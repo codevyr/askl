@@ -1,8 +1,21 @@
+use std::fmt;
+use std::fs;
 use std::process::{Command, Child, Stdio};
 use std::io::{BufReader, BufRead, Write};
 
 use serde::{Serialize, Deserialize};
 use serde_json;
+
+#[derive(Debug)]
+struct LspError(String);
+
+impl fmt::Display for LspError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "LSP error: {}", self.0)
+    }
+}
+
+impl std::error::Error for LspError {}
 
 type Error = Box<dyn std::error::Error>;
 type DocumentUri = String;
@@ -81,26 +94,76 @@ struct InitializeResult {
 struct InitializedParams {
 }
 
+type LanguageIdString = String;
+
+#[allow(non_snake_case)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct TextDocumentItem {
+    uri: DocumentUri,
+    languageId: LanguageIdString,
+    version: u32,
+    text: String,
+}
+
+#[allow(non_snake_case)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct DidOpenTextDocumentParams {
+    textDocument: TextDocumentItem,
+}
+
+#[allow(non_snake_case)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct TextDocumentIdentifier {
+    uri: DocumentUri,
+}
+
+#[allow(non_snake_case)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct DocumentSymbolParams {
+    textDocument: TextDocumentIdentifier,
+}
+
+#[allow(non_snake_case)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct DocumentSymbol {
+}
+
+#[allow(non_snake_case)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct SymbolInformation {
+}
+
+#[allow(non_snake_case)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+enum DocumentSymbolResult {
+    DocumentSymbol(Vec<DocumentSymbol>),
+    SymbolInformation(Vec<SymbolInformation>),
+    None
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
 enum LspRequestParams {
     InitializeParams(InitializeParams),
+    DocumentSymbolParams(DocumentSymbolParams),
 }
 
 impl LspRequestParams {
     pub fn method(&self) -> String {
         match self {
             LspRequestParams::InitializeParams(_) => "initialize",
+            LspRequestParams::DocumentSymbolParams(_) => "textDocument/documentSymbol",
         }.to_string()
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(untagged)]
 enum LspNotificationParams {
     InitializedParams(InitializedParams),
     ShutdownParams,
     ExitParams,
+    DidOpenTextDocumentParams(DidOpenTextDocumentParams),
 }
 
 impl LspNotificationParams {
@@ -109,6 +172,7 @@ impl LspNotificationParams {
             LspNotificationParams::InitializedParams(_) => "initialized",
             LspNotificationParams::ShutdownParams => "shutdown",
             LspNotificationParams::ExitParams => "exit",
+            LspNotificationParams::DidOpenTextDocumentParams(_) => "textDocument/didOpen",
         }.to_string()
     }
 }
@@ -121,11 +185,26 @@ struct LspRequest {
     params: LspRequestParams,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct LspResponse<T: Clone> {
+#[derive(Serialize, Deserialize, Debug)]
+struct ResponseError {
+    code: i32,
+    message: String,
+    data: Option<serde_json::Value>,
+}
+
+impl fmt::Display for ResponseError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Response error {}: {} data: {:?}",
+               self.code, self.message, self.data)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct LspResponse {
     id: u32,
     jsonrpc: String,
-    result: T,
+    result: Option<serde_json::Value>,
+    error: Option<ResponseError>,
 }
 
 impl LspRequest {
@@ -156,6 +235,17 @@ impl LspNotification {
     }
 }
 
+#[serde(untagged)]
+#[derive(Serialize, Deserialize, Debug)]
+enum LspServerMessage {
+    Response(LspResponse),
+    Notification(LspNotification),
+}
+
+struct LspDocument {
+    item: TextDocumentItem,
+}
+
 struct LanguageServer {
     cmd: Child,
     next_id: u32,
@@ -180,7 +270,7 @@ impl LanguageServer {
             workspaceFolders: None,
         });
 
-        let resp: LspResponse<InitializeResult> = self.request(params)?;
+        let resp: InitializeResult = self.request(params)?;
         println!("{:?}", resp);
         Ok(())
     }
@@ -200,8 +290,45 @@ impl LanguageServer {
         self.notification(params)
     }
 
-    fn request<'a, T>(&mut self, params: LspRequestParams) -> Result<LspResponse<T>, Error>
-        where T: Deserialize<'a> + Clone
+    pub fn document_open(&mut self, path: &str, lang: &str) -> Result<LspDocument, Error> {
+        let uri = self.uri(path);
+        let contents = fs::read_to_string(self.full_path(path))?;
+        let document = LspDocument {
+            item: TextDocumentItem {
+                uri: uri,
+                languageId: lang.to_string(),
+                version: 1,
+                text: contents,
+            },
+        };
+
+        let params = LspNotificationParams::DidOpenTextDocumentParams(DidOpenTextDocumentParams{
+            textDocument: document.item.clone(),
+        });
+        self.notification(params)?;
+
+        Ok(document)
+    }
+
+    pub fn document_symbol(&mut self, document: &LspDocument) -> Result<DocumentSymbolResult, Error> {
+        let params = LspRequestParams::DocumentSymbolParams(DocumentSymbolParams {
+            textDocument: TextDocumentIdentifier{
+                uri: document.item.uri.clone(),
+            },
+        });
+        self.request::<DocumentSymbolResult>(params)
+    }
+
+    fn uri(&mut self, path: &str) -> String {
+        format!("file://{}/{}", self.project, path)
+    }
+
+    fn full_path(&mut self, path: &str) -> String {
+        format!("{}/{}", self.project, path)
+    }
+
+    fn request<'a, T>(&mut self, params: LspRequestParams) -> Result<T, Error>
+        where T: serde::de::DeserializeOwned + Clone
     {
         let body = LspRequest::new(self.next_id, params);
 
@@ -236,11 +363,21 @@ impl LanguageServer {
             }
         }
 
-        let mut de = serde_json::Deserializer::from_reader(reader);
-        let resp = LspResponse::<T>::deserialize(&mut de)?;
-
         self.next_id = self.next_id + 1;
-        Ok(resp)
+
+        let mut de = serde_json::Deserializer::from_reader(reader);
+        let mut msg = LspServerMessage::deserialize(&mut de)?;
+
+        match msg {
+            LspServerMessage::Response(r) => {
+                let res : T = serde_json::from_value(r.result.unwrap())?;
+                Ok(res)
+            }
+            LspServerMessage::Notification(n) => {
+                println!("{:?}", n);
+                Err(Box::new(LspError("Not a response".to_string())))
+            }
+        }
     }
 
     fn notification(&mut self, params: LspNotificationParams) -> Result<(), Error> {
@@ -259,6 +396,7 @@ impl LanguageServer {
 
 struct LanguageServerLauncher<'a> {
     server_path: &'a str,
+    server_args: Vec<String>,
     project_path: &'a str,
 }
 
@@ -266,12 +404,22 @@ impl<'a> LanguageServerLauncher<'a> {
     fn new() -> LanguageServerLauncher<'a> {
         LanguageServerLauncher{
             server_path: "",
+            server_args: vec!(),
             project_path: "",
         }
     }
 
     pub fn server(&'a mut self, path: &'a str) -> &'a mut LanguageServerLauncher {
         self.server_path = path;
+        self
+    }
+
+    pub fn server_args<I>(&'a mut self, args: I) -> &'a mut LanguageServerLauncher 
+        where I: IntoIterator<Item = &'a &'a str>
+    {
+        for arg in args {
+            self.server_args.push(arg.to_string());
+        }
         self
     }
 
@@ -283,8 +431,10 @@ impl<'a> LanguageServerLauncher<'a> {
     pub fn launch(&'a self) -> Result<LanguageServer, Error> {
         Ok(LanguageServer {
             cmd: Command::new(self.server_path)
+                .args(&self.server_args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
                 .spawn()?,
             next_id: 0,
             project: self.project_path.to_string(),
@@ -293,15 +443,20 @@ impl<'a> LanguageServerLauncher<'a> {
 }
 
 fn main() -> Result<(), Error> {
+    let project_home = "/home/desertfox/research/projects/ffmk/criu/";
     let mut lang_server = LanguageServerLauncher::new()
-        .server("/usr/bin/clangd")
-        .project("/home/desertfox/research/projects/ffmk/criu/")
+        .server("/usr/bin/clangd-9")
+        .server_args(&["--background-index", "--compile-commands-dir", project_home])
+        .project(project_home)
         .launch()
         .expect("Failed to spawn clangd");
 
 
     lang_server.initialize()?;
     lang_server.initialized()?;
+
+    let document = lang_server.document_open("criu/cr-restore.c", "cpp")?;
+    println!("{:?}", lang_server.document_symbol(&document)?);
     lang_server.shutdown()?;
     lang_server.exit()?;
 
