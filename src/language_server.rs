@@ -70,10 +70,6 @@ enum ServerMessage {
     Notification(Notification),
 }
 
-pub struct LspDocument {
-    item: TextDocumentItem,
-}
-
 pub struct LanguageServer {
     cmd: Child,
     next_id: u32,
@@ -154,30 +150,28 @@ impl LanguageServer {
         self.notify(Notification::new::<Exit>(()))
     }
 
-    pub fn document_open(&mut self, path: &str, lang: &str) -> Result<LspDocument, Error> {
+    pub fn document_open(&mut self, path: &str, lang: &str) -> Result<TextDocumentItem, Error> {
         let uri = self.uri(path);
         let contents = fs::read_to_string(self.full_path(path))?;
-        let document = LspDocument {
-            item: TextDocumentItem {
-                uri: uri,
-                language_id: lang.to_string(),
-                version: 1,
-                text: contents,
-            },
+        let document = TextDocumentItem {
+            uri: uri,
+            language_id: lang.to_string(),
+            version: 1,
+            text: contents,
         };
 
         let notification = Notification::new::<DidOpenTextDocument>(DidOpenTextDocumentParams{
-            text_document: document.item.clone(),
+            text_document: document.clone(),
         });
         self.notify(notification)?;
 
         Ok(document)
     }
 
-    pub fn document_symbol(&mut self, document: &LspDocument) -> Result<Option<DocumentSymbolResponse>, Error> {
+    pub fn document_symbol(&mut self, document: &TextDocumentItem) -> Result<Option<DocumentSymbolResponse>, Error> {
         let params = Request::<DocumentSymbolRequest>::new(DocumentSymbolParams {
             text_document: TextDocumentIdentifier{
-                uri: document.item.uri.clone(),
+                uri: document.uri.clone(),
             },
         });
         self.request(params)
