@@ -6,15 +6,13 @@ use std::io::{BufReader, BufRead, Read, Write};
 use std::marker::PhantomData;
 
 use log;
-use log::info;
+use log::{info, debug, trace};
 use stderrlog;
 
-#[macro_use]
 use structopt;
 use structopt::StructOpt;
 
 use serde::{Serialize, Deserialize};
-use serde::de::DeserializeOwned;
 use serde_json::json;
 use serde_json;
 
@@ -26,7 +24,7 @@ use lsp_types::request::{Initialize, Shutdown, DocumentSymbolRequest};
 use lsp_types::request::Request as LspRequest;
 
 #[derive(Debug)]
-struct LspError(String);
+struct LspError(&'static str);
 
 #[derive(StructOpt, Debug)]
 #[structopt()]
@@ -114,8 +112,9 @@ struct LanguageServer {
 }
 
 impl LanguageServer {
-    pub fn initialize(&mut self) -> Result<(), Error> {
-        let resp: InitializeResult = self.request(Request::<Initialize>::new(InitializeParams {
+    #[allow(deprecated)]
+    pub fn initialize(&mut self) -> Result<InitializeResult, Error> {
+        self.request(Request::<Initialize>::new(InitializeParams {
             process_id: Some(std::process::id() as u64),
             root_path: None,
             root_uri: Url::from_file_path(self.project.clone()).ok(),
@@ -126,6 +125,42 @@ impl LanguageServer {
                     ..Default::default()
                 }),
                 text_document: Some(TextDocumentClientCapabilities {
+                    document_symbol: Some(DocumentSymbolCapability {
+                        hierarchical_document_symbol_support: Some(true),
+                        symbol_kind: Some(SymbolKindCapability{
+                            value_set: Some(vec![
+                                SymbolKind::File,
+                                SymbolKind::Module,
+                                SymbolKind::Namespace,
+                                SymbolKind::Package,
+                                SymbolKind::Class,
+                                SymbolKind::Method,
+                                SymbolKind::Property,
+                                SymbolKind::Field,
+                                SymbolKind::Constructor,
+                                SymbolKind::Enum,
+                                SymbolKind::Interface,
+                                SymbolKind::Function,
+                                SymbolKind::Variable,
+                                SymbolKind::Constant,
+                                SymbolKind::String,
+                                SymbolKind::Number,
+                                SymbolKind::Boolean,
+                                SymbolKind::Array,
+                                SymbolKind::Object,
+                                SymbolKind::Key,
+                                SymbolKind::Null,
+                                SymbolKind::EnumMember,
+                                SymbolKind::Struct,
+                                SymbolKind::Event,
+                                SymbolKind::Operator,
+                                SymbolKind::TypeParameter,
+                                SymbolKind::Unknown,
+                            ]
+                            )
+                        }),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 window: None,
@@ -134,8 +169,7 @@ impl LanguageServer {
             trace: None,
             workspace_folders: None,
             client_info: None,
-        }))?;
-        Ok(())
+        }))
     }
 
     pub fn initialized(&mut self) -> Result<(), Error> {
@@ -226,8 +260,7 @@ impl LanguageServer {
             let content_str = self.read_message()?;
             match serde_json::from_str(&content_str)? {
                 ServerMessage::Response(resp) => return Ok(resp),
-                ServerMessage::Notification(notification) => info!("received notification: {}", notification.method),
-                _ => panic!("Unexpected result"),
+                ServerMessage::Notification(notification) => debug!("received notification: {}", notification.method),
             }
         }
     }
@@ -242,9 +275,9 @@ impl LanguageServer {
         }).to_string();
         let stdin = self.cmd.stdin.as_mut().expect("Failed to get stdin");
         let content_length = format!("Content-Length: {}\r\n\r\n", raw_json.len());
-        info!("Writing header: {:#?}", content_length);
+        trace!("Writing header: {:#?}", content_length);
         stdin.write(content_length.as_bytes())?;
-        info!("Making a request: {:#?}", raw_json);
+        trace!("Making a request: {:#?}", raw_json);
         stdin.write(raw_json.as_bytes())?;
 
         let res: Response = self.receive()?;
@@ -260,7 +293,7 @@ impl LanguageServer {
         let stdin = self.cmd.stdin.as_mut().expect("Failed to get stdin");
         let content_length = format!("Content-Length: {}\r\n\r\n", json.len());
         stdin.write(content_length.as_bytes())?;
-        info!("Sending notification: {}", json);
+        trace!("Sending notification: {}", json);
         stdin.write(json.as_bytes())?;
 
         Ok(())
@@ -315,6 +348,26 @@ impl<'a> LanguageServerLauncher<'a> {
     }
 }
 
+fn print_symbols(symbols: Option<DocumentSymbolResponse>) -> Result<(), LspError> {
+    match symbols {
+        Some(DocumentSymbolResponse::Flat(_)) => {
+            info!("Skipping flat symbols");
+            Err(LspError("Flat symbols are unsupported"))
+        },
+        Some(DocumentSymbolResponse::Nested(v)) => {
+            for symbol in v.iter() {
+                info!("Found nested symbol: {:#?}", symbol);
+            }
+            Ok(())
+        },
+        None => {
+            Err(LspError("No symbols found"))
+        }
+    }
+
+
+}
+
 fn main() -> Result<(), Error> {
     let opt = Opt::from_args();
 
@@ -339,7 +392,7 @@ fn main() -> Result<(), Error> {
     lang_server.initialized()?;
 
     let document = lang_server.document_open("criu/cr-restore.c", "cpp")?;
-    println!("{:?}", lang_server.document_symbol(&document)?);
+    print_symbols(lang_server.document_symbol(&document)?)?;
     lang_server.shutdown()?;
     lang_server.exit()?;
 
