@@ -10,7 +10,7 @@ type EngineName = String;
 #[derive(Debug)]
 pub struct Match {
     pub filename: String,
-    pub line_number: u32,
+    pub line_number: u64,
     pub matched: String,
 }
 
@@ -19,10 +19,9 @@ impl Match {
         let terms: Vec<&str> = match_str.split('\n').collect();
 
         if let [_, filename, line_number, pattern] = terms.as_slice() {
-            println!("{}", filename);
             Match {
                 filename: filename.to_string(),
-                line_number: line_number.parse().unwrap(),
+                line_number: line_number.parse::<u64>().unwrap() - 1,
                 matched: pattern.to_string(),
             }
         } else {
@@ -85,7 +84,6 @@ impl Search for SearchAck {
             let mut buffer = Vec::new();
             match reader.read_until(0, &mut buffer) {
                 Ok(0) => {
-                    println!("Done");
                     break;
                 }
                 Ok(_) => {

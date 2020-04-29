@@ -8,7 +8,7 @@ use stderrlog;
 use structopt;
 use structopt::StructOpt;
 
-use lsp_types::{DocumentSymbolResponse, SymbolKind, TextDocumentItem, Range, DocumentSymbol, Url};
+use lsp_types::{DocumentSymbolResponse, SymbolKind, TextDocumentItem, Range, DocumentSymbol};
 
 mod language_server;
 use language_server::{LanguageServerLauncher, LanguageServer};
@@ -17,6 +17,9 @@ mod search;
 use search::{SearchLauncher, Search, Match};
 
 use std::collections::HashMap;
+
+use petgraph::graph::DiGraph;
+use petgraph::dot::{Dot, Config};
 
 #[derive(Debug)]
 struct LspError(&'static str);
@@ -45,25 +48,7 @@ impl std::error::Error for LspError {}
 
 type Error = Box<dyn std::error::Error>;
 
-fn print_symbols(symbols: Option<DocumentSymbolResponse>) -> Result<(), LspError> {
-    match symbols {
-        Some(DocumentSymbolResponse::Flat(_)) => {
-            info!("Skipping flat symbols");
-            Err(LspError("Flat symbols are unsupported"))
-        },
-        Some(DocumentSymbolResponse::Nested(v)) => {
-            for symbol in v.iter() {
-                info!("Found nested symbol: {:#?}", symbol);
-            }
-            Ok(())
-        },
-        None => {
-            Err(LspError("No symbols found"))
-        }
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct AskerSymbol {
     name: String,
     range: Range,
@@ -131,7 +116,6 @@ impl Asker {
             Some(DocumentSymbolResponse::Nested(v)) => {
                 for symbol in v.iter() {
                     document.append_symbol(symbol, None)?;
-                    info!("Found nested symbol: {:#?}", symbol);
                 }
                 Ok(())
             },
@@ -149,7 +133,6 @@ impl Asker {
 
             let mut document = AskerDocument::new(self.lang_server.document_open(m.filename.as_str())?);
 
-            println!("Document: {:#?}", m.filename);
             self.update_symbols(&mut document)?;
             self.documents.insert(m.filename.clone(), document);
         }
@@ -165,11 +148,44 @@ impl Asker {
         Ok(matches)
     }
 
-    pub fn find_parents(&mut self, matches: Vec<Match>) -> Result<(), Error> {
-        for m in matches {
-            println!("Searching parents: {:#?}", m);
+    pub fn find_symbols(&mut self, matches: &Vec<Match>) -> Vec<AskerSymbol> {
+        matches
+            .iter()
+            .map(|search_match| {
+                let document = self.documents.get(&search_match.filename).unwrap();
+                let symbol = document.symbols
+                    .iter()
+                    .rev()
+                    .skip_while(|s| s.range.start.line > search_match.line_number)
+                    .nth(0);
+                info!("Symbol: {:#?} Search: {:#?}", symbol, search_match);
+                if let Some(symbol) = symbol {
+                    if symbol.range.start.line == search_match.line_number {
+                        return Some(symbol.clone());
+                    }
+                }
+                None
+            })
+            .filter_map(|s| s)
+            .collect()
+    }
+
+    pub fn find_parent(&mut self, search_match: Match) -> Option<AskerSymbol> {
+        let document = self.documents.get(&search_match.filename).unwrap();
+
+        let symbol = document.symbols.iter().rev().skip_while(|s| s.range.start.line > search_match.line_number).nth(0);
+
+        match symbol {
+            Some(symbol) => {
+                if symbol.range.start.line == search_match.line_number {
+                    // Found oneself
+                    None
+                } else {
+                    Some(symbol.clone())
+                }
+            },
+            None => None,
         }
-        Ok(())
     }
 }
 
@@ -212,7 +228,35 @@ fn main() -> Result<(), Error> {
 
     let matches = asker.search(pattern_string)?;
 
-    asker.find_parents(matches)?;
+    let mut graph = DiGraph::<String, &str>::new();
+    let mut node_map = HashMap::new();
+
+    let child = {
+        let mut children = asker.find_symbols(&matches);
+        if children.len() != 1 {
+            info!("Children: {:#?}", children);
+            panic!("Child not found or too many children");
+        }
+        let child_symbol = children.pop().unwrap();
+        let child = graph.add_node(child_symbol.name.clone());
+        node_map.insert(child_symbol.name, child);
+        child
+    };
+
+    for m in matches {
+        if let Some(s) = asker.find_parent(m) {
+            let parent = {
+                if node_map.contains_key(&s.name) == false {
+                    let parent = graph.add_node(s.name.clone());
+                    node_map.insert(s.name.clone(), parent);
+                }
+                node_map.get(&s.name).unwrap()
+            };
+            graph.update_edge(*parent, child, "");
+        }
+    }
+
+    println!("{}", Dot::with_config(&graph, &[Config::EdgeNoLabel]));
 
     Ok(())
 }

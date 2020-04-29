@@ -14,3 +14,4 @@ url = "2.1.1"
 log = { version = "0.4", features = ["max_level_trace"]}
 stderrlog = "0.4"
 structopt = "0.3"
+petgraph = "0.5"
