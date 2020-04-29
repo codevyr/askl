@@ -20,6 +20,15 @@ use lsp_types::request::Request as LspRequest;
 
 use crate::Error;
 
+pub trait LanguageServer {
+    fn initialize(&mut self) -> Result<InitializeResult, Error>;
+    fn initialized(&mut self) -> Result<(), Error>;
+    fn shutdown(&mut self) -> Result<(), Error>;
+    fn exit(&mut self) -> Result<(), Error>;
+    fn document_open(&mut self, path: &str, lang: &str) -> Result<TextDocumentItem, Error>;
+    fn document_symbol(&mut self, document: &TextDocumentItem) -> Result<Option<DocumentSymbolResponse>, Error>;
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct Request<T: LspRequest> {
     id: u32,
@@ -70,111 +79,32 @@ enum ServerMessage {
     Notification(Notification),
 }
 
-pub struct LanguageServer {
+pub struct ClangdLanguageServer {
     cmd: Child,
     next_id: u32,
     project: String,
 }
 
-impl LanguageServer {
-    #[allow(deprecated)]
-    pub fn initialize(&mut self) -> Result<InitializeResult, Error> {
-        self.request(Request::<Initialize>::new(InitializeParams {
-            process_id: Some(std::process::id() as u64),
-            root_path: None,
-            root_uri: Url::from_file_path(self.project.clone()).ok(),
-            initialization_options: None,
-            capabilities: ClientCapabilities {
-                workspace: Some(WorkspaceClientCapabilities {
-                    apply_edit: Some(false),
-                    ..Default::default()
-                }),
-                text_document: Some(TextDocumentClientCapabilities {
-                    document_symbol: Some(DocumentSymbolCapability {
-                        hierarchical_document_symbol_support: Some(true),
-                        symbol_kind: Some(SymbolKindCapability{
-                            value_set: Some(vec![
-                                SymbolKind::File,
-                                SymbolKind::Module,
-                                SymbolKind::Namespace,
-                                SymbolKind::Package,
-                                SymbolKind::Class,
-                                SymbolKind::Method,
-                                SymbolKind::Property,
-                                SymbolKind::Field,
-                                SymbolKind::Constructor,
-                                SymbolKind::Enum,
-                                SymbolKind::Interface,
-                                SymbolKind::Function,
-                                SymbolKind::Variable,
-                                SymbolKind::Constant,
-                                SymbolKind::String,
-                                SymbolKind::Number,
-                                SymbolKind::Boolean,
-                                SymbolKind::Array,
-                                SymbolKind::Object,
-                                SymbolKind::Key,
-                                SymbolKind::Null,
-                                SymbolKind::EnumMember,
-                                SymbolKind::Struct,
-                                SymbolKind::Event,
-                                SymbolKind::Operator,
-                                SymbolKind::TypeParameter,
-                                SymbolKind::Unknown,
-                            ]
-                            )
-                        }),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                window: None,
-                experimental: None,
-            },
-            trace: None,
-            workspace_folders: None,
-            client_info: None,
+impl ClangdLanguageServer {
+    fn new(launcher: LanguageServerLauncher) -> Result<Box<dyn LanguageServer>, Error> {
+        Ok(Box::new(ClangdLanguageServer{
+            cmd: Command::new(launcher.server_path)
+                .args(ClangdLanguageServer::compose_args(launcher.project_path.clone()))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?,
+            next_id: 0,
+            project: launcher.project_path.to_string(),
         }))
     }
 
-    pub fn initialized(&mut self) -> Result<(), Error> {
-        self.notify(Notification::new::<Initialized>(InitializedParams {}))
-    }
-
-    pub fn shutdown(&mut self) -> Result<(), Error> {
-        let params = Request::<Shutdown>::new(());
-        self.request(params)
-    }
-
-    pub fn exit(&mut self) -> Result<(), Error> {
-        self.notify(Notification::new::<Exit>(()))
-    }
-
-    pub fn document_open(&mut self, path: &str, lang: &str) -> Result<TextDocumentItem, Error> {
-        let uri = self.uri(path);
-        let contents = fs::read_to_string(self.full_path(path))?;
-        let document = TextDocumentItem {
-            uri: uri,
-            language_id: lang.to_string(),
-            version: 1,
-            text: contents,
-        };
-
-        let notification = Notification::new::<DidOpenTextDocument>(DidOpenTextDocumentParams{
-            text_document: document.clone(),
-        });
-        self.notify(notification)?;
-
-        Ok(document)
-    }
-
-    pub fn document_symbol(&mut self, document: &TextDocumentItem) -> Result<Option<DocumentSymbolResponse>, Error> {
-        let params = Request::<DocumentSymbolRequest>::new(DocumentSymbolParams {
-            text_document: TextDocumentIdentifier{
-                uri: document.uri.clone(),
-            },
-        });
-        self.request(params)
+    fn compose_args(project_path: String) -> Vec<String> {
+        vec![
+            "--background-index".to_owned(),
+            "--compile-commands-dir".to_owned(),
+            project_path,
+        ]
     }
 
     fn uri(&mut self, path: &str) -> Url {
@@ -263,50 +193,132 @@ impl LanguageServer {
     }
 }
 
-pub struct LanguageServerLauncher<'a> {
-    server_path: &'a str,
-    server_args: Vec<String>,
-    project_path: &'a str,
+impl LanguageServer for ClangdLanguageServer {
+    #[allow(deprecated)]
+    fn initialize(&mut self) -> Result<InitializeResult, Error> {
+        self.request(Request::<Initialize>::new(InitializeParams {
+            process_id: Some(std::process::id() as u64),
+            root_path: None,
+            root_uri: Url::from_file_path(self.project.clone()).ok(),
+            initialization_options: None,
+            capabilities: ClientCapabilities {
+                workspace: Some(WorkspaceClientCapabilities {
+                    apply_edit: Some(false),
+                    ..Default::default()
+                }),
+                text_document: Some(TextDocumentClientCapabilities {
+                    document_symbol: Some(DocumentSymbolCapability {
+                        hierarchical_document_symbol_support: Some(true),
+                        symbol_kind: Some(SymbolKindCapability{
+                            value_set: Some(vec![
+                                SymbolKind::File,
+                                SymbolKind::Module,
+                                SymbolKind::Namespace,
+                                SymbolKind::Package,
+                                SymbolKind::Class,
+                                SymbolKind::Method,
+                                SymbolKind::Property,
+                                SymbolKind::Field,
+                                SymbolKind::Constructor,
+                                SymbolKind::Enum,
+                                SymbolKind::Interface,
+                                SymbolKind::Function,
+                                SymbolKind::Variable,
+                                SymbolKind::Constant,
+                                SymbolKind::String,
+                                SymbolKind::Number,
+                                SymbolKind::Boolean,
+                                SymbolKind::Array,
+                                SymbolKind::Object,
+                                SymbolKind::Key,
+                                SymbolKind::Null,
+                                SymbolKind::EnumMember,
+                                SymbolKind::Struct,
+                                SymbolKind::Event,
+                                SymbolKind::Operator,
+                                SymbolKind::TypeParameter,
+                                SymbolKind::Unknown,
+                            ]
+                            )
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                window: None,
+                experimental: None,
+            },
+            trace: None,
+            workspace_folders: None,
+            client_info: None,
+        }))
+    }
+
+    fn initialized(&mut self) -> Result<(), Error> {
+        self.notify(Notification::new::<Initialized>(InitializedParams {}))
+    }
+
+    fn shutdown(&mut self) -> Result<(), Error> {
+        let params = Request::<Shutdown>::new(());
+        self.request(params)
+    }
+
+    fn exit(&mut self) -> Result<(), Error> {
+        self.notify(Notification::new::<Exit>(()))
+    }
+
+    fn document_open(&mut self, path: &str, lang: &str) -> Result<TextDocumentItem, Error> {
+        let uri = self.uri(path);
+        let contents = fs::read_to_string(self.full_path(path))?;
+        let document = TextDocumentItem {
+            uri: uri,
+            language_id: lang.to_string(),
+            version: 1,
+            text: contents,
+        };
+
+        let notification = Notification::new::<DidOpenTextDocument>(DidOpenTextDocumentParams{
+            text_document: document.clone(),
+        });
+        self.notify(notification)?;
+
+        Ok(document)
+    }
+
+    fn document_symbol(&mut self, document: &TextDocumentItem) -> Result<Option<DocumentSymbolResponse>, Error> {
+        let params = Request::<DocumentSymbolRequest>::new(DocumentSymbolParams {
+            text_document: TextDocumentIdentifier{
+                uri: document.uri.clone(),
+            },
+        });
+        self.request(params)
+    }
 }
 
-impl<'a> LanguageServerLauncher<'a> {
-    pub fn new() -> LanguageServerLauncher<'a> {
+pub struct LanguageServerLauncher {
+    server_path: String,
+    project_path: String,
+}
+
+impl LanguageServerLauncher {
+    pub fn new() -> LanguageServerLauncher {
         LanguageServerLauncher{
-            server_path: "",
-            server_args: vec!(),
-            project_path: "",
+            server_path: "".to_owned(),
+            project_path: "".to_owned(),
         }
     }
 
-    pub fn server(&'a mut self, path: &'a str) -> &'a mut LanguageServerLauncher {
+    pub fn server(mut self, path: String) -> LanguageServerLauncher {
         self.server_path = path;
         self
     }
 
-    pub fn server_args<I>(&'a mut self, args: I) -> &'a mut LanguageServerLauncher 
-        where I: IntoIterator<Item = &'a &'a str>
-    {
-        for arg in args {
-            self.server_args.push(arg.to_string());
-        }
-        self
-    }
-
-    pub fn project(&'a mut self, path: &'a str) -> &'a mut LanguageServerLauncher {
+    pub fn project(mut self, path: String) -> LanguageServerLauncher {
         self.project_path = path;
         self
     }
 
-    pub fn launch(&'a self) -> Result<LanguageServer, Error> {
-        Ok(LanguageServer {
-            cmd: Command::new(self.server_path)
-                .args(&self.server_args)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()?,
-            next_id: 0,
-            project: self.project_path.to_string(),
-        })
+    pub fn launch(self) -> Result<Box<dyn LanguageServer>, Error> {
+        ClangdLanguageServer::new(self)
     }
 }

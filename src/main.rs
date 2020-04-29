@@ -87,9 +87,8 @@ fn main() -> Result<(), Error> {
     println!("Matches: {:#?}", results);
 
     let mut lang_server = LanguageServerLauncher::new()
-        .server("/usr/bin/clangd-9")
-        .server_args(&["--background-index", "--compile-commands-dir", project_home])
-        .project(project_home)
+        .server("/usr/bin/clangd-9".to_owned())
+        .project(project_home.to_owned())
         .launch()
         .expect("Failed to spawn clangd");
 
