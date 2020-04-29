@@ -89,6 +89,7 @@ fn main() -> Result<(), Error> {
     let mut lang_server = LanguageServerLauncher::new()
         .server("/usr/bin/clangd-9".to_owned())
         .project(project_home.to_owned())
+        .languages(languages)
         .launch()
         .expect("Failed to spawn clangd");
 
@@ -96,7 +97,7 @@ fn main() -> Result<(), Error> {
     lang_server.initialize()?;
     lang_server.initialized()?;
 
-    let document = lang_server.document_open("criu/cr-restore.c", languages[0].as_str())?;
+    let document = lang_server.document_open("criu/cr-restore.c")?;
     print_symbols(lang_server.document_symbol(&document)?)?;
     lang_server.shutdown()?;
     lang_server.exit()?;

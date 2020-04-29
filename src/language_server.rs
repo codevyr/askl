@@ -18,14 +18,14 @@ use lsp_types::notification::Notification as LspNotification;
 use lsp_types::request::{Initialize, Shutdown, DocumentSymbolRequest};
 use lsp_types::request::Request as LspRequest;
 
-use crate::Error;
+use crate::{Error, LspError};
 
 pub trait LanguageServer {
     fn initialize(&mut self) -> Result<InitializeResult, Error>;
     fn initialized(&mut self) -> Result<(), Error>;
     fn shutdown(&mut self) -> Result<(), Error>;
     fn exit(&mut self) -> Result<(), Error>;
-    fn document_open(&mut self, path: &str, lang: &str) -> Result<TextDocumentItem, Error>;
+    fn document_open(&mut self, path: &str) -> Result<TextDocumentItem, Error>;
     fn document_symbol(&mut self, document: &TextDocumentItem) -> Result<Option<DocumentSymbolResponse>, Error>;
 }
 
@@ -83,6 +83,7 @@ pub struct ClangdLanguageServer {
     cmd: Child,
     next_id: u32,
     project: String,
+    lang: String,
 }
 
 impl ClangdLanguageServer {
@@ -96,6 +97,7 @@ impl ClangdLanguageServer {
                 .spawn()?,
             next_id: 0,
             project: launcher.project_path.to_string(),
+            lang: "c".to_owned(),
         }))
     }
 
@@ -105,6 +107,17 @@ impl ClangdLanguageServer {
             "--compile-commands-dir".to_owned(),
             project_path,
         ]
+    }
+
+    fn languages_supported(languages: Vec<String>) -> bool {
+        for lang in languages {
+            match lang.as_str() {
+                "cc" | "cpp" => (),
+                _ => return false,
+            }
+        }
+
+        true
     }
 
     fn uri(&mut self, path: &str) -> Url {
@@ -267,12 +280,12 @@ impl LanguageServer for ClangdLanguageServer {
         self.notify(Notification::new::<Exit>(()))
     }
 
-    fn document_open(&mut self, path: &str, lang: &str) -> Result<TextDocumentItem, Error> {
+    fn document_open(&mut self, path: &str) -> Result<TextDocumentItem, Error> {
         let uri = self.uri(path);
         let contents = fs::read_to_string(self.full_path(path))?;
         let document = TextDocumentItem {
             uri: uri,
-            language_id: lang.to_string(),
+            language_id: self.lang.clone(),
             version: 1,
             text: contents,
         };
@@ -298,6 +311,7 @@ impl LanguageServer for ClangdLanguageServer {
 pub struct LanguageServerLauncher {
     server_path: String,
     project_path: String,
+    languages: Vec<String>,
 }
 
 impl LanguageServerLauncher {
@@ -305,6 +319,7 @@ impl LanguageServerLauncher {
         LanguageServerLauncher{
             server_path: "".to_owned(),
             project_path: "".to_owned(),
+            languages: Vec::new(),
         }
     }
 
@@ -318,7 +333,16 @@ impl LanguageServerLauncher {
         self
     }
 
+    pub fn languages(mut self, languages: Vec<String>) -> LanguageServerLauncher {
+        self.languages = languages;
+        self
+    }
+
     pub fn launch(self) -> Result<Box<dyn LanguageServer>, Error> {
-        ClangdLanguageServer::new(self)
+        if ClangdLanguageServer::languages_supported(self.languages.clone()) {
+            ClangdLanguageServer::new(self)
+        } else {
+            Err(Box::new(LspError("Unsupported languages")))
+        }
     }
 }
