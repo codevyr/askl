@@ -13,6 +13,9 @@ use lsp_types::DocumentSymbolResponse;
 mod language_server;
 use language_server::LanguageServerLauncher;
 
+mod search;
+use search::{SearchLauncher};
+
 #[derive(Debug)]
 struct LspError(&'static str);
 
@@ -72,6 +75,17 @@ fn main() -> Result<(), Error> {
         .unwrap();
 
     let project_home = "/home/desertfox/research/projects/ffmk/criu/";
+    let languages: Vec<String> = vec!["cpp".to_owned(), "cc".to_owned()];
+
+    let searcher = SearchLauncher::new()
+        .engine("ack")
+        .directory(project_home)
+        .languages(&languages)
+        .launch()?;
+
+    let results = searcher.search("restore_wait_other_tasks".to_owned())?;
+    println!("Matches: {:#?}", results);
+
     let mut lang_server = LanguageServerLauncher::new()
         .server("/usr/bin/clangd-9")
         .server_args(&["--background-index", "--compile-commands-dir", project_home])
@@ -83,7 +97,7 @@ fn main() -> Result<(), Error> {
     lang_server.initialize()?;
     lang_server.initialized()?;
 
-    let document = lang_server.document_open("criu/cr-restore.c", "cpp")?;
+    let document = lang_server.document_open("criu/cr-restore.c", languages[0].as_str())?;
     print_symbols(lang_server.document_symbol(&document)?)?;
     lang_server.shutdown()?;
     lang_server.exit()?;
