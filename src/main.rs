@@ -8,13 +8,15 @@ use stderrlog;
 use structopt;
 use structopt::StructOpt;
 
-use lsp_types::DocumentSymbolResponse;
+use lsp_types::{DocumentSymbolResponse, SymbolKind, TextDocumentItem, Range, DocumentSymbol, Url};
 
 mod language_server;
-use language_server::LanguageServerLauncher;
+use language_server::{LanguageServerLauncher, LanguageServer};
 
 mod search;
-use search::{SearchLauncher};
+use search::{SearchLauncher, Search, Match};
+
+use std::collections::HashMap;
 
 #[derive(Debug)]
 struct LspError(&'static str);
@@ -59,8 +61,123 @@ fn print_symbols(symbols: Option<DocumentSymbolResponse>) -> Result<(), LspError
             Err(LspError("No symbols found"))
         }
     }
+}
 
+#[derive(Debug)]
+struct AskerSymbol {
+    name: String,
+    range: Range,
+    kind: SymbolKind,
+    parent: Option<usize>,
+}
 
+struct AskerDocument {
+    symbols: Vec<AskerSymbol>,
+    lsp_item: TextDocumentItem,
+}
+
+impl AskerDocument {
+    fn new(document: TextDocumentItem) -> Self {
+        AskerDocument {
+            lsp_item: document,
+            symbols: Vec::new(),
+        }
+    }
+
+    fn append_symbol(&mut self, symbol: &DocumentSymbol, parent: Option<usize>) -> Result<(), Error> {
+        self.symbols.push(AskerSymbol{
+            parent: parent,
+            kind: symbol.kind.clone(),
+            name: symbol.name.clone(),
+            range: symbol.range.clone(),
+        });
+
+        let current_id = self.symbols.len() - 1;
+        if let Some(children) = &symbol.children {
+            for child in children {
+                self.append_symbol(&child, Some(current_id))?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Structure that maintains metadata for the commands to run
+struct Asker {
+    documents: HashMap<String, AskerDocument>,
+    lang_server: Box<dyn LanguageServer>,
+    searcher: Box<dyn Search>,
+}
+
+impl Asker {
+    pub fn new(searcher: Box<dyn Search>, mut lang_server: Box<dyn LanguageServer>) -> Result<Asker, Error> {
+        lang_server.initialize()?;
+        lang_server.initialized()?;
+
+        Ok(Asker {
+            lang_server: lang_server,
+            searcher: searcher,
+            documents: HashMap::new(),
+        })
+    }
+
+    fn update_symbols(&mut self, document: &mut AskerDocument) -> Result<(), Error> {
+        let symbols = self.lang_server.document_symbol(&document.lsp_item)?;
+        match symbols {
+            Some(DocumentSymbolResponse::Flat(_)) => {
+                Err(Box::new(LspError("Flat symbols are unsupported")))
+            },
+            Some(DocumentSymbolResponse::Nested(v)) => {
+                for symbol in v.iter() {
+                    document.append_symbol(symbol, None)?;
+                    info!("Found nested symbol: {:#?}", symbol);
+                }
+                Ok(())
+            },
+            None => {
+                Err(Box::new(LspError("No symbols found")))
+            }
+        }
+    }
+
+    fn update_documents(&mut self, matches: &Vec<Match>) -> Result<(), Error> {
+        for m in matches {
+            if let Some(_) = self.documents.get(&m.filename) {
+                continue
+            }
+
+            let mut document = AskerDocument::new(self.lang_server.document_open(m.filename.as_str())?);
+
+            println!("Document: {:#?}", m.filename);
+            self.update_symbols(&mut document)?;
+            self.documents.insert(m.filename.clone(), document);
+        }
+
+        Ok(())
+    }
+
+    pub fn search(&mut self, pattern_string: &str) -> Result<Vec<Match>, Error> {
+        let matches = self.searcher.search(pattern_string.to_owned())?;
+
+        self.update_documents(&matches)?;
+
+        Ok(matches)
+    }
+
+    pub fn find_parents(&mut self, matches: Vec<Match>) -> Result<(), Error> {
+        for m in matches {
+            println!("Searching parents: {:#?}", m);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Asker {
+    fn drop(&mut self) {
+        self.lang_server.shutdown().expect("Shutdown message failed");
+        self.lang_server.exit().expect("Exit failed");
+    }
 }
 
 fn main() -> Result<(), Error> {
@@ -75,6 +192,7 @@ fn main() -> Result<(), Error> {
         .unwrap();
 
     let project_home = "/home/desertfox/research/projects/ffmk/criu/";
+    let pattern_string = "restore_wait_other_tasks";
     let languages: Vec<String> = vec!["cpp".to_owned(), "cc".to_owned()];
 
     let searcher = SearchLauncher::new()
@@ -83,26 +201,18 @@ fn main() -> Result<(), Error> {
         .languages(&languages)
         .launch()?;
 
-    let results = searcher.search("restore_wait_other_tasks".to_owned())?;
-    println!("Matches: {:#?}", results);
-
-    let mut lang_server = LanguageServerLauncher::new()
+    let lang_server = LanguageServerLauncher::new()
         .server("/usr/bin/clangd-9".to_owned())
         .project(project_home.to_owned())
         .languages(languages)
         .launch()
         .expect("Failed to spawn clangd");
 
+    let mut asker = Asker::new(searcher, lang_server)?;
 
-    lang_server.initialize()?;
-    lang_server.initialized()?;
+    let matches = asker.search(pattern_string)?;
 
-    let document = lang_server.document_open("criu/cr-restore.c")?;
-    print_symbols(lang_server.document_symbol(&document)?)?;
-    lang_server.shutdown()?;
-    lang_server.exit()?;
-
-    println!("Hello, world!");
+    asker.find_parents(matches)?;
 
     Ok(())
 }

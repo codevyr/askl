@@ -9,9 +9,9 @@ type EngineName = String;
 
 #[derive(Debug)]
 pub struct Match {
-    filename: String,
-    line_number: u32,
-    matched: String,
+    pub filename: String,
+    pub line_number: u32,
+    pub matched: String,
 }
 
 impl Match {
@@ -19,6 +19,7 @@ impl Match {
         let terms: Vec<&str> = match_str.split('\n').collect();
 
         if let [_, filename, line_number, pattern] = terms.as_slice() {
+            println!("{}", filename);
             Match {
                 filename: filename.to_string(),
                 line_number: line_number.parse().unwrap(),
