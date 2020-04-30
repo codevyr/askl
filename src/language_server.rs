@@ -20,7 +20,7 @@ use lsp_types::request::Request as LspRequest;
 
 use crate::{Error, LspError};
 
-pub trait LanguageServer {
+pub trait LanguageServer : Send {
     fn initialize(&mut self) -> Result<InitializeResult, Error>;
     fn initialized(&mut self) -> Result<(), Error>;
     fn shutdown(&mut self) -> Result<(), Error>;

@@ -31,7 +31,7 @@ impl Match {
     }
 }
 
-pub trait Search {
+pub trait Search : Send {
     fn search(&self, pattern_string: PatternString) -> Result<Vec<Match>, Error>;
 }
 

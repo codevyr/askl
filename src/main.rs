@@ -21,7 +21,7 @@ mod asker;
 mod language_server;
 mod search;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use juniper::http::GraphQLRequest;
 use juniper::http::graphiql::graphiql_source;
 
@@ -59,7 +59,8 @@ impl std::error::Error for LspError {}
 type Error = Box<dyn std::error::Error>;
 
 
-fn test_run(asker: &mut asker::Asker) -> Result<(), Error> {
+fn test_run(asker: Arc<Mutex<asker::Asker>>) -> Result<(), Error> {
+    let mut asker = asker.lock().unwrap();
     let pattern_string = "restore_wait_other_tasks";
 
     let matches = asker.search(pattern_string)?;
@@ -104,12 +105,21 @@ async fn graphiql() -> HttpResponse {
         .body(html)
 }
 
+#[derive(Clone)]
+struct AppData {
+    schema: Arc<schema::Schema>,
+    asker: Arc<Mutex<asker::Asker>>,
+}
+
 async fn graphql(
-    st: web::Data<Arc<schema::Schema>>,
+    st: web::Data<AppData>,
     data: web::Json<GraphQLRequest>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let user = web::block(move || {
-        let res = data.execute(&st, &());
+        let ctx = schema::Context{
+            asker: st.asker.clone(),
+        };
+        let res = data.execute(&st.schema, &ctx);
         Ok::<_, serde_json::error::Error>(serde_json::to_string(&res)?)
     })
     .await?;
@@ -119,11 +129,14 @@ async fn graphql(
 }
 
 #[actix_rt::main]
-async fn server_main(asker: asker::Asker) -> io::Result<()> {
+async fn server_main(asker: Arc<Mutex<asker::Asker>>) -> io::Result<()> {
     let schema = std::sync::Arc::new(schema::create_schema());
     HttpServer::new(move || {
         App::new()
-            .data(schema.clone())
+            .data(AppData{
+                schema: schema.clone(),
+                asker: asker.clone(),
+            })
             .service(web::resource("/graphql").route(web::post().to(graphql)))
             .service(web::resource("/graphiql").route(web::get().to(graphiql)))
     })
@@ -143,9 +156,9 @@ fn main() -> Result<(), Error> {
         .init()
         .unwrap();
 
-    let mut asker = asker::Asker::new(&opt)?;
+    let asker = Arc::new(Mutex::new(asker::Asker::new(&opt)?));
 
-    test_run(&mut asker)?;
+    test_run(asker.clone())?;
 
     server_main(asker)?;
 
