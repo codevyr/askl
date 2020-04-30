@@ -15,3 +15,7 @@ log = { version = "0.4", features = ["max_level_trace"]}
 stderrlog = "0.4"
 structopt = "0.3"
 petgraph = "0.5"
+juniper = "0.14.2"
+actix-web = "2.0"
+actix-rt = "1.0"
+actix-server = "1.0.2"

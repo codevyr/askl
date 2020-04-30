@@ -1,5 +1,6 @@
 use std::fmt;
 use std::str;
+use std::io;
 
 use log;
 use log::{info};
@@ -21,8 +22,20 @@ use std::collections::HashMap;
 use petgraph::graph::DiGraph;
 use petgraph::dot::{Dot, Config};
 
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+
+mod schema;
+
+use std::sync::Arc;
+use juniper::http::GraphQLRequest;
+use juniper::http::graphiql::graphiql_source;
+
 #[derive(Debug)]
 struct LspError(&'static str);
+
+fn parse_list(src: &str) -> Vec<String> {
+    src.split(',').map(str::to_string).collect()
+}
 
 #[derive(StructOpt, Debug)]
 #[structopt()]
@@ -36,6 +49,12 @@ struct Opt {
     /// Timestamp (sec, ms, ns, none)
     #[structopt(short = "t", long = "timestamp")]
     ts: Option<stderrlog::Timestamp>,
+    /// Project root directory
+    #[structopt(short = "p", long = "project-root")]
+    project_root: String,
+    /// List of project languages
+    #[structopt(short = "l", long = "languages", default_value = "cc,cpp")]
+    languages: String,
 }
 
 impl fmt::Display for LspError {
@@ -96,7 +115,22 @@ struct Asker {
 }
 
 impl Asker {
-    pub fn new(searcher: Box<dyn Search>, mut lang_server: Box<dyn LanguageServer>) -> Result<Asker, Error> {
+    pub fn new(opt: &Opt) -> Result<Asker, Error> {
+        let language_list = parse_list(&opt.languages);
+
+        let searcher = SearchLauncher::new()
+            .engine("ack")
+            .directory(&opt.project_root)
+            .languages(&language_list)
+            .launch()?;
+
+        let mut lang_server = LanguageServerLauncher::new()
+            .server("/usr/bin/clangd-9".to_owned())
+            .project(opt.project_root.to_owned())
+            .languages(language_list)
+            .launch()
+            .expect("Failed to spawn clangd");
+
         lang_server.initialize()?;
         lang_server.initialized()?;
 
@@ -196,35 +230,8 @@ impl Drop for Asker {
     }
 }
 
-fn main() -> Result<(), Error> {
-    let opt = Opt::from_args();
-
-    stderrlog::new()
-        .module(module_path!())
-        .quiet(opt.quiet)
-        .verbosity(opt.verbose)
-        .timestamp(opt.ts.unwrap_or(stderrlog::Timestamp::Off))
-        .init()
-        .unwrap();
-
-    let project_home = "/home/desertfox/research/projects/ffmk/criu/";
+fn test_run(asker: &mut Asker) -> Result<(), Error> {
     let pattern_string = "restore_wait_other_tasks";
-    let languages: Vec<String> = vec!["cpp".to_owned(), "cc".to_owned()];
-
-    let searcher = SearchLauncher::new()
-        .engine("ack")
-        .directory(project_home)
-        .languages(&languages)
-        .launch()?;
-
-    let lang_server = LanguageServerLauncher::new()
-        .server("/usr/bin/clangd-9".to_owned())
-        .project(project_home.to_owned())
-        .languages(languages)
-        .launch()
-        .expect("Failed to spawn clangd");
-
-    let mut asker = Asker::new(searcher, lang_server)?;
 
     let matches = asker.search(pattern_string)?;
 
@@ -257,6 +264,61 @@ fn main() -> Result<(), Error> {
     }
 
     println!("{}", Dot::with_config(&graph, &[Config::EdgeNoLabel]));
+
+    Ok(())
+}
+
+async fn graphiql() -> HttpResponse {
+    let html = graphiql_source("http://127.0.0.1:8080/graphql");
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(html)
+}
+
+async fn graphql(
+    st: web::Data<Arc<schema::Schema>>,
+    data: web::Json<GraphQLRequest>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let user = web::block(move || {
+        let res = data.execute(&st, &());
+        Ok::<_, serde_json::error::Error>(serde_json::to_string(&res)?)
+    })
+    .await?;
+    Ok(HttpResponse::Ok()
+        .content_type("application/json")
+        .body(user))
+}
+
+#[actix_rt::main]
+async fn server_main(asker: Asker) -> io::Result<()> {
+    let schema = std::sync::Arc::new(schema::create_schema());
+    HttpServer::new(move || {
+        App::new()
+            .data(schema.clone())
+            .service(web::resource("/graphql").route(web::post().to(graphql)))
+            .service(web::resource("/graphiql").route(web::get().to(graphiql)))
+    })
+        .bind("127.0.0.1:8080")?
+        .run()
+        .await
+}
+
+fn main() -> Result<(), Error> {
+    let opt = Opt::from_args();
+
+    stderrlog::new()
+        .module(module_path!())
+        .quiet(opt.quiet)
+        .verbosity(opt.verbose)
+        .timestamp(opt.ts.unwrap_or(stderrlog::Timestamp::Off))
+        .init()
+        .unwrap();
+
+    let mut asker = Asker::new(&opt)?;
+
+    test_run(&mut asker)?;
+
+    server_main(asker)?;
 
     Ok(())
 }
