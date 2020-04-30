@@ -21,6 +21,7 @@ impl Match {
         if let [_, filename, line_number, pattern] = terms.as_slice() {
             Match {
                 filename: filename.to_string(),
+                // Need to remove one, because we count line numbers from 0
                 line_number: line_number.parse::<u64>().unwrap() - 1,
                 matched: pattern.to_string(),
             }
