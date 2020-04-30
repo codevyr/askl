@@ -250,7 +250,6 @@ impl LanguageServer for ClangdLanguageServer {
                                 SymbolKind::Event,
                                 SymbolKind::Operator,
                                 SymbolKind::TypeParameter,
-                                SymbolKind::Unknown,
                             ]
                             )
                         }),
