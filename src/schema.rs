@@ -23,12 +23,9 @@ impl Symbol {
         self.name.as_str()
     }
 
-    fn parents(&self, context: &Context) -> Vec<Symbol> {
-        println!("Looking for: {:?}", self.name);
+    fn parents(&self, context: &Context, name_filter: Option<String>) -> Vec<Symbol> {
         let mut asker = context.asker.lock().unwrap();
-        println!("  Looking for: {:?}", self.name);
         let matches = asker.search(self.name.as_str());
-        println!("    Looking for: {:?}", self.name);
 
         if let Err(_) = matches {
             return vec![];
@@ -36,8 +33,10 @@ impl Symbol {
 
         let mut parents = Vec::new();
         for m in matches.unwrap() {
-            println!("      Looking for: {:?} {:?}", self.name, m);
             if let Some(s) = asker.find_parent(m) {
+                if name_filter.is_some() && name_filter.as_ref().unwrap().ne(&s.name) {
+                    continue;
+                }
                 parents.push(Symbol {
                     name: s.name,
                 });
@@ -57,7 +56,7 @@ pub struct QueryRoot;
     Context = Context,
 )]
 impl QueryRoot {
-    fn f(context: &Context, name: Option<String>) -> Vec<Symbol> {
+    fn s(context: &Context, name: Option<String>) -> Vec<Symbol> {
         match name {
             Some(name) => {
                 let mut asker = context.asker.lock().unwrap();
