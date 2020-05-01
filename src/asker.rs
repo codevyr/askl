@@ -2,7 +2,7 @@ use log::{info};
 
 use std::collections::HashMap;
 
-use lsp_types::{DocumentSymbolResponse, SymbolKind, TextDocumentItem, Range, DocumentSymbol};
+use lsp_types::{DocumentSymbolResponse, SymbolKind, TextDocumentItem, DocumentSymbol};
 
 use crate::{Opt, Error, LspError};
 
@@ -10,13 +10,13 @@ use crate::language_server::{LanguageServerLauncher, LanguageServer};
 
 use crate::search::{SearchLauncher, Search, Match};
 
-use crate::schema::Symbol;
+use crate::schema::{Symbol, Range};
 
 fn parse_list(src: &str) -> Vec<String> {
     src.split(',').map(str::to_string).collect()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AskerSymbol {
     pub name: String,
     range: Range,
@@ -42,7 +42,7 @@ impl AskerDocument {
             parent: parent,
             kind: symbol.kind.clone(),
             name: symbol.name.clone(),
-            range: symbol.range.clone(),
+            range: Range::from(symbol.range),
         });
 
         let current_id = self.symbols.len() - 1;
@@ -146,6 +146,8 @@ impl Asker {
                     if symbol.range.start.line == search_match.line_number {
                         return Some(Symbol {
                             name: symbol.name.clone(),
+                            filename: search_match.filename.clone(),
+                            range: Range::from(symbol.range.clone()),
                         });
                     }
                 }
@@ -168,6 +170,8 @@ impl Asker {
                 } else {
                     Some(Symbol {
                         name: symbol.name.clone(),
+                        filename: search_match.filename,
+                        range: Range::from(symbol.range.clone()),
                     })
                 }
             },

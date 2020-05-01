@@ -12,6 +12,60 @@ impl juniper::Context for Context {}
 #[derive(Debug)]
 pub struct Symbol {
     pub name: String,
+    pub filename: String,
+    pub range: Range,
+}
+
+#[derive(Debug, Clone)]
+pub struct Position {
+    pub line: u64,
+    pub character: u64,
+}
+
+#[juniper::object(description = "Position in the file")]
+impl Position {
+    fn line(&self) -> i32 {
+        self.line as i32 + 1
+    }
+
+    fn character(&self) -> i32 {
+        self.character as i32 + 1
+    }
+}
+
+impl From<lsp_types::Position> for Position {
+    fn from(range: lsp_types::Position) -> Position {
+        Position {
+            line: range.line,
+            character: range.character,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Range {
+    pub start: Position,
+    pub end: Position,
+}
+
+#[juniper::object(description = "Range of the symbol in the file")]
+impl Range {
+    fn start(&self) -> &Position {
+        &self.start
+    }
+
+    fn end(&self) -> &Position {
+        &self.end
+    }
+}
+
+impl From<lsp_types::Range> for Range {
+    fn from(range: lsp_types::Range) -> Range {
+        Range {
+            start: Position::from(range.start),
+            end: Position::from(range.end),
+        }
+    }
 }
 
 #[juniper::object(
@@ -21,6 +75,14 @@ pub struct Symbol {
 impl Symbol {
     fn name(&self) -> &str {
         self.name.as_str()
+    }
+
+    fn filename(&self) -> &str {
+        self.filename.as_str()
+    }
+
+    fn range(&self) -> &Range {
+        &self.range
     }
 
     fn parents(&self, context: &Context, name_filter: Option<String>) -> Vec<Symbol> {
@@ -37,9 +99,7 @@ impl Symbol {
                 if name_filter.is_some() && name_filter.as_ref().unwrap().ne(&s.name) {
                     continue;
                 }
-                parents.push(Symbol {
-                    name: s.name,
-                });
+                parents.push(s);
             }
         }
 
@@ -63,9 +123,7 @@ impl QueryRoot {
                 let matches = asker.search(name.as_str()).unwrap();
                 let mut children = asker.find_symbols(&matches);
 
-                children.iter().map(|s| Symbol {
-                    name: s.name.clone(),
-                }).collect()
+                children
             },
             None => Vec::new()
         }
