@@ -167,12 +167,14 @@ impl Asker {
                 if symbol.range.start.line == search_match.line_number {
                     // Found oneself
                     None
-                } else {
+                } else if symbol.range.end.line >= search_match.line_number {
                     Some(Symbol {
                         name: symbol.name.clone(),
                         filename: search_match.filename,
                         range: Range::from(symbol.range.clone()),
                     })
+                } else {
+                    None
                 }
             },
             None => None,
