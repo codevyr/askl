@@ -10,6 +10,8 @@ use crate::language_server::{LanguageServerLauncher, LanguageServer};
 
 use crate::search::{SearchLauncher, Search, Match};
 
+use crate::schema::Symbol;
+
 fn parse_list(src: &str) -> Vec<String> {
     src.split(',').map(str::to_string).collect()
 }
@@ -129,7 +131,7 @@ impl Asker {
         Ok(matches)
     }
 
-    pub fn find_symbols(&mut self, matches: &Vec<Match>) -> Vec<AskerSymbol> {
+    pub fn find_symbols(&mut self, matches: &Vec<Match>) -> Vec<Symbol> {
         matches
             .iter()
             .map(|search_match| {
@@ -142,7 +144,9 @@ impl Asker {
                 info!("Symbol: {:#?} Search: {:#?}", symbol, search_match);
                 if let Some(symbol) = symbol {
                     if symbol.range.start.line == search_match.line_number {
-                        return Some(symbol.clone());
+                        return Some(Symbol {
+                            name: symbol.name.clone(),
+                        });
                     }
                 }
                 None
@@ -151,7 +155,7 @@ impl Asker {
             .collect()
     }
 
-    pub fn find_parent(&mut self, search_match: Match) -> Option<AskerSymbol> {
+    pub fn find_parent(&mut self, search_match: Match) -> Option<Symbol> {
         let document = self.documents.get(&search_match.filename).unwrap();
 
         let symbol = document.symbols.iter().rev().skip_while(|s| s.range.start.line > search_match.line_number).nth(0);
@@ -162,7 +166,9 @@ impl Asker {
                     // Found oneself
                     None
                 } else {
-                    Some(symbol.clone())
+                    Some(Symbol {
+                        name: symbol.name.clone(),
+                    })
                 }
             },
             None => None,

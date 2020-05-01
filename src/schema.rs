@@ -9,14 +9,45 @@ pub struct Context {
 
 impl juniper::Context for Context {}
 
-struct Function {
-    name: String,
+#[derive(Debug)]
+pub struct Symbol {
+    pub name: String,
 }
 
-#[juniper::object(description = "Function query")]
-impl Function {
-    pub fn name(&self) -> &str {
+#[juniper::object(
+    Context = Context,
+    description = "Symbol query"
+)]
+impl Symbol {
+    fn name(&self) -> &str {
         self.name.as_str()
+    }
+
+    fn parents(&self, context: &Context) -> Vec<Symbol> {
+        println!("Looking for: {:?}", self.name);
+        let mut asker = context.asker.lock().unwrap();
+        println!("  Looking for: {:?}", self.name);
+        let matches = asker.search(self.name.as_str());
+        println!("    Looking for: {:?}", self.name);
+
+        if let Err(_) = matches {
+            return vec![];
+        }
+
+        let mut parents = Vec::new();
+        for m in matches.unwrap() {
+            println!("      Looking for: {:?} {:?}", self.name, m);
+            if let Some(s) = asker.find_parent(m) {
+                parents.push(Symbol {
+                    name: s.name,
+                });
+            }
+        }
+
+        parents.sort_by(|a, b| a.name.cmp(&b.name));
+        parents.dedup_by(|a, b| a.name == b.name);
+
+        parents
     }
 }
 
@@ -26,43 +57,27 @@ pub struct QueryRoot;
     Context = Context,
 )]
 impl QueryRoot {
-    fn f(context: &Context, name: Option<String>) -> Vec<Function> {
+    fn f(context: &Context, name: Option<String>) -> Vec<Symbol> {
         match name {
             Some(name) => {
-                vec![
-                    Function {
-                        name: "foo".to_owned(),
-                    },
-                    Function {
-                        name: "bar".to_owned(),
-                    },
-                ]
+                let mut asker = context.asker.lock().unwrap();
+                let matches = asker.search(name.as_str()).unwrap();
+                let mut children = asker.find_symbols(&matches);
+
+                children.iter().map(|s| Symbol {
+                    name: s.name.clone(),
+                }).collect()
             },
             None => Vec::new()
         }
     }
 
-    fn cfg(context: &Context) -> Option<Function> {
+    fn cfg(context: &Context) -> Option<Symbol> {
         None
     }
 
-    fn parent(context: &Context, name: String) -> Option<Function> {
-        let mut asker = context.asker.lock().unwrap();
-        let matches = asker.search(name.as_str());
-
-        if let Err(_) = matches {
-            return None
-        }
-
-        for m in matches.unwrap() {
-            if let Some(s) = asker.find_parent(m) {
-                return Some(Function {
-                    name: s.name,
-                })
-            }
-        }
-
-        None
+    fn grand_parents(&self, context: &Context, name: String) -> &QueryRoot {
+        self
     }
 }
 
