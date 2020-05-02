@@ -1,7 +1,10 @@
-use juniper::{EmptyMutation, RootNode};
+use juniper::{EmptyMutation, RootNode, FieldResult, FieldError};
 use std::sync::{Arc, Mutex};
 
+use lsp_types;
+
 use crate::asker::Asker;
+use crate::search;
 
 pub struct Context {
     pub asker: Arc<Mutex<Asker>>,
@@ -18,53 +21,69 @@ pub struct Symbol {
 
 #[derive(Debug, Clone)]
 pub struct Position {
-    pub line: u64,
-    pub character: u64,
+    lsp: lsp_types::Position,
 }
 
 #[juniper::object(description = "Position in the file")]
 impl Position {
     fn line(&self) -> i32 {
-        self.line as i32 + 1
+        self.lsp.line as i32 + 1
     }
 
     fn character(&self) -> i32 {
-        self.character as i32 + 1
+        self.lsp.character as i32 + 1
     }
 }
 
 impl From<lsp_types::Position> for Position {
-    fn from(range: lsp_types::Position) -> Position {
+    fn from(lsp: lsp_types::Position) -> Position {
         Position {
-            line: range.line,
-            character: range.character,
+            lsp: lsp,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Range {
-    pub start: Position,
-    pub end: Position,
+    pub lsp: lsp_types::Range,
+}
+
+impl From<lsp_types::Range> for Range {
+    fn from(lsp: lsp_types::Range) -> Range {
+        Range {
+            lsp: lsp,
+        }
+    }
 }
 
 #[juniper::object(description = "Range of the symbol in the file")]
 impl Range {
-    fn start(&self) -> &Position {
-        &self.start
+    fn start(&self) -> Position {
+        Position::from(self.lsp.start)
     }
 
-    fn end(&self) -> &Position {
-        &self.end
+    fn end(&self) -> Position {
+        Position::from(self.lsp.end)
     }
 }
 
-impl From<lsp_types::Range> for Range {
-    fn from(range: lsp_types::Range) -> Range {
-        Range {
-            start: Position::from(range.start),
-            end: Position::from(range.end),
-        }
+type Match = search::Match;
+
+#[juniper::object(
+    Context = Context,
+    description = "Search match"
+)]
+impl Match {
+    fn pattern(&self) -> &str {
+        self.pattern.as_str()
+    }
+
+    fn filename(&self) -> &str {
+        self.filename.as_str()
+    }
+
+    fn range(&self) -> Range {
+        Range::from(self.range)
     }
 }
 
@@ -127,6 +146,14 @@ impl QueryRoot {
             },
             None => Vec::new()
         }
+    }
+
+    #[graphql(name="match")]
+    fn matches(context: &Context, pattern: String) -> FieldResult<Vec<Match>> {
+        let mut asker = context.asker.lock().unwrap();
+        asker
+            .search(pattern.as_str())
+            .map_err(FieldError::from)
     }
 
     fn cfg(context: &Context) -> Option<Symbol> {

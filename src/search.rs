@@ -1,5 +1,6 @@
 use std::process::{Command, Stdio};
 use std::io::{BufReader, BufRead};
+use lsp_types::{Range, Position};
 
 use crate::Error;
 
@@ -10,20 +11,36 @@ type EngineName = String;
 #[derive(Debug)]
 pub struct Match {
     pub filename: String,
-    pub line_number: u64,
+    pub range: Range,
+    pub before: String,
     pub matched: String,
+    pub after: String,
+    pub pattern: PatternString,
 }
 
 impl Match {
-    fn new(match_str: String) -> Match {
+    fn new(pattern: PatternString, match_str: String) -> Match {
         let terms: Vec<&str> = match_str.split('\n').collect();
 
-        if let [_, filename, line_number, pattern] = terms.as_slice() {
+        if let [_, filename, line_number, before, matched, after] = terms.as_slice() {
+            // Need to remove one, because we count line numbers from 0
+            let line_number = line_number.parse::<u64>().unwrap() - 1;
             Match {
                 filename: filename.to_string(),
-                // Need to remove one, because we count line numbers from 0
-                line_number: line_number.parse::<u64>().unwrap() - 1,
-                matched: pattern.to_string(),
+                range: Range {
+                    start: Position {
+                        line: line_number,
+                        character: before.len() as u64,
+                    },
+                    end: Position {
+                        line: line_number,
+                        character: (before.len() + matched.len()) as u64,
+                    }
+                },
+                before: before.to_string(),
+                matched: matched.to_string(),
+                after: after.to_string(),
+                pattern: pattern,
             }
         } else {
             panic!("Unexpected match format");
@@ -59,7 +76,7 @@ impl SearchAck {
 
         // Make the output of awk easy to parse
         args.push("--output".to_owned());
-        args.push("\n$f\n$.\n$&".to_owned());
+        args.push("\n$f\n$.\n$`\n$&\n$'".to_owned());
 
         // separate entries with zeroes
         args.push("--print0".to_owned());
@@ -72,7 +89,7 @@ impl SearchAck {
 impl Search for SearchAck {
     fn search(&self, pattern_string: PatternString) -> Result<Vec<Match>, Error> {
         let mut cmd = Command::new(self.exec_path.as_str())
-            .args(self.compose_args(pattern_string))
+            .args(self.compose_args(pattern_string.clone()))
             .current_dir(self.directory_path.as_str())
             .stdout(Stdio::piped())
             .spawn()?;
@@ -89,7 +106,7 @@ impl Search for SearchAck {
                 }
                 Ok(_) => {
                     let single_match = String::from_utf8(buffer[..buffer.len() - 1].to_vec())?;
-                    matches.push(Match::new(single_match));
+                    matches.push(Match::new(pattern_string.clone(), single_match));
                 }
                 Err(e) => {
                     return Err(Box::new(e));
