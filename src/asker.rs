@@ -25,7 +25,7 @@ pub struct AskerSymbol {
     parent: Option<usize>,
 }
 
-struct AskerDocument {
+pub struct AskerDocument {
     symbols: Vec<AskerSymbol>,
     lsp_item: TextDocumentItem,
 }
@@ -54,6 +54,14 @@ impl AskerDocument {
         }
 
         Ok(())
+    }
+
+    pub fn language(&self) -> &str {
+        self.lsp_item.language_id.as_str()
+    }
+
+    pub fn contents(&self) -> &str {
+        self.lsp_item.text.as_str()
     }
 }
 
@@ -122,6 +130,10 @@ impl Asker {
         }
 
         Ok(())
+    }
+
+    pub fn get_document(&mut self, filename: &String) -> Result<&AskerDocument, Error> {
+        self.documents.get(filename).ok_or(Box::new(LspError("No document found")))
     }
 
     pub fn search(&mut self, pattern_string: &str) -> Result<Vec<Match>, Error> {
