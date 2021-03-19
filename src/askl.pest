@@ -1,0 +1,16 @@
+string_symbol = _{ LETTER | NUMBER | WHITESPACE }
+ident = @{ XID_START ~ XID_CONTINUE* }
+string = _{ "\"" ~ string_symbol+ ~ "\""}
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+unnamed_param = ${ "$" ~ ident }
+named_param = ${ ident ~ ":" ~ (string | NUMBER | ident) }
+filter_params = _{ (string | named_param | unnamed_param)* }
+call = { ident ~ "(" ~ operation ~ ")" }
+operation = { (call | filter | insert) }
+scope = _{ "{" ~ operation? ~ (";" ~ operation)* ~ "}" }
+filter = { filter_params ~ scope }
+find = { "find" ~ ident ~ "=" ~ (filter | insert | call) ~ ";" }
+param = { "param" ~ ident ~ "=" ~ filter_params ~ ";" }
+insert = { "[" ~ (call | ident) ~ "]" }
+ask = { (find | param)* ~ operation? }
