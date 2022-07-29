@@ -50,16 +50,6 @@ impl<'i> Askl<'i> {
         pairs.for_each(|pair| {
             println!("{:#?}", pair);
             match pair.as_rule() {
-                Rule::param => {
-                    params.push(pair);
-                },
-                Rule::find => {
-                    find.push(pair)
-                },
-                Rule::operation => {
-                    command.push(pair)
-                }
-                Rule::EOI => (),
                 _ => unreachable!(),
             };
         });
