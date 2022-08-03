@@ -1,7 +1,6 @@
-use std::fs;
+use std::fs::{self, File};
 use std::io::Write;
 use std::marker::PhantomData;
-use std::process;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -9,8 +8,8 @@ use std::sync::{
 
 use log::debug;
 
-use anyhow::{anyhow, Context, Result};
-use lsp_types;
+use anyhow::{anyhow, Result};
+use lsp_types::{self, NumberOrString};
 use serde;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -19,9 +18,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use url::Url;
 
 use lsp_types::notification::Notification as LspNotification;
-use lsp_types::notification::{DidOpenTextDocument, Exit, Initialized};
-use lsp_types::request::Request as LspRequest;
-use lsp_types::request::{DocumentSymbolRequest, Initialize, Shutdown};
+use lsp_types::notification::{DidCloseTextDocument, DidOpenTextDocument, Exit, Initialized};
+use lsp_types::request::{DocumentSymbolRequest, Initialize, Shutdown, WorkspaceSymbol};
+use lsp_types::request::{References, Request as LspRequest};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Request<T: LspRequest> {
@@ -48,7 +47,7 @@ struct Response {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct Notification {
+pub struct Notification {
     jsonrpc: String,
     method: String,
     params: serde_json::Value,
@@ -84,14 +83,24 @@ impl Drop for LSPClient {
 }
 
 impl LSPClient {
-    pub fn start(lsp_command: &str, project_root: &str) -> Result<Self> {
+    pub fn start(lsp_command: &str, project_root: &str, log: Option<&str>) -> Result<Self> {
         let mut args = lsp_command.split_whitespace();
         let prog = args.next().ok_or(anyhow!("LSP server path not provided"))?;
+
+        let stderr = match log {
+            Some("-") => std::process::Stdio::inherit(),
+            Some(log_path) => {
+                let f = File::create(log_path)?;
+                std::process::Stdio::from(f)
+            },
+            None => std::process::Stdio::null(),
+        };
+
         let lsp = tokio::process::Command::new(prog)
             .args(args)
-            .stdin(process::Stdio::piped())
-            .stdout(process::Stdio::piped())
-            .stderr(process::Stdio::piped())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(stderr)
             .kill_on_drop(true)
             .spawn()?;
 
@@ -109,12 +118,13 @@ impl LSPClient {
             .ok()
     }
 
+    #[allow(unused)]
     fn full_path(&mut self, path: &str) -> String {
         format!("{}/{}", self.project_root, path)
     }
 
     async fn read_message(&mut self) -> Result<String> {
-        let mut stdout = self.lsp.stdout.take().context("Failed to get stdout")?;
+        let mut stdout = self.lsp.stdout.as_mut().unwrap();
 
         let mut content_length: usize = 0;
         let mut reader = BufReader::new(&mut stdout);
@@ -150,9 +160,10 @@ impl LSPClient {
             let content_str = self.read_message().await?;
             match serde_json::from_str(&content_str)? {
                 ServerMessage::Response(resp) => return Ok(resp),
-                ServerMessage::Notification(notification) => {
-                    debug!("received notification: {}", notification.method)
-                }
+                ServerMessage::Notification(notification) => match notification.method.as_str() {
+                    lsp_types::notification::PublishDiagnostics::METHOD => (),
+                    _ => debug!("received notification: {:#?}", notification),
+                },
             }
         }
     }
@@ -167,7 +178,7 @@ impl LSPClient {
             "method": T::METHOD,
         })
         .to_string();
-        let stdin = self.lsp.stdin.as_mut().expect("Failed to get stdin");
+        let stdin = self.lsp.stdin.as_mut().unwrap();
 
         let buffer = new_request_buf(&raw_json)?;
         stdin.write_all(&buffer).await?;
@@ -194,7 +205,7 @@ impl LSPClient {
         self.request(Request::<Initialize>::new(lsp_types::InitializeParams {
             process_id: Some(std::process::id()),
             root_path: None,
-            root_uri: self.uri(""),
+            root_uri: self.uri(&self.project_root),
             initialization_options: None,
             capabilities: lsp_types::ClientCapabilities {
                 workspace: Some(lsp_types::WorkspaceClientCapabilities {
@@ -203,6 +214,13 @@ impl LSPClient {
                 }),
                 window: None,
                 experimental: None,
+                text_document: Some(lsp_types::TextDocumentClientCapabilities {
+                    document_symbol: Some(lsp_types::DocumentSymbolClientCapabilities {
+                        hierarchical_document_symbol_support: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             trace: None,
@@ -220,21 +238,23 @@ impl LSPClient {
         .await
     }
 
+    #[allow(unused)]
     async fn shutdown(&mut self) -> Result<()> {
         let params = Request::<Shutdown>::new(());
         self.request(params).await
     }
 
+    #[allow(unused)]
     async fn exit(&mut self) -> Result<()> {
         self.notify(Notification::new::<Exit>(())).await
     }
 
-    async fn document_open(
+    pub async fn open_file(
         &mut self,
         path: &str,
         lang: &str,
     ) -> Result<lsp_types::TextDocumentItem> {
-        let contents = fs::read_to_string(self.full_path(path))?;
+        let contents = fs::read_to_string(path)?;
         let document = lsp_types::TextDocumentItem {
             uri: self
                 .uri(path)
@@ -253,7 +273,20 @@ impl LSPClient {
         Ok(document)
     }
 
-    async fn document_symbol(
+    #[allow(unused)]
+    pub async fn close_file(&mut self, document: &lsp_types::TextDocumentItem) -> Result<()> {
+        let notification =
+            Notification::new::<DidCloseTextDocument>(lsp_types::DidCloseTextDocumentParams {
+                text_document: lsp_types::TextDocumentIdentifier {
+                    uri: document.uri.clone(),
+                },
+            });
+        self.notify(notification).await?;
+
+        Ok(())
+    }
+
+    pub async fn document_symbol(
         &mut self,
         document: &lsp_types::TextDocumentItem,
     ) -> Result<Option<lsp_types::DocumentSymbolResponse>> {
@@ -262,11 +295,55 @@ impl LSPClient {
                 uri: document.uri.clone(),
             },
             work_done_progress_params: lsp_types::WorkDoneProgressParams {
+                work_done_token: Some(NumberOrString::String(document.uri.clone().into())),
                 ..Default::default()
             },
             partial_result_params: lsp_types::PartialResultParams {
+                partial_result_token: Some(NumberOrString::String(document.uri.clone().into())),
                 ..Default::default()
             },
+        });
+        self.request(params).await
+    }
+
+    pub async fn find_references(
+        &mut self,
+        path: &lsp_types::Url,
+        position: lsp_types::Position,
+    ) -> Result<Vec<lsp_types::Location>> {
+        let params = Request::<References>::new(lsp_types::ReferenceParams {
+            text_document_position: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: path.clone() },
+                position: position,
+            },
+            context: lsp_types::ReferenceContext {
+                include_declaration: false,
+            },
+            work_done_progress_params: lsp_types::WorkDoneProgressParams {
+                work_done_token: Some(NumberOrString::String(path.to_string())),
+                ..Default::default()
+            },
+            partial_result_params: lsp_types::PartialResultParams {
+                partial_result_token: Some(NumberOrString::String(path.to_string())),
+                ..Default::default()
+            },
+        });
+
+        match self.request(params).await {
+            Ok(None) => Err(anyhow!("No result has been found")),
+            Ok(Some(v)) => Ok(v),
+            Err(e) => Err(e),
+        }
+    }
+
+    #[allow(unused)]
+    pub async fn workspace_symbols(
+        &mut self,
+        query: &str,
+    ) -> Result<Option<Vec<lsp_types::SymbolInformation>>> {
+        let params = Request::<WorkspaceSymbol>::new(lsp_types::WorkspaceSymbolParams {
+            query: query.into(),
+            ..Default::default()
         });
         self.request(params).await
     }
