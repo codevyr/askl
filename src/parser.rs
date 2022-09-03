@@ -15,19 +15,8 @@ struct Identifier(pub String);
 
 impl AstType for Identifier {
     fn build(pair: pest::iterators::Pair<Rule>) -> Result<AstNode, Error<Rule>> {
-        match pair.as_rule() {
-            Rule::ident => {
-                let ident = pair.as_str();
-                Ok(AstNode::Identifier(Identifier(ident.into())))
-            }
-            _ => Err(Error::new_from_span(
-                pest::error::ErrorVariant::ParsingError {
-                    positives: vec![Rule::ident],
-                    negatives: vec![pair.as_rule()],
-                },
-                pair.as_span(),
-            )),
-        }
+        let ident = pair.as_str();
+        Ok(AstNode::Identifier(Identifier(ident.into())))
     }
 }
 
@@ -36,19 +25,8 @@ struct Value(pub String);
 
 impl AstType for Value {
     fn build(pair: pest::iterators::Pair<Rule>) -> Result<AstNode, Error<Rule>> {
-        match pair.as_rule() {
-            Rule::string => {
-                let string = pair.as_str();
-                Ok(AstNode::Value(Value(string.into())))
-            }
-            _ => Err(Error::new_from_span(
-                pest::error::ErrorVariant::ParsingError {
-                    positives: vec![Rule::string],
-                    negatives: vec![pair.as_rule()],
-                },
-                pair.as_span(),
-            )),
-        }
+        let string = pair.as_str();
+        Ok(AstNode::Value(Value(string.into())))
     }
 }
 
@@ -60,26 +38,15 @@ struct NamedArgument {
 
 impl AstType for NamedArgument {
     fn build(pair: pest::iterators::Pair<Rule>) -> Result<AstNode, Error<Rule>> {
-        match pair.as_rule() {
-            Rule::named_argument => {
-                let mut pair = pair.into_inner();
-                let ident = pair.next().unwrap();
-                let ident = Identifier::build(ident).unwrap();
-                let value = pair.next().unwrap();
-                let value = Value::build(value).unwrap();
-                Ok(AstNode::Argument(NamedArgument {
-                    name: Box::new(ident),
-                    value: Box::new(value),
-                }))
-            }
-            _ => Err(Error::new_from_span(
-                pest::error::ErrorVariant::ParsingError {
-                    positives: vec![Rule::named_argument],
-                    negatives: vec![pair.as_rule()],
-                },
-                pair.as_span(),
-            )),
-        }
+        let mut pair = pair.into_inner();
+        let ident = pair.next().unwrap();
+        let ident = Identifier::build(ident).unwrap();
+        let value = pair.next().unwrap();
+        let value = Value::build(value).unwrap();
+        Ok(AstNode::Argument(NamedArgument {
+            name: Box::new(ident),
+            value: Box::new(value),
+        }))
     }
 }
 
@@ -91,25 +58,14 @@ struct Verb {
 
 impl AstType for Verb {
     fn build(pair: pest::iterators::Pair<Rule>) -> Result<AstNode, Error<Rule>> {
-        match pair.as_rule() {
-            Rule::verb => {
-                let mut pair = pair.into_inner();
-                let ident = pair.next().unwrap();
-                let ident = Identifier::build(ident).unwrap();
-                let args: Result<Vec<AstNode>, _> = pair.map(NamedArgument::build).collect();
-                Ok(AstNode::Verb(Verb {
-                    ident: Box::new(ident),
-                    args: args?,
-                }))
-            }
-            _ => Err(Error::new_from_span(
-                pest::error::ErrorVariant::ParsingError {
-                    positives: vec![Rule::verb],
-                    negatives: vec![pair.as_rule()],
-                },
-                pair.as_span(),
-            )),
-        }
+        let mut pair = pair.into_inner();
+        let ident = pair.next().unwrap();
+        let ident = Identifier::build(ident).unwrap();
+        let args: Result<Vec<AstNode>, _> = pair.map(NamedArgument::build).collect();
+        Ok(AstNode::Verb(Verb {
+            ident: Box::new(ident),
+            args: args?,
+        }))
     }
 }
 #[derive(Debug)]
@@ -120,36 +76,31 @@ struct Statement {
 
 impl AstType for Statement {
     fn build(pair: pest::iterators::Pair<Rule>) -> Result<AstNode, Error<Rule>> {
-        match pair.as_rule() {
-            Rule::statement => {
-                let mut verbs = vec![];
-                let mut scope = AstNode::None;
+        let mut verbs = vec![];
+        let mut scope = AstNode::None;
 
-                for pair in pair.into_inner() {
-                    match pair.as_rule() {
-                        Rule::verb => {
-                            verbs.push(Verb::build(pair)?);
-                        }
-                        Rule::scope => {
-                            scope = Scope::build(pair)?;
-                        }
-                        _ => Err(Error::new_from_span(
-                            pest::error::ErrorVariant::ParsingError {
-                                positives: vec![Rule::verb, Rule::scope],
-                                negatives: vec![pair.as_rule()],
-                            },
-                            pair.as_span(),
-                        ))?,
-                    }
+        for pair in pair.into_inner() {
+            match pair.as_rule() {
+                Rule::verb => {
+                    verbs.push(Verb::build(pair)?);
                 }
-
-                Ok(AstNode::Statement(Statement {
-                    verbs: verbs,
-                    scope: Box::new(scope),
-                }))
+                Rule::scope => {
+                    scope = Scope::build(pair)?;
+                }
+                _ => Err(Error::new_from_span(
+                    pest::error::ErrorVariant::ParsingError {
+                        positives: vec![Rule::verb, Rule::scope],
+                        negatives: vec![pair.as_rule()],
+                    },
+                    pair.as_span(),
+                ))?,
             }
-            _ => unreachable!("Unknown rule: {:#?}", pair.as_rule()),
         }
+
+        Ok(AstNode::Statement(Statement {
+            verbs: verbs,
+            scope: Box::new(scope),
+        }))
     }
 }
 
@@ -158,14 +109,8 @@ struct Scope(pub Vec<AstNode>);
 
 impl AstType for Scope {
     fn build(pair: pest::iterators::Pair<Rule>) -> Result<AstNode, Error<Rule>> {
-        match pair.as_rule() {
-            Rule::scope => {
-                let statements: Result<Vec<AstNode>, _> =
-                    pair.into_inner().map(Statement::build).collect();
-                Ok(AstNode::Scope(statements?))
-            }
-            _ => unreachable!("Unknown rule: {:#?}", pair.as_rule()),
-        }
+        let statements: Result<Vec<AstNode>, _> = pair.into_inner().map(Statement::build).collect();
+        Ok(AstNode::Scope(statements?))
     }
 }
 
