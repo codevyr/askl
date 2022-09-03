@@ -2,14 +2,12 @@ use clap::Parser;
 use env_logger;
 use indicatif::ProgressBar;
 use log::{debug, warn};
-
 use console::{style, Emoji};
 mod compile_commands;
 mod lsp_client;
-mod symbols;
 use crate::compile_commands::{CompileCommands, FileList};
 use crate::lsp_client::LSPClient;
-use symbols::{Location, Symbol, SymbolMap, Symbols};
+use askl::symbols::{Location, Symbol, SymbolMap, Symbols};
 
 /// Indexer for askl
 #[derive(Parser, Debug)]

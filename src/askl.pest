@@ -2,10 +2,11 @@ COMMENT = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
 WHITESPACE = _{(" " | "\t")+}
 ident = @{ XID_START ~ XID_CONTINUE* }
 string = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\""}
-named_parameter = ${ident ~ "=" ~ string ~ ""}
-verb = ${ "@" ~ ident ~ ("(" ~ named_parameter ~ ("," ~ named_parameter)* ~ ")")?}
+named_argument = ${ident ~ "=" ~ string ~ ""}
+verb = ${ "@" ~ ident ~ ("(" ~ named_argument ~ ("," ~ named_argument)* ~ ")")?}
 scope = { "{" ~ statements ~ "}" }
-statement = {verb* ~ scope?}
+verbs = {verb*}
+statement = {verbs ~ scope?}
 statement_terminator = _{";" | NEWLINE}
-statements = { statement ~ (statement_terminator ~ statement)* }
+statements = _{ statement ~ (statement_terminator ~ statement)* }
 ask = _{SOI ~ statements ~ EOI }

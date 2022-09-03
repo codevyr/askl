@@ -1,9 +1,10 @@
 use std::{collections::HashMap, hash};
 
 use log::debug;
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
+use anyhow::Result;
 
-#[derive(Debug, PartialEq, Eq, Clone, Serialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct Location {
     pub file: lsp_types::Url,
     pub position: lsp_types::Position,
@@ -22,7 +23,7 @@ impl hash::Hash for Location {
     }
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Range {
     range: lsp_types::Range,
 }
@@ -49,7 +50,7 @@ impl Range {
     }
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Symbol {
     pub path: lsp_types::Url,
     pub name: String,
@@ -77,6 +78,22 @@ impl SymbolMap {
         Self {
             map: HashMap::new(),
         }
+    }
+
+    pub fn from_slice(slice: &[u8]) -> Result<Self> {
+        let v: Vec<Symbol> = serde_json::from_slice(slice)?;
+
+        let mut map = HashMap::new();
+        for s in v {
+            map.insert(
+                Location {
+                    file: s.path.clone(),
+                    position: s.range.range.start,
+                },
+                s,
+            );
+        }
+        Ok(Self { map: map })
     }
 }
 
