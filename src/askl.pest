@@ -5,8 +5,7 @@ string = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\""}
 named_argument = ${ident ~ "=" ~ string ~ ""}
 verb = ${ "@" ~ ident ~ ("(" ~ named_argument ~ ("," ~ named_argument)* ~ ")")?}
 scope = { "{" ~ statements ~ "}" }
-verbs = {verb*}
-statement = {verbs ~ scope?}
+statement = {verb* ~ scope?}
 statement_terminator = _{";" | NEWLINE}
 statements = _{ statement ~ (statement_terminator ~ statement)* }
 ask = _{SOI ~ statements ~ EOI }
