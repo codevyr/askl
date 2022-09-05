@@ -3,7 +3,8 @@ use clap::Parser;
 use env_logger;
 use log::{debug, warn};
 
-use askl::parser::Askl;
+use askl::executor::Executor;
+use askl::parser::Ast;
 use askl::symbols::SymbolMap;
 
 /// Indexer for askl
@@ -25,8 +26,13 @@ fn main() -> Result<()> {
 
     let symbols = SymbolMap::from_slice(&std::fs::read(args.index)?)?;
 
-    let ask = Askl::new(&args.query)?;
-    // println!("S {:#?}", symbols);
+    let ast = Ast::parse(&args.query)?;
+
+    let mut executor = Executor::new(ast);
+    executor.add_symbols(symbols);
+
+    let cfg = executor.run();
+    println!("{:#?}", cfg);
 
     Ok(())
 }

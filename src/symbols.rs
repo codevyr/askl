@@ -95,6 +95,11 @@ impl SymbolMap {
         }
         Ok(Self { map: map })
     }
+
+    pub fn merge(&mut self, other: SymbolMap) -> &mut Self {
+        self.map.extend(other.map);
+        self
+    }
 }
 
 impl Symbols for SymbolMap {

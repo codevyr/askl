@@ -1,5 +1,5 @@
 use anyhow::Result;
-use pest::{error::Error, iterators::Pairs, Parser};
+use pest::{error::Error, Parser};
 use pest_derive::Parser;
 
 #[derive(Parser)]
@@ -11,7 +11,7 @@ trait AstType {
 }
 
 #[derive(Debug)]
-struct Identifier(pub String);
+pub struct Identifier(pub String);
 
 impl AstType for Identifier {
     fn build(pair: pest::iterators::Pair<Rule>) -> Result<AstNode, Error<Rule>> {
@@ -21,7 +21,7 @@ impl AstType for Identifier {
 }
 
 #[derive(Debug)]
-struct Value(pub String);
+pub struct Value(pub String);
 
 impl AstType for Value {
     fn build(pair: pest::iterators::Pair<Rule>) -> Result<AstNode, Error<Rule>> {
@@ -31,7 +31,7 @@ impl AstType for Value {
 }
 
 #[derive(Debug)]
-struct NamedArgument {
+pub struct NamedArgument {
     name: Box<AstNode>,
     value: Box<AstNode>,
 }
@@ -51,7 +51,7 @@ impl AstType for NamedArgument {
 }
 
 #[derive(Debug)]
-struct Verb {
+pub struct Verb {
     ident: Box<AstNode>,
     args: Vec<AstNode>,
 }
@@ -68,10 +68,34 @@ impl AstType for Verb {
         }))
     }
 }
+
+impl Verb {
+    pub fn ident(&self) -> String {
+        match &*self.ident {
+            AstNode::Identifier(i) => i.0.clone(),
+            node => unreachable!("Impossible AstNode: {:?}", node),
+        }
+    }
+
+    pub fn arguments(&self) -> Vec<(Option<String>, String)> {
+        self.args
+            .iter()
+            .map(|arg| match arg {
+                AstNode::Argument(a) => {
+                    match (&*a.name, &*a.value) {
+                        (AstNode::Identifier(i), AstNode::Value(v)) => (Some(i.0.clone()), v.0.clone()),
+                        (i, v) => unreachable!("Impossible AstNodes: {:?} {:?}", i, v),
+                    }
+                }
+                node => unreachable!("Impossible AstNode: {:?}", node),
+            })
+            .collect()
+    }
+}
 #[derive(Debug)]
-struct Statement {
-    verbs: Vec<AstNode>,
-    scope: Box<AstNode>,
+pub struct Statement {
+    pub verbs: Vec<AstNode>,
+    pub scope: Box<AstNode>,
 }
 
 impl AstType for Statement {
@@ -105,47 +129,48 @@ impl AstType for Statement {
 }
 
 #[derive(Debug)]
-struct Scope(pub Vec<AstNode>);
+pub struct Scope(pub Vec<AstNode>);
 
 impl AstType for Scope {
     fn build(pair: pest::iterators::Pair<Rule>) -> Result<AstNode, Error<Rule>> {
         let statements: Result<Vec<AstNode>, _> = pair.into_inner().map(Statement::build).collect();
-        Ok(AstNode::Scope(statements?))
+        Ok(AstNode::Scope(Scope(statements?)))
     }
 }
 
 #[derive(Debug)]
-enum AstNode {
+pub struct Ast {
+    statements: Vec<AstNode>,
+}
+
+impl Ast {
+    pub fn parse(ask_code: &str) -> Result<Ast> {
+        let pairs = AsklParser::parse(Rule::ask, ask_code)?;
+
+        let mut ast = vec![];
+        for pair in pairs {
+            match pair.as_rule() {
+                Rule::statement => ast.push(Statement::build(pair)?),
+                Rule::EOI => {}
+                _ => unreachable!("Unknown rule: {:#?}", pair.as_rule()),
+            };
+        }
+
+        Ok(Self { statements: ast })
+    }
+
+    pub fn iter_statements(&self) -> core::slice::Iter<AstNode> {
+        self.statements.iter()
+    }
+}
+
+#[derive(Debug)]
+pub enum AstNode {
     Statement(Statement),
-    Scope(Vec<AstNode>),
+    Scope(Scope),
     Verb(Verb),
     Argument(NamedArgument),
     Identifier(Identifier),
     Value(Value),
     None,
-}
-
-fn parse_ask(pairs: Pairs<Rule>) -> Result<Vec<AstNode>, Error<Rule>> {
-    let mut ast = vec![];
-    for pair in pairs {
-        match pair.as_rule() {
-            Rule::statement => ast.push(Statement::build(pair)?),
-            Rule::EOI => {}
-            _ => unreachable!("Unknown rule: {:#?}", pair.as_rule()),
-        };
-    }
-
-    Ok(ast)
-}
-
-pub struct Askl {}
-
-impl Askl {
-    pub fn new(ask_code: &str) -> Result<Askl> {
-        let pairs = AsklParser::parse(Rule::ask, ask_code)?;
-
-        let askl = parse_ask(pairs);
-        println!("{:#?}", &askl);
-        Ok(Self {})
-    }
 }
