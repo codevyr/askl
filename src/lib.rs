@@ -1,4 +1,7 @@
-pub mod symbols;
-pub mod parser;
-pub mod executor;
 pub mod cfg;
+pub mod executor;
+pub mod parser;
+pub mod scope;
+pub mod symbols;
+pub mod verb;
+pub mod statement;

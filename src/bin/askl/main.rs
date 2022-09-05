@@ -1,10 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
 use env_logger;
-use log::{debug, warn};
 
 use askl::executor::Executor;
-use askl::parser::Ast;
+use askl::parser::parse;
 use askl::symbols::SymbolMap;
 
 /// Indexer for askl
@@ -26,9 +25,9 @@ fn main() -> Result<()> {
 
     let symbols = SymbolMap::from_slice(&std::fs::read(args.index)?)?;
 
-    let ast = Ast::parse(&args.query)?;
+    let ast = parse(&args.query)?;
 
-    let mut executor = Executor::new(ast);
+    let mut executor = Executor::new(ast)?;
     executor.add_symbols(symbols);
 
     let cfg = executor.run();

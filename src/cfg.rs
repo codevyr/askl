@@ -10,9 +10,9 @@ impl ControlFlowGraph {
         Self{}
     }
     
-    pub fn from_symbols(symbols: &SymbolMap) -> Self {
+    pub fn from_symbols(_symbols: &SymbolMap) -> Self {
         Self{}
     }
 
-    pub fn merge(&mut self, other: &ControlFlowGraph) {}
+    pub fn merge(&mut self, _other: &ControlFlowGraph) {}
 }
