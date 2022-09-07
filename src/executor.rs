@@ -20,8 +20,8 @@ impl Executor {
         self
     }
 
-    pub fn run(&self) -> ControlFlowGraph {
-        let cfg_in = ControlFlowGraph::from_symbols(&self.symbols);
+    pub fn run(self) -> ControlFlowGraph {
+        let cfg_in = ControlFlowGraph::from_symbols(self.symbols);
         self.global.run(&cfg_in)
     }
 }

@@ -1,13 +1,37 @@
-use std::{collections::HashMap, hash};
-
-use log::debug;
-use serde::{Serialize, Deserialize};
 use anyhow::Result;
+use log::debug;
+use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
+use std::{collections::HashMap, hash, hash::Hasher};
 
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Copy, Clone, Serialize, Deserialize)]
+pub struct FileHash(u64);
+
+impl FileHash {
+    pub fn new<T: hash::Hash>(url: &T) -> Self {
+        let mut s = DefaultHasher::new();
+        url.hash(&mut s);
+        FileHash(s.finish())
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Serialize, Deserialize)]
 pub struct Location {
-    pub file: lsp_types::Url,
-    pub position: lsp_types::Position,
+    file: FileHash,
+    position: lsp_types::Position,
+}
+
+impl Location {
+    pub fn new(url: &lsp_types::Url, pos: lsp_types::Position) -> Self {
+        Self {
+            file: FileHash::new(url),
+            position: pos,
+        }
+    }
+
+    pub fn position(&self) -> lsp_types::Position {
+        self.position
+    }
 }
 
 /// URLs hash like their serialization.
@@ -64,11 +88,12 @@ pub struct Symbol {
 pub trait Symbols: ToString {
     fn add(&mut self, loc: Location, symbol: Symbol);
     fn into_vec(&self) -> Vec<Location>;
+    fn into_iter(&self) -> Vec<(Location, Symbol)>;
     fn find(&self, loc: &Location) -> Option<Location>;
     fn add_parent(&mut self, child: &Location, parent: &Location);
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct SymbolMap {
     map: HashMap<Location, Symbol>,
 }
@@ -87,7 +112,7 @@ impl SymbolMap {
         for s in v {
             map.insert(
                 Location {
-                    file: s.path.clone(),
+                    file: FileHash::new(&s.path),
                     position: s.range.range.start,
                 },
                 s,
@@ -112,6 +137,13 @@ impl Symbols for SymbolMap {
 
     fn into_vec(&self) -> Vec<Location> {
         self.map.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()
+    }
+
+    fn into_iter(&self) -> Vec<(Location, Symbol)> {
+        self.map
+            .iter()
+            .map(|(l, s)| (l.clone(), s.clone()))
+            .collect::<Vec<_>>()
     }
 
     fn find(&self, loc: &Location) -> Option<Location> {

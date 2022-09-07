@@ -53,6 +53,6 @@ impl Statement for DefaultStatement {
         }
 
         let inner = self.scope.run(cfg_in);
-        self.scope.combine(&outer, &inner)
+        self.scope.combine(&cfg_in, &outer, &inner)
     }
 }

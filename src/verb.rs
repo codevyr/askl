@@ -1,9 +1,11 @@
 use crate::cfg::ControlFlowGraph;
 use crate::parser::{Identifier, NamedArgument, Rule};
-use anyhow::{bail, Result, anyhow};
+use crate::symbols::Location;
+use anyhow::{anyhow, bail, Result};
 use core::fmt::Debug;
+use itertools::Itertools;
 use pest::error::Error;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub fn build_verb(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Verb>, Error<Rule>> {
     let mut pair = pair.into_inner();
@@ -39,25 +41,44 @@ pub trait Verb: Debug {
 
 #[derive(Debug)]
 struct FilterVerb {
-    positional: Vec<String>,
-    named: HashMap<String, String>,
+    name: String,
 }
 
 impl FilterVerb {
     const NAME: &'static str = "filter";
 
-    fn new(positional: Vec<String>, named: HashMap<String, String>) -> Result<Box<dyn Verb>> {
-        if !named.contains_key("name") {
+    fn new(_positional: Vec<String>, named: HashMap<String, String>) -> Result<Box<dyn Verb>> {
+        if let Some(name) = named.get("name") {
+            Ok(Box::new(Self { name: name.clone() }))
+        } else {
             bail!("Must contain name field");
         }
-
-        Ok(Box::new(Self { positional, named }))
     }
 }
 
 impl Verb for FilterVerb {
     fn apply(&self, cfg: &ControlFlowGraph) -> ControlFlowGraph {
         println!("VERB: {:#?}", self);
-        cfg.clone()
+        let mut matched_sinks = HashSet::new();
+        let mut result = ControlFlowGraph::new();
+        for sink in cfg.iter_sink() {
+            if self.name != "" {
+                matched_sinks.insert(sink);
+            }
+        }
+
+        for source in cfg.iter_source() {
+            for sink in matched_sinks.iter() {
+                for path in cfg.find_paths::<Vec<Location>>(source, *sink, None) {
+                    path.iter()
+                        .tuple_windows()
+                        .map(|(from, to)| {
+                            result.add_edge(*from, *to);
+                        })
+                        .collect()
+                }
+            }
+        }
+        result
     }
 }

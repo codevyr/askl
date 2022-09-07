@@ -1,8 +1,8 @@
 use clap::Parser;
+use console::{style, Emoji};
 use env_logger;
 use indicatif::ProgressBar;
 use log::{debug, warn};
-use console::{style, Emoji};
 mod compile_commands;
 mod lsp_client;
 use crate::compile_commands::{CompileCommands, FileList};
@@ -79,10 +79,10 @@ async fn main() -> anyhow::Result<()> {
             Some(lsp_types::DocumentSymbolResponse::Nested(symbols)) => {
                 for symbol in symbols {
                     symbols_db.add(
-                        Location {
-                            file: doc.uri.clone(),
-                            position: symbol.selection_range.start,
-                        },
+                        Location::new(
+                            &doc.uri,
+                            symbol.selection_range.start,
+                        ),
                         Symbol {
                             path: doc.uri.clone(),
                             name: symbol.name,
@@ -99,10 +99,10 @@ async fn main() -> anyhow::Result<()> {
                 warn!("Flat symbols: {:#?}", symbols);
                 for symbol in symbols {
                     symbols_db.add(
-                        Location {
-                            file: doc.uri.clone(),
-                            position: symbol.location.range.start,
-                        },
+                        Location::new(
+                            &doc.uri,
+                            symbol.location.range.start,
+                        ),
                         Symbol {
                             path: doc.uri.clone(),
                             name: symbol.name,
@@ -128,19 +128,19 @@ async fn main() -> anyhow::Result<()> {
         CLIP
     );
 
-    let symbols_vec = symbols_db.into_vec().clone();
+    let symbols_vec = symbols_db.into_iter().clone();
     let pb = ProgressBar::new(symbols_vec.len() as u64);
-    for loc in symbols_vec.iter() {
+    for (loc, symb) in symbols_vec.iter() {
         pb.inc(1);
-        let refs = lsp.find_references(&loc.file, loc.position).await?;
+        let refs = lsp.find_references(&symb.path, loc.position()).await?;
         for r in refs.iter() {
-            let r_loc = Location {
-                file: r.uri.clone(),
-                position: lsp_types::Position {
+            let r_loc = Location::new(
+                &r.uri,
+                lsp_types::Position {
                     line: r.range.start.line,
                     character: r.range.start.character,
                 },
-            };
+            );
             match symbols_db.find(&r_loc) {
                 Some(parent) => symbols_db.add_parent(loc, &parent),
                 None => {}
