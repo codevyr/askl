@@ -39,6 +39,10 @@ impl<'a> ControlFlowGraph<'a> {
         self.symbols.iter()
     }
 
+    pub fn get_symbol(&'a self, loc: &'a Location) -> Option<&'a Symbol> {
+        self.symbols.map.get(loc)
+    }
+
     pub fn find_paths<TargetColl>(
         &'a self,
         from: &'a Location,
