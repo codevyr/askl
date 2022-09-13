@@ -6,7 +6,7 @@ quoted_string = _{ "\"" ~ string  ~ "\""}
 named_argument = ${ident ~ "=" ~ quoted_string}
 verb = ${ "@" ~ ident ~ ("(" ~ named_argument ~ ("," ~ named_argument)* ~ ")")?}
 scope = { "{" ~ statements ~ "}" }
-statement = {verb ~ scope?}
+statement = {verb? ~ scope?}
 statement_terminator = _{";" | NEWLINE}
 statements = _{ statement ~ (statement_terminator ~ statement)* }
 ask = _{SOI ~ statements ~ EOI }
