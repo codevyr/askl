@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use env_logger;
+use petgraph::dot::{Config, Dot};
 
 use askl::executor::Executor;
 use askl::parser::parse;
@@ -31,7 +32,7 @@ fn main() -> Result<()> {
     executor.add_symbols(symbols);
 
     let cfg = executor.run();
-    println!("{:#?}", cfg);
+    println!("{:?}", Dot::with_config(&cfg, &[Config::EdgeNoLabel]));
 
     Ok(())
 }
