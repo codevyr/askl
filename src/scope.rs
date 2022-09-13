@@ -1,11 +1,10 @@
-use crate::cfg::ControlFlowGraph;
+use crate::cfg::{ControlFlowGraph, NodeList, EdgeList};
 use crate::parser::Rule;
 use crate::statement::{build_statement, Statement};
 use crate::symbols::Location;
 use core::fmt::Debug;
 use itertools::Itertools;
 use pest::error::Error;
-use std::collections::HashSet;
 
 pub fn build_scope(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Scope>, Error<Rule>> {
     let statements: Result<Vec<Box<dyn Statement>>, _> =
@@ -14,56 +13,46 @@ pub fn build_scope(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Scope>, 
 }
 
 pub trait Scope: Debug {
-    fn run(&self, cfg_in: &ControlFlowGraph) -> ControlFlowGraph {
-        let mut cfg_out = ControlFlowGraph::new();
+    /// Run statements in a scope. Return list of top-level nodes and all egdes
+    /// that belong to the scope.
+    fn run<'a>(&self, cfg_in: &'a ControlFlowGraph) -> (NodeList<'a>, EdgeList<'a>) {
+        let mut nodes_scope = vec![];
+        let mut edges_scope = vec![];
         for statement in self.statements().iter() {
-            cfg_out.merge(&statement.run(cfg_in));
+            let (nodes, edges) = statement.run(cfg_in);
+            nodes_scope.extend(nodes.0);
+            edges_scope.extend(edges.0);
         }
-        cfg_out
+        (NodeList(nodes_scope), EdgeList(edges_scope))
     }
 
-    fn combine(
+    fn combine<'a>(
         &self,
-        full: &ControlFlowGraph,
-        outer: &ControlFlowGraph,
-        inner: &ControlFlowGraph,
-    ) -> ControlFlowGraph {
-        let mut matched_sinks = HashSet::new();
-        let mut result = ControlFlowGraph::new();
-        for sink in outer.iter_sink() {
-            for source in inner.iter_source() {
-                let edges = self.matching_edges(full, sink, source);
-                if edges.len() > 0 {
-                    matched_sinks.insert(sink);
-                    for (from, to) in edges {
-                        result.add_edge(from, to);
-                    }
+        full: &'a ControlFlowGraph,
+        outer: NodeList<'a>,
+        inner: NodeList<'a>,
+    ) -> (NodeList<'a>, EdgeList<'a>) {
+        let mut node_matches = vec![];
+        let mut edge_matches = vec![];
+        for from in outer.0.into_iter() {
+            for to in inner.0.iter() {
+                let edges = self.matching_edges(full, from, to);
+                if edges.0.len() > 0 {
+                    node_matches.push(from);
+                    edge_matches.extend(edges.0.iter());
                 }
             }
         }
-
-        for source in outer.iter_source() {
-            for sink in matched_sinks.iter() {
-                for path in outer.find_paths::<Vec<Location>>(source, *sink, None) {
-                    path.iter()
-                        .tuple_windows()
-                        .map(|(from, to)| {
-                            result.add_edge(*from, *to);
-                        })
-                        .collect()
-                }
-            }
-        }
-        outer.clone()
+        (NodeList(node_matches), EdgeList(edge_matches))
     }
 
     fn statements(&self) -> &Vec<Box<dyn Statement>>;
-    fn matching_edges(
+    fn matching_edges<'a>(
         &self,
-        full: &ControlFlowGraph,
-        from: Location,
-        to: Location,
-    ) -> Vec<(Location, Location)>;
+        full: &'a ControlFlowGraph,
+        from: &'a Location,
+        to: &'a Location,
+    ) -> EdgeList<'a>;
 }
 
 #[derive(Debug)]
@@ -80,14 +69,14 @@ impl Scope for DefaultScope {
         &self.0
     }
 
-    fn matching_edges(
+    fn matching_edges<'a>(
         &self,
-        full: &ControlFlowGraph,
-        from: Location,
-        to: Location,
-    ) -> Vec<(Location, Location)> {
+        full: &'a ControlFlowGraph,
+        from: &'a Location,
+        to: &'a Location,
+    ) -> EdgeList<'a> {
         let mut result = vec![];
-        for path in full.find_paths::<Vec<Location>>(from, to, Some(1)) {
+        for path in full.find_paths::<Vec<&Location>>(from, to, Some(1)) {
             path.iter()
                 .tuple_windows()
                 .map(|(from, to)| {
@@ -95,7 +84,7 @@ impl Scope for DefaultScope {
                 })
                 .collect()
         }
-        result
+        EdgeList(result)
     }
 }
 
@@ -109,25 +98,25 @@ impl EmptyScope {
 }
 
 impl Scope for EmptyScope {
-    fn combine(
+    fn combine<'a>(
         &self,
         _full: &ControlFlowGraph,
-        outer: &ControlFlowGraph,
-        _inner: &ControlFlowGraph,
-    ) -> ControlFlowGraph {
-        outer.clone()
+        outer: NodeList<'a>,
+        _inner: NodeList<'a>,
+    ) -> (NodeList<'a>, EdgeList<'a>) {
+        (outer, EdgeList(vec![]))
     }
 
     fn statements(&self) -> &Vec<Box<dyn Statement>> {
         &self.0
     }
 
-    fn matching_edges(
+    fn matching_edges<'a>(
         &self,
-        _full: &ControlFlowGraph,
-        _from: Location,
-        _to: Location,
-    ) -> Vec<(Location, Location)> {
+        _full: &'a ControlFlowGraph,
+        _from: &'a Location,
+        _to: &'a Location,
+    ) -> EdgeList<'a> {
         unreachable!("Cannot match edges in empty scope")
     }
 }

@@ -1,11 +1,9 @@
-use crate::cfg::ControlFlowGraph;
 use crate::parser::{Identifier, NamedArgument, Rule};
-use crate::symbols::Location;
+use crate::symbols::Symbol;
 use anyhow::{anyhow, bail, Result};
 use core::fmt::Debug;
-use itertools::Itertools;
 use pest::error::Error;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
 
 pub fn build_verb(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Verb>, Error<Rule>> {
     let mut pair = pair.into_inner();
@@ -23,6 +21,7 @@ pub fn build_verb(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Verb>, Er
     let span = ident.as_span();
     match Identifier::build(ident)?.0.as_str() {
         FilterVerb::NAME => FilterVerb::new(positional, named),
+        AllVerb::NAME => AllVerb::new(positional, named),
         unknown => Err(anyhow!("Unknown filter: {}", unknown)),
     }
     .map_err(|e| {
@@ -36,7 +35,7 @@ pub fn build_verb(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Verb>, Er
 }
 
 pub trait Verb: Debug {
-    fn apply(&self, cfg: &ControlFlowGraph) -> ControlFlowGraph;
+    fn mark(&self, symbol: &Symbol) -> bool;
 }
 
 #[derive(Debug)]
@@ -57,28 +56,28 @@ impl FilterVerb {
 }
 
 impl Verb for FilterVerb {
-    fn apply(&self, cfg: &ControlFlowGraph) -> ControlFlowGraph {
-        println!("VERB: {:#?}", self);
-        let mut matched_sinks = HashSet::new();
-        let mut result = ControlFlowGraph::new();
-        for sink in cfg.iter_sink() {
-            if self.name != "" {
-                matched_sinks.insert(sink);
-            }
-        }
+    fn mark(&self, symbol: &Symbol) -> bool {
+        self.name == symbol.name
+    }
+}
 
-        for source in cfg.iter_source() {
-            for sink in matched_sinks.iter() {
-                for path in cfg.find_paths::<Vec<Location>>(source, *sink, None) {
-                    path.iter()
-                        .tuple_windows()
-                        .map(|(from, to)| {
-                            result.add_edge(*from, *to);
-                        })
-                        .collect()
-                }
-            }
-        }
-        result
+#[derive(Debug)]
+pub struct AllVerb {}
+
+impl AllVerb {
+    const NAME: &'static str = "all";
+
+    pub fn new(_positional: Vec<String>, _named: HashMap<String, String>) -> Result<Box<dyn Verb>> {
+        Ok(Box::new(Self {}))
+    }
+
+    pub fn new_default() -> Box<dyn Verb> {
+        Box::new(Self {})
+    }
+}
+
+impl Verb for AllVerb {
+    fn mark(&self, _symbol: &Symbol) -> bool {
+        true
     }
 }

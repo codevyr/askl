@@ -1,6 +1,8 @@
+
 use crate::scope::Scope;
 use crate::{cfg::ControlFlowGraph, symbols::SymbolMap};
 use anyhow::Result;
+use petgraph::graphmap::DiGraphMap;
 
 pub struct Executor {
     global: Box<dyn Scope>,
@@ -20,8 +22,24 @@ impl Executor {
         self
     }
 
-    pub fn run(self) -> ControlFlowGraph {
-        let cfg_in = ControlFlowGraph::from_symbols(self.symbols);
-        self.global.run(&cfg_in)
+    pub fn run<'a>(&'a self) -> DiGraphMap<&'a str, ()> {
+        let cfg_in = ControlFlowGraph::from_symbols(&self.symbols);
+        let (outer, inner) = self.global.run(&cfg_in);
+
+        let mut result_graph : DiGraphMap<&str, ()> = DiGraphMap::new();
+
+        for (from, to) in inner.0 {
+            let sym_from = self.symbols.map.get(from).unwrap();
+            let sym_to = self.symbols.map.get(to).unwrap();
+
+            result_graph.add_edge(&sym_from.name, &sym_to.name, ());
+        }
+
+        for loc in outer.0 {
+            let sym= self.symbols.map.get(loc).unwrap();
+            result_graph.add_node(&sym.name);
+        }
+
+        result_graph
     }
 }

@@ -95,7 +95,7 @@ pub trait Symbols: ToString {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct SymbolMap {
-    map: HashMap<Location, Symbol>,
+    pub map: HashMap<Location, Symbol>,
 }
 
 impl SymbolMap {
@@ -124,6 +124,11 @@ impl SymbolMap {
     pub fn merge(&mut self, other: SymbolMap) -> &mut Self {
         self.map.extend(other.map);
         self
+    }
+
+    pub fn iter<'a>(&'a self) -> impl Iterator<Item = (&Location, &Symbol)> + 'a {
+        self.map
+            .iter()
     }
 }
 
