@@ -76,7 +76,7 @@ impl Scope for DefaultScope {
         to: &'a Location,
     ) -> EdgeList<'a> {
         let mut result = vec![];
-        for path in full.find_paths::<Vec<&Location>>(from, to, Some(1)) {
+        for path in full.find_paths::<Vec<&Location>>(from, to, Some(0)) {
             path.iter()
                 .tuple_windows()
                 .map(|(from, to)| {
