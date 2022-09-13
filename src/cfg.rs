@@ -22,13 +22,6 @@ pub struct NodeList<'a>(pub Vec<&'a Location>);
 pub struct EdgeList<'a>(pub Vec<(&'a Location, &'a Location)>);
 
 impl<'a> ControlFlowGraph<'a> {
-    // pub fn new() -> Self {
-    //     Self {
-    //         graph: DiGraphMap::new(),
-    //         symbols: SymbolMap::new(),
-    //     }
-    // }
-
     pub fn from_symbols(symbols: &'a SymbolMap) -> Self {
         let mut g = DiGraphMap::new();
         for (child_l, s) in symbols.iter() {
@@ -42,28 +35,8 @@ impl<'a> ControlFlowGraph<'a> {
         }
     }
 
-    pub fn merge(&'a mut self, other: &'a ControlFlowGraph) {
-        self.graph.extend(other.graph.all_edges());
-    }
-
     pub fn iter_symbols(&'a self) -> impl Iterator<Item = (&Location, &Symbol)> + 'a {
         self.symbols.iter()
-    }
-
-    pub fn iter_sink(&'a self) -> impl Iterator<Item = &'a Location> {
-        self.graph
-            .nodes()
-            .filter(move |n| self.graph.neighbors_directed(*n, Outgoing).count() == 0)
-    }
-
-    pub fn iter_source(&'a self) -> impl Iterator<Item = &'a Location> {
-        self.graph
-            .nodes()
-            .filter(move |n| self.graph.neighbors_directed(*n, Incoming).count() == 0)
-    }
-
-    pub fn add_edge(&mut self, from: &'a Location, to: &'a Location) {
-        self.graph.add_edge(from, to, ());
     }
 
     pub fn find_paths<TargetColl>(
