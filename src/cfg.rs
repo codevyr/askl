@@ -3,11 +3,8 @@ use std::iter::Iterator;
 
 use crate::symbols::Symbol;
 use crate::symbols::{Location, SymbolMap};
-use petgraph::{
-    algo::all_simple_paths,
-    graphmap::DiGraphMap,
-    Direction::{Incoming, Outgoing},
-};
+use itertools::Itertools;
+use petgraph::{algo::all_simple_paths, graphmap::DiGraphMap, Direction::Outgoing};
 
 #[derive(Debug, Clone)]
 pub struct ControlFlowGraph<'a> {
@@ -41,6 +38,12 @@ impl<'a> ControlFlowGraph<'a> {
 
     pub fn get_symbol(&'a self, loc: &'a Location) -> Option<&'a Symbol> {
         self.symbols.map.get(loc)
+    }
+
+    pub fn get_children(&'a self, parent: &'a Location) -> Vec<&'a Location> {
+        self.graph
+            .neighbors_directed(parent, Outgoing)
+            .collect_vec()
     }
 
     pub fn find_paths<TargetColl>(

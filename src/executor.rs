@@ -2,6 +2,7 @@
 use crate::scope::Scope;
 use crate::{cfg::ControlFlowGraph, symbols::SymbolMap};
 use anyhow::Result;
+use log::debug;
 use petgraph::graphmap::DiGraphMap;
 
 pub struct Executor {

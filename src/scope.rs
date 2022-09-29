@@ -1,9 +1,10 @@
-use crate::cfg::{ControlFlowGraph, NodeList, EdgeList};
+use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::parser::Rule;
 use crate::statement::{build_statement, Statement};
 use crate::symbols::Location;
 use core::fmt::Debug;
 use itertools::Itertools;
+use log::debug;
 use pest::error::Error;
 
 pub fn build_scope(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Scope>, Error<Rule>> {
@@ -13,6 +14,12 @@ pub fn build_scope(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Scope>, 
 }
 
 pub trait Scope: Debug {
+    fn find_matches<'a>(
+        &self,
+        cfg_in: &'a ControlFlowGraph,
+        parent: &'a Location,
+    ) -> (NodeList<'a>, EdgeList<'a>);
+
     /// Run statements in a scope. Return list of top-level nodes and all egdes
     /// that belong to the scope.
     fn run<'a>(&self, cfg_in: &'a ControlFlowGraph) -> (NodeList<'a>, EdgeList<'a>) {
@@ -69,6 +76,25 @@ impl Scope for DefaultScope {
         &self.0
     }
 
+    fn find_matches<'a>(
+        &self,
+        cfg_in: &'a ControlFlowGraph,
+        parent: &'a Location,
+    ) -> (NodeList<'a>, EdgeList<'a>) {
+        let descendants = cfg_in.get_children(parent);
+
+        let mut nodes_scope = vec![];
+        let mut edges_scope = vec![];
+        for statement in self.statements().iter() {
+            for node in descendants.iter() {
+                let (nodes, edges) = statement.find_matches(cfg_in, node);
+                nodes_scope.extend(nodes.0);
+                edges_scope.extend(edges.0);
+            }
+        }
+        (NodeList(nodes_scope), EdgeList(edges_scope))
+    }
+
     fn matching_edges<'a>(
         &self,
         full: &'a ControlFlowGraph,
@@ -98,6 +124,14 @@ impl EmptyScope {
 }
 
 impl Scope for EmptyScope {
+    fn find_matches<'a>(
+        &self,
+        cfg_in: &'a ControlFlowGraph,
+        parent: &'a Location,
+    ) -> (NodeList<'a>, EdgeList<'a>) {
+        (NodeList(vec![]), EdgeList(vec![]))
+    }
+
     fn combine<'a>(
         &self,
         _full: &ControlFlowGraph,

@@ -26,7 +26,6 @@ pub struct Value(pub String);
 
 impl Value {
     pub fn build(pair: pest::iterators::Pair<Rule>) -> Result<Value, Error<Rule>> {
-        println!("VALUE::build: {:#?}", pair.as_str());
         let string = match pair.as_rule() {
             Rule::string => pair.as_str(),
             _ => unreachable!("Unknown rule: {:#?}", pair.as_rule()),

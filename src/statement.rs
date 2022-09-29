@@ -1,8 +1,10 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::parser::Rule;
 use crate::scope::{build_scope, EmptyScope, Scope};
+use crate::symbols::Location;
 use crate::verb::{build_verb, AllVerb, Verb};
 use core::fmt::Debug;
+use log::debug;
 use pest::error::Error;
 
 #[derive(Debug)]
@@ -42,10 +44,37 @@ pub fn build_statement<'a>(
 }
 
 pub trait Statement: Debug {
+    fn find_matches<'a>(
+        &self,
+        cfg: &'a ControlFlowGraph,
+        parent: &'a Location,
+    ) -> (NodeList<'a>, EdgeList<'a>);
     fn run<'a>(&self, cfg_in: &'a ControlFlowGraph) -> (NodeList<'a>, EdgeList<'a>);
 }
 
 impl Statement for DefaultStatement {
+    fn find_matches<'a>(
+        &self,
+        cfg: &'a ControlFlowGraph,
+        parent: &'a Location,
+    ) -> (NodeList<'a>, EdgeList<'a>) {
+        let matches = cfg
+            .get_symbol(parent)
+            .iter()
+            .filter(|symbol| self.verb.mark(symbol))
+            .map(| _s| parent)
+            .collect::<Vec<_>>();
+
+        let mut combined_sources = NodeList(vec![]);
+        let mut combined_edges = EdgeList(vec![]);
+        for parent_match in matches.iter() {
+            let (new_sources, new_edges) = self.scope.find_matches(cfg, parent_match);
+            combined_sources.0.extend(new_sources.0.into_iter());
+            combined_edges.0.extend(new_edges.0.into_iter());
+        }
+        (combined_sources, combined_edges)
+    }
+
     fn run<'a>(&self, cfg: &'a ControlFlowGraph) -> (NodeList<'a>, EdgeList<'a>) {
         let matches = cfg
             .iter_symbols()
