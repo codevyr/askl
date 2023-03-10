@@ -2,7 +2,7 @@
 name = "askl"
 version = "0.1.0"
 authors = ["Maksym Planeta <mplaneta@os.inf.tu-dresden.de>"]
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -10,7 +10,7 @@ edition = "2018"
 pest="2.1"
 pest_derive="2.1"
 clap = { version = "3.2", features = ["derive"] }
-tokio = { version = "1.20.1", features = ["process", "io-std", "io-util", "macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1.20.1", features = ["process", "io-std", "io-util", "macros", "rt", "rt-multi-thread", "sync"] }
 anyhow = "1.0.58"
 lsp-types = "0.93.0"
 url = "2.2.2"
@@ -23,3 +23,4 @@ console = "0.15.1"
 indicatif = "0.17.0"
 petgraph = "0.6.2"
 itertools = "0.10.3"
+shell-words = "1.1"
