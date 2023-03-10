@@ -17,7 +17,7 @@ impl FileHash {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Serialize, Deserialize)]
 pub struct Location {
-    file: FileHash,
+    pub file: FileHash,
     position: lsp_types::Position,
 }
 
@@ -109,11 +109,17 @@ impl SymbolMap {
         let v: Vec<Symbol> = serde_json::from_slice(slice)?;
 
         let mut map = HashMap::new();
-        for s in v {
+        for mut s in v {
+            for p in s.parents.iter_mut() {
+                p.position.character = 0
+            }
             map.insert(
                 Location {
                     file: FileHash::new(&s.path),
-                    position: s.range.range.start,
+                    position: lsp_types::Position {
+                        line: s.range.range.start.line,
+                        character: 0,
+                    },
                 },
                 s,
             );
@@ -127,8 +133,7 @@ impl SymbolMap {
     }
 
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = (&Location, &Symbol)> + 'a {
-        self.map
-            .iter()
+        self.map.iter()
     }
 }
 

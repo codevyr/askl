@@ -45,6 +45,20 @@ pub trait Scope: Debug {
             for to in inner.0.iter() {
                 let edges = self.matching_edges(full, from, to);
                 if edges.0.len() > 0 {
+                    debug!("FROM: {:?}", full.get_symbol(from).unwrap().name.clone());
+                    debug!("TO: {:?}", full.get_symbol(to).unwrap().name.clone());
+                    debug!(
+                        "EDGES: {:#?}",
+                        edges
+                            .0
+                            .iter()
+                            .map(|e| format!(
+                                "{}->{}",
+                                full.get_symbol(e.0).unwrap().name.clone(),
+                                full.get_symbol(e.1).unwrap().name.clone()
+                            ))
+                            .collect::<Vec<_>>()
+                    );
                     node_matches.push(from);
                     edge_matches.extend(edges.0.iter());
                 }

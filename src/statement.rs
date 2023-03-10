@@ -85,6 +85,26 @@ impl Statement for DefaultStatement {
         let (scope_sources, scope_edges) = self.scope.run(cfg);
         let (combined_matches, mut combined_edges) =
             self.scope.combine(cfg, NodeList(matches), scope_sources);
+        // debug!(
+        //     "NODES: {:#?}",
+        //     combined_matches
+        //         .0
+        //         .iter()
+        //         .map(|n| cfg.get_symbol(n).unwrap().name.clone())
+        //         .collect::<Vec<_>>()
+        // );
+        // debug!(
+        //     "EDGES: {:#?}",
+        //     combined_edges
+        //         .0
+        //         .iter()
+        //         .map(|e| format!(
+        //             "{}->{}",
+        //             cfg.get_symbol(e.0).unwrap().name.clone(),
+        //             cfg.get_symbol(e.1).unwrap().name.clone()
+        //         ))
+        //         .collect::<Vec<_>>()
+        // );
         combined_edges.0.extend(scope_edges.0.iter());
         (combined_matches, combined_edges)
     }

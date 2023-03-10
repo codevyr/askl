@@ -25,6 +25,9 @@ impl Executor {
 
     pub fn run<'a>(&'a self) -> DiGraphMap<&'a str, ()> {
         let cfg_in = ControlFlowGraph::from_symbols(&self.symbols);
+
+        debug!("Global scope: {:#?}", self.global);
+
         let (outer, inner) = self.global.run(&cfg_in);
 
         let mut result_graph : DiGraphMap<&str, ()> = DiGraphMap::new();
