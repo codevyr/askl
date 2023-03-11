@@ -1,4 +1,4 @@
-use std::{fs::File, process::Output};
+use std::fs::File;
 
 use anyhow::anyhow;
 use clap::Parser;
@@ -35,7 +35,39 @@ struct CompileCommand {
     output: Option<String>,
 }
 
-async fn run_ast_gen(args: &Args, c: CompileCommand) -> anyhow::Result<(String, Output)> {
+pub type Node = clang_ast::Node<Clang>;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum Clang {
+    EnumConstantDecl(EnumConstantDecl),
+    EnumDecl(EnumDecl),
+    FunctionDecl(FunctionDecl),
+    NamespaceDecl(NamespaceDecl),
+    Other,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct EnumConstantDecl {
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct EnumDecl {
+    pub name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FunctionDecl {
+    pub name: Option<String>,
+    pub loc: Option<clang_ast::SourceLocation>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NamespaceDecl {
+    pub name: Option<String>,
+}
+
+async fn run_ast_gen(args: &Args, c: CompileCommand) -> anyhow::Result<(String, Node)> {
 
     let mut arguments = if let Some(ref command) = c.command {
         shell_words::split(command).expect("Failed to parse command")
@@ -53,7 +85,11 @@ async fn run_ast_gen(args: &Args, c: CompileCommand) -> anyhow::Result<(String, 
         .args(&arguments[1..])
         .output().await?;
 
-    Ok((c.file ,output))
+    let json = String::from_utf8(output.stdout)?;
+
+    let node : Node = serde_json::from_str(&json)?;
+
+    Ok((c.file, node))
 }
 
 #[tokio::main]
@@ -81,14 +117,14 @@ async fn main() -> anyhow::Result<()> {
     let mut first = true;
     println!("[");
     while let Some(c) = rx.recv().await {
-        let (file, output) = run_ast_gen(&args, c).await?;
+        let (file, node) = run_ast_gen(&args, c).await?;
 
         if first {
             first = false;
         } else {
             println!(",");
         }
-        print!(r#""{}": {}"#, file, String::from_utf8(output.stdout)?);
+        print!(r#""{}": {}"#, file, serde_json::to_string_pretty(&node)?);
     }
     println!("\n]");
 
