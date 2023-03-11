@@ -39,10 +39,13 @@ pub type Node = clang_ast::Node<Clang>;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Clang {
-    EnumConstantDecl(EnumConstantDecl),
-    EnumDecl(EnumDecl),
+    // EnumConstantDecl(EnumConstantDecl),
+    // EnumDecl(EnumDecl),
     FunctionDecl(FunctionDecl),
-    NamespaceDecl(NamespaceDecl),
+    // NamespaceDecl(NamespaceDecl),
+    DeclRefExpr(DeclRefExpr),
+    TranslationUnitDecl,
+    CompoundStmt,
     Other,
 }
 
@@ -60,11 +63,64 @@ pub struct EnumDecl {
 pub struct FunctionDecl {
     pub name: Option<String>,
     pub loc: Option<clang_ast::SourceLocation>,
+    pub range: Option<clang_ast::SourceRange>
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DeclRefExpr {
+    pub name: Option<String>,
+    pub loc: Option<clang_ast::SourceLocation>,
+    pub range: Option<clang_ast::SourceRange>,
+    pub referenced_decl: Option<Box<Node>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NamespaceDecl {
     pub name: Option<String>,
+}
+
+fn node_simplify(root: Node) -> Vec<Node> {
+    let inner : Vec<Node> = root.inner
+        .into_iter()
+        .map(|node| node_simplify(node))
+        .flatten()
+        .collect();
+    match &root.kind {
+        Clang::DeclRefExpr(ref_expr) => {
+            if let Some(referenced_decl) = &ref_expr.referenced_decl {
+                if let Clang::FunctionDecl(_) = &referenced_decl.kind {
+                    return vec![Node{
+                        id: root.id,
+                        kind: root.kind,
+                        inner: inner,
+                    }];
+                }
+            }
+            vec![]
+        },
+        Clang::FunctionDecl(_) => {
+            if inner.len() > 0 {
+                vec![Node{
+                    id: root.id,
+                    kind: root.kind,
+                    inner: inner,
+                }]
+            } else {
+                inner
+            }
+        },
+        Clang::TranslationUnitDecl => {
+            vec![Node{
+                id: root.id,
+                kind: root.kind,
+                inner: inner,
+            }]
+        },
+        Clang::Other | Clang::CompoundStmt=> {
+            inner
+        },
+    }
 }
 
 async fn run_ast_gen(args: &Args, c: CompileCommand) -> anyhow::Result<(String, Node)> {
@@ -77,19 +133,72 @@ async fn run_ast_gen(args: &Args, c: CompileCommand) -> anyhow::Result<(String, 
         return Err(anyhow!("Either command or arguments must be defined for file: {}", c.file));
     };
 
-    arguments.push("-Xclang".to_string());
-    arguments.push("-ast-dump=json".to_string());
-    arguments.push("-fsyntax-only".to_string());
+    println!("{:?}", arguments);
+    let output;
+    if let Some(i) = arguments.iter().position(|opt| *opt == "-o") {
+        // Replace option of type "-o outfile"
+        output = format!("{}/{}.pch", c.directory, arguments[i + 1]);
+        // arguments[i + 1] = output;
+        println!("!: {}", output);
+    } else if let Some(i) = arguments.iter().position(|opt| opt.starts_with("-o")) {
+        // Replace option of type "-ooutfile"
+        output = format!("{}/{}.pch", c.directory, &arguments[i + 1][2..]);
+        // arguments[i] = format!("-o{}", output);
+        println!("$: {}", output);
+    } else {
+        output = format!("{}/{}.pch", c.directory, c.file);
+        // arguments.push(format!("-o{}", output));
+        println!("#: {}", output);
+    }
+
+    if let Some(i) = arguments.iter().position(|opt| *opt == "-c") {
+        // Remove option "-c"
+        arguments.remove(i);
+    }
+
+    if let Some(i) = arguments.iter().position(|opt| *opt == "-g") {
+        // Remove option "-c"
+        arguments.remove(i);
+    }
+
+    // Remove path to the compiler
+    arguments.remove(0);
+
+    // let arguments = [
+    //     vec![
+    //         "-Xclang".to_string(),
+    //         "-emit-pch".to_string(),
+    //         "-fsyntax-only".to_string()
+    //     ],
+    //     arguments
+    // ].concat();
+
+    let arguments = [
+        vec![
+            "-Xclang".to_string(),
+            "-ast-dump=json".to_string(),
+            "-fsyntax-only".to_string()
+        ],
+        arguments
+    ].concat();
+
+    println!("{:?}", arguments.join(" "));
 
     let output = Command::new(args.clang.clone())
-        .args(&arguments[1..])
-        .output().await?;
+        .current_dir(c.directory)
+        .args(arguments)
+        .output()
+        .await?;
 
+    println!("{:?}", c.file);
     let json = String::from_utf8(output.stdout)?;
 
     let node : Node = serde_json::from_str(&json)?;
 
-    Ok((c.file, node))
+    // let simple_node = node;
+    let simple_node = node_simplify(node).pop().unwrap();
+
+    Ok((c.file, simple_node))
 }
 
 #[tokio::main]
@@ -115,18 +224,18 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let mut first = true;
-    println!("[");
+    // println!("[");
     while let Some(c) = rx.recv().await {
         let (file, node) = run_ast_gen(&args, c).await?;
 
         if first {
             first = false;
         } else {
-            println!(",");
+            // println!(",");
         }
         print!(r#""{}": {}"#, file, serde_json::to_string_pretty(&node)?);
     }
-    println!("\n]");
+    // println!("\n]");
 
     Ok(())
 }
