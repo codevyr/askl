@@ -1,7 +1,4 @@
-use std::{
-    fs::File,
-    sync::Arc,
-};
+use std::{fs::File, sync::Arc};
 
 use anyhow::anyhow;
 use clap::Parser;
@@ -30,7 +27,7 @@ struct Args {
     trim: Option<usize>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct CompileCommand {
     arguments: Option<Vec<String>>,
     command: Option<String>,
@@ -152,37 +149,19 @@ async fn run_ast_gen(args: Args, c: CompileCommand) -> anyhow::Result<(String, N
         // arguments.push(format!("-o{}", output));
     }
 
-    if let Some(i) = arguments.iter().position(|opt| *opt == "-c") {
-        // Remove option "-c"
-        arguments.remove(i);
-    }
-
-    if let Some(i) = arguments.iter().position(|opt| *opt == "-g") {
-        // Remove option "-c"
-        arguments.remove(i);
-    }
-
-    // Remove path to the compiler
-    arguments.remove(0);
-
-    // let arguments = [
-    //     vec![
-    //         "-Xclang".to_string(),
-    //         "-emit-pch".to_string(),
-    //         "-fsyntax-only".to_string()
-    //     ],
-    //     arguments
-    // ].concat();
-
-    let arguments = [
-        vec![
-            "-Xclang".to_string(),
-            "-ast-dump=json".to_string(),
-            "-fsyntax-only".to_string(),
-        ],
-        arguments,
+    arguments = vec![
+        "-Xclang".to_string(),
+        "-ast-dump=json".to_string(),
+        "-fsyntax-only".to_string(),
     ]
-    .concat();
+    .into_iter()
+    .chain(
+        arguments
+            .drain(1..) // Remove path to the compiler
+            .filter(|arg| arg != "-c")
+            .filter(|arg| arg != "-g")
+            .filter(|arg| !arg.starts_with("-f"))
+    ).collect();
 
     let output = Command::new(args.clang.clone())
         .current_dir(c.directory)
@@ -194,7 +173,6 @@ async fn run_ast_gen(args: Args, c: CompileCommand) -> anyhow::Result<(String, N
 
     let node: Node = serde_json::from_str(&json)?;
 
-    // let simple_node = node;
     let simple_node = node_simplify(node).pop().unwrap();
 
     Ok((ast_file, simple_node))
@@ -213,7 +191,10 @@ async fn parse_all(
         let _args = args.clone();
         tasks.push(tokio::spawn(async move {
             pb.inc(1);
-            let res = run_ast_gen(_args, c).await;
+            let res = run_ast_gen(_args, c.clone()).await;
+            if let Err(err) = &res {
+                println!("{} in {:?}", err, c);
+            }
             drop(permit);
             res
         }));
@@ -242,11 +223,25 @@ async fn main() -> anyhow::Result<()> {
 
     let outputs = parse_all(args, compile_commands).await;
 
-    outputs
+    let all_ast = outputs
         .into_iter()
+        .map(|r| {
+            if let Err(err) = &r {
+                println!("{:?}", err);
+            }
+            r
+        })
+        .filter(|r| r.is_ok())
         .map(|r| r.unwrap())
-        .for_each(|(ast_path, node)| {
-            std::fs::write(ast_path, serde_json::to_string_pretty(&node).unwrap()).unwrap();
+        .map(|(_, node)| node)
+        .reduce(|mut acc, node| {
+            acc.inner.extend(node.inner);
+            Node {
+                id: acc.id,
+                kind: acc.kind,
+                inner: acc.inner,
+            }
         });
+    std::fs::write("out.json", serde_json::to_string_pretty(&all_ast).unwrap()).unwrap();
     Ok(())
 }
