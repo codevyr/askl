@@ -26,6 +26,7 @@ dependencies = [
  "clap",
  "console",
  "env_logger",
+ "futures",
  "indicatif",
  "itertools",
  "jsonrpc-core",

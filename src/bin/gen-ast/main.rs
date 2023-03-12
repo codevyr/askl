@@ -1,12 +1,16 @@
-use std::fs::File;
+use std::{
+    fs::File,
+    sync::Arc,
+};
 
 use anyhow::anyhow;
 use clap::Parser;
-use serde::{Serialize, Deserialize};
-use tokio::{sync::mpsc, process::Command};
+use indicatif::ProgressBar;
+use serde::{Deserialize, Serialize};
+use tokio::{process::Command, sync::Semaphore};
 
 /// Indexer for askl
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
     // Path to compile command to get the list of source files
@@ -23,7 +27,7 @@ struct Args {
 
     // Limit how many files can be processed
     #[clap(long)]
-    trim: Option<usize>
+    trim: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -63,7 +67,7 @@ pub struct EnumDecl {
 pub struct FunctionDecl {
     pub name: Option<String>,
     pub loc: Option<clang_ast::SourceLocation>,
-    pub range: Option<clang_ast::SourceRange>
+    pub range: Option<clang_ast::SourceRange>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -81,7 +85,8 @@ pub struct NamespaceDecl {
 }
 
 fn node_simplify(root: Node) -> Vec<Node> {
-    let inner : Vec<Node> = root.inner
+    let inner: Vec<Node> = root
+        .inner
         .into_iter()
         .map(|node| node_simplify(node))
         .flatten()
@@ -90,7 +95,7 @@ fn node_simplify(root: Node) -> Vec<Node> {
         Clang::DeclRefExpr(ref_expr) => {
             if let Some(referenced_decl) = &ref_expr.referenced_decl {
                 if let Clang::FunctionDecl(_) = &referenced_decl.kind {
-                    return vec![Node{
+                    return vec![Node {
                         id: root.id,
                         kind: root.kind,
                         inner: inner,
@@ -98,10 +103,10 @@ fn node_simplify(root: Node) -> Vec<Node> {
                 }
             }
             vec![]
-        },
+        }
         Clang::FunctionDecl(_) => {
             if inner.len() > 0 {
-                vec![Node{
+                vec![Node {
                     id: root.id,
                     kind: root.kind,
                     inner: inner,
@@ -109,46 +114,42 @@ fn node_simplify(root: Node) -> Vec<Node> {
             } else {
                 inner
             }
-        },
+        }
         Clang::TranslationUnitDecl => {
-            vec![Node{
+            vec![Node {
                 id: root.id,
                 kind: root.kind,
                 inner: inner,
             }]
-        },
-        Clang::Other | Clang::CompoundStmt=> {
-            inner
-        },
+        }
+        Clang::Other | Clang::CompoundStmt => inner,
     }
 }
 
-async fn run_ast_gen(args: &Args, c: CompileCommand) -> anyhow::Result<(String, Node)> {
-
+async fn run_ast_gen(args: Args, c: CompileCommand) -> anyhow::Result<(String, Node)> {
     let mut arguments = if let Some(ref command) = c.command {
         shell_words::split(command).expect("Failed to parse command")
     } else if let Some(arguments) = c.arguments {
         arguments
     } else {
-        return Err(anyhow!("Either command or arguments must be defined for file: {}", c.file));
+        return Err(anyhow!(
+            "Either command or arguments must be defined for file: {}",
+            c.file
+        ));
     };
 
-    println!("{:?}", arguments);
-    let output;
+    let ast_file;
     if let Some(i) = arguments.iter().position(|opt| *opt == "-o") {
         // Replace option of type "-o outfile"
-        output = format!("{}/{}.pch", c.directory, arguments[i + 1]);
+        ast_file = format!("{}/{}.ast", c.directory, arguments[i + 1]);
         // arguments[i + 1] = output;
-        println!("!: {}", output);
     } else if let Some(i) = arguments.iter().position(|opt| opt.starts_with("-o")) {
         // Replace option of type "-ooutfile"
-        output = format!("{}/{}.pch", c.directory, &arguments[i + 1][2..]);
+        ast_file = format!("{}/{}.ast", c.directory, &arguments[i + 1][2..]);
         // arguments[i] = format!("-o{}", output);
-        println!("$: {}", output);
     } else {
-        output = format!("{}/{}.pch", c.directory, c.file);
+        ast_file = format!("{}/{}.ast", c.directory, c.file);
         // arguments.push(format!("-o{}", output));
-        println!("#: {}", output);
     }
 
     if let Some(i) = arguments.iter().position(|opt| *opt == "-c") {
@@ -177,12 +178,11 @@ async fn run_ast_gen(args: &Args, c: CompileCommand) -> anyhow::Result<(String, 
         vec![
             "-Xclang".to_string(),
             "-ast-dump=json".to_string(),
-            "-fsyntax-only".to_string()
+            "-fsyntax-only".to_string(),
         ],
-        arguments
-    ].concat();
-
-    println!("{:?}", arguments.join(" "));
+        arguments,
+    ]
+    .concat();
 
     let output = Command::new(args.clang.clone())
         .current_dir(c.directory)
@@ -190,15 +190,41 @@ async fn run_ast_gen(args: &Args, c: CompileCommand) -> anyhow::Result<(String, 
         .output()
         .await?;
 
-    println!("{:?}", c.file);
     let json = String::from_utf8(output.stdout)?;
 
-    let node : Node = serde_json::from_str(&json)?;
+    let node: Node = serde_json::from_str(&json)?;
 
     // let simple_node = node;
     let simple_node = node_simplify(node).pop().unwrap();
 
-    Ok((c.file, simple_node))
+    Ok((ast_file, simple_node))
+}
+
+async fn parse_all(
+    args: Args,
+    compile_commands: Vec<CompileCommand>,
+) -> Vec<anyhow::Result<(String, Node)>> {
+    let sem = Arc::new(Semaphore::new(args.parallelism));
+    let mut tasks = Vec::with_capacity(compile_commands.len());
+    let pb = ProgressBar::new(compile_commands.len() as u64);
+    for c in compile_commands {
+        let permit = Arc::clone(&sem).acquire_owned().await.unwrap();
+        let pb = pb.clone();
+        let _args = args.clone();
+        tasks.push(tokio::spawn(async move {
+            pb.inc(1);
+            let res = run_ast_gen(_args, c).await;
+            drop(permit);
+            res
+        }));
+    }
+
+    let mut outputs = Vec::<anyhow::Result<(String, Node)>>::with_capacity(tasks.len());
+    for task in tasks {
+        outputs.push(task.await.unwrap());
+    }
+
+    outputs
 }
 
 #[tokio::main]
@@ -206,36 +232,21 @@ async fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args = Args::parse();
 
-    let file = File::open(&args.compile_commands)
-        .expect("file should open read only");
-    let mut compile_commands: Vec<CompileCommand> = serde_json::from_reader(file)
-        .expect("file should be proper JSON");
+    let file = File::open(&args.compile_commands).expect("file should open read only");
+    let mut compile_commands: Vec<CompileCommand> =
+        serde_json::from_reader(file).expect("file should be proper JSON");
 
     if let Some(trim) = args.trim {
         compile_commands.truncate(trim);
     }
 
-    let (tx, mut rx) = mpsc::channel(args.parallelism);
+    let outputs = parse_all(args, compile_commands).await;
 
-    tokio::spawn(async move {
-        for c in compile_commands {
-            tx.send(c).await.unwrap();
-        }
-    });
-
-    let mut first = true;
-    // println!("[");
-    while let Some(c) = rx.recv().await {
-        let (file, node) = run_ast_gen(&args, c).await?;
-
-        if first {
-            first = false;
-        } else {
-            // println!(",");
-        }
-        print!(r#""{}": {}"#, file, serde_json::to_string_pretty(&node)?);
-    }
-    // println!("\n]");
-
+    outputs
+        .into_iter()
+        .map(|r| r.unwrap())
+        .for_each(|(ast_path, node)| {
+            std::fs::write(ast_path, serde_json::to_string_pretty(&node).unwrap()).unwrap();
+        });
     Ok(())
 }
