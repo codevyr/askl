@@ -24,7 +24,7 @@ fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
 
-    let symbols = SymbolMap::from_slice(&std::fs::read(args.index)?)?;
+    let symbols: SymbolMap = serde_json::from_slice(&std::fs::read(args.index)?)?;
 
     let ast = parse(&args.query)?;
 

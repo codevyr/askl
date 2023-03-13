@@ -1,6 +1,7 @@
 use std::{fs::File, sync::Arc};
 
 use anyhow::anyhow;
+use askl::symbols::{Symbol, SymbolId, SymbolMap, Symbols};
 use clap::Parser;
 use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};
@@ -102,7 +103,7 @@ fn node_simplify(root: Node) -> Vec<Node> {
             vec![]
         }
         Clang::FunctionDecl(_) => {
-            if inner.len() > 0 {
+            if inner.len() >= 0 {
                 vec![Node {
                     id: root.id,
                     kind: root.kind,
@@ -160,8 +161,9 @@ async fn run_ast_gen(args: Args, c: CompileCommand) -> anyhow::Result<(String, N
             .drain(1..) // Remove path to the compiler
             .filter(|arg| arg != "-c")
             .filter(|arg| arg != "-g")
-            .filter(|arg| !arg.starts_with("-f"))
-    ).collect();
+            .filter(|arg| !arg.starts_with("-f")),
+    )
+    .collect();
 
     let output = Command::new(args.clang.clone())
         .current_dir(c.directory)
@@ -241,7 +243,44 @@ async fn main() -> anyhow::Result<()> {
                 kind: acc.kind,
                 inner: acc.inner,
             }
-        });
-    std::fs::write("out.json", serde_json::to_string_pretty(&all_ast).unwrap()).unwrap();
+        })
+        .unwrap();
+
+    let mut symbol_map = SymbolMap::new();
+    for node in all_ast.inner {
+        if let Clang::FunctionDecl(f) = node.kind {
+            let children = node
+                .inner
+                .iter()
+                .filter_map(|i| {
+                    if let Clang::DeclRefExpr(r) = &i.kind {
+                        if let Some(ref_decl) = &r.referenced_decl {
+                            if let Clang::FunctionDecl(f) = &ref_decl.kind {
+                                if let Some(name) = &f.name {
+                                    return Some(SymbolId::new(name.clone()));
+                                }
+                            }
+                        }
+                    }
+                    None
+                })
+                .collect();
+
+            symbol_map.add(
+                SymbolId::new(f.name.clone().unwrap()),
+                Symbol {
+                    name: f.name.clone().unwrap(),
+                    ranges: vec![f.range.unwrap()],
+                    children: children,
+                },
+            );
+        }
+    }
+
+    std::fs::write(
+        "symbol_map.json",
+        serde_json::to_string_pretty(&symbol_map).unwrap(),
+    )
+    .unwrap();
     Ok(())
 }

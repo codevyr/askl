@@ -1,7 +1,7 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::parser::Rule;
 use crate::scope::{build_scope, EmptyScope, Scope};
-use crate::symbols::Location;
+use crate::symbols::SymbolId;
 use crate::verb::{build_verb, AllVerb, Verb};
 use core::fmt::Debug;
 use log::debug;
@@ -47,7 +47,7 @@ pub trait Statement: Debug {
     fn find_matches<'a>(
         &self,
         cfg: &'a ControlFlowGraph,
-        parent: &'a Location,
+        parent: &'a SymbolId,
     ) -> (NodeList<'a>, EdgeList<'a>);
     fn run<'a>(&self, cfg_in: &'a ControlFlowGraph) -> (NodeList<'a>, EdgeList<'a>);
 }
@@ -56,7 +56,7 @@ impl Statement for DefaultStatement {
     fn find_matches<'a>(
         &self,
         cfg: &'a ControlFlowGraph,
-        parent: &'a Location,
+        parent: &'a SymbolId,
     ) -> (NodeList<'a>, EdgeList<'a>) {
         let matches = cfg
             .get_symbol(parent)

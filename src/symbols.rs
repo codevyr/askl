@@ -1,4 +1,5 @@
 use anyhow::Result;
+use clang_ast::SourceRange;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -15,87 +16,30 @@ impl FileHash {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Copy, Clone, Serialize, Deserialize)]
-pub struct Location {
-    pub file: FileHash,
-    position: lsp_types::Position,
-}
-
-impl Location {
-    pub fn new(url: &lsp_types::Url, pos: lsp_types::Position) -> Self {
-        Self {
-            file: FileHash::new(url),
-            position: pos,
-        }
-    }
-
-    pub fn position(&self) -> lsp_types::Position {
-        self.position
-    }
-}
-
-/// URLs hash like their serialization.
-impl hash::Hash for Location {
-    #[inline]
-    fn hash<H>(&self, state: &mut H)
-    where
-        H: hash::Hasher,
-    {
-        hash::Hash::hash(&self.file, state);
-        hash::Hash::hash(&self.position.character, state);
-        hash::Hash::hash(&self.position.line, state);
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Range {
-    range: lsp_types::Range,
-}
-
-impl From<lsp_types::Range> for Range {
-    fn from(r: lsp_types::Range) -> Self {
-        Self { range: r }
-    }
-}
-
-impl Range {
-    fn contains(&self, pos: lsp_types::Position) -> bool {
-        if (pos.line < self.range.start.line)
-            || (self.range.start.line == pos.line && pos.character <= self.range.start.character)
-        {
-            false
-        } else if (self.range.end.line < pos.line)
-            || (self.range.end.line == pos.line && self.range.end.character < pos.character)
-        {
-            false
-        } else {
-            true
-        }
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Symbol {
-    pub path: lsp_types::Url,
     pub name: String,
-    pub detail: Option<String>,
-    pub kind: lsp_types::SymbolKind,
-    pub range: Range,
-    pub selection_range: Range,
-    pub parents: Vec<Location>,
+    pub ranges: Vec<SourceRange>,
+    pub children: Vec<SymbolId>,
 }
 
 pub trait Symbols: ToString {
-    fn add(&mut self, loc: Location, symbol: Symbol);
-    fn into_vec(&self) -> Vec<Location>;
-    fn into_iter(&self) -> Vec<(Location, Symbol)>;
-    fn find(&self, loc: &Location) -> Option<Location>;
-    fn add_parent(&mut self, child: &Location, parent: &Location);
+    fn add(&mut self, id: SymbolId, symbol: Symbol);
+    fn into_vec(&self) -> Vec<SymbolId>;
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct SymbolId(String);
+
+impl SymbolId {
+    pub fn new(id: String) -> Self {
+        Self(id)
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SymbolMap {
-    pub map: HashMap<Location, Symbol>,
+    pub map: HashMap<SymbolId, Symbol>,
 }
 
 impl SymbolMap {
@@ -105,72 +49,29 @@ impl SymbolMap {
         }
     }
 
-    pub fn from_slice(slice: &[u8]) -> Result<Self> {
-        let v: Vec<Symbol> = serde_json::from_slice(slice)?;
-
-        let mut map = HashMap::new();
-        for mut s in v {
-            for p in s.parents.iter_mut() {
-                p.position.character = 0
-            }
-            map.insert(
-                Location {
-                    file: FileHash::new(&s.path),
-                    position: lsp_types::Position {
-                        line: s.range.range.start.line,
-                        character: 0,
-                    },
-                },
-                s,
-            );
-        }
-        Ok(Self { map: map })
-    }
-
     pub fn merge(&mut self, other: SymbolMap) -> &mut Self {
         self.map.extend(other.map);
         self
     }
 
-    pub fn iter<'a>(&'a self) -> impl Iterator<Item = (&Location, &Symbol)> + 'a {
+    pub fn iter<'a>(&'a self) -> impl Iterator<Item = (&SymbolId, &Symbol)> + 'a {
         self.map.iter()
     }
 }
 
 impl Symbols for SymbolMap {
-    fn add(&mut self, loc: Location, symbol: Symbol) {
-        let prev = self.map.insert(loc.clone(), symbol);
-        if prev.is_some() {
-            panic!("Location duplicate: {:?}", loc);
+    fn add(&mut self, id: SymbolId, mut symbol: Symbol) {
+        if let Some(existing) = self.map.get_mut(&id) {
+            assert_eq!(existing.name, symbol.name);
+            existing.ranges.append(&mut symbol.ranges);
+            existing.children.append(&mut symbol.children);
+        } else {
+            self.map.insert(id, symbol);
         }
     }
 
-    fn into_vec(&self) -> Vec<Location> {
+    fn into_vec(&self) -> Vec<SymbolId> {
         self.map.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()
-    }
-
-    fn into_iter(&self) -> Vec<(Location, Symbol)> {
-        self.map
-            .iter()
-            .map(|(l, s)| (l.clone(), s.clone()))
-            .collect::<Vec<_>>()
-    }
-
-    fn find(&self, loc: &Location) -> Option<Location> {
-        self.map
-            .iter()
-            .find(|(k, v)| k.file == loc.file && (v.range.contains(loc.position)))
-            .map(|(k, _)| k)
-            .cloned()
-    }
-
-    fn add_parent(&mut self, child: &Location, parent: &Location) {
-        let symbol = self.map.get_mut(child).unwrap();
-        symbol.parents.push(parent.clone());
-        debug!(
-            "add_parent: {:#?} {:#?} {:#?}",
-            child, parent, symbol.parents
-        );
     }
 }
 

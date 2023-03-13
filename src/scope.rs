@@ -1,7 +1,7 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::parser::Rule;
 use crate::statement::{build_statement, Statement};
-use crate::symbols::Location;
+use crate::symbols::SymbolId;
 use core::fmt::Debug;
 use itertools::Itertools;
 use log::debug;
@@ -17,7 +17,7 @@ pub trait Scope: Debug {
     fn find_matches<'a>(
         &self,
         cfg_in: &'a ControlFlowGraph,
-        parent: &'a Location,
+        parent: &'a SymbolId,
     ) -> (NodeList<'a>, EdgeList<'a>);
 
     /// Run statements in a scope. Return list of top-level nodes and all egdes
@@ -71,8 +71,8 @@ pub trait Scope: Debug {
     fn matching_edges<'a>(
         &self,
         full: &'a ControlFlowGraph,
-        from: &'a Location,
-        to: &'a Location,
+        from: &'a SymbolId,
+        to: &'a SymbolId,
     ) -> EdgeList<'a>;
 }
 
@@ -93,7 +93,7 @@ impl Scope for DefaultScope {
     fn find_matches<'a>(
         &self,
         cfg_in: &'a ControlFlowGraph,
-        parent: &'a Location,
+        parent: &'a SymbolId,
     ) -> (NodeList<'a>, EdgeList<'a>) {
         let descendants = cfg_in.get_children(parent);
 
@@ -112,11 +112,11 @@ impl Scope for DefaultScope {
     fn matching_edges<'a>(
         &self,
         full: &'a ControlFlowGraph,
-        from: &'a Location,
-        to: &'a Location,
+        from: &'a SymbolId,
+        to: &'a SymbolId,
     ) -> EdgeList<'a> {
         let mut result = vec![];
-        for path in full.find_paths::<Vec<&Location>>(from, to, Some(0)) {
+        for path in full.find_paths::<Vec<&SymbolId>>(from, to, Some(0)) {
             path.iter()
                 .tuple_windows()
                 .map(|(from, to)| {
@@ -141,7 +141,7 @@ impl Scope for EmptyScope {
     fn find_matches<'a>(
         &self,
         _cfg_in: &'a ControlFlowGraph,
-        _parent: &'a Location,
+        _parent: &'a SymbolId,
     ) -> (NodeList<'a>, EdgeList<'a>) {
         (NodeList(vec![]), EdgeList(vec![]))
     }
@@ -162,8 +162,8 @@ impl Scope for EmptyScope {
     fn matching_edges<'a>(
         &self,
         _full: &'a ControlFlowGraph,
-        _from: &'a Location,
-        _to: &'a Location,
+        _from: &'a SymbolId,
+        _to: &'a SymbolId,
     ) -> EdgeList<'a> {
         unreachable!("Cannot match edges in empty scope")
     }
