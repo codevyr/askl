@@ -1,6 +1,4 @@
-use anyhow::Result;
 use clang_ast::SourceRange;
-use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::{collections::HashMap, hash, hash::Hasher};
