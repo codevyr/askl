@@ -140,8 +140,8 @@ impl EmptyScope {
 impl Scope for EmptyScope {
     fn find_matches<'a>(
         &self,
-        cfg_in: &'a ControlFlowGraph,
-        parent: &'a Location,
+        _cfg_in: &'a ControlFlowGraph,
+        _parent: &'a Location,
     ) -> (NodeList<'a>, EdgeList<'a>) {
         (NodeList(vec![]), EdgeList(vec![]))
     }
