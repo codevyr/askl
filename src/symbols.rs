@@ -1,5 +1,6 @@
 use clang_ast::SourceRange;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::{collections::HashMap, hash, hash::Hasher};
 
@@ -18,7 +19,7 @@ impl FileHash {
 pub struct Symbol {
     pub name: String,
     pub ranges: Vec<SourceRange>,
-    pub children: Vec<SymbolId>,
+    pub children: HashSet<SymbolId>,
 }
 
 pub trait Symbols: ToString {
@@ -62,7 +63,7 @@ impl Symbols for SymbolMap {
         if let Some(existing) = self.map.get_mut(&id) {
             assert_eq!(existing.name, symbol.name);
             existing.ranges.append(&mut symbol.ranges);
-            existing.children.append(&mut symbol.children);
+            existing.children.extend(symbol.children);
         } else {
             self.map.insert(id, symbol);
         }
