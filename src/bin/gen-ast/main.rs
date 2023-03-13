@@ -103,15 +103,11 @@ fn node_simplify(root: Node) -> Vec<Node> {
             vec![]
         }
         Clang::FunctionDecl(_) => {
-            if inner.len() >= 0 {
-                vec![Node {
-                    id: root.id,
-                    kind: root.kind,
-                    inner: inner,
-                }]
-            } else {
-                inner
-            }
+            vec![Node {
+                id: root.id,
+                kind: root.kind,
+                inner: inner,
+            }]
         }
         Clang::TranslationUnitDecl => {
             vec![Node {
