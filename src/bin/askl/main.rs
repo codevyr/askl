@@ -1,12 +1,14 @@
 use anyhow::Result;
+use askl::cfg::ControlFlowGraph;
 use clap::Parser;
 use env_logger;
 use console::{style, Emoji};
+use log::debug;
 use petgraph::dot::{Config, Dot};
 
-use askl::executor::Executor;
 use askl::parser::parse;
 use askl::symbols::SymbolMap;
+use petgraph::prelude::DiGraphMap;
 
 /// Indexer for askl
 #[derive(Parser, Debug)]
@@ -49,16 +51,40 @@ fn main() -> Result<()> {
         style("[3/4]").bold().dim(),
         CLIP
     );
-    let mut executor = Executor::new(ast)?;
-    executor.add_symbols(symbols);
 
     println!(
         "{} {}Running query...",
-        style("[4/4]").bold().dim(),
+        style("[4/5]").bold().dim(),
         PAPER
     );
-    let cfg = executor.run();
-    println!("{:?}", Dot::with_config(&cfg, &[Config::EdgeNoLabel]));
+
+    let cfg_in = ControlFlowGraph::from_symbols(&symbols);
+
+    debug!("Global scope: {:#?}", ast);
+
+    let (outer, inner) = ast.run(&cfg_in);
+
+    let mut result_graph : DiGraphMap<&str, ()> = DiGraphMap::new();
+
+    println!(
+        "{} {}Making graph...",
+        style("[5/5]").bold().dim(),
+        PAPER
+    );
+
+    for (from, to) in inner.0 {
+        let sym_from = symbols.map.get(from).unwrap();
+        let sym_to = symbols.map.get(to).unwrap();
+
+        result_graph.add_edge(&sym_from.name, &sym_to.name, ());
+    }
+
+    for loc in outer.0 {
+        let sym= symbols.map.get(loc).unwrap();
+        result_graph.add_node(&sym.name);
+    }
+
+    println!("{:?}", Dot::with_config(&result_graph, &[Config::EdgeNoLabel]));
 
     Ok(())
 }
