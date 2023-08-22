@@ -56,6 +56,16 @@ impl SymbolMap {
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = (&SymbolId, &Symbol)> + 'a {
         self.map.iter()
     }
+
+    pub fn get_children(&self, symbol_id: SymbolId) -> Vec<SymbolId> {
+        let symbol = if let Some(symbol) = self.map.get(&symbol_id) {
+            symbol
+        } else {
+            return vec![];
+        };
+
+        symbol.children.clone().into_iter().collect::<Vec<_>>()    
+    }
 }
 
 impl Symbols for SymbolMap {

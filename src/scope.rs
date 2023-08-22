@@ -17,12 +17,12 @@ pub trait Scope: Debug {
     fn find_matches<'a>(
         &self,
         cfg_in: &'a ControlFlowGraph,
-        parent: &'a SymbolId,
-    ) -> (NodeList<'a>, EdgeList<'a>);
+        parent: SymbolId,
+    ) -> (NodeList, EdgeList);
 
     /// Run statements in a scope. Return list of top-level nodes and all egdes
     /// that belong to the scope.
-    fn run<'a>(&self, cfg_in: &'a ControlFlowGraph) -> (NodeList<'a>, EdgeList<'a>) {
+    fn run<'a>(&self, cfg_in: &'a ControlFlowGraph) -> (NodeList, EdgeList) {
         let mut nodes_scope = vec![];
         let mut edges_scope = vec![];
         for statement in self.statements().iter() {
@@ -36,34 +36,35 @@ pub trait Scope: Debug {
     fn combine<'a>(
         &self,
         full: &'a ControlFlowGraph,
-        outer: NodeList<'a>,
-        inner: NodeList<'a>,
-    ) -> (NodeList<'a>, EdgeList<'a>) {
+        outer: NodeList,
+        inner: NodeList,
+    ) -> (NodeList, EdgeList) {
         let mut node_matches = vec![];
-        let mut edge_matches = vec![];
-        for from in outer.0.into_iter() {
-            for to in inner.0.iter() {
-                let edges = self.matching_edges(full, from, to);
-                if edges.0.len() > 0 {
-                    debug!("FROM: {:?}", full.get_symbol(from).unwrap().name.clone());
-                    debug!("TO: {:?}", full.get_symbol(to).unwrap().name.clone());
-                    debug!(
-                        "EDGES: {:#?}",
-                        edges
-                            .0
-                            .iter()
-                            .map(|e| format!(
-                                "{}->{}",
-                                full.get_symbol(e.0).unwrap().name.clone(),
-                                full.get_symbol(e.1).unwrap().name.clone()
-                            ))
-                            .collect::<Vec<_>>()
-                    );
-                    node_matches.push(from);
-                    edge_matches.extend(edges.0.iter());
-                }
-            }
-        }
+        let mut edge_matches : Vec<(SymbolId, SymbolId)> = vec![];
+        // for from in outer.0.into_iter() {
+        //     for to in inner.0.iter() {
+        //         let edges = self.matching_edges(full, from.clone(), to.clone());
+        //         if edges.0.len() > 0 {
+        //             debug!("FROM: {:?}", full.get_symbol(from).unwrap().name.clone());
+        //             debug!("TO: {:?}", full.get_symbol(to.clone()).unwrap().name.clone());
+        //             debug!(
+        //                 "EDGES: {:#?}",
+        //                 edges
+        //                     .0
+        //                     .iter()
+        //                     .map(|e| format!(
+        //                         "{}->{}",
+        //                         full.get_symbol(e.0.clone()).unwrap().name.clone(),
+        //                         full.get_symbol(e.1.clone()).unwrap().name.clone()
+        //                     ))
+        //                     .collect::<Vec<_>>()
+        //             );
+        //             node_matches.push(from);
+        //             edge_matches.extend(edges.0.into_iter());
+        //         }
+        //     }
+        // }
+        unimplemented!();
         (NodeList(node_matches), EdgeList(edge_matches))
     }
 
@@ -71,9 +72,9 @@ pub trait Scope: Debug {
     fn matching_edges<'a>(
         &self,
         full: &'a ControlFlowGraph,
-        from: &'a SymbolId,
-        to: &'a SymbolId,
-    ) -> EdgeList<'a>;
+        from: SymbolId,
+        to: SymbolId,
+    ) -> EdgeList;
 }
 
 #[derive(Debug)]
@@ -93,14 +94,16 @@ impl Scope for DefaultScope {
     fn find_matches<'a>(
         &self,
         cfg_in: &'a ControlFlowGraph,
-        parent: &'a SymbolId,
-    ) -> (NodeList<'a>, EdgeList<'a>) {
-        let descendants = cfg_in.get_children(parent);
+        parent: SymbolId,
+    ) -> (NodeList, EdgeList) {
+        // let descendants = cfg_in.get_children(parent);
+        let descendants = vec![parent.clone()];
+        unimplemented!();
 
         let mut nodes_scope = vec![];
         let mut edges_scope = vec![];
         for statement in self.statements().iter() {
-            for node in descendants.iter() {
+            for node in descendants.into_iter() {
                 let (nodes, edges) = statement.find_matches(cfg_in, node);
                 nodes_scope.extend(nodes.0);
                 edges_scope.extend(edges.0);
@@ -112,15 +115,15 @@ impl Scope for DefaultScope {
     fn matching_edges<'a>(
         &self,
         full: &'a ControlFlowGraph,
-        from: &'a SymbolId,
-        to: &'a SymbolId,
-    ) -> EdgeList<'a> {
-        let mut result = vec![];
-        for path in full.find_paths::<Vec<&SymbolId>>(from, to, Some(0)) {
+        from: SymbolId,
+        to: SymbolId,
+    ) -> EdgeList {
+        let mut result : Vec<(SymbolId, SymbolId)> = vec![];
+        for path in full.find_paths::<Vec<SymbolId>>(from, to, Some(0)) {
             path.iter()
                 .tuple_windows()
                 .map(|(from, to)| {
-                    result.push((*from, *to));
+                    result.push(((*from).clone(), (*to).clone()));
                 })
                 .collect()
         }
@@ -141,17 +144,17 @@ impl Scope for EmptyScope {
     fn find_matches<'a>(
         &self,
         _cfg_in: &'a ControlFlowGraph,
-        _parent: &'a SymbolId,
-    ) -> (NodeList<'a>, EdgeList<'a>) {
+        _parent: SymbolId,
+    ) -> (NodeList, EdgeList) {
         (NodeList(vec![]), EdgeList(vec![]))
     }
 
     fn combine<'a>(
         &self,
         _full: &ControlFlowGraph,
-        outer: NodeList<'a>,
-        _inner: NodeList<'a>,
-    ) -> (NodeList<'a>, EdgeList<'a>) {
+        outer: NodeList,
+        _inner: NodeList,
+    ) -> (NodeList, EdgeList) {
         (outer, EdgeList(vec![]))
     }
 
@@ -162,9 +165,9 @@ impl Scope for EmptyScope {
     fn matching_edges<'a>(
         &self,
         _full: &'a ControlFlowGraph,
-        _from: &'a SymbolId,
-        _to: &'a SymbolId,
-    ) -> EdgeList<'a> {
+        _from: SymbolId,
+        _to: SymbolId,
+    ) -> EdgeList {
         unreachable!("Cannot match edges in empty scope")
     }
 }
