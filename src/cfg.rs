@@ -1,13 +1,9 @@
-use std::iter::FromIterator;
 use std::iter::Iterator;
 
 use crate::scope::Scope;
 use crate::symbols::{Symbol, SymbolId, SymbolMap};
 use indicatif::ProgressBar;
-use itertools::Itertools;
-use petgraph::{algo::all_simple_paths, graphmap::DiGraphMap, Direction::Incoming};
-
-type DiGraph<'a> = DiGraphMap<SymbolId, ()>;
+use petgraph::graphmap::DiGraphMap;
 
 #[derive(Debug, Clone)]
 pub struct ControlFlowGraph<'a> {
@@ -41,26 +37,6 @@ impl<'a> ControlFlowGraph<'a> {
 
     pub fn get_symbol(&'a self, loc: SymbolId) -> Option<&'a Symbol> {
         self.symbols.map.get(&loc)
-    }
-
-    // pub fn get_children(&'a self, parent: SymbolId) -> Vec<SymbolId> {
-    //     self.graph
-    //         .neighbors_directed(parent, Incoming)
-    //         .collect_vec()
-    // }
-
-    pub fn find_paths<TargetColl>(
-        &'a self,
-        from: SymbolId,
-        to: SymbolId,
-        max_intermediate_nodes: Option<usize>,
-    ) -> impl Iterator<Item = TargetColl> + 'a
-    where
-        TargetColl: FromIterator<SymbolId> + 'a,
-    {
-        unimplemented!();
-        vec![].into_iter()
-        //all_simple_paths(&self.graph, from.clone(), to.clone(), 0, max_intermediate_nodes)
     }
 
     pub fn matched_symbols(&self, sources: Vec<SymbolId>, scope: &dyn Scope, progress: bool) -> Option<(Vec<SymbolId>, EdgeList)>{

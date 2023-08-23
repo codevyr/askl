@@ -3,7 +3,7 @@ use crate::symbols::Symbol;
 use anyhow::{anyhow, bail, Result};
 use core::fmt::Debug;
 use pest::error::Error;
-use std::collections::{HashMap};
+use std::collections::HashMap;
 
 pub fn build_verb(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Verb>, Error<Rule>> {
     let mut pair = pair.into_inner();
