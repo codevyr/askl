@@ -4,9 +4,12 @@ ident = @{ XID_START ~ XID_CONTINUE* }
 string = @{(!"\"" ~ ANY)*}
 quoted_string = _{ "\"" ~ string  ~ "\""}
 named_argument = ${ident ~ "=" ~ quoted_string}
-verb = ${ "@" ~ ident ~ ("(" ~ named_argument ~ ("," ~ named_argument)* ~ ")")?}
+generic_verb = ${ "@" ~ ident ~ ("(" ~ named_argument ~ ("," ~ named_argument)* ~ ")")?}
+plain_filter = { quoted_string }
+special_verb = _{ plain_filter }
+verb = { generic_verb | special_verb}
 scope = { "{" ~ statements ~ "}" }
-statement = {verb? ~ scope?}
+statement = {verb* ~ scope?}
 statement_terminator = _{";" | NEWLINE}
 statements = _{ statement ~ (statement_terminator ~ statement)* }
 ask = _{SOI ~ statements ~ EOI }

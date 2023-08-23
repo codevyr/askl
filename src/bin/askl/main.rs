@@ -71,9 +71,7 @@ fn main() -> Result<()> {
 
     println!("Symbols: {:#?}", res_symbols.len());
     println!("Edges: {:#?}", res_edges.0.len());
-    
-    // let (outer, inner) = ast.run(&cfg);
-    
+        
     let mut result_graph : DiGraphMap<&str, ()> = DiGraphMap::new();
     
     println!(

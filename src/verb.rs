@@ -1,11 +1,12 @@
 use crate::parser::{Identifier, NamedArgument, Rule};
 use crate::symbols::Symbol;
 use anyhow::{anyhow, bail, Result};
+use log::debug;
 use core::fmt::Debug;
 use pest::error::Error;
 use std::collections::HashMap;
 
-pub fn build_verb(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Verb>, Error<Rule>> {
+fn build_generic_verb(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Verb>> {
     let mut pair = pair.into_inner();
     let ident = pair.next().unwrap();
     let args = pair
@@ -24,14 +25,37 @@ pub fn build_verb(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Verb>, Er
         AllVerb::NAME => AllVerb::new(positional, named),
         unknown => Err(anyhow!("Unknown filter: {}", unknown)),
     }
-    .map_err(|e| {
-        Error::new_from_span(
-            pest::error::ErrorVariant::CustomError {
-                message: format!("Failed to create filter: {}", e),
-            },
-            span,
-        )
-    })
+}
+
+pub fn build_verb(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Verb>, Error<Rule>> {
+    let span = pair.as_span();
+    let verb = pair.into_inner()
+        .try_fold(
+            AllVerb::new(vec!{}, HashMap::new()).unwrap(),
+            |prev_verb, pair| -> Result<Box<dyn Verb>, Error<Rule>> {
+            debug!("Build verb {:#?}", pair);
+            match pair.as_rule() {
+                Rule::generic_verb => build_generic_verb(pair),
+                Rule::plain_filter => {
+                    let ident = pair.into_inner().next().unwrap();
+                    let positional = vec![];
+                    let mut named = HashMap::new();
+                    named.insert("name".into(), ident.as_str().into());
+                    FilterVerb::new(positional, named)
+                },
+                _ => unreachable!("Unknown rule: {:#?}", pair.as_rule()),
+            }
+            .map_err(|e| {
+                Error::new_from_span(
+                    pest::error::ErrorVariant::CustomError {
+                        message: format!("Failed to create filter: {}", e),
+                    },
+                    span,
+                )
+            })
+        });
+
+    return verb;
 }
 
 pub trait Verb: Debug {
