@@ -1,6 +1,6 @@
 use crate::parser::Rule;
 use crate::scope::{build_scope, EmptyScope, Scope};
-use crate::verb::{build_verb, AllVerb, Verb};
+use crate::verb::{build_verb, UnitVerb, Verb};
 use core::fmt::Debug;
 use pest::error::Error;
 
@@ -13,13 +13,13 @@ pub struct DefaultStatement {
 pub fn build_statement<'a>(
     pair: pest::iterators::Pair<Rule>,
 ) -> Result<Box<dyn Statement>, Error<Rule>> {
-    let mut verb: Box<dyn Verb> = AllVerb::new_default();
+    let mut verb: Box<dyn Verb> = UnitVerb::new();
     let mut scope: Box<dyn Scope> = Box::new(EmptyScope::new());
 
     for pair in pair.into_inner() {
         match pair.as_rule() {
             Rule::verb => {
-                verb = build_verb(pair)?;
+                verb = build_verb(verb, pair)?;
             }
             Rule::scope => {
                 scope = build_scope(pair)?;

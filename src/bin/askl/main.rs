@@ -3,6 +3,7 @@ use askl::cfg::ControlFlowGraph;
 use clap::Parser;
 use env_logger;
 use console::{style, Emoji};
+use indicatif::ProgressBar;
 use log::debug;
 use petgraph::dot::{Config, Dot};
 
@@ -58,15 +59,16 @@ fn main() -> Result<()> {
         PAPER
     );
 
-    let cfg = ControlFlowGraph::from_symbols(&symbols);
-
     let sources : Vec<SymbolId> = symbols.iter().map(|(id, _)| id.clone()).collect();
+    let cfg = ControlFlowGraph::from_symbols(symbols);
+
 
     debug!("Global scope: {:#?}", ast);
     println!("Sources: {:#?}", sources.len());
+    let progress_bar = ProgressBar::new(sources.len() as u64);
 
-    let (res_symbols, res_edges) = cfg
-        .matched_symbols(sources, ast.as_ref(), true)
+    let (res_symbols, res_edges) = ast
+        .matched_symbols(&cfg, &sources, Some(progress_bar))
         .unwrap();
 
     println!("Symbols: {:#?}", res_symbols.len());
@@ -81,14 +83,14 @@ fn main() -> Result<()> {
     );
     
     for (from, to) in res_edges.0 {
-        let sym_from = symbols.map.get(&from).unwrap();
-        let sym_to = symbols.map.get(&to).unwrap();
+        let sym_from = cfg.get_symbol(&from).unwrap();
+        let sym_to = cfg.get_symbol(&to).unwrap();
 
         result_graph.add_edge(&sym_from.name, &sym_to.name, ());
     }
 
     for loc in res_symbols {
-        let sym= symbols.map.get(&loc).unwrap();
+        let sym= cfg.get_symbol(&loc).unwrap();
         result_graph.add_node(&sym.name);
     }
 

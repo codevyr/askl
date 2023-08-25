@@ -57,7 +57,7 @@ impl SymbolMap {
         self.map.iter()
     }
 
-    pub fn get_children(&self, symbol_id: SymbolId) -> Vec<SymbolId> {
+    pub fn get_children(&self, symbol_id: &SymbolId) -> Vec<SymbolId> {
         let symbol = if let Some(symbol) = self.map.get(&symbol_id) {
             symbol
         } else {
