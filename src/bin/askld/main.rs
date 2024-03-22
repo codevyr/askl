@@ -6,10 +6,7 @@ use askl::{
 };
 use clap::Parser;
 use log::{debug, info};
-use petgraph::{
-    dot::{Config, Dot},
-    graphmap::DiGraphMap,
-};
+use petgraph::graphmap::DiGraphMap;
 
 /// Indexer for askl
 #[derive(Parser, Debug)]
@@ -54,11 +51,9 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
         result_graph.add_node(&sym.name);
     }
 
-    let gv = format!(
-        "{:?}",
-        Dot::with_config(&result_graph, &[Config::EdgeNoLabel])
-    );
-    HttpResponse::Ok().body(gv)
+    let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();
+    debug!("Result graph: {}", json_graph);
+    HttpResponse::Ok().body(json_graph)
 }
 
 #[actix_web::main]
