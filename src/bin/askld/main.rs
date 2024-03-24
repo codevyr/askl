@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder};
 use askl::{
     cfg::ControlFlowGraph,
@@ -6,7 +8,7 @@ use askl::{
 };
 use clap::Parser;
 use log::{debug, info};
-use petgraph::graphmap::DiGraphMap;
+use serde::{Serialize, Deserialize};
 
 /// Indexer for askl
 #[derive(Parser, Debug)]
@@ -20,6 +22,65 @@ struct Args {
 struct AsklData {
     cfg: ControlFlowGraph,
     sources: Vec<SymbolId>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Node{
+    id: SymbolId,
+    label: String,
+    uri: String,
+    loc: String,
+}
+
+impl Node{
+    fn new(id: SymbolId, label: String, uri: String, loc: String) -> Self{
+        Self{
+            id: id,
+            label: label,
+            uri: uri,
+            loc: loc,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Edge{
+    from: SymbolId,
+    to: SymbolId,
+    from_loc: String,
+}
+
+impl Edge{
+    fn new(from: SymbolId, to: SymbolId) -> Self{
+        Self{
+            from: from,
+            to: to,
+            from_loc: "".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Graph{
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+}
+
+impl Graph{
+    fn new() -> Self{
+        Self{
+            nodes: vec![],
+            edges: vec![],
+        }
+    }
+
+    fn add_node(&mut self, node: Node){
+        self.nodes.push(node);
+    }
+
+    fn add_edge(&mut self, edge: Edge){
+        self.edges.push(edge);
+    }
 }
 
 #[post("/query")]
@@ -37,22 +98,28 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     info!("Symbols: {:#?}", res_symbols.len());
     info!("Edges: {:#?}", res_edges.0.len());
 
-    let mut result_graph: DiGraphMap<&str, ()> = DiGraphMap::new();
+    let mut result_graph = Graph::new();
 
+    let mut all_symbols = HashSet::new();
     for (from, to) in res_edges.0 {
-        let sym_from = data.cfg.get_symbol(&from).unwrap();
-        let sym_to = data.cfg.get_symbol(&to).unwrap();
-
-        result_graph.add_edge(&sym_from.name, &sym_to.name, ());
+        all_symbols.insert(from.clone());
+        all_symbols.insert(to.clone());
+        result_graph.add_edge(Edge::new(from, to));
     }
 
     for loc in res_symbols {
+        all_symbols.insert(loc);
+    }
+
+    for loc in all_symbols {
         let sym = data.cfg.get_symbol(&loc).unwrap();
-        result_graph.add_node(&sym.name);
+        let file = sym.ranges[0].begin.spelling_loc.as_ref().unwrap().file.clone();
+        let line = sym.ranges[0].begin.spelling_loc.as_ref().unwrap().line;
+        let uri = format!("file://{}", file);
+        result_graph.add_node(Node::new(loc, sym.name.clone(), uri, format!("{}", line)));
     }
 
     let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();
-    debug!("Result graph: {}", json_graph);
     HttpResponse::Ok().body(json_graph)
 }
 
