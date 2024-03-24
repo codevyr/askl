@@ -19,7 +19,7 @@
       {
         devShells.default = mkShell {
           buildInputs = [
-            rust-bin.beta.latest.default
+            rust-bin.stable.latest.default
             cargo
             rust-analyzer
           ];
