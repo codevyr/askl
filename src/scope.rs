@@ -4,7 +4,6 @@ use crate::statement::{build_statement, Statement};
 use crate::symbols::SymbolId;
 use core::fmt::Debug;
 use pest::error::Error;
-use indicatif::ProgressBar;
 
 pub fn build_scope(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Scope>, Error<Rule>> {
     let statements: Result<Vec<Box<dyn Statement>>, _> =
@@ -15,7 +14,7 @@ pub fn build_scope(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Scope>, 
 pub trait Scope: Debug {
     fn statements(&self) -> &Vec<Box<dyn Statement>>;
 
-    fn matched_symbols(&self, cfg: &ControlFlowGraph, symbols: &Vec<SymbolId>, progress: Option<ProgressBar>) -> Option<(Vec<SymbolId>, EdgeList)>{
+    fn matched_symbols(&self, cfg: &ControlFlowGraph, symbols: &Vec<SymbolId>) -> Option<(Vec<SymbolId>, EdgeList)>{
         let mut result = EdgeList(vec![]);
         let mut result_sources : Vec<SymbolId> = vec![];
 
@@ -31,14 +30,10 @@ pub trait Scope: Debug {
 
             // Iterate through all the symbols in the CFG
             for symbol_id in statement_symbols.iter() {
-                if let Some(progress) = progress.as_ref() {
-                    progress.inc(1);
-                }
-
                 let children = cfg.symbols.get_children(symbol_id);
 
                     // If the statement matches the symbol, add it to the result
-                if let Some((source_ids, mut edges)) = statement.scope().matched_symbols(cfg, &children, None) {
+                if let Some((source_ids, mut edges)) = statement.scope().matched_symbols(cfg, &children) {
                     for source_id in source_ids.into_iter() {
                         edges.0.push((symbol_id.clone(), source_id.clone()));
                     }

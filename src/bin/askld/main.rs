@@ -93,7 +93,7 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     };
     debug!("Global scope: {:#?}", ast);
 
-    let (res_symbols, res_edges) = ast.matched_symbols(&data.cfg, &data.sources, None).unwrap();
+    let (res_symbols, res_edges) = ast.matched_symbols(&data.cfg, &data.sources).unwrap();
 
     info!("Symbols: {:#?}", res_symbols.len());
     info!("Edges: {:#?}", res_edges.0.len());

@@ -3,7 +3,6 @@ use askl::cfg::ControlFlowGraph;
 use clap::Parser;
 use env_logger;
 use console::{style, Emoji};
-use indicatif::ProgressBar;
 use log::debug;
 use petgraph::dot::{Config, Dot};
 
@@ -65,10 +64,9 @@ fn main() -> Result<()> {
 
     debug!("Global scope: {:#?}", ast);
     println!("Sources: {:#?}", sources.len());
-    let progress_bar = ProgressBar::new(sources.len() as u64);
 
     let (res_symbols, res_edges) = ast
-        .matched_symbols(&cfg, &sources, Some(progress_bar))
+        .matched_symbols(&cfg, &sources)
         .unwrap();
 
     println!("Symbols: {:#?}", res_symbols.len());
