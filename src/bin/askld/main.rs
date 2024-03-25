@@ -1,6 +1,6 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, path::Path};
 
-use actix_web::{post, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use askl::{
     cfg::ControlFlowGraph,
     parser::parse,
@@ -8,7 +8,7 @@ use askl::{
 };
 use clap::Parser;
 use log::{debug, info};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Indexer for askl
 #[derive(Parser, Debug)]
@@ -25,16 +25,16 @@ struct AsklData {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Node{
+struct Node {
     id: SymbolId,
     label: String,
     uri: String,
     loc: String,
 }
 
-impl Node{
-    fn new(id: SymbolId, label: String, uri: String, loc: String) -> Self{
-        Self{
+impl Node {
+    fn new(id: SymbolId, label: String, uri: String, loc: String) -> Self {
+        Self {
             id: id,
             label: label,
             uri: uri,
@@ -44,15 +44,15 @@ impl Node{
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Edge{
+struct Edge {
     from: SymbolId,
     to: SymbolId,
     from_loc: String,
 }
 
-impl Edge{
-    fn new(from: SymbolId, to: SymbolId) -> Self{
-        Self{
+impl Edge {
+    fn new(from: SymbolId, to: SymbolId) -> Self {
+        Self {
             from: from,
             to: to,
             from_loc: "".to_string(),
@@ -61,24 +61,24 @@ impl Edge{
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Graph{
+struct Graph {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
 }
 
-impl Graph{
-    fn new() -> Self{
-        Self{
+impl Graph {
+    fn new() -> Self {
+        Self {
             nodes: vec![],
             edges: vec![],
         }
     }
 
-    fn add_node(&mut self, node: Node){
+    fn add_node(&mut self, node: Node) {
         self.nodes.push(node);
     }
 
-    fn add_edge(&mut self, edge: Edge){
+    fn add_edge(&mut self, edge: Edge) {
         self.edges.push(edge);
     }
 }
@@ -113,14 +113,31 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
 
     for loc in all_symbols {
         let sym = data.cfg.get_symbol(&loc).unwrap();
-        let file = sym.ranges[0].begin.spelling_loc.as_ref().unwrap().file.clone();
+        let filename = sym.ranges[0]
+            .begin
+            .spelling_loc
+            .as_ref()
+            .unwrap()
+            .file
+            .clone();
         let line = sym.ranges[0].begin.spelling_loc.as_ref().unwrap().line;
-        let uri = format!("file://{}", file);
+        let uri = format!("file://{}", filename);
         result_graph.add_node(Node::new(loc, sym.name.clone(), uri, format!("{}", line)));
     }
 
     let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();
     HttpResponse::Ok().body(json_graph)
+}
+
+#[get["/source/{path:.*}"]]
+async fn file(data: web::Data<AsklData>, path: web::Path<String>) -> impl Responder {
+    let path = Path::new("/").join(Path::new(path.as_str()));
+    debug!("Received request for file: {:#?}", path);
+    if let Ok(source) = std::fs::read_to_string(&path) {
+        HttpResponse::Ok().body(source)
+    } else {
+        HttpResponse::NotFound().body("File not found")
+    }
 }
 
 #[actix_web::main]
@@ -140,8 +157,13 @@ async fn main() -> std::io::Result<()> {
 
     info!("Starting server...");
 
-    HttpServer::new(move || App::new().app_data(askl_data.clone()).service(query))
-        .bind(("127.0.0.1", 8080))?
-        .run()
-        .await
+    HttpServer::new(move || {
+        App::new()
+            .app_data(askl_data.clone())
+            .service(query)
+            .service(file)
+    })
+    .bind(("127.0.0.1", 8080))?
+    .run()
+    .await
 }
