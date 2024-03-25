@@ -133,6 +133,7 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
 async fn file(data: web::Data<AsklData>, path: web::Path<String>) -> impl Responder {
     let path = Path::new("/").join(Path::new(path.as_str()));
     debug!("Received request for file: {:#?}", path);
+    debug!("XXX: This function is unsafe, because it can read any file on the system");
     if let Ok(source) = std::fs::read_to_string(&path) {
         HttpResponse::Ok().body(source)
     } else {
