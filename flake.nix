@@ -20,6 +20,7 @@
         devShells.default = mkShell {
           packages = [
             clang-tools
+            clang
           ];
 
           nativeBuildInputs = [

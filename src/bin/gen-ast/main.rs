@@ -1,9 +1,10 @@
 use std::{fs::File, sync::Arc};
 
 use anyhow::anyhow;
-use askl::symbols::{Symbol, SymbolId, SymbolMap, Symbols};
+use askl::symbols::{Occurence, Symbol, SymbolId, SymbolMap, Symbols};
 use clap::Parser;
 use indicatif::ProgressBar;
+use log::debug;
 use serde::{Deserialize, Serialize};
 use tokio::{process::Command, sync::Semaphore};
 
@@ -11,7 +12,7 @@ use tokio::{process::Command, sync::Semaphore};
 #[derive(Parser, Debug, Clone)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
-    // Path to compile command to get the list of source files
+    /// Path to compile command to get the list of source files
     #[clap(value_name = "FILE")]
     compile_commands: String,
 
@@ -23,7 +24,7 @@ struct Args {
     #[clap(short, long, default_value = "1")]
     parallelism: usize,
 
-    // Limit how many files can be processed
+    /// Limit how many files can be processed
     #[clap(long)]
     trim: Option<usize>,
 }
@@ -155,11 +156,16 @@ async fn run_ast_gen(args: Args, c: CompileCommand) -> anyhow::Result<(String, N
     .chain(
         arguments
             .drain(1..) // Remove path to the compiler
+            .filter(|arg| arg != "-Werror")
             .filter(|arg| arg != "-c")
             .filter(|arg| arg != "-g")
             .filter(|arg| !arg.starts_with("-f")),
     )
     .collect();
+
+    debug!("Command: {:?}", args.clang.clone());
+    debug!("Running clang with arguments: {:?}", arguments);
+    debug!("Directory: {}", c.directory);
 
     let output = Command::new(args.clang.clone())
         .current_dir(c.directory)
@@ -168,6 +174,9 @@ async fn run_ast_gen(args: Args, c: CompileCommand) -> anyhow::Result<(String, N
         .await?;
 
     let json = String::from_utf8(output.stdout)?;
+
+    // // Dump the AST to a file
+    // std::fs::write("log", &json)?;
 
     let node: Node = serde_json::from_str(&json)?;
 
@@ -244,7 +253,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut symbol_map = SymbolMap::new();
     for node in all_ast.inner {
-        if let Clang::FunctionDecl(f) = node.kind {
+        if let Clang::FunctionDecl(ref f) = node.kind {
             let children = node
                 .inner
                 .iter()
@@ -262,11 +271,37 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .collect();
 
+            let clang_range = f.range.clone().unwrap();
+            let range = if clang_range.begin.spelling_loc.is_some()
+                && clang_range.end.spelling_loc.is_some()
+            {
+                let file = clang_range
+                    .begin
+                    .spelling_loc
+                    .as_ref()
+                    .unwrap()
+                    .file
+                    .clone()
+                    .to_string();
+                if file == "" {
+                    None
+                } else {
+                    Some(Occurence {
+                        file: file,
+                        line_start: clang_range.begin.spelling_loc.as_ref().unwrap().line as i32,
+                        column_start: clang_range.begin.spelling_loc.unwrap().col as i32,
+                        line_end: clang_range.end.spelling_loc.as_ref().unwrap().line as i32,
+                        column_end: clang_range.end.spelling_loc.unwrap().col as i32,
+                    })
+                }
+            } else {
+                None
+            };
             symbol_map.add(
                 SymbolId::new(f.name.clone().unwrap()),
                 Symbol {
                     name: f.name.clone().unwrap(),
-                    ranges: vec![f.range.unwrap()],
+                    ranges: range.into_iter().collect(),
                     children: children,
                 },
             );
