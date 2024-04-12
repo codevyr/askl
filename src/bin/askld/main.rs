@@ -1,13 +1,21 @@
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+use anyhow::{anyhow, Result};
+use askl::symbols::{Symbols, Occurence};
 use askl::{
     cfg::ControlFlowGraph,
     parser::parse,
-    symbols::{SymbolId, SymbolMap},
+    symbols::{Symbol, SymbolId, SymbolMap},
 };
+use clang_ast::{SourceLocation, SourceRange};
 use clap::Parser;
 use log::{debug, info};
+use protobuf::Message;
+use scip::{symbol, types::Index};
 use serde::{Deserialize, Serialize};
 
 /// Indexer for askl
@@ -17,6 +25,10 @@ struct Args {
     // Path to the index file
     #[clap(short, long)]
     index: String,
+
+    // Format of the index file
+    #[clap(short, long, default_value = "askl")]
+    format: String,
 }
 
 struct AsklData {
@@ -114,13 +126,9 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     for loc in all_symbols {
         let sym = data.cfg.get_symbol(&loc).unwrap();
         let filename = sym.ranges[0]
-            .begin
-            .spelling_loc
-            .as_ref()
-            .unwrap()
             .file
             .clone();
-        let line = sym.ranges[0].begin.spelling_loc.as_ref().unwrap().line;
+        let line = sym.ranges[0].line_start;
         let uri = format!("file://{}", filename);
         result_graph.add_node(Node::new(loc, sym.name.clone(), uri, format!("{}", line)));
     }
@@ -141,21 +149,86 @@ async fn file(data: web::Data<AsklData>, path: web::Path<String>) -> impl Respon
     }
 }
 
+fn read_data(args: &Args) -> Result<AsklData> {
+    match args.format.as_str() {
+        "askl" => {
+            let symbols: SymbolMap = serde_json::from_slice(&std::fs::read(&args.index)?)?;
+            let sources: Vec<SymbolId> = symbols.iter().map(|(id, _)| id.clone()).collect();
+            let cfg = ControlFlowGraph::from_symbols(symbols);
+            Ok(AsklData {
+                cfg: cfg,
+                sources: sources,
+            })
+        }
+        "scip" => {
+            info!("Index format: SCIP");
+
+            let bytes = std::fs::read(&args.index)?;
+            let index = Index::parse_from_bytes(&bytes).unwrap();
+
+            debug!(
+                "Index: documents {} external symbols {}",
+                index.documents.len(),
+                index.external_symbols.len()
+            );
+            debug!("Index: metadata {:#?}", index.metadata);
+
+            debug!("Index: documents {:#?}", index.documents);
+
+            let mut occurence_map: HashMap<&String, Vec<Occurence>> = HashMap::new();
+            index.documents.iter().for_each(|doc| {
+                doc.occurrences.iter().for_each(|occ| {
+                    let range = if occ.range.len() == 4 {
+                        Occurence {
+                            file: doc.relative_path.clone(),
+                            line_start: occ.range[0],
+                            column_start: occ.range[1],
+                            line_end: occ.range[2],
+                            column_end: occ.range[3],
+                        }
+                    } else {
+                        Occurence {
+                            file: doc.relative_path.clone(),
+                            line_start: occ.range[0],
+                            column_start: occ.range[1],
+                            line_end: occ.range[0],
+                            column_end: occ.range[2],
+                        }
+                    };
+                    occurence_map
+                        .entry(&occ.symbol)
+                        .and_modify(|ranges: &mut Vec<Occurence>| ranges.push(range.clone()))
+                        .or_insert_with(|| vec![range]);
+                });
+            });
+            let mut symbols = SymbolMap::new();
+            index.documents.iter().for_each(|doc| {
+                doc.symbols.iter().for_each(|si| {
+                    let id = SymbolId::new(si.symbol.clone());
+
+                    let range = occurence_map.get(&si.symbol).unwrap();
+                    let symbol = Symbol {
+                        name: si.symbol.clone(),
+                        ranges: range.clone(),
+                        children: HashSet::new(),
+                    };
+                    symbols.add(id, symbol);
+                });
+            });
+
+            Err(anyhow!("Unimplemented index format: {}", args.format))
+        }
+        _ => Err(anyhow!("Unsupported index format: {}", args.format)),
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
     let args = Args::parse();
 
-    let symbols: SymbolMap = serde_json::from_slice(&std::fs::read(args.index)?)?;
-
-    let sources: Vec<SymbolId> = symbols.iter().map(|(id, _)| id.clone()).collect();
-    let cfg = ControlFlowGraph::from_symbols(symbols);
-
-    let askl_data = web::Data::new(AsklData {
-        cfg: cfg,
-        sources: sources,
-    });
-
+    let askl_data: AsklData = read_data(&args).expect("Failed to read data");
+    let askl_data = web::Data::new(askl_data);
     info!("Starting server...");
 
     HttpServer::new(move || {

@@ -16,9 +16,18 @@ impl FileHash {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Occurence {
+    pub line_start: i32,
+    pub line_end: i32,
+    pub column_start: i32,
+    pub column_end: i32,
+    pub file: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Symbol {
     pub name: String,
-    pub ranges: Vec<SourceRange>,
+    pub ranges: Vec<Occurence>,
     pub children: HashSet<SymbolId>,
 }
 
