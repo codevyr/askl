@@ -18,8 +18,13 @@
       with pkgs;
       {
         devShells.default = mkShell {
-          buildInputs = [
-            rust-bin.stable.latest.default
+          packages = [
+            clang-tools
+          ];
+
+          nativeBuildInputs = [
+            # rust-bin.stable.latest.default
+            rustc
             cargo
             rust-analyzer
           ];
