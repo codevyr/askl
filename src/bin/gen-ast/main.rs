@@ -175,8 +175,13 @@ async fn run_ast_gen(args: Args, c: CompileCommand) -> anyhow::Result<(String, N
 
     let json = String::from_utf8(output.stdout)?;
 
+    if !output.status.success() {
+        let stderr = String::from_utf8(output.stderr)?;
+        return Err(anyhow!("Error: {}", stderr));
+    }
+
     // // Dump the AST to a file
-    // std::fs::write("log", &json)?;
+    // std::fs::write("ast.json", &json)?;
 
     let node: Node = serde_json::from_str(&json)?;
 
