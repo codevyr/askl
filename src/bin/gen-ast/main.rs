@@ -1,9 +1,10 @@
 use std::{fs::File, sync::Arc};
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Result};
 use askl::symbols::{Occurence, Symbol, SymbolId, SymbolMap, Symbols};
 use clap::Parser;
 use indicatif::ProgressBar;
+use itertools::Itertools;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use tokio::{process::Command, sync::Semaphore};
@@ -40,16 +41,47 @@ struct CompileCommand {
 
 pub type Node = clang_ast::Node<Clang>;
 
+fn extract_filter(root: &Node, f: impl Fn(&Node) -> bool) -> bool {
+    if f(root) {
+        return true;
+    }
+
+    for node in &root.inner {
+        if extract_filter(node, &f) {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Clang {
     // EnumConstantDecl(EnumConstantDecl),
     // EnumDecl(EnumDecl),
     FunctionDecl(FunctionDecl),
     // NamespaceDecl(NamespaceDecl),
+    // CallExpr(CallExpr),
     DeclRefExpr(DeclRefExpr),
-    TranslationUnitDecl,
-    CompoundStmt,
+    TranslationUnitDecl(TranslationUnitDecl),
+    CompoundStmt(CompoundStmt),
     Other,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TranslationUnitDecl;
+
+impl TranslationUnitDecl {
+    fn extract_symbol_map(&self, inner: &Vec<Node>) -> Option<SymbolMap> {
+        inner
+            .iter()
+            .filter_map(|child| match &child.kind {
+                Clang::FunctionDecl(f) => Some(f.extract_symbol_map(&child.inner)),
+                _ => None,
+            })
+            .map(|s| s.unwrap())
+            .reduce(|acc, next| acc.merge(next))
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -64,6 +96,77 @@ pub struct EnumDecl {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct FunctionDecl {
+    pub name: Option<String>,
+    pub loc: Option<clang_ast::SourceLocation>,
+    pub range: Option<clang_ast::SourceRange>,
+    pub inner: Option<Vec<Node>>,
+}
+
+impl FunctionDecl {
+    fn extract_symbol_map(&self, inner: &Vec<Node>) -> Option<SymbolMap> {
+        let clang_range = self.range.clone().unwrap();
+        let range =
+            if clang_range.begin.spelling_loc.is_some() && clang_range.end.spelling_loc.is_some() {
+                let file = clang_range
+                    .begin
+                    .spelling_loc
+                    .as_ref()
+                    .unwrap()
+                    .file
+                    .clone()
+                    .to_string();
+                if file == "" {
+                    None
+                } else {
+                    Some(Occurence {
+                        file: file,
+                        line_start: clang_range.begin.spelling_loc.as_ref().unwrap().line as i32,
+                        column_start: clang_range.begin.spelling_loc.unwrap().col as i32,
+                        line_end: clang_range.end.spelling_loc.as_ref().unwrap().line as i32,
+                        column_end: clang_range.end.spelling_loc.unwrap().col as i32,
+                    })
+                }
+            } else {
+                None
+            };
+
+        // let children: Vec<_> = inner
+        //     .iter()
+        //     .filter_map(|node| {
+        //         match node.kind {
+        //             Clang::CompoundStmt(compound_stmt) => {
+        //                 return None;
+        //             },
+        //             _ => None,
+        //         }
+        //     })
+        //     .collect();
+
+        let mut symbol_map = SymbolMap::new();
+        symbol_map.add(
+            SymbolId::new(self.name.clone().unwrap()),
+            Symbol {
+                name: self.name.clone().unwrap(),
+                ranges: range.into_iter().collect(),
+                children: Default::default(),
+            },
+        );
+
+        Some(symbol_map)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CompoundStmt {
+    pub name: Option<String>,
+    pub loc: Option<clang_ast::SourceLocation>,
+    pub range: Option<clang_ast::SourceRange>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CallExpr {
     pub name: Option<String>,
     pub loc: Option<clang_ast::SourceLocation>,
     pub range: Option<clang_ast::SourceRange>,
@@ -83,43 +186,43 @@ pub struct NamespaceDecl {
     pub name: Option<String>,
 }
 
-fn node_simplify(root: Node) -> Vec<Node> {
-    let inner: Vec<Node> = root
-        .inner
-        .into_iter()
-        .map(|node| node_simplify(node))
-        .flatten()
-        .collect();
-    match &root.kind {
-        Clang::DeclRefExpr(ref_expr) => {
-            if let Some(referenced_decl) = &ref_expr.referenced_decl {
-                if let Clang::FunctionDecl(_) = &referenced_decl.kind {
-                    return vec![Node {
-                        id: root.id,
-                        kind: root.kind,
-                        inner: inner,
-                    }];
-                }
-            }
-            vec![]
-        }
-        Clang::FunctionDecl(_) => {
-            vec![Node {
-                id: root.id,
-                kind: root.kind,
-                inner: inner,
-            }]
-        }
-        Clang::TranslationUnitDecl => {
-            vec![Node {
-                id: root.id,
-                kind: root.kind,
-                inner: inner,
-            }]
-        }
-        Clang::Other | Clang::CompoundStmt => inner,
-    }
-}
+// fn node_simplify(root: Node) -> Vec<Node> {
+//     let inner: Vec<Node> = root
+//         .inner
+//         .into_iter()
+//         .map(|node| node_simplify(node))
+//         .flatten()
+//         .collect();
+//     match &root.kind {
+//         Clang::DeclRefExpr(ref_expr) => {
+//             if let Some(referenced_decl) = &ref_expr.referenced_decl {
+//                 if let Clang::FunctionDecl(_) = &referenced_decl.kind {
+//                     return vec![Node {
+//                         id: root.id,
+//                         kind: root.kind,
+//                         inner: inner,
+//                     }];
+//                 }
+//             }
+//             vec![]
+//         }
+//         Clang::FunctionDecl(_) => {
+//             vec![Node {
+//                 id: root.id,
+//                 kind: root.kind,
+//                 inner: inner,
+//             }]
+//         }
+//         Clang::TranslationUnitDecl => {
+//             vec![Node {
+//                 id: root.id,
+//                 kind: root.kind,
+//                 inner: inner,
+//             }]
+//         }
+//         Clang::Other | Clang::CompoundStmt => inner,
+//     }
+// }
 
 async fn run_ast_gen(args: Args, c: CompileCommand) -> anyhow::Result<(String, Node)> {
     let mut arguments = if let Some(ref command) = c.command {
@@ -163,10 +266,6 @@ async fn run_ast_gen(args: Args, c: CompileCommand) -> anyhow::Result<(String, N
     )
     .collect();
 
-    debug!("Command: {:?}", args.clang.clone());
-    debug!("Running clang with arguments: {:?}", arguments);
-    debug!("Directory: {}", c.directory);
-
     let output = Command::new(args.clang.clone())
         .current_dir(c.directory)
         .args(arguments)
@@ -180,14 +279,12 @@ async fn run_ast_gen(args: Args, c: CompileCommand) -> anyhow::Result<(String, N
         return Err(anyhow!("Error: {}", stderr));
     }
 
-    // // Dump the AST to a file
-    // std::fs::write("ast.json", &json)?;
+    // Dump the AST to a file
+    std::fs::write("ast.json", &json)?;
 
     let node: Node = serde_json::from_str(&json)?;
 
-    let simple_node = node_simplify(node).pop().unwrap();
-
-    Ok((ast_file, simple_node))
+    Ok((ast_file, node))
 }
 
 async fn parse_all(
@@ -220,44 +317,18 @@ async fn parse_all(
     outputs
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    env_logger::init();
-    let args = Args::parse();
-
-    let file = File::open(&args.compile_commands).expect("file should open read only");
-    let mut compile_commands: Vec<CompileCommand> =
-        serde_json::from_reader(file).expect("file should be proper JSON");
-
-    if let Some(trim) = args.trim {
-        compile_commands.truncate(trim);
+fn extract_symbol_map_root(root: Node) -> Result<SymbolMap> {
+    match root.kind {
+        Clang::TranslationUnitDecl(node) => Ok(node
+            .extract_symbol_map(&root.inner)
+            .unwrap_or_else(|| SymbolMap::new())),
+        _ => Err(anyhow!("Not implemented")),
     }
+}
 
-    let outputs = parse_all(args, compile_commands).await;
-
-    let all_ast = outputs
-        .into_iter()
-        .map(|r| {
-            if let Err(err) = &r {
-                println!("{:?}", err);
-            }
-            r
-        })
-        .filter(|r| r.is_ok())
-        .map(|r| r.unwrap())
-        .map(|(_, node)| node)
-        .reduce(|mut acc, node| {
-            acc.inner.extend(node.inner);
-            Node {
-                id: acc.id,
-                kind: acc.kind,
-                inner: acc.inner,
-            }
-        })
-        .unwrap();
-
+fn extract_symbol_map(root: Node) -> SymbolMap {
     let mut symbol_map = SymbolMap::new();
-    for node in all_ast.inner {
+    for node in root.inner {
         if let Clang::FunctionDecl(ref f) = node.kind {
             let children = node
                 .inner
@@ -312,6 +383,41 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     }
+
+    symbol_map
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    env_logger::init();
+    let args = Args::parse();
+
+    let file = File::open(&args.compile_commands).expect("file should open read only");
+    let mut compile_commands: Vec<CompileCommand> =
+        serde_json::from_reader(file).expect("file should be proper JSON");
+
+    if let Some(trim) = args.trim {
+        compile_commands.truncate(trim);
+    }
+
+    let outputs = parse_all(args, compile_commands).await;
+
+    let symbol_map = outputs
+        .into_iter()
+        .map(|r| {
+            if let Err(err) = &r {
+                println!("Failed parsing: {:?}", err);
+            }
+            r
+        })
+        .filter(|r| r.is_ok())
+        .map(|r| r.unwrap())
+        .map(|(_, node)| node)
+        .map(extract_symbol_map_root)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .reduce(|acc, next| acc.merge(next))
+        .unwrap();
 
     std::fs::write(
         "symbol_map.json",

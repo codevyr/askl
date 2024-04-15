@@ -57,7 +57,7 @@ impl SymbolMap {
         }
     }
 
-    pub fn merge(&mut self, other: SymbolMap) -> &mut Self {
+    pub fn merge(mut self, other: SymbolMap) -> Self {
         self.map.extend(other.map);
         self
     }
