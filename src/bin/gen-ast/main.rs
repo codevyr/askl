@@ -27,6 +27,10 @@ struct Args {
     /// Limit how many files can be processed
     #[clap(long)]
     trim: Option<usize>,
+
+    /// Output file to store the resulting symbol map
+    #[clap(short, long, default_value = "symbol_map.json")]
+    symbol_map: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -328,7 +332,7 @@ async fn run_ast_gen(args: Args, c: CompileCommand) -> anyhow::Result<(String, N
 }
 
 async fn parse_all(
-    args: Args,
+    args: &Args,
     compile_commands: Vec<CompileCommand>,
 ) -> Vec<anyhow::Result<(String, Node)>> {
     let sem = Arc::new(Semaphore::new(args.parallelism));
@@ -440,7 +444,7 @@ async fn main() -> anyhow::Result<()> {
         compile_commands.truncate(trim);
     }
 
-    let outputs = parse_all(args, compile_commands).await;
+    let outputs = parse_all(&args, compile_commands).await;
 
     let symbol_map = outputs
         .into_iter()
@@ -460,7 +464,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap();
 
     std::fs::write(
-        "symbol_map.json",
+        args.symbol_map,
         serde_json::to_string_pretty(&symbol_map).unwrap(),
     )
     .unwrap();
