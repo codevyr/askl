@@ -1,6 +1,8 @@
 use clang_ast::SourceRange;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
+use std::fs;
+use std::path::PathBuf;
 use std::{collections::HashMap, hash, hash::Hasher};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Copy, Clone, Serialize, Deserialize)]
@@ -20,17 +22,17 @@ pub struct Occurence {
     pub line_end: i32,
     pub column_start: i32,
     pub column_end: i32,
-    pub file: String,
+    pub file: PathBuf,
 }
 
 impl Occurence {
-    pub fn new(file: String, range: SourceRange) -> Self {
+    pub fn new(file: PathBuf, range: SourceRange) -> Self {
         Self {
             line_start: range.begin.spelling_loc.as_ref().unwrap().line as i32,
             column_start: range.begin.spelling_loc.unwrap().col as i32,
             line_end: range.end.spelling_loc.as_ref().unwrap().line as i32,
             column_end: range.end.spelling_loc.unwrap().col as i32,
-            file,
+            file: fs::canonicalize(file).unwrap(),
         }
     }
 }

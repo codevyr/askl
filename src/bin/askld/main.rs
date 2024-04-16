@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
@@ -16,6 +16,7 @@ use log::{debug, info};
 use protobuf::Message;
 use scip::types::Index;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 /// Indexer for askl
 #[derive(Parser, Debug)]
@@ -39,12 +40,12 @@ struct AsklData {
 struct Node {
     id: SymbolId,
     label: String,
-    uri: String,
+    uri: Url,
     loc: String,
 }
 
 impl Node {
-    fn new(id: SymbolId, label: String, uri: String, loc: String) -> Self {
+    fn new(id: SymbolId, label: String, uri: Url, loc: String) -> Self {
         Self {
             id: id,
             label: label,
@@ -130,8 +131,8 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
         let sym = data.cfg.get_symbol(&loc).unwrap();
         let filename = sym.ranges[0].file.clone();
         let line = sym.ranges[0].line_start;
-        let uri = format!("file://{}", filename);
-        result_graph.add_node(Node::new(loc, sym.name.clone(), uri, format!("{}", line)));
+        let url = Url::from_file_path(filename).unwrap();
+        result_graph.add_node(Node::new(loc, sym.name.clone(), url, format!("{}", line)));
     }
 
     let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();
@@ -181,7 +182,7 @@ fn read_data(args: &Args) -> Result<AsklData> {
                 doc.occurrences.iter().for_each(|occ| {
                     let range = if occ.range.len() == 4 {
                         Occurence {
-                            file: doc.relative_path.clone(),
+                            file: PathBuf::from(doc.relative_path.clone()),
                             line_start: occ.range[0],
                             column_start: occ.range[1],
                             line_end: occ.range[2],
@@ -189,7 +190,7 @@ fn read_data(args: &Args) -> Result<AsklData> {
                         }
                     } else {
                         Occurence {
-                            file: doc.relative_path.clone(),
+                            file: PathBuf::from(doc.relative_path.clone()),
                             line_start: occ.range[0],
                             column_start: occ.range[1],
                             line_end: occ.range[0],

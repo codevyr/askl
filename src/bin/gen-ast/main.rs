@@ -1,4 +1,4 @@
-use std::{fs::File, sync::Arc};
+use std::{fs::File, sync::Arc, path::PathBuf};
 
 use anyhow::{anyhow, Result};
 use askl::symbols::{Occurence, Symbol, SymbolChild, SymbolId, SymbolMap, Symbols};
@@ -122,13 +122,7 @@ impl FunctionDecl {
                 if file == "" {
                     None
                 } else {
-                    Some(Occurence {
-                        file: file,
-                        line_start: clang_range.begin.spelling_loc.as_ref().unwrap().line as i32,
-                        column_start: clang_range.begin.spelling_loc.unwrap().col as i32,
-                        line_end: clang_range.end.spelling_loc.as_ref().unwrap().line as i32,
-                        column_end: clang_range.end.spelling_loc.unwrap().col as i32,
-                    })
+                    Some(Occurence::new(file.into(), clang_range))
                 }
             } else {
                 None
@@ -153,7 +147,7 @@ impl FunctionDecl {
                         Clang::FunctionDecl(f) => Some(SymbolChild {
                             symbol_id: SymbolId::new(f.name.as_ref().unwrap().clone()),
                             occurence: Occurence::new(
-                                ref_expr.range.as_ref().unwrap().begin.expansion_loc.as_ref().unwrap().file.clone().to_string(),
+                                PathBuf::from(ref_expr.range.as_ref().unwrap().begin.expansion_loc.as_ref().unwrap().file.clone().to_string()),
                                 ref_expr.range.as_ref().unwrap().clone(),
                             ),
                         }),
