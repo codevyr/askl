@@ -59,13 +59,13 @@ fn extract_filter<'a>(root: &'a Node, f: &'a impl Fn(&Node) -> bool) -> Vec<&'a 
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Clang {
-    // EnumConstantDecl(EnumConstantDecl),
+    EnumConstantDecl(EnumConstantDecl),
     // EnumDecl(EnumDecl),
     FunctionDecl(FunctionDecl),
     VarDecl(VarDecl),
     ParmVarDecl,
     // NamespaceDecl(NamespaceDecl),
-    // CallExpr(CallExpr),
+    CallExpr(CallExpr),
     DeclRefExpr(DeclRefExpr),
     TranslationUnitDecl(TranslationUnitDecl),
     CompoundStmt(CompoundStmt),
@@ -137,12 +137,12 @@ impl FunctionDecl {
         let children: Vec<_> = inner
             .iter()
             .map(|node| {
+                extract_filter(node, &|node: &Node| matches!(node.kind, Clang::CallExpr(_)))
+            })
+            .flatten()
+            .map(|node| {
                 extract_filter(node, &|node: &Node| {
-                    if let Clang::DeclRefExpr(_) = node.kind {
-                        true
-                    } else {
-                        false
-                    }
+                    matches!(node.kind, Clang::DeclRefExpr(_))
                 })
             })
             .flatten()
@@ -153,23 +153,22 @@ impl FunctionDecl {
                         Clang::FunctionDecl(f) => Some(SymbolChild {
                             symbol_id: SymbolId::new(f.name.as_ref().unwrap().clone()),
                             occurence: Occurence::new(
-                                "".to_string(),
+                                ref_expr.loc.as_ref().unwrap().expansion_loc.as_ref().unwrap().file.clone().to_string(),
                                 ref_expr.range.as_ref().unwrap().clone(),
                             ),
                         }),
                         Clang::VarDecl(v) => {
-                            debug!("VarDecl: {:#?}", v);
                             Some(SymbolChild {
                                 symbol_id: SymbolId::new(v.name.as_ref().unwrap().clone()),
                                 occurence: Occurence::new(
-                                    "".to_string(),
+                                    ref_expr.loc.as_ref().unwrap().expansion_loc.as_ref().unwrap().file.clone().to_string(),
                                     ref_expr.range.as_ref().unwrap().clone(),
                                 ),
                             })
                         }
-                        Clang::ParmVarDecl => None,
+                        Clang::ParmVarDecl | Clang::EnumConstantDecl(_) => None,
                         _ => {
-                            panic!("Impossible node kind: {:#?}", referenced_decl);
+                            panic!("Impossible node kind: {:#?}", ref_expr);
                         }
                     }
                 }
