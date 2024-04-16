@@ -104,7 +104,11 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     };
     debug!("Global scope: {:#?}", ast);
 
-    let (res_symbols, res_edges) = ast.matched_symbols(&data.cfg, &data.sources).unwrap();
+    let (res_symbols, res_edges) =  if let Some(res) = ast.matched_symbols(&data.cfg, &data.sources) {
+        res
+    } else {
+        return HttpResponse::BadRequest().body("Unmatched nodes or edges");
+    };
 
     info!("Symbols: {:#?}", res_symbols.len());
     info!("Edges: {:#?}", res_edges.0.len());
