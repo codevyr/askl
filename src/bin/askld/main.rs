@@ -207,7 +207,7 @@ fn read_data(args: &Args) -> Result<AsklData> {
                     let symbol = Symbol {
                         name: si.symbol.clone(),
                         ranges: range.clone(),
-                        children: HashSet::new(),
+                        children: Default::default(),
                     };
                     symbols.add(id, symbol);
                 });
