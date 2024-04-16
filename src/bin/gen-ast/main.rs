@@ -153,7 +153,7 @@ impl FunctionDecl {
                         Clang::FunctionDecl(f) => Some(SymbolChild {
                             symbol_id: SymbolId::new(f.name.as_ref().unwrap().clone()),
                             occurence: Occurence::new(
-                                ref_expr.loc.as_ref().unwrap().expansion_loc.as_ref().unwrap().file.clone().to_string(),
+                                ref_expr.range.as_ref().unwrap().begin.expansion_loc.as_ref().unwrap().file.clone().to_string(),
                                 ref_expr.range.as_ref().unwrap().clone(),
                             ),
                         }),
@@ -161,7 +161,7 @@ impl FunctionDecl {
                             Some(SymbolChild {
                                 symbol_id: SymbolId::new(v.name.as_ref().unwrap().clone()),
                                 occurence: Occurence::new(
-                                    ref_expr.loc.as_ref().unwrap().expansion_loc.as_ref().unwrap().file.clone().to_string(),
+                                    ref_expr.range.as_ref().unwrap().begin.expansion_loc.as_ref().unwrap().file.clone().to_string(),
                                     ref_expr.range.as_ref().unwrap().clone(),
                                 ),
                             })
