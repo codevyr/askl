@@ -77,7 +77,13 @@ impl SymbolMap {
     }
 
     pub fn merge(mut self, other: SymbolMap) -> Self {
-        self.map.extend(other.map);
+        other.map
+        .into_iter()
+        .for_each(|(key, value)| {
+            self.map.entry(key).and_modify(|cur_symbol| {
+                cur_symbol.children.extend(value.children.clone())
+            }).or_insert(value);
+        });
         self
     }
 
