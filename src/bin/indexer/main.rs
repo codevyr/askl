@@ -1,10 +1,9 @@
 use std::{thread::sleep, time::Duration};
 
+use askl::language_server::LanguageServerLauncher;
 use clap::Parser;
 use log::debug;
-use lsp_types::TextDocumentItem;
 use serde::{Deserialize, Serialize};
-use askl::language_server::{LanguageServerLauncher, LanguageServer};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CompileCommand {
@@ -55,22 +54,34 @@ fn main() {
         .launch()
         .expect("Failed to spawn clangd");
 
-    let initialize_result = lang_server.initialize().expect("Failed to initialize language server");
+    let initialize_result = lang_server
+        .initialize()
+        .expect("Failed to initialize language server");
 
-    debug!("Initialize result: {:?}", initialize_result.capabilities.references_provider);
+    debug!(
+        "Initialize result: {:?}",
+        initialize_result.capabilities.references_provider
+    );
 
-    lang_server.initialized().expect("Language server is not initialized");
-    
+    lang_server
+        .initialized()
+        .expect("Language server is not initialized");
+
     compiledb.iter().for_each(|entry| {
-        let uri = lang_server.document_open(&entry.file).expect("Failed to open document");
+        let uri = lang_server
+            .document_open(&entry.file)
+            .expect("Failed to open document");
         debug!("Document open result: {:?}", uri);
 
         sleep(Duration::from_secs(1));
 
-        let res = lang_server.document_close(&uri).expect("Failed to close document");
+        let res = lang_server
+            .document_close(&uri)
+            .expect("Failed to close document");
         debug!("Document close result: {:?}", res);
     });
-    
-    lang_server.workspace_symbols("").expect("Failed to get workspace symbols");
 
+    lang_server
+        .workspace_symbols("")
+        .expect("Failed to get workspace symbols");
 }

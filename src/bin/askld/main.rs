@@ -5,17 +5,16 @@ use std::{
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::{anyhow, Result};
-use askl::symbols::{Symbols, Occurence};
+use askl::symbols::{Occurence, Symbols};
 use askl::{
     cfg::ControlFlowGraph,
     parser::parse,
     symbols::{Symbol, SymbolId, SymbolMap},
 };
-use clang_ast::{SourceLocation, SourceRange};
 use clap::Parser;
 use log::{debug, info};
 use protobuf::Message;
-use scip::{symbol, types::Index};
+use scip::types::Index;
 use serde::{Deserialize, Serialize};
 
 /// Indexer for askl
@@ -125,9 +124,7 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
 
     for loc in all_symbols {
         let sym = data.cfg.get_symbol(&loc).unwrap();
-        let filename = sym.ranges[0]
-            .file
-            .clone();
+        let filename = sym.ranges[0].file.clone();
         let line = sym.ranges[0].line_start;
         let uri = format!("file://{}", filename);
         result_graph.add_node(Node::new(loc, sym.name.clone(), uri, format!("{}", line)));
