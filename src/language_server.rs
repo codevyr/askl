@@ -3,14 +3,11 @@ use std::str;
 use std::process::{Command, Child, Stdio};
 use std::io::{BufReader, BufRead, Read, Write};
 use std::marker::PhantomData;
-use std::thread::sleep;
-use std::time::Duration;
 use anyhow::{Result, anyhow};
 use log::error;
 use log::warn;
 use lsp_types::notification::DidCloseTextDocument;
 use lsp_types::request::WorkspaceSymbolRequest;
-use rand::prelude::*;
 
 use log;
 use log::{debug, trace};
@@ -25,8 +22,6 @@ use lsp_types::notification::Notification as LspNotification;
 
 use lsp_types::request::{Initialize, Shutdown, DocumentSymbolRequest};
 use lsp_types::request::Request as LspRequest;
-
-use crate::symbols;
 
 pub trait LanguageServer : Send {
     fn initialize(&mut self) -> Result<InitializeResult>;
@@ -83,8 +78,8 @@ impl Notification {
     }
 }
 
-#[serde(untagged)]
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(untagged)]
 enum ServerMessage {
     Response(Response),
     Notification(Notification),
@@ -382,11 +377,7 @@ impl LanguageServer for ClangdLanguageServer {
                     }
                 },
             }
-
-            sleep(Duration::from_secs(1));
         }
-
-        Ok(vec![])
     }
 }
 

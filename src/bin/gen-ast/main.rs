@@ -1,10 +1,9 @@
 use std::{fs::File, sync::Arc};
 
 use anyhow::{anyhow, Result};
-use askl::symbols::{Occurence, Symbol, SymbolId, SymbolMap, Symbols};
+use askl::symbols::{Occurence, Symbol, SymbolChild, SymbolId, SymbolMap, Symbols};
 use clap::Parser;
 use indicatif::ProgressBar;
-use itertools::Itertools;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use tokio::{process::Command, sync::Semaphore};
@@ -41,18 +40,17 @@ struct CompileCommand {
 
 pub type Node = clang_ast::Node<Clang>;
 
-fn extract_filter(root: &Node, f: impl Fn(&Node) -> bool) -> bool {
+fn extract_filter<'a>(root: &'a Node, f: &'a impl Fn(&Node) -> bool) -> Vec<&'a Node> {
+    let mut result = vec![];
     if f(root) {
-        return true;
+        result.push(root);
     }
 
     for node in &root.inner {
-        if extract_filter(node, &f) {
-            return true;
-        }
+        result.extend(extract_filter(node, f));
     }
 
-    false
+    result
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -60,6 +58,8 @@ pub enum Clang {
     // EnumConstantDecl(EnumConstantDecl),
     // EnumDecl(EnumDecl),
     FunctionDecl(FunctionDecl),
+    VarDecl(VarDecl),
+    ParmVarDecl,
     // NamespaceDecl(NamespaceDecl),
     // CallExpr(CallExpr),
     DeclRefExpr(DeclRefExpr),
@@ -130,17 +130,50 @@ impl FunctionDecl {
                 None
             };
 
-        // let children: Vec<_> = inner
-        //     .iter()
-        //     .filter_map(|node| {
-        //         match node.kind {
-        //             Clang::CompoundStmt(compound_stmt) => {
-        //                 return None;
-        //             },
-        //             _ => None,
-        //         }
-        //     })
-        //     .collect();
+        let children: Vec<_> = inner
+            .iter()
+            .map(|node| {
+                extract_filter(node, &|node: &Node| {
+                    if let Clang::DeclRefExpr(_) = node.kind {
+                        true
+                    } else {
+                        false
+                    }
+                })
+            })
+            .flatten()
+            .filter_map(|node| match &node.kind {
+                Clang::DeclRefExpr(ref_expr) => {
+                    let referenced_decl = ref_expr.referenced_decl.as_ref().unwrap();
+                    match &referenced_decl.kind {
+                        Clang::FunctionDecl(f) => Some(SymbolChild {
+                            symbol_id: SymbolId::new(f.name.as_ref().unwrap().clone()),
+                            occurence: Occurence::new(
+                                "".to_string(),
+                                ref_expr.range.as_ref().unwrap().clone(),
+                            ),
+                        }),
+                        Clang::VarDecl(v) => {
+                            debug!("VarDecl: {:#?}", v);
+                            Some(SymbolChild {
+                                symbol_id: SymbolId::new(v.name.as_ref().unwrap().clone()),
+                                occurence: Occurence::new(
+                                    "".to_string(),
+                                    ref_expr.range.as_ref().unwrap().clone(),
+                                ),
+                            })
+                        }
+                        Clang::ParmVarDecl => None,
+                        _ => {
+                            panic!("Impossible node kind: {:#?}", referenced_decl);
+                        }
+                    }
+                }
+                _ => {
+                    panic!("Impossible node kind");
+                }
+            })
+            .collect();
 
         let mut symbol_map = SymbolMap::new();
         symbol_map.add(
@@ -148,12 +181,19 @@ impl FunctionDecl {
             Symbol {
                 name: self.name.clone().unwrap(),
                 ranges: range.into_iter().collect(),
-                children: Default::default(),
+                children: children,
             },
         );
 
         Some(symbol_map)
     }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct VarDecl {
+    pub name: Option<String>,
+    pub loc: Option<clang_ast::SourceLocation>,
+    pub range: Option<clang_ast::SourceRange>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -326,66 +366,66 @@ fn extract_symbol_map_root(root: Node) -> Result<SymbolMap> {
     }
 }
 
-fn extract_symbol_map(root: Node) -> SymbolMap {
-    let mut symbol_map = SymbolMap::new();
-    for node in root.inner {
-        if let Clang::FunctionDecl(ref f) = node.kind {
-            let children = node
-                .inner
-                .iter()
-                .filter_map(|i| {
-                    if let Clang::DeclRefExpr(r) = &i.kind {
-                        if let Some(ref_decl) = &r.referenced_decl {
-                            if let Clang::FunctionDecl(f) = &ref_decl.kind {
-                                if let Some(name) = &f.name {
-                                    return Some(SymbolId::new(name.clone()));
-                                }
-                            }
-                        }
-                    }
-                    None
-                })
-                .collect();
+// fn extract_symbol_map(root: Node) -> SymbolMap {
+//     let mut symbol_map = SymbolMap::new();
+//     for node in root.inner {
+//         if let Clang::FunctionDecl(ref f) = node.kind {
+//             let children = node
+//                 .inner
+//                 .iter()
+//                 .filter_map(|i| {
+//                     if let Clang::DeclRefExpr(r) = &i.kind {
+//                         if let Some(ref_decl) = &r.referenced_decl {
+//                             if let Clang::FunctionDecl(f) = &ref_decl.kind {
+//                                 if let Some(name) = &f.name {
+//                                     return Some(SymbolId::new(name.clone()));
+//                                 }
+//                             }
+//                         }
+//                     }
+//                     None
+//                 })
+//                 .collect();
 
-            let clang_range = f.range.clone().unwrap();
-            let range = if clang_range.begin.spelling_loc.is_some()
-                && clang_range.end.spelling_loc.is_some()
-            {
-                let file = clang_range
-                    .begin
-                    .spelling_loc
-                    .as_ref()
-                    .unwrap()
-                    .file
-                    .clone()
-                    .to_string();
-                if file == "" {
-                    None
-                } else {
-                    Some(Occurence {
-                        file: file,
-                        line_start: clang_range.begin.spelling_loc.as_ref().unwrap().line as i32,
-                        column_start: clang_range.begin.spelling_loc.unwrap().col as i32,
-                        line_end: clang_range.end.spelling_loc.as_ref().unwrap().line as i32,
-                        column_end: clang_range.end.spelling_loc.unwrap().col as i32,
-                    })
-                }
-            } else {
-                None
-            };
-            symbol_map.add(
-                SymbolId::new(f.name.clone().unwrap()),
-                Symbol {
-                    name: f.name.clone().unwrap(),
-                    ranges: range.into_iter().collect(),
-                    children: children,
-                },
-            );
-        }
-    }
+//             let clang_range = f.range.clone().unwrap();
+//             let range = if clang_range.begin.spelling_loc.is_some()
+//                 && clang_range.end.spelling_loc.is_some()
+//             {
+//                 let file = clang_range
+//                     .begin
+//                     .spelling_loc
+//                     .as_ref()
+//                     .unwrap()
+//                     .file
+//                     .clone()
+//                     .to_string();
+//                 if file == "" {
+//                     None
+//                 } else {
+//                     Some(Occurence {
+//                         file: file,
+//                         line_start: clang_range.begin.spelling_loc.as_ref().unwrap().line as i32,
+//                         column_start: clang_range.begin.spelling_loc.unwrap().col as i32,
+//                         line_end: clang_range.end.spelling_loc.as_ref().unwrap().line as i32,
+//                         column_end: clang_range.end.spelling_loc.unwrap().col as i32,
+//                     })
+//                 }
+//             } else {
+//                 None
+//             };
+//             symbol_map.add(
+//                 SymbolId::new(f.name.clone().unwrap()),
+//                 Symbol {
+//                     name: f.name.clone().unwrap(),
+//                     ranges: range.into_iter().collect(),
+//                     children: children,
+//                 },
+//             );
+//         }
+//     }
 
-    symbol_map
-}
+//     symbol_map
+// }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

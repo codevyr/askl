@@ -1,6 +1,5 @@
 use clang_ast::SourceRange;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::{collections::HashMap, hash, hash::Hasher};
 
@@ -15,7 +14,7 @@ impl FileHash {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct Occurence {
     pub line_start: i32,
     pub line_end: i32,
@@ -24,11 +23,29 @@ pub struct Occurence {
     pub file: String,
 }
 
+impl Occurence {
+    pub fn new(file: String, range: SourceRange) -> Self {
+        Self {
+            line_start: range.begin.spelling_loc.as_ref().unwrap().line as i32,
+            column_start: range.begin.spelling_loc.unwrap().col as i32,
+            line_end: range.end.spelling_loc.as_ref().unwrap().line as i32,
+            column_end: range.end.spelling_loc.unwrap().col as i32,
+            file,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct SymbolChild {
+    pub symbol_id: SymbolId,
+    pub occurence: Occurence,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Symbol {
     pub name: String,
     pub ranges: Vec<Occurence>,
-    pub children: HashSet<SymbolId>,
+    pub children: Vec<SymbolChild>,
 }
 
 pub trait Symbols: ToString {
@@ -66,14 +83,14 @@ impl SymbolMap {
         self.map.iter()
     }
 
-    pub fn get_children(&self, symbol_id: &SymbolId) -> Vec<SymbolId> {
+    pub fn get_children(&self, symbol_id: &SymbolId) -> Vec<SymbolChild> {
         let symbol = if let Some(symbol) = self.map.get(&symbol_id) {
             symbol
         } else {
             return vec![];
         };
 
-        symbol.children.clone().into_iter().collect::<Vec<_>>()    
+        symbol.children.clone().into_iter().collect::<Vec<_>>()
     }
 }
 

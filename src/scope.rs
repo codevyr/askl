@@ -30,7 +30,7 @@ pub trait Scope: Debug {
 
             // Iterate through all the symbols in the CFG
             for symbol_id in statement_symbols.iter() {
-                let children = cfg.symbols.get_children(symbol_id);
+                let children = cfg.symbols.get_children(symbol_id).into_iter().map(|child| child.symbol_id).collect();
 
                     // If the statement matches the symbol, add it to the result
                 if let Some((source_ids, mut edges)) = statement.scope().matched_symbols(cfg, &children) {
