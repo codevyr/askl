@@ -1,6 +1,6 @@
 use crate::cfg::ControlFlowGraph;
 use crate::parser::{Identifier, NamedArgument, Rule};
-use crate::symbols::SymbolId;
+use crate::symbols::{SymbolId, SymbolChild};
 use anyhow::{anyhow, bail, Result};
 use log::debug;
 use core::fmt::Debug;
@@ -23,7 +23,6 @@ fn build_generic_verb(prev_verb: Box<dyn Verb>, pair: pest::iterators::Pair<Rule
     let span = ident.as_span();
     match Identifier::build(ident)?.0.as_str() {
         FilterVerb::NAME => FilterVerb::new(prev_verb, positional, named),
-        AllVerb::NAME => Ok(AllVerb::new()),
         unknown => Err(anyhow!("Unknown filter: {}", unknown)),
     }
 }
@@ -60,7 +59,7 @@ pub fn build_verb(prev_verb: Box<dyn Verb>, pair: pest::iterators::Pair<Rule>) -
 }
 
 pub trait Verb: Debug {
-    fn symbols(&self, cfg: &ControlFlowGraph, symbols: &Vec<SymbolId>) -> Vec<SymbolId>;
+    fn symbols(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> bool;
 }
 
 #[derive(Debug)]
@@ -85,35 +84,8 @@ impl FilterVerb {
 }
 
 impl Verb for FilterVerb {
-    fn symbols(&self, cfg: &ControlFlowGraph, symbols: &Vec<SymbolId>) -> Vec<SymbolId> {
-        self.prev
-            .symbols(cfg, symbols)
-            .into_iter()
-            .filter(|s| {
-                self.name == cfg.get_symbol(s).unwrap().name
-            })
-            .collect()
-    }
-}
-
-#[derive(Debug)]
-pub struct AllVerb {
-}
-
-impl AllVerb {
-    const NAME: &'static str = "all";
-
-    pub fn new() -> Box<dyn Verb> {
-        Box::new(Self {})
-    }
-}
-
-impl Verb for AllVerb {
-    fn symbols(&self, cfg: &ControlFlowGraph, _symbols: &Vec<SymbolId>) -> Vec<SymbolId> {
-        cfg
-            .iter_symbols()
-            .map(|(id, _)| id.clone())
-            .collect()
+    fn symbols(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> bool {
+        self.name == cfg.get_symbol(symbol).unwrap().name
     }
 }
 
@@ -128,7 +100,7 @@ impl UnitVerb {
 }
 
 impl Verb for UnitVerb {
-    fn symbols(&self, _cfg: &ControlFlowGraph, symbols: &Vec<SymbolId>) -> Vec<SymbolId> {
-        symbols.clone()
+    fn symbols(&self, _cfg: &ControlFlowGraph, _symbol: &SymbolId) -> bool {
+        true
     }
 }

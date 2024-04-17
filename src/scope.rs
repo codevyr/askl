@@ -1,8 +1,9 @@
-use crate::cfg::{EdgeList, ControlFlowGraph};
+use crate::cfg::{ControlFlowGraph, EdgeList};
 use crate::parser::Rule;
 use crate::statement::{build_statement, Statement};
-use crate::symbols::SymbolId;
+use crate::symbols::{Occurence, SymbolChild, SymbolId};
 use core::fmt::Debug;
+use log::debug;
 use pest::error::Error;
 
 pub fn build_scope(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Scope>, Error<Rule>> {
@@ -13,48 +14,49 @@ pub fn build_scope(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Scope>, 
 
 pub trait Scope: Debug {
     fn statements(&self) -> &Vec<Box<dyn Statement>>;
+    fn get_children(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Vec<SymbolChild>;
 
-    fn matched_symbols(&self, cfg: &ControlFlowGraph, symbols: &Vec<SymbolId>) -> Option<(Vec<SymbolId>, EdgeList)>{
-        let mut result = EdgeList(vec![]);
-        let mut result_sources : Vec<SymbolId> = vec![];
+    fn run(
+        &self,
+        cfg: &ControlFlowGraph,
+        active_symbols: &Vec<SymbolId>,
+    ) -> Option<(Vec<SymbolId>, EdgeList)> {
+        let mut nodes = vec![];
+        let mut edges = EdgeList(vec![]);
 
         if self.statements().len() == 0 {
-            return Some((result_sources, result));
+            return Some((nodes, edges));
         }
-        
-        // Iterate through all the statements in the scope or subscope of
-        // the query
-        for statement in self.statements().iter() {
 
-            let statement_symbols = statement.verb().symbols(cfg, symbols);
-
-            // Iterate through all the symbols in the CFG
-            for symbol_id in statement_symbols.iter() {
-                let children = cfg.symbols.get_children(symbol_id).into_iter().map(|child| child.symbol_id).collect();
-
-                    // If the statement matches the symbol, add it to the result
-                if let Some((source_ids, mut edges)) = statement.scope().matched_symbols(cfg, &children) {
-                    for source_id in source_ids.into_iter() {
-                        edges.0.push((symbol_id.clone(), source_id.clone()));
+        let child_symbols: Vec<_> = active_symbols
+            .iter()
+            .map(|active_symbol| {
+                let active_children = self.get_children(cfg, active_symbol);
+                for statement in self.statements().iter() {
+                    // Iterate through all the statements in the scope or subscope of
+                    // the query
+                    if let Some((passed_children, edge_list)) = statement
+                        .execute(cfg, &active_children)
+                    {
+                        passed_children.into_iter().for_each(|s| {
+                            nodes.push(s.symbol_id.clone());
+                            edges.0.push((
+                                active_symbol.clone(),
+                                s.symbol_id.clone(),
+                                s.occurence.clone(),
+                            ));
+                        })
                     }
-
-                    // This nodes matches the pattern, so remember it
-                    result_sources.push(symbol_id.clone());
-                    result.0.extend(edges.0.into_iter()); 
                 }
-            }
-        }
-
-        if result_sources.len() == 0 {
-            return None;
-        }
+            })
+            .collect();
 
         // Sort and deduplicate the sources
-        result_sources.sort();
-        result_sources.dedup();
-        result.0.sort();
-        result.0.dedup();
-        Some((result_sources, result))
+        nodes.sort();
+        nodes.dedup();
+        edges.0.sort();
+        edges.0.dedup();
+        Some((nodes, edges))
     }
 }
 
@@ -71,6 +73,11 @@ impl Scope for DefaultScope {
     fn statements(&self) -> &Vec<Box<dyn Statement>> {
         &self.0
     }
+
+    fn get_children(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Vec<SymbolChild> {
+        // debug!("get_children from Default: {:?}", symbol);
+        cfg.symbols.get_children(symbol)
+    }
 }
 
 #[derive(Debug)]
@@ -85,5 +92,10 @@ impl EmptyScope {
 impl Scope for EmptyScope {
     fn statements(&self) -> &Vec<Box<dyn Statement>> {
         &self.0
+    }
+
+    fn get_children(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Vec<SymbolChild> {
+        debug!("get_children from Empty: {:?}", symbol);
+        vec![]
     }
 }

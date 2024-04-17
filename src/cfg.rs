@@ -1,6 +1,6 @@
 use std::iter::Iterator;
 
-use crate::symbols::{Symbol, SymbolId, SymbolMap};
+use crate::symbols::{Symbol, SymbolId, SymbolMap, Occurence};
 use petgraph::graphmap::DiGraphMap;
 
 #[derive(Debug, Clone)]
@@ -12,7 +12,7 @@ pub struct ControlFlowGraph {
 pub struct NodeList(pub Vec<SymbolId>);
 
 #[derive(Debug, Clone)]
-pub struct EdgeList(pub Vec<(SymbolId, SymbolId)>);
+pub struct EdgeList(pub Vec<(SymbolId, SymbolId, Occurence)>);
 
 impl ControlFlowGraph {
     pub fn from_symbols(symbols: SymbolMap) -> Self {

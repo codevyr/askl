@@ -5,11 +5,14 @@ use std::{
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::{anyhow, Result};
-use askl::symbols::{Occurence, Symbols};
 use askl::{
     cfg::ControlFlowGraph,
     parser::parse,
     symbols::{Symbol, SymbolId, SymbolMap},
+};
+use askl::{
+    cfg::EdgeList,
+    symbols::{Occurence, Symbols},
 };
 use clap::Parser;
 use log::{debug, info};
@@ -57,17 +60,21 @@ impl Node {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Edge {
+    id: String,
     from: SymbolId,
     to: SymbolId,
-    from_loc: String,
+    from_file: String,
+    from_line: i32,
 }
 
 impl Edge {
-    fn new(from: SymbolId, to: SymbolId) -> Self {
+    fn new(from: SymbolId, to: SymbolId, loc: Occurence) -> Self {
         Self {
+            id: format!("{}-{}", from, to),
             from: from,
             to: to,
-            from_loc: "".to_string(),
+            from_file: loc.file.into_os_string().into_string().unwrap(),
+            from_line: loc.line_start,
         }
     }
 }
@@ -105,11 +112,9 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     };
     debug!("Global scope: {:#?}", ast);
 
-    let (res_symbols, res_edges) =  if let Some(res) = ast.matched_symbols(&data.cfg, &data.sources) {
-        res
-    } else {
-        return HttpResponse::BadRequest().body("Unmatched nodes or edges");
-    };
+    let (res_symbols, res_edges) = ast
+        .run(&data.cfg, &data.sources).unwrap();
+
 
     info!("Symbols: {:#?}", res_symbols.len());
     info!("Edges: {:#?}", res_edges.0.len());
@@ -117,14 +122,14 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     let mut result_graph = Graph::new();
 
     let mut all_symbols = HashSet::new();
-    for (from, to) in res_edges.0 {
+    for (from, to, loc) in res_edges.0 {
         all_symbols.insert(from.clone());
         all_symbols.insert(to.clone());
-        result_graph.add_edge(Edge::new(from, to));
+        result_graph.add_edge(Edge::new(from, to, loc));
     }
 
     for loc in res_symbols {
-        all_symbols.insert(loc);
+        all_symbols.insert(loc.clone());
     }
 
     for loc in all_symbols {

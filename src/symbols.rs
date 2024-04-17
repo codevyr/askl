@@ -1,6 +1,7 @@
 use clang_ast::SourceRange;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
+use std::fmt::{Display, self};
 use std::fs;
 use std::path::PathBuf;
 use std::{collections::HashMap, hash, hash::Hasher};
@@ -56,11 +57,17 @@ pub trait Symbols: ToString {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct SymbolId(String);
+pub struct SymbolId(pub String);
 
 impl SymbolId {
     pub fn new(id: String) -> Self {
         Self(id)
+    }
+}
+
+impl fmt::Display for SymbolId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -77,12 +84,11 @@ impl SymbolMap {
     }
 
     pub fn merge(mut self, other: SymbolMap) -> Self {
-        other.map
-        .into_iter()
-        .for_each(|(key, value)| {
-            self.map.entry(key).and_modify(|cur_symbol| {
-                cur_symbol.children.extend(value.children.clone())
-            }).or_insert(value);
+        other.map.into_iter().for_each(|(key, value)| {
+            self.map
+                .entry(key)
+                .and_modify(|cur_symbol| cur_symbol.children.extend(value.children.clone()))
+                .or_insert(value);
         });
         self
     }
