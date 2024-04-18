@@ -21,29 +21,43 @@ pub trait Scope: Debug {
         cfg: &ControlFlowGraph,
         active_symbols: &Vec<SymbolChild>,
     ) -> (Vec<SymbolChild>, NodeList, EdgeList) {
-        let mut passed_symbols = vec![];
+        let mut passed_symbols: Vec<SymbolChild> = vec![];
         let mut nodes = NodeList(vec![]);
         let mut edges = EdgeList(vec![]);
 
-        if self.statements().len() == 0 {
-            return (active_symbols.clone(), nodes, edges);
-        }
+        for active_symbol in active_symbols.into_iter() {
+            let children = self.get_children(cfg, &active_symbol.symbol_id);
 
-        for statement in self.statements().iter() {
-            // Iterate through all the statements in the scope or subscope of
-            // the query
-            if let Some((passed_children, node_list, edge_list)) =
-                statement.execute(cfg, &active_symbols)
-            {
-                passed_symbols.extend(passed_children.into_iter());
-                nodes.0.extend(node_list.0.into_iter());
-                nodes
-                    .0
-                    .extend(passed_symbols.iter().map(|s| s.symbol_id.clone()));
-                edges.0.extend(edge_list.0.into_iter());
+            let mut valid_symbol = false;
+            for statement in self.statements().iter() {
+                // Iterate through all the statements in the scope or subscope of
+                // the query
+                if let Some((passed_children, node_list, edge_list)) =
+                    statement.execute(cfg, &children)
+                {
+                    valid_symbol = true;
+                    passed_children.iter().for_each(|c| {
+                        if let Some(occurence) = &c.occurence {
+                            edges.0.push((
+                                active_symbol.symbol_id.clone(),
+                                c.symbol_id.clone(),
+                                occurence.clone(),
+                            ))
+                        }
+                    });
+                    nodes.0.extend(node_list.0.into_iter());
+                    nodes
+                        .0
+                        .extend(passed_symbols.iter().map(|s| s.symbol_id.clone()));
+                    edges.0.extend(edge_list.0.into_iter());
+                }
             }
-        }
 
+            if valid_symbol {
+                passed_symbols.push(active_symbol.clone());
+            }
+    
+        }
         // Sort and deduplicate the sources
         passed_symbols.sort();
         passed_symbols.dedup();

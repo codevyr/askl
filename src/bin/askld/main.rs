@@ -368,7 +368,15 @@ mod tests {
         let statements = scope.statements();
         assert_eq!(statements.len(), 0);
 
-        println!("{:#?}", ast);
+        assert_eq!(format!("{:?}", ast), r#"DefaultScope([DefaultStatement { verb: FilterVerb { prev: UnitVerb, name: "a" }, scope: EmptyScope([]) }])"#);
+    }
+
+    #[test]
+    fn parse_parent_query() {        
+        const QUERY: &str = r#"{"a"}"#;
+        let ast = parse(QUERY).unwrap();
+        println!("{:?}", ast);
+        assert_eq!(format!("{:?}", ast), r#"DefaultScope([DefaultStatement { verb: UnitVerb, scope: DefaultScope([DefaultStatement { verb: FilterVerb { prev: UnitVerb, name: "a" }, scope: EmptyScope([]) }]) }])"#);
     }
 
     fn run_query(askl_input: &str, askl_query: &str) -> (Vec<SymbolChild>, NodeList, EdgeList) {

@@ -73,30 +73,16 @@ impl Statement for DefaultStatement {
             self.scope,
             symbols
         );
-        let mut passed_symbols = vec![];
         let mut res_edges = EdgeList(vec![]);
         let mut res_nodes = NodeList(vec![]);
-        for passed_symbol in verb_passed_symbols.into_iter() {
-            let children = self.scope().get_children(cfg, &passed_symbol.symbol_id);
-            let (scoped_children, nodes, edges) = self.scope.run(cfg, &children);
-            log::debug!(
-                "Default statement matched {:?} symbol {:?}",
-                scoped_children,
-                edges
-            );
-            scoped_children.iter().for_each(|c| {
-                if let Some(occurence) = &c.occurence {
-                    res_edges.0.push((
-                        passed_symbol.symbol_id.clone(),
-                        c.symbol_id.clone(),
-                        occurence.clone(),
-                    ))
-                }
-            });
-            passed_symbols.push(passed_symbol);
-            res_nodes.0.extend(nodes.0.into_iter());
-            res_edges.0.extend(edges.0.into_iter());
-        }
+        let (passed_symbols, nodes, edges) = self.scope.run(cfg, &verb_passed_symbols);
+        log::debug!(
+            "Default statement matched {:?} symbol {:?}",
+            passed_symbols,
+            edges
+        );
+        res_nodes.0.extend(nodes.0.into_iter());
+        res_edges.0.extend(edges.0.into_iter());
 
         log::debug!("Statement return {:?}", passed_symbols);
         return Some((passed_symbols, res_nodes, res_edges));
