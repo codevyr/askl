@@ -223,44 +223,6 @@ pub struct NamespaceDecl {
     pub name: Option<String>,
 }
 
-// fn node_simplify(root: Node) -> Vec<Node> {
-//     let inner: Vec<Node> = root
-//         .inner
-//         .into_iter()
-//         .map(|node| node_simplify(node))
-//         .flatten()
-//         .collect();
-//     match &root.kind {
-//         Clang::DeclRefExpr(ref_expr) => {
-//             if let Some(referenced_decl) = &ref_expr.referenced_decl {
-//                 if let Clang::FunctionDecl(_) = &referenced_decl.kind {
-//                     return vec![Node {
-//                         id: root.id,
-//                         kind: root.kind,
-//                         inner: inner,
-//                     }];
-//                 }
-//             }
-//             vec![]
-//         }
-//         Clang::FunctionDecl(_) => {
-//             vec![Node {
-//                 id: root.id,
-//                 kind: root.kind,
-//                 inner: inner,
-//             }]
-//         }
-//         Clang::TranslationUnitDecl => {
-//             vec![Node {
-//                 id: root.id,
-//                 kind: root.kind,
-//                 inner: inner,
-//             }]
-//         }
-//         Clang::Other | Clang::CompoundStmt => inner,
-//     }
-// }
-
 async fn run_ast_gen(args: Args, c: CompileCommand) -> anyhow::Result<(String, Node)> {
     let mut arguments = if let Some(ref command) = c.command {
         shell_words::split(command).expect("Failed to parse command")
@@ -362,67 +324,6 @@ fn extract_symbol_map_root(root: Node) -> Result<SymbolMap> {
         _ => Err(anyhow!("Not implemented")),
     }
 }
-
-// fn extract_symbol_map(root: Node) -> SymbolMap {
-//     let mut symbol_map = SymbolMap::new();
-//     for node in root.inner {
-//         if let Clang::FunctionDecl(ref f) = node.kind {
-//             let children = node
-//                 .inner
-//                 .iter()
-//                 .filter_map(|i| {
-//                     if let Clang::DeclRefExpr(r) = &i.kind {
-//                         if let Some(ref_decl) = &r.referenced_decl {
-//                             if let Clang::FunctionDecl(f) = &ref_decl.kind {
-//                                 if let Some(name) = &f.name {
-//                                     return Some(SymbolId::new(name.clone()));
-//                                 }
-//                             }
-//                         }
-//                     }
-//                     None
-//                 })
-//                 .collect();
-
-//             let clang_range = f.range.clone().unwrap();
-//             let range = if clang_range.begin.spelling_loc.is_some()
-//                 && clang_range.end.spelling_loc.is_some()
-//             {
-//                 let file = clang_range
-//                     .begin
-//                     .spelling_loc
-//                     .as_ref()
-//                     .unwrap()
-//                     .file
-//                     .clone()
-//                     .to_string();
-//                 if file == "" {
-//                     None
-//                 } else {
-//                     Some(Occurence {
-//                         file: file,
-//                         line_start: clang_range.begin.spelling_loc.as_ref().unwrap().line as i32,
-//                         column_start: clang_range.begin.spelling_loc.unwrap().col as i32,
-//                         line_end: clang_range.end.spelling_loc.as_ref().unwrap().line as i32,
-//                         column_end: clang_range.end.spelling_loc.unwrap().col as i32,
-//                     })
-//                 }
-//             } else {
-//                 None
-//             };
-//             symbol_map.add(
-//                 SymbolId::new(f.name.clone().unwrap()),
-//                 Symbol {
-//                     name: f.name.clone().unwrap(),
-//                     ranges: range.into_iter().collect(),
-//                     children: children,
-//                 },
-//             );
-//         }
-//     }
-
-//     symbol_map
-// }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
