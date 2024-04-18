@@ -112,9 +112,7 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     };
     debug!("Global scope: {:#?}", ast);
 
-    let (res_symbols, res_edges) = ast
-        .run(&data.cfg, &data.sources).unwrap();
-
+    let (res_symbols, res_edges) = ast.run(&data.cfg, &data.sources).unwrap();
 
     info!("Symbols: {:#?}", res_symbols.len());
     info!("Edges: {:#?}", res_edges.0.len());
@@ -251,6 +249,8 @@ async fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use askl::scope::DefaultScope;
+
     use super::*;
 
     const INPUT_A: &str = r#"
@@ -341,8 +341,43 @@ mod tests {
         }
     "#;
 
+    const QUERY_A: &str = r#""a""#;
+
     #[test]
     fn parse_askl() {
         let _symbols: SymbolMap = serde_json::from_slice(INPUT_A.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn parse_query() {
+        let ast = parse(QUERY_A).unwrap();
+
+        let statements = ast.statements();
+        assert_eq!(statements.len(), 1);
+        let statement = &statements[0];
+
+        let _verb = statement.verb();
+        let scope = statement.scope();
+
+        let statements = scope.statements();
+        assert_eq!(statements.len(), 0);
+
+        println!("{:#?}", ast);
+    }
+
+    #[test]
+    fn single_node_query() {
+        let symbols: SymbolMap = serde_json::from_slice(INPUT_A.as_bytes()).unwrap();
+        let sources: Vec<SymbolId> = symbols.iter().map(|(id, _)| id.clone()).collect();
+        let cfg = ControlFlowGraph::from_symbols(symbols);
+
+        let ast = parse(QUERY_A).unwrap();
+
+        let (res_symbols, res_edges) = ast.run(&cfg, &sources).unwrap();
+
+        assert_eq!(res_symbols, vec![SymbolId::new("a".to_string())]);
+        assert_eq!(res_edges.0.len(), 0);
+        println!("{:#?}", res_symbols);
+        println!("{:#?}", res_edges);
     }
 }
