@@ -248,3 +248,101 @@ async fn main() -> std::io::Result<()> {
     .run()
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INPUT_A: &str = r#"
+    {
+        "map": {
+            "b": {
+            "name": "b",
+            "ranges": [
+                {
+                "line_start": 1,
+                "line_end": 3,
+                "column_start": 1,
+                "column_end": 1,
+                "file": "main.c"
+                }
+            ],
+            "children": []
+            },
+            "a": {
+            "name": "a",
+            "ranges": [
+                {
+                "line_start": 5,
+                "line_end": 7,
+                "column_start": 1,
+                "column_end": 1,
+                "file": "main.c"
+                }
+            ],
+            "children": [
+                {
+                "symbol_id": "b",
+                "occurence": {
+                    "line_start": 7,
+                    "line_end": 7,
+                    "column_start": 16,
+                    "column_end": 16,
+                    "file": "main.c"
+                }
+                },
+                {
+                "symbol_id": "b",
+                "occurence": {
+                    "line_start": 7,
+                    "line_end": 7,
+                    "column_start": 22,
+                    "column_end": 22,
+                    "file": "main.c"
+                }
+                }
+            ]
+            },
+            "main": {
+            "name": "main",
+            "ranges": [
+                {
+                "line_start": 9,
+                "line_end": 11,
+                "column_start": 1,
+                "column_end": 1,
+                "file": "main.c"
+                }
+            ],
+            "children": [
+                {
+                "symbol_id": "a",
+                "occurence": {
+                    "line_start": 11,
+                    "line_end": 11,
+                    "column_start": 16,
+                    "column_end": 16,
+                    "file": "main.c"
+                }
+                },
+                {
+                "symbol_id": "b",
+                "occurence": {
+                    "line_start": 11,
+                    "line_end": 11,
+                    "column_start": 22,
+                    "column_end": 22,
+                    "file": "main.c"
+                }
+                }
+            ]
+            }
+        }
+        }
+    "#;
+
+    #[test]
+    fn parse_askl() {
+        let _symbols: SymbolMap = serde_json::from_slice(INPUT_A.as_bytes()).unwrap();
+    }
+}
