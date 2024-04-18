@@ -5,6 +5,7 @@ use std::{
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::{anyhow, Result};
+use askl::cfg::NodeList;
 use askl::{
     cfg::ControlFlowGraph,
     parser::parse,
@@ -112,9 +113,9 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     };
     debug!("Global scope: {:#?}", ast);
 
-    let (res_symbols, res_edges) = ast.run(&data.cfg, &data.sources).unwrap();
+    let (_, res_nodes, res_edges) = ast.run(&data.cfg, &data.sources);
 
-    info!("Symbols: {:#?}", res_symbols.len());
+    info!("Symbols: {:#?}", res_nodes.0.len());
     info!("Edges: {:#?}", res_edges.0.len());
 
     let mut result_graph = Graph::new();
@@ -126,8 +127,8 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
         result_graph.add_edge(Edge::new(from, to, loc));
     }
 
-    for s in res_symbols {
-        all_symbols.insert(s.symbol_id.clone());
+    for s in res_nodes.0 {
+        all_symbols.insert(s.clone());
     }
 
     for loc in all_symbols {
@@ -370,7 +371,7 @@ mod tests {
         println!("{:#?}", ast);
     }
 
-    fn run_query(askl_input: &str, askl_query: &str) -> (Vec<SymbolChild>, EdgeList) {
+    fn run_query(askl_input: &str, askl_query: &str) -> (Vec<SymbolChild>, NodeList, EdgeList) {
         let symbols: SymbolMap = serde_json::from_slice(askl_input.as_bytes()).unwrap();
         let sources: Vec<SymbolChild> = symbols
             .iter()
@@ -383,40 +384,44 @@ mod tests {
 
         let ast = parse(askl_query).unwrap();
 
-        ast.run(&cfg, &sources).unwrap()
+        ast.run(&cfg, &sources)
     }
 
     #[test]
     fn single_node_query() {
-        const QUERY: &str = r#""a""#;
-        let (res_symbols, res_edges) = run_query(INPUT_A, QUERY);
+        env_logger::init();
 
+        const QUERY: &str = r#""a""#;
+        let (_, res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
         assert_eq!(
-            res_symbols,
-            vec![SymbolChild {
-                symbol_id: SymbolId::new("a".to_string()),
-                occurence: None,
-            }]
+            res_nodes.0,
+            vec![SymbolId::new("a".to_string())]
         );
         assert_eq!(res_edges.0.len(), 0);
-        println!("{:#?}", res_symbols);
-        println!("{:#?}", res_edges);
     }
 
     #[test]
     fn single_child_query() {
         const QUERY: &str = r#""a"{}"#;
-        let (res_symbols, res_edges) = run_query(INPUT_A, QUERY);
+        let (_, res_nodes, res_edges) = run_query(INPUT_A, QUERY);
 
+        println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        println!("{:#?}", res_symbols);
-        assert_eq!(
-            res_symbols,
-            vec![SymbolChild {
-                symbol_id: SymbolId::new("a".to_string()),
-                occurence: None,
-            }]
-        );
-        assert_eq!(res_edges.0.len(), 0);
+        assert_eq!(res_nodes.0, vec![SymbolId::new("a".to_string()), SymbolId::new("b".to_string())]);
+        assert_eq!(res_edges.0.len(), 2);
+    }
+
+    #[test]
+    fn single_parent_query() {
+        const QUERY: &str = r#"{"a"}"#;
+        let (_, res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+        assert_eq!(res_nodes.0, vec![SymbolId::new("a".to_string()), SymbolId::new("main".to_string())]);
+        assert_eq!(res_edges.0.len(), 1);
     }
 }

@@ -1,4 +1,4 @@
-use crate::cfg::{ControlFlowGraph, EdgeList};
+use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::parser::Rule;
 use crate::statement::{build_statement, Statement};
 use crate::symbols::{Occurence, SymbolChild, SymbolId};
@@ -20,29 +20,38 @@ pub trait Scope: Debug {
         &self,
         cfg: &ControlFlowGraph,
         active_symbols: &Vec<SymbolChild>,
-    ) -> Option<(Vec<SymbolChild>, EdgeList)> {
-        let mut nodes = vec![];
+    ) -> (Vec<SymbolChild>, NodeList, EdgeList) {
+        let mut passed_symbols = vec![];
+        let mut nodes = NodeList(vec![]);
         let mut edges = EdgeList(vec![]);
 
         if self.statements().len() == 0 {
-            return Some((nodes, edges));
+            return (active_symbols.clone(), nodes, edges);
         }
 
         for statement in self.statements().iter() {
             // Iterate through all the statements in the scope or subscope of
             // the query
-            if let Some((passed_children, edge_list)) = statement.execute(cfg, &active_symbols) {
-                nodes.extend(passed_children.into_iter());
+            if let Some((passed_children, node_list, edge_list)) =
+                statement.execute(cfg, &active_symbols)
+            {
+                passed_symbols.extend(passed_children.into_iter());
+                nodes.0.extend(node_list.0.into_iter());
+                nodes
+                    .0
+                    .extend(passed_symbols.iter().map(|s| s.symbol_id.clone()));
                 edges.0.extend(edge_list.0.into_iter());
             }
         }
 
         // Sort and deduplicate the sources
-        nodes.sort();
-        nodes.dedup();
+        passed_symbols.sort();
+        passed_symbols.dedup();
+        nodes.0.sort();
+        nodes.0.dedup();
         edges.0.sort();
         edges.0.dedup();
-        Some((nodes, edges))
+        (passed_symbols, nodes, edges)
     }
 }
 
@@ -80,8 +89,20 @@ impl Scope for EmptyScope {
         &self.0
     }
 
-    fn get_children(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Vec<SymbolChild> {
+    fn get_children(&self, _cfg: &ControlFlowGraph, symbol: &SymbolId) -> Vec<SymbolChild> {
         debug!("get_children from Empty: {:?}", symbol);
         vec![]
+    }
+
+    fn run(
+        &self,
+        _cfg: &ControlFlowGraph,
+        active_symbols: &Vec<SymbolChild>,
+    ) -> (Vec<SymbolChild>, NodeList, EdgeList) {
+        (
+            active_symbols.clone(),
+            NodeList(active_symbols.iter().map(|s| s.symbol_id.clone()).collect()),
+            EdgeList(vec![]),
+        )
     }
 }
