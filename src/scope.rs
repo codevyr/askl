@@ -19,8 +19,8 @@ pub trait Scope: Debug {
     fn run(
         &self,
         cfg: &ControlFlowGraph,
-        active_symbols: &Vec<SymbolId>,
-    ) -> Option<(Vec<SymbolId>, EdgeList)> {
+        active_symbols: &Vec<SymbolChild>,
+    ) -> Option<(Vec<SymbolChild>, EdgeList)> {
         let mut nodes = vec![];
         let mut edges = EdgeList(vec![]);
 
@@ -28,28 +28,14 @@ pub trait Scope: Debug {
             return Some((nodes, edges));
         }
 
-        let child_symbols: Vec<_> = active_symbols
-            .iter()
-            .map(|active_symbol| {
-                let active_children = self.get_children(cfg, active_symbol);
-                for statement in self.statements().iter() {
-                    // Iterate through all the statements in the scope or subscope of
-                    // the query
-                    if let Some((passed_children, edge_list)) = statement
-                        .execute(cfg, &active_children)
-                    {
-                        passed_children.into_iter().for_each(|s| {
-                            nodes.push(s.symbol_id.clone());
-                            edges.0.push((
-                                active_symbol.clone(),
-                                s.symbol_id.clone(),
-                                s.occurence.clone(),
-                            ));
-                        })
-                    }
-                }
-            })
-            .collect();
+        for statement in self.statements().iter() {
+            // Iterate through all the statements in the scope or subscope of
+            // the query
+            if let Some((passed_children, edge_list)) = statement.execute(cfg, &active_symbols) {
+                nodes.extend(passed_children.into_iter());
+                edges.0.extend(edge_list.0.into_iter());
+            }
+        }
 
         // Sort and deduplicate the sources
         nodes.sort();

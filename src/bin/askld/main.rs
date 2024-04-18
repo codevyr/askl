@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use askl::{
     cfg::ControlFlowGraph,
     parser::parse,
-    symbols::{Symbol, SymbolId, SymbolMap},
+    symbols::{Symbol, SymbolChild, SymbolId, SymbolMap},
 };
 use askl::{
     cfg::EdgeList,
@@ -36,7 +36,7 @@ struct Args {
 
 struct AsklData {
     cfg: ControlFlowGraph,
-    sources: Vec<SymbolId>,
+    sources: Vec<SymbolChild>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -126,8 +126,8 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
         result_graph.add_edge(Edge::new(from, to, loc));
     }
 
-    for loc in res_symbols {
-        all_symbols.insert(loc.clone());
+    for s in res_symbols {
+        all_symbols.insert(s.symbol_id.clone());
     }
 
     for loc in all_symbols {
@@ -158,7 +158,13 @@ fn read_data(args: &Args) -> Result<AsklData> {
     match args.format.as_str() {
         "askl" => {
             let symbols: SymbolMap = serde_json::from_slice(&std::fs::read(&args.index)?)?;
-            let sources: Vec<SymbolId> = symbols.iter().map(|(id, _)| id.clone()).collect();
+            let sources: Vec<SymbolChild> = symbols
+                .iter()
+                .map(|(id, _)| SymbolChild {
+                    symbol_id: id.clone(),
+                    occurence: None,
+                })
+                .collect();
             let cfg = ControlFlowGraph::from_symbols(symbols);
             Ok(AsklData {
                 cfg: cfg,
@@ -249,7 +255,7 @@ async fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use askl::scope::DefaultScope;
+    use askl::{scope::DefaultScope, symbols::SymbolChild};
 
     use super::*;
 
@@ -341,8 +347,6 @@ mod tests {
         }
     "#;
 
-    const QUERY_A: &str = r#""a""#;
-
     #[test]
     fn parse_askl() {
         let _symbols: SymbolMap = serde_json::from_slice(INPUT_A.as_bytes()).unwrap();
@@ -350,7 +354,8 @@ mod tests {
 
     #[test]
     fn parse_query() {
-        let ast = parse(QUERY_A).unwrap();
+        const QUERY: &str = r#""a""#;
+        let ast = parse(QUERY).unwrap();
 
         let statements = ast.statements();
         assert_eq!(statements.len(), 1);
@@ -365,19 +370,53 @@ mod tests {
         println!("{:#?}", ast);
     }
 
-    #[test]
-    fn single_node_query() {
-        let symbols: SymbolMap = serde_json::from_slice(INPUT_A.as_bytes()).unwrap();
-        let sources: Vec<SymbolId> = symbols.iter().map(|(id, _)| id.clone()).collect();
+    fn run_query(askl_input: &str, askl_query: &str) -> (Vec<SymbolChild>, EdgeList) {
+        let symbols: SymbolMap = serde_json::from_slice(askl_input.as_bytes()).unwrap();
+        let sources: Vec<SymbolChild> = symbols
+            .iter()
+            .map(|(id, _)| SymbolChild {
+                symbol_id: id.clone(),
+                occurence: None,
+            })
+            .collect();
         let cfg = ControlFlowGraph::from_symbols(symbols);
 
-        let ast = parse(QUERY_A).unwrap();
+        let ast = parse(askl_query).unwrap();
 
-        let (res_symbols, res_edges) = ast.run(&cfg, &sources).unwrap();
+        ast.run(&cfg, &sources).unwrap()
+    }
 
-        assert_eq!(res_symbols, vec![SymbolId::new("a".to_string())]);
+    #[test]
+    fn single_node_query() {
+        const QUERY: &str = r#""a""#;
+        let (res_symbols, res_edges) = run_query(INPUT_A, QUERY);
+
+        assert_eq!(
+            res_symbols,
+            vec![SymbolChild {
+                symbol_id: SymbolId::new("a".to_string()),
+                occurence: None,
+            }]
+        );
         assert_eq!(res_edges.0.len(), 0);
         println!("{:#?}", res_symbols);
         println!("{:#?}", res_edges);
+    }
+
+    #[test]
+    fn single_child_query() {
+        const QUERY: &str = r#""a"{}"#;
+        let (res_symbols, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_edges);
+        println!("{:#?}", res_symbols);
+        assert_eq!(
+            res_symbols,
+            vec![SymbolChild {
+                symbol_id: SymbolId::new("a".to_string()),
+                occurence: None,
+            }]
+        );
+        assert_eq!(res_edges.0.len(), 0);
     }
 }

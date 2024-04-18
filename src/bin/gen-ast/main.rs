@@ -1,4 +1,4 @@
-use std::{fs::File, sync::Arc, path::PathBuf};
+use std::{fs::File, path::PathBuf, sync::Arc};
 
 use anyhow::{anyhow, Result};
 use askl::symbols::{Occurence, Symbol, SymbolChild, SymbolId, SymbolMap, Symbols};
@@ -146,10 +146,22 @@ impl FunctionDecl {
                     match &referenced_decl.kind {
                         Clang::FunctionDecl(f) => Some(SymbolChild {
                             symbol_id: SymbolId::new(f.name.as_ref().unwrap().clone()),
-                            occurence: Occurence::new(
-                                PathBuf::from(ref_expr.range.as_ref().unwrap().begin.expansion_loc.as_ref().unwrap().file.clone().to_string()),
+                            occurence: Some(Occurence::new(
+                                PathBuf::from(
+                                    ref_expr
+                                        .range
+                                        .as_ref()
+                                        .unwrap()
+                                        .begin
+                                        .expansion_loc
+                                        .as_ref()
+                                        .unwrap()
+                                        .file
+                                        .clone()
+                                        .to_string(),
+                                ),
                                 ref_expr.range.as_ref().unwrap().clone(),
-                            ),
+                            )),
                         }),
                         // Clang::VarDecl(v) => {
                         //     Some(SymbolChild {

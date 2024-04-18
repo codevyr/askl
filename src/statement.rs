@@ -58,13 +58,13 @@ impl Statement for DefaultStatement {
         cfg: &ControlFlowGraph,
         symbols: &Vec<SymbolChild>,
     ) -> Option<(Vec<SymbolChild>, EdgeList)> {
-        let passed_children: Vec<SymbolChild> = symbols
+        let mut passed_symbols: Vec<SymbolChild> = symbols
             .iter()
             .filter(|s| self.verb().symbols(cfg, &s.symbol_id))
             .map(|s| s.clone())
             .collect();
 
-        if passed_children.len() == 0 {
+        if passed_symbols.len() == 0 {
             return None;
         }
 
@@ -73,19 +73,19 @@ impl Statement for DefaultStatement {
             self.scope,
             symbols
         );
-        if let Some((nodes, edges)) = self.scope.run(
-            cfg,
-            &passed_children
-                .iter()
-                .map(|s| s.symbol_id.clone())
-                .collect(),
-        ) {
-            log::debug!("Default statement matched {:?} symbol {:?}", nodes, edges);
-
-            return Some((passed_children, edges));
+        let mut res_edges = EdgeList(vec![]);
+        let mut children_symbols = vec![];
+        for passed_symbol in passed_symbols.iter() {
+            let children = self.scope().get_children(cfg, &passed_symbol.symbol_id);
+            if let Some((scoped_children, edges)) = self.scope.run(cfg, &children) {
+                log::debug!("Default statement matched {:?} symbol {:?}", scoped_children, edges);
+                children_symbols.extend(scoped_children.into_iter());
+                res_edges.0.extend(edges.0.into_iter());
+            }
         }
 
-        None
+        passed_symbols.extend(children_symbols.into_iter());
+        return Some((passed_symbols, res_edges));
     }
 
     fn verb(&self) -> &dyn Verb {
