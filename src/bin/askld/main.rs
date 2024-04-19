@@ -368,7 +368,7 @@ mod tests {
         let statements = scope.statements();
         assert_eq!(statements.len(), 0);
 
-        assert_eq!(format!("{:?}", ast), r#"DefaultScope([DefaultStatement { verb: FilterVerb { prev: UnitVerb, name: "a" }, scope: EmptyScope([]) }])"#);
+        assert_eq!(format!("{:?}", ast), r#"GlobalScope([DefaultStatement { verb: FilterVerb { prev: UnitVerb, name: "a" }, scope: EmptyScope([]) }])"#);
     }
 
     #[test]
@@ -376,7 +376,7 @@ mod tests {
         const QUERY: &str = r#"{"a"}"#;
         let ast = parse(QUERY).unwrap();
         println!("{:?}", ast);
-        assert_eq!(format!("{:?}", ast), r#"DefaultScope([DefaultStatement { verb: UnitVerb, scope: DefaultScope([DefaultStatement { verb: FilterVerb { prev: UnitVerb, name: "a" }, scope: EmptyScope([]) }]) }])"#);
+        assert_eq!(format!("{:?}", ast), r#"GlobalScope([DefaultStatement { verb: UnitVerb, scope: DefaultScope([DefaultStatement { verb: FilterVerb { prev: UnitVerb, name: "a" }, scope: EmptyScope([]) }]) }])"#);
     }
 
     fn run_query(askl_input: &str, askl_query: &str) -> (Vec<SymbolChild>, NodeList, EdgeList) {

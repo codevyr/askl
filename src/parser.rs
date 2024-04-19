@@ -1,5 +1,5 @@
 use crate::{
-    scope::{DefaultScope, Scope},
+    scope::{GlobalScope, Scope},
     statement::build_statement,
 };
 use anyhow::Result;
@@ -66,5 +66,5 @@ pub fn parse(ask_code: &str) -> Result<Box<dyn Scope>> {
         };
     }
 
-    Ok(Box::new(DefaultScope::new(ast)))
+    Ok(Box::new(GlobalScope::new(ast)))
 }

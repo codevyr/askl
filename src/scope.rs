@@ -56,7 +56,6 @@ pub trait Scope: Debug {
             if valid_symbol {
                 passed_symbols.push(active_symbol.clone());
             }
-    
         }
         // Sort and deduplicate the sources
         passed_symbols.sort();
@@ -86,6 +85,60 @@ impl Scope for DefaultScope {
     fn get_children(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Vec<SymbolChild> {
         // debug!("get_children from Default: {:?}", symbol);
         cfg.symbols.get_children(symbol)
+    }
+}
+
+#[derive(Debug)]
+pub struct GlobalScope(Vec<Box<dyn Statement>>);
+
+impl GlobalScope {
+    pub fn new(statements: Vec<Box<dyn Statement>>) -> Self {
+        Self(statements)
+    }
+}
+
+impl Scope for GlobalScope {
+    fn statements(&self) -> &Vec<Box<dyn Statement>> {
+        &self.0
+    }
+
+    fn get_children(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Vec<SymbolChild> {
+        // debug!("get_children from Default: {:?}", symbol);
+        cfg.symbols.get_children(symbol)
+    }
+
+    fn run(
+        &self,
+        cfg: &ControlFlowGraph,
+        active_symbols: &Vec<SymbolChild>,
+    ) -> (Vec<SymbolChild>, NodeList, EdgeList) {
+        let mut passed_symbols: Vec<SymbolChild> = vec![];
+        let mut nodes = NodeList(vec![]);
+        let mut edges = EdgeList(vec![]);
+
+        for statement in self.statements().iter() {
+            // Iterate through all the statements in the scope or subscope of
+            // the query
+            if let Some((new_passed_symbols, node_list, edge_list)) = statement.execute(cfg, &active_symbols)
+            {
+                nodes.0.extend(node_list.0.into_iter());
+                nodes
+                    .0
+                    .extend(new_passed_symbols.iter().map(|s| s.symbol_id.clone()));
+                edges.0.extend(edge_list.0.into_iter());
+                passed_symbols.extend(new_passed_symbols.into_iter());
+            }
+        }
+
+
+        // Sort and deduplicate the sources
+        passed_symbols.sort();
+        passed_symbols.dedup();
+        nodes.0.sort();
+        nodes.0.dedup();
+        edges.0.sort();
+        edges.0.dedup();
+        (passed_symbols, nodes, edges)
     }
 }
 
