@@ -22,7 +22,7 @@ fn build_generic_verb(prev_verb: Box<dyn Verb>, pair: pest::iterators::Pair<Rule
 
     let span = ident.as_span();
     match Identifier::build(ident)?.0.as_str() {
-        FilterVerb::NAME => FilterVerb::new(positional, named),
+        FilterVerb::NAME => FilterVerb::new(&positional, &named),
         unknown => Err(anyhow!("Unknown filter: {}", unknown)),
     }
 }
@@ -41,7 +41,7 @@ pub fn build_verb(prev_verb: Box<dyn Verb>, pair: pest::iterators::Pair<Rule>) -
                     let positional = vec![];
                     let mut named = HashMap::new();
                     named.insert("name".into(), ident.as_str().into());
-                    FilterVerb::new(positional, named)
+                    CompoundVerb::new(&positional, &named)
                 },
                 _ => unreachable!("Unknown rule: {:#?}", pair.as_rule()),
             }
@@ -61,12 +61,43 @@ pub fn build_verb(prev_verb: Box<dyn Verb>, pair: pest::iterators::Pair<Rule>) -
 pub trait Verb: Debug {
     fn symbols(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> bool;
 
-    fn filter(&self, cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
+    fn filter(&self, _cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
         symbols
     }
 
-    fn derive(&self, cfg: &ControlFlowGraph, symbol: &SymbolChild) -> Vec<SymbolChild> {
+    fn derive(&self, _cfg: &ControlFlowGraph, symbol: &SymbolChild) -> Vec<SymbolChild> {
         vec![symbol.clone()]
+    }
+}
+
+#[derive(Debug)]
+struct CompoundVerb {
+    filter_verb: Box<dyn Verb>,
+    derive_verb: Box<dyn Verb>,
+}
+
+impl CompoundVerb {
+    const NAME: &'static str = "verb";
+
+    fn new(positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Box<dyn Verb>> {
+        Ok(Box::new(Self {
+            filter_verb: FilterVerb::new(&positional, &named)?,
+            derive_verb: ChildrenVerb::new(&positional, &named)?,
+        }))
+    }
+}
+
+impl Verb for CompoundVerb {
+    fn symbols(&self, _cfg: &ControlFlowGraph, _symbol: &SymbolId) -> bool {
+        true
+    }
+
+    fn filter(&self, cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
+        self.filter_verb.filter(cfg, symbols)
+    }
+
+    fn derive(&self, cfg: &ControlFlowGraph, symbol: &SymbolChild) -> Vec<SymbolChild> {
+        self.derive_verb.derive(cfg, symbol)
     }
 }
 
@@ -78,7 +109,7 @@ struct FilterVerb {
 impl FilterVerb {
     const NAME: &'static str = "filter";
 
-    fn new(_positional: Vec<String>, named: HashMap<String, String>) -> Result<Box<dyn Verb>> {
+    fn new(_positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Box<dyn Verb>> {
         if let Some(name) = named.get("name") {
             Ok(Box::new(Self {
                 name: name.clone()
@@ -113,7 +144,7 @@ struct ChildrenVerb {
 impl ChildrenVerb {
     const NAME: &'static str = "children";
 
-    fn new(_positional: Vec<String>, named: HashMap<String, String>) -> Result<Box<dyn Verb>> {
+    fn new(_positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Box<dyn Verb>> {
         Ok(Box::new(Self {}))
     }
 }
