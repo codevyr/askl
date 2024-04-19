@@ -20,6 +20,32 @@ pub trait Scope: Debug {
         &self,
         cfg: &ControlFlowGraph,
         active_symbols: &Vec<SymbolChild>,
+    ) -> (Vec<SymbolChild>, NodeList, EdgeList);
+}
+
+#[derive(Debug)]
+pub struct DefaultScope(Vec<Box<dyn Statement>>);
+
+impl DefaultScope {
+    pub fn new(statements: Vec<Box<dyn Statement>>) -> Self {
+        Self(statements)
+    }
+}
+
+impl Scope for DefaultScope {
+    fn statements(&self) -> &Vec<Box<dyn Statement>> {
+        &self.0
+    }
+
+    fn get_children(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Vec<SymbolChild> {
+        // debug!("get_children from Default: {:?}", symbol);
+        cfg.symbols.get_children(symbol)
+    }
+
+    fn run(
+        &self,
+        cfg: &ControlFlowGraph,
+        active_symbols: &Vec<SymbolChild>,
     ) -> (Vec<SymbolChild>, NodeList, EdgeList) {
         let mut passed_symbols: Vec<SymbolChild> = vec![];
         let mut nodes = NodeList(vec![]);
@@ -69,26 +95,6 @@ pub trait Scope: Debug {
 }
 
 #[derive(Debug)]
-pub struct DefaultScope(Vec<Box<dyn Statement>>);
-
-impl DefaultScope {
-    pub fn new(statements: Vec<Box<dyn Statement>>) -> Self {
-        Self(statements)
-    }
-}
-
-impl Scope for DefaultScope {
-    fn statements(&self) -> &Vec<Box<dyn Statement>> {
-        &self.0
-    }
-
-    fn get_children(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Vec<SymbolChild> {
-        // debug!("get_children from Default: {:?}", symbol);
-        cfg.symbols.get_children(symbol)
-    }
-}
-
-#[derive(Debug)]
 pub struct GlobalScope(Vec<Box<dyn Statement>>);
 
 impl GlobalScope {
@@ -119,7 +125,8 @@ impl Scope for GlobalScope {
         for statement in self.statements().iter() {
             // Iterate through all the statements in the scope or subscope of
             // the query
-            if let Some((new_passed_symbols, node_list, edge_list)) = statement.execute(cfg, &active_symbols)
+            if let Some((new_passed_symbols, node_list, edge_list)) =
+                statement.execute(cfg, &active_symbols)
             {
                 nodes.0.extend(node_list.0.into_iter());
                 nodes
@@ -129,7 +136,6 @@ impl Scope for GlobalScope {
                 passed_symbols.extend(new_passed_symbols.into_iter());
             }
         }
-
 
         // Sort and deduplicate the sources
         passed_symbols.sort();
