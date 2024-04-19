@@ -1,19 +1,41 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
-use crate::parser::Rule;
+use crate::parser::{ParserContext, Rule};
 use crate::statement::{build_statement, Statement};
-use crate::symbols::{Occurence, SymbolChild, SymbolId};
+use crate::symbols::SymbolChild;
 use core::fmt::Debug;
-use log::debug;
 use pest::error::Error;
 
-pub fn build_scope(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Scope>, Error<Rule>> {
+pub fn build_scope(
+    ctx: &ParserContext,
+    pair: pest::iterators::Pair<Rule>,
+) -> Result<Box<dyn Scope>, Error<Rule>> {
     let statements: Result<Vec<Box<dyn Statement>>, _> =
-        pair.into_inner().map(build_statement).collect();
-    Ok(Box::new(DefaultScope(statements?)))
+        pair.into_inner().map(|p| build_statement(ctx, p)).collect();
+
+    Ok(ctx.new_scope(statements?))
+}
+
+#[derive(Debug)]
+pub enum ScopeFactory {
+    Children,
+    Global,
+    Empty,
+}
+
+impl ScopeFactory {
+    pub fn create(&self, statements: Vec<Box<dyn Statement>>) -> Box<dyn Scope> {
+        match self {
+            Self::Children => DefaultScope::new(statements),
+            Self::Global => GlobalScope::new(statements),
+            _ => panic!("Impossible: {:?}", self),
+        }
+    }
 }
 
 pub trait Scope: Debug {
     fn statements(&self) -> &Vec<Box<dyn Statement>>;
+
+    fn derive(&self, cfg: &ControlFlowGraph, symbol: &SymbolChild) -> Vec<SymbolChild>;
 
     fn run(
         &self,
@@ -26,14 +48,18 @@ pub trait Scope: Debug {
 pub struct DefaultScope(Vec<Box<dyn Statement>>);
 
 impl DefaultScope {
-    pub fn new(statements: Vec<Box<dyn Statement>>) -> Self {
-        Self(statements)
+    pub fn new(statements: Vec<Box<dyn Statement>>) -> Box<dyn Scope> {
+        Box::new(Self(statements))
     }
 }
 
 impl Scope for DefaultScope {
     fn statements(&self) -> &Vec<Box<dyn Statement>> {
         &self.0
+    }
+
+    fn derive(&self, cfg: &ControlFlowGraph, symbol: &SymbolChild) -> Vec<SymbolChild> {
+        cfg.symbols.get_children(&symbol.symbol_id)
     }
 
     fn run(
@@ -76,14 +102,18 @@ impl Scope for DefaultScope {
 pub struct GlobalScope(Vec<Box<dyn Statement>>);
 
 impl GlobalScope {
-    pub fn new(statements: Vec<Box<dyn Statement>>) -> Self {
-        Self(statements)
+    pub fn new(statements: Vec<Box<dyn Statement>>) -> Box<dyn Scope> {
+        Box::new(Self(statements))
     }
 }
 
 impl Scope for GlobalScope {
     fn statements(&self) -> &Vec<Box<dyn Statement>> {
         &self.0
+    }
+
+    fn derive(&self, _cfg: &ControlFlowGraph, symbol: &SymbolChild) -> Vec<SymbolChild> {
+        vec![symbol.clone()]
     }
 
     fn run(
@@ -135,14 +165,24 @@ impl Scope for EmptyScope {
         &self.0
     }
 
+    fn derive(&self, _cfg: &ControlFlowGraph, symbol: &SymbolChild) -> Vec<SymbolChild> {
+        vec![symbol.clone()]
+    }
+
     fn run(
         &self,
         _cfg: &ControlFlowGraph,
         active_symbols: &Vec<SymbolChild>,
     ) -> (Vec<SymbolChild>, NodeList, EdgeList) {
         (
-            active_symbols.clone(),
-            NodeList(active_symbols.iter().map(|s| s.symbol_id.clone()).collect()),
+            active_symbols
+                .iter()
+                .map(|s| SymbolChild {
+                    symbol_id: s.symbol_id.clone(),
+                    occurence: None,
+                })
+                .collect(),
+            NodeList(vec![]),
             EdgeList(vec![]),
         )
     }

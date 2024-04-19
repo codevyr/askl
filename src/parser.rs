@@ -1,6 +1,6 @@
 use crate::{
-    scope::{GlobalScope, Scope},
-    statement::build_statement,
+    scope::{GlobalScope, Scope, build_scope, DefaultScope, ScopeFactory},
+    statement::{build_statement, Statement}, verb::Verb,
 };
 use anyhow::Result;
 use core::fmt::Debug;
@@ -54,17 +54,62 @@ impl NamedArgument {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct ParserContext<'a> {
+    prev: Option<&'a ParserContext<'a>>,
+    scope_factory: Option<ScopeFactory>,
+}
+
+impl<'a> ParserContext<'a> {
+    pub fn new(scope_factory: ScopeFactory) -> Self {
+        Self {
+            prev: None,
+            scope_factory: Some(scope_factory),
+        }
+    }
+
+    pub fn derive(&'a self) -> Box<Self> {
+        Box::new(Self{
+            prev: Some(self),
+            ..Default::default()
+        })
+    }
+
+    pub fn set_scope_factory(&mut self, scope_factory: ScopeFactory) {
+        self.scope_factory = Some(scope_factory);
+    }
+
+    pub fn new_scope(&self, statements: Vec<Box<dyn Statement>>) -> Box<dyn Scope> {
+        if let Some(factory) = &self.scope_factory {
+            return factory.create(statements)
+        }
+
+        let factory = self.prev.expect("Should never try uninitialized factory");
+        factory.new_scope(statements)
+    }
+
+    pub fn consume(&mut self, verb: Box<dyn Verb>) -> Option<Box<dyn Verb>> {
+        if !verb.update_context(self) {
+            Some(verb)
+        } else {
+            None
+        }
+    }
+}
+
+
 pub fn parse(ask_code: &str) -> Result<Box<dyn Scope>> {
     let pairs = AsklParser::parse(Rule::ask, ask_code)?;
 
+    let ctx = ParserContext::new(ScopeFactory::Children);
     let mut ast = vec![];
     for pair in pairs {
         match pair.as_rule() {
-            Rule::statement => ast.push(build_statement(pair)?),
+            Rule::statement => ast.push(build_statement(&ctx, pair)?),
             Rule::EOI => {}
             _ => unreachable!("Unknown rule: {:#?}", pair.as_rule()),
         };
     }
 
-    Ok(Box::new(GlobalScope::new(ast)))
+    Ok(GlobalScope::new(ast))
 }

@@ -5,15 +5,11 @@ use std::{
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::{anyhow, Result};
-use askl::cfg::NodeList;
+use askl::symbols::{Occurence, Symbols};
 use askl::{
     cfg::ControlFlowGraph,
     parser::parse,
     symbols::{Symbol, SymbolChild, SymbolId, SymbolMap},
-};
-use askl::{
-    cfg::EdgeList,
-    symbols::{Occurence, Symbols},
 };
 use clap::Parser;
 use log::{debug, info};
@@ -145,7 +141,7 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
 }
 
 #[get["/source/{path:.*}"]]
-async fn file(data: web::Data<AsklData>, path: web::Path<String>) -> impl Responder {
+async fn file(_data: web::Data<AsklData>, path: web::Path<String>) -> impl Responder {
     let path = Path::new("/").join(Path::new(path.as_str()));
     debug!("Received request for file: {:#?}", path);
     debug!("XXX: This function is unsafe, because it can read any file on the system");
@@ -257,7 +253,7 @@ async fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use askl::{scope::DefaultScope, symbols::SymbolChild};
+    use askl::{symbols::SymbolChild, cfg::{EdgeList, NodeList}};
 
     use super::*;
 
@@ -370,15 +366,32 @@ mod tests {
         assert_eq!(statements.len(), 0);
 
         println!("{:?}", ast);
-        assert_eq!(format!("{:?}", ast), r#"GlobalScope([DefaultStatement { verb: CompoundVerb { filter_verb: FilterVerb { name: "a" }, derive_verb: ChildrenVerb }, scope: EmptyScope([]) }])"#);
+        assert_eq!(
+            format!("{:?}", ast),
+            r#"GlobalScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: EmptyScope([]) }])"#
+        );
     }
 
     #[test]
-    fn parse_parent_query() {        
+    fn parse_parent_query() {
         const QUERY: &str = r#"{"a"}"#;
         let ast = parse(QUERY).unwrap();
         println!("{:?}", ast);
-        assert_eq!(format!("{:?}", ast), r#"GlobalScope([DefaultStatement { verb: UnitVerb, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: FilterVerb { name: "a" }, derive_verb: ChildrenVerb }, scope: EmptyScope([]) }]) }])"#);
+        assert_eq!(
+            format!("{:?}", ast),
+            r#"GlobalScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: EmptyScope([]) }]) }])"#
+        );
+    }
+
+    #[test]
+    fn parse_child_query() {
+        const QUERY: &str = r#""a"{}"#;
+        let ast = parse(QUERY).unwrap();
+        println!("{:?}", ast);
+        assert_eq!(
+            format!("{:?}", ast),
+            r#"GlobalScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb] }, scope: EmptyScope([]) }]) }])"#
+        );
     }
 
     fn run_query(askl_input: &str, askl_query: &str) -> (Vec<SymbolChild>, NodeList, EdgeList) {
@@ -406,10 +419,7 @@ mod tests {
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(
-            res_nodes.0,
-            vec![SymbolId::new("a".to_string())]
-        );
+        assert_eq!(res_nodes.0, vec![SymbolId::new("a".to_string())]);
         assert_eq!(res_edges.0.len(), 0);
     }
 
@@ -420,7 +430,13 @@ mod tests {
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.0, vec![SymbolId::new("a".to_string()), SymbolId::new("b".to_string())]);
+        assert_eq!(
+            res_nodes.0,
+            vec![
+                SymbolId::new("a".to_string()),
+                SymbolId::new("b".to_string())
+            ]
+        );
         assert_eq!(res_edges.0.len(), 2);
     }
 
@@ -431,7 +447,13 @@ mod tests {
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.0, vec![SymbolId::new("a".to_string()), SymbolId::new("main".to_string())]);
+        assert_eq!(
+            res_nodes.0,
+            vec![
+                SymbolId::new("a".to_string()),
+                SymbolId::new("main".to_string())
+            ]
+        );
         assert_eq!(res_edges.0.len(), 1);
     }
 
@@ -442,8 +464,19 @@ mod tests {
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.0, vec![SymbolId::new("a".to_string()), SymbolId::new("b".to_string()), SymbolId::new("main".to_string())]);
-        let edges: Vec<_> = res_edges.0.into_iter().map(|(f, t, _)| format!("{}-{}", f, t)).collect();
+        assert_eq!(
+            res_nodes.0,
+            vec![
+                SymbolId::new("a".to_string()),
+                SymbolId::new("b".to_string()),
+                SymbolId::new("main".to_string())
+            ]
+        );
+        let edges: Vec<_> = res_edges
+            .0
+            .into_iter()
+            .map(|(f, t, _)| format!("{}-{}", f, t))
+            .collect();
         assert_eq!(edges, vec!["a-b", "a-b", "main-a", "main-b"]);
     }
 }

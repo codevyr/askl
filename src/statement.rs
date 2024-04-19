@@ -1,24 +1,31 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
-use crate::parser::Rule;
+use crate::parser::{ParserContext, Rule};
 use crate::scope::{build_scope, EmptyScope, Scope};
 use crate::symbols::{Symbol, SymbolChild, SymbolId};
-use crate::verb::{build_verb, UnitVerb, Verb};
+use crate::verb::{build_verb, CompoundVerb, UnitVerb, Verb};
 use core::fmt::Debug;
 use pest::error::Error;
 
 pub fn build_statement<'a>(
+    ctx: &ParserContext,
     pair: pest::iterators::Pair<Rule>,
 ) -> Result<Box<dyn Statement>, Error<Rule>> {
-    let mut verb: Box<dyn Verb> = UnitVerb::new();
     let mut scope: Box<dyn Scope> = Box::new(EmptyScope::new());
 
-    for pair in pair.into_inner() {
+    let mut iter = pair.into_inner();
+    let mut sub_ctx = ctx.derive();
+    let mut verbs = vec![UnitVerb::new()];
+    for pair in iter.by_ref() {
         match pair.as_rule() {
             Rule::verb => {
-                verb = build_verb(verb, pair)?;
+                let new_verb = build_verb(&sub_ctx, pair)?;
+                if let Some(verb) = sub_ctx.consume(new_verb) {
+                    verbs.push(verb);
+                }
             }
             Rule::scope => {
-                scope = build_scope(pair)?;
+                scope = build_scope(ctx, pair)?;
+                break;
             }
             _ => Err(Error::new_from_span(
                 pest::error::ErrorVariant::ParsingError {
@@ -28,6 +35,17 @@ pub fn build_statement<'a>(
                 pair.as_span(),
             ))?,
         }
+    }
+
+    let verb: Box<dyn Verb> = CompoundVerb::new(verbs).unwrap();
+
+    if let Some(pair) = iter.next() {
+        return Err(Error::new_from_span(
+            pest::error::ErrorVariant::CustomError {
+                message: format!("Unexpected token after scope: {}", pair),
+            },
+            pair.as_span(),
+        ));
     }
 
     Ok(Box::new(DefaultStatement {
@@ -68,8 +86,8 @@ impl Statement for DefaultStatement {
         let mut res_edges = EdgeList(vec![]);
         let mut res_nodes = NodeList(vec![]);
         for filtered_symbol in filtered_symbols {
-            let derived_symbols: Vec<_> = self.verb().derive(cfg, &filtered_symbol);
-            let (passed_symbols, nodes, edges) = self.scope.run(cfg, &derived_symbols);
+            let derived_symbols: Vec<_> = self.scope().derive(cfg, &filtered_symbol);
+            let (passed_symbols, nodes, edges) = self.scope().run(cfg, &derived_symbols);
             if passed_symbols.len() > 0 {
                 passed_symbols.iter().for_each(|c| {
                     if let Some(occurence) = &c.occurence {
