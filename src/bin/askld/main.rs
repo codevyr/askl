@@ -135,6 +135,7 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
         let sym = data.cfg.get_symbol(&loc).unwrap();
         let filename = sym.ranges[0].file.clone();
         let line = sym.ranges[0].line_start;
+        debug!("filename {}", filename.display());
         let url = Url::from_file_path(filename).unwrap();
         result_graph.add_node(Node::new(loc, sym.name.clone(), url, format!("{}", line)));
     }
@@ -368,7 +369,7 @@ mod tests {
         let statements = scope.statements();
         assert_eq!(statements.len(), 0);
 
-        assert_eq!(format!("{:?}", ast), r#"GlobalScope([DefaultStatement { verb: FilterVerb { prev: UnitVerb, name: "a" }, scope: EmptyScope([]) }])"#);
+        assert_eq!(format!("{:?}", ast), r#"GlobalScope([DefaultStatement { verb: FilterVerb { name: "a" }, scope: EmptyScope([]) }])"#);
     }
 
     #[test]
@@ -376,7 +377,7 @@ mod tests {
         const QUERY: &str = r#"{"a"}"#;
         let ast = parse(QUERY).unwrap();
         println!("{:?}", ast);
-        assert_eq!(format!("{:?}", ast), r#"GlobalScope([DefaultStatement { verb: UnitVerb, scope: DefaultScope([DefaultStatement { verb: FilterVerb { prev: UnitVerb, name: "a" }, scope: EmptyScope([]) }]) }])"#);
+        assert_eq!(format!("{:?}", ast), r#"GlobalScope([DefaultStatement { verb: UnitVerb, scope: DefaultScope([DefaultStatement { verb: FilterVerb { name: "a" }, scope: EmptyScope([]) }]) }])"#);
     }
 
     fn run_query(askl_input: &str, askl_query: &str) -> (Vec<SymbolChild>, NodeList, EdgeList) {
@@ -431,5 +432,17 @@ mod tests {
         println!("{:#?}", res_edges);
         assert_eq!(res_nodes.0, vec![SymbolId::new("a".to_string()), SymbolId::new("main".to_string())]);
         assert_eq!(res_edges.0.len(), 1);
+    }
+
+    #[test]
+    fn double_parent_query() {
+        const QUERY: &str = r#"{{"b"}}"#;
+        let (_, res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+        assert_eq!(res_nodes.0, vec![SymbolId::new("a".to_string()), SymbolId::new("b".to_string()), SymbolId::new("main".to_string())]);
+        let edges: Vec<_> = res_edges.0.into_iter().map(|(f, t, _)| format!("{}-{}", f, t)).collect();
+        assert_eq!(edges, vec!["a-b", "a-b", "main-a", "main-b"]);
     }
 }

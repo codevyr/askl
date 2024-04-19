@@ -14,7 +14,6 @@ pub fn build_scope(pair: pest::iterators::Pair<Rule>) -> Result<Box<dyn Scope>, 
 
 pub trait Scope: Debug {
     fn statements(&self) -> &Vec<Box<dyn Statement>>;
-    fn get_children(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Vec<SymbolChild>;
 
     fn run(
         &self,
@@ -37,60 +36,39 @@ impl Scope for DefaultScope {
         &self.0
     }
 
-    fn get_children(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Vec<SymbolChild> {
-        // debug!("get_children from Default: {:?}", symbol);
-        cfg.symbols.get_children(symbol)
-    }
-
     fn run(
         &self,
         cfg: &ControlFlowGraph,
         active_symbols: &Vec<SymbolChild>,
     ) -> (Vec<SymbolChild>, NodeList, EdgeList) {
-        let mut passed_symbols: Vec<SymbolChild> = vec![];
-        let mut nodes = NodeList(vec![]);
-        let mut edges = EdgeList(vec![]);
+        let mut res_symbols: Vec<SymbolChild> = vec![];
+        let mut res_nodes = NodeList(vec![]);
+        let mut res_edges = EdgeList(vec![]);
 
-        for active_symbol in active_symbols.into_iter() {
-            let children = self.get_children(cfg, &active_symbol.symbol_id);
+        for statement in self.statements().iter() {
+            // Iterate through all the statements in the scope or subscope of
+            // the query
+            if let Some((passed_symbols, scope_nodes, scope_edges)) =
+                statement.execute(cfg, &active_symbols)
+            {
+                res_symbols.extend(passed_symbols.into_iter());
 
-            let mut valid_symbol = false;
-            for statement in self.statements().iter() {
-                // Iterate through all the statements in the scope or subscope of
-                // the query
-                if let Some((passed_children, node_list, edge_list)) =
-                    statement.execute(cfg, &children)
-                {
-                    valid_symbol = true;
-                    passed_children.iter().for_each(|c| {
-                        if let Some(occurence) = &c.occurence {
-                            edges.0.push((
-                                active_symbol.symbol_id.clone(),
-                                c.symbol_id.clone(),
-                                occurence.clone(),
-                            ))
-                        }
-                    });
-                    nodes.0.extend(node_list.0.into_iter());
-                    nodes
-                        .0
-                        .extend(passed_symbols.iter().map(|s| s.symbol_id.clone()));
-                    edges.0.extend(edge_list.0.into_iter());
-                }
-            }
-
-            if valid_symbol {
-                passed_symbols.push(active_symbol.clone());
+                res_nodes.0.extend(scope_nodes.0.into_iter());
+                res_nodes
+                    .0
+                    .extend(res_symbols.iter().map(|s| s.symbol_id.clone()));
+                res_edges.0.extend(scope_edges.0.into_iter());
             }
         }
+
         // Sort and deduplicate the sources
-        passed_symbols.sort();
-        passed_symbols.dedup();
-        nodes.0.sort();
-        nodes.0.dedup();
-        edges.0.sort();
-        edges.0.dedup();
-        (passed_symbols, nodes, edges)
+        res_symbols.sort();
+        res_symbols.dedup();
+        res_nodes.0.sort();
+        res_nodes.0.dedup();
+        res_edges.0.sort();
+        res_edges.0.dedup();
+        (res_symbols, res_nodes, res_edges)
     }
 }
 
@@ -108,17 +86,12 @@ impl Scope for GlobalScope {
         &self.0
     }
 
-    fn get_children(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Vec<SymbolChild> {
-        // debug!("get_children from Default: {:?}", symbol);
-        cfg.symbols.get_children(symbol)
-    }
-
     fn run(
         &self,
         cfg: &ControlFlowGraph,
         active_symbols: &Vec<SymbolChild>,
     ) -> (Vec<SymbolChild>, NodeList, EdgeList) {
-        let mut passed_symbols: Vec<SymbolChild> = vec![];
+        let mut res_symbols: Vec<SymbolChild> = vec![];
         let mut nodes = NodeList(vec![]);
         let mut edges = EdgeList(vec![]);
 
@@ -133,18 +106,18 @@ impl Scope for GlobalScope {
                     .0
                     .extend(new_passed_symbols.iter().map(|s| s.symbol_id.clone()));
                 edges.0.extend(edge_list.0.into_iter());
-                passed_symbols.extend(new_passed_symbols.into_iter());
+                res_symbols.extend(new_passed_symbols.into_iter());
             }
         }
 
         // Sort and deduplicate the sources
-        passed_symbols.sort();
-        passed_symbols.dedup();
+        res_symbols.sort();
+        res_symbols.dedup();
         nodes.0.sort();
         nodes.0.dedup();
         edges.0.sort();
         edges.0.dedup();
-        (passed_symbols, nodes, edges)
+        (res_symbols, nodes, edges)
     }
 }
 
@@ -160,11 +133,6 @@ impl EmptyScope {
 impl Scope for EmptyScope {
     fn statements(&self) -> &Vec<Box<dyn Statement>> {
         &self.0
-    }
-
-    fn get_children(&self, _cfg: &ControlFlowGraph, symbol: &SymbolId) -> Vec<SymbolChild> {
-        debug!("get_children from Empty: {:?}", symbol);
-        vec![]
     }
 
     fn run(

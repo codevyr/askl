@@ -58,34 +58,36 @@ impl Statement for DefaultStatement {
         cfg: &ControlFlowGraph,
         symbols: &Vec<SymbolChild>,
     ) -> Option<(Vec<SymbolChild>, NodeList, EdgeList)> {
-        let verb_passed_symbols: Vec<SymbolChild> = symbols
-            .iter()
-            .filter(|s| self.verb().symbols(cfg, &s.symbol_id))
-            .map(|s| s.clone())
-            .collect();
+        let filtered_symbols: Vec<SymbolChild> = self.verb().filter(cfg, symbols.clone());
 
-        if verb_passed_symbols.len() == 0 {
+        if filtered_symbols.len() == 0 {
             return None;
         }
 
-        log::debug!(
-            "Default statement scope {:?} symbol {:?}",
-            self.scope,
-            symbols
-        );
+        let mut res_symbols = vec![];
         let mut res_edges = EdgeList(vec![]);
         let mut res_nodes = NodeList(vec![]);
-        let (passed_symbols, nodes, edges) = self.scope.run(cfg, &verb_passed_symbols);
-        log::debug!(
-            "Default statement matched {:?} symbol {:?}",
-            passed_symbols,
-            edges
-        );
-        res_nodes.0.extend(nodes.0.into_iter());
-        res_edges.0.extend(edges.0.into_iter());
+        for filtered_symbol in filtered_symbols {
+            let derived_symbols: Vec<_> = self.verb().derive(cfg, &filtered_symbol);
+            let (passed_symbols, nodes, edges) = self.scope.run(cfg, &derived_symbols);
+            if passed_symbols.len() > 0 {
+                passed_symbols.iter().for_each(|c| {
+                    if let Some(occurence) = &c.occurence {
+                        res_edges.0.push((
+                            filtered_symbol.symbol_id.clone(),
+                            c.symbol_id.clone(),
+                            occurence.clone(),
+                        ))
+                    }
+                });
+                res_symbols.push(filtered_symbol);
+            }
+            res_nodes.0.extend(nodes.0.into_iter());
+            res_edges.0.extend(edges.0.into_iter());
+        }
 
-        log::debug!("Statement return {:?}", passed_symbols);
-        return Some((passed_symbols, res_nodes, res_edges));
+        log::debug!("Statement return {:?}", res_symbols);
+        return Some((res_symbols, res_nodes, res_edges));
     }
 
     fn verb(&self) -> &dyn Verb {
