@@ -32,8 +32,9 @@ impl ScopeFactory {
     }
 }
 
+type StatementIter<'a> = Box<dyn Iterator<Item=&'a Box<dyn Statement + 'a>>+ 'a>;
 pub trait Scope: Debug {
-    fn statements(&self) -> &Vec<Box<dyn Statement>>;
+    fn statements(&self) -> StatementIter;
 
     fn derive(&self, cfg: &ControlFlowGraph, symbol: &SymbolChild) -> Vec<SymbolChild>;
 
@@ -54,8 +55,8 @@ impl DefaultScope {
 }
 
 impl Scope for DefaultScope {
-    fn statements(&self) -> &Vec<Box<dyn Statement>> {
-        &self.0
+    fn statements(&self) -> StatementIter {
+        Box::new(self.0.iter())
     }
 
     fn derive(&self, cfg: &ControlFlowGraph, symbol: &SymbolChild) -> Vec<SymbolChild> {
@@ -71,7 +72,7 @@ impl Scope for DefaultScope {
         let mut res_nodes = NodeList(vec![]);
         let mut res_edges = EdgeList(vec![]);
 
-        for statement in self.statements().iter() {
+        for statement in self.statements() {
             // Iterate through all the statements in the scope or subscope of
             // the query
             if let Some((passed_symbols, scope_nodes, scope_edges)) =
@@ -108,8 +109,8 @@ impl GlobalScope {
 }
 
 impl Scope for GlobalScope {
-    fn statements(&self) -> &Vec<Box<dyn Statement>> {
-        &self.0
+    fn statements(&self) -> StatementIter {
+        Box::new(self.0.iter())
     }
 
     fn derive(&self, _cfg: &ControlFlowGraph, symbol: &SymbolChild) -> Vec<SymbolChild> {
@@ -125,7 +126,7 @@ impl Scope for GlobalScope {
         let mut nodes = NodeList(vec![]);
         let mut edges = EdgeList(vec![]);
 
-        for statement in self.statements().iter() {
+        for statement in self.statements() {
             // Iterate through all the statements in the scope or subscope of
             // the query
             if let Some((new_passed_symbols, node_list, edge_list)) =
@@ -152,17 +153,17 @@ impl Scope for GlobalScope {
 }
 
 #[derive(Debug)]
-pub struct EmptyScope(Vec<Box<dyn Statement>>);
+pub struct EmptyScope;
 
 impl EmptyScope {
     pub fn new() -> Self {
-        Self(vec![])
+        Self {}
     }
 }
 
 impl Scope for EmptyScope {
-    fn statements(&self) -> &Vec<Box<dyn Statement>> {
-        &self.0
+    fn statements(&self) -> StatementIter {
+        Box::new(std::iter::empty::<_>())
     }
 
     fn derive(&self, _cfg: &ControlFlowGraph, symbol: &SymbolChild) -> Vec<SymbolChild> {

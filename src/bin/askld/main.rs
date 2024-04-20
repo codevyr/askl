@@ -355,20 +355,20 @@ mod tests {
         const QUERY: &str = r#""a""#;
         let ast = parse(QUERY).unwrap();
 
-        let statements = ast.statements();
+        let statements: Vec<_> = ast.statements().collect();
         assert_eq!(statements.len(), 1);
         let statement = &statements[0];
 
         let _verb = statement.verb();
         let scope = statement.scope();
 
-        let statements = scope.statements();
+        let statements: Vec<_> = scope.statements().collect();
         assert_eq!(statements.len(), 0);
 
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"GlobalScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: EmptyScope([]) }])"#
+            r#"GlobalScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }])"#
         );
     }
 
@@ -379,7 +379,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"GlobalScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: EmptyScope([]) }]) }])"#
+            r#"GlobalScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }]) }])"#
         );
     }
 
@@ -390,7 +390,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"GlobalScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb] }, scope: EmptyScope([]) }]) }])"#
+            r#"GlobalScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb] }, scope: EmptyScope }]) }])"#
         );
     }
 
