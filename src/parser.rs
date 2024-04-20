@@ -111,5 +111,5 @@ pub fn parse(ask_code: &str) -> Result<Box<dyn Scope>> {
         };
     }
 
-    Ok(GlobalScope::new(ast))
+    Ok(DefaultScope::new(ast))
 }

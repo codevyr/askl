@@ -368,7 +368,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"GlobalScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }])"#
+            r#"DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }])"#
         );
     }
 
@@ -379,7 +379,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"GlobalScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }]) }])"#
+            r#"DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }]) }])"#
         );
     }
 
@@ -390,7 +390,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"GlobalScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb] }, scope: EmptyScope }]) }])"#
+            r#"DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb] }, scope: EmptyScope }]) }])"#
         );
     }
 
