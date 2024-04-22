@@ -24,7 +24,8 @@ indicatif = "0.17.0"
 petgraph = { version = "0.6.4", features = ["serde-1"] }
 itertools = "0.10.3"
 shell-words = "1.1"
-clang-ast = "0.1"
+#clang-ast = "0.1"
+clang-ast = { path = "../clang-ast" }
 futures = "0.3"
 actix-web = "4"
 rand = "0.8.5"

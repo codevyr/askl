@@ -1,7 +1,7 @@
 use clang_ast::SourceRange;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
-use std::fmt::{Display, self};
+use std::fmt::{self, Display};
 use std::fs;
 use std::path::PathBuf;
 use std::{collections::HashMap, hash, hash::Hasher};
@@ -27,14 +27,40 @@ pub struct Occurence {
 }
 
 impl Occurence {
-    pub fn new(file: PathBuf, range: SourceRange) -> Self {
-        Self {
-            line_start: range.begin.spelling_loc.as_ref().unwrap().line as i32,
-            column_start: range.begin.spelling_loc.unwrap().col as i32,
-            line_end: range.end.spelling_loc.as_ref().unwrap().line as i32,
-            column_end: range.end.spelling_loc.unwrap().col as i32,
-            file: fs::canonicalize(file).unwrap(),
-        }
+    pub fn new(range: &Option<SourceRange>) -> Option<Self> {
+        let range = if let Some(range) = range {
+            range
+        } else {
+            return None
+        };
+
+        let begin = if let Some(begin) = &range.begin.spelling_loc {
+            begin
+        } else {
+            return None;
+        };
+
+        let end = if let Some(end) = &range.end.spelling_loc {
+            end
+        } else {
+            return None;
+        };
+
+        let file = if let Some(file) = &begin.file {
+            file.clone().to_string()
+        } else {
+            return None;
+        };
+
+        Some(Self {
+            line_start: begin.line.unwrap() as i32,
+            column_start: begin.col as i32,
+            line_end: end.line.unwrap() as i32,
+            column_end: end.col as i32,
+            file: fs::canonicalize(file.clone())
+                .or::<PathBuf>(Ok(PathBuf::from(file)))
+                .unwrap(),
+        })
     }
 }
 
