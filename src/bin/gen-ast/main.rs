@@ -44,186 +44,6 @@ struct CompileCommand {
 
 pub type Node = clang_ast::Node<Clang>;
 
-trait MergeTypes: Clone {
-    fn merge(&self, other: &Self) -> Self;
-}
-
-impl MergeTypes for clang_ast::SourceLocation {
-    fn merge(&self, other: &Self) -> Self {
-        let spelling_loc = self.spelling_loc.merge(&other.spelling_loc);
-        Self {
-            expansion_loc: self
-                .expansion_loc
-                .merge(&spelling_loc)
-                .merge(&other.expansion_loc),
-            spelling_loc: spelling_loc,
-        }
-    }
-}
-
-impl MergeTypes for usize {
-    fn merge(&self, other: &Self) -> Self {
-        *self
-    }
-}
-
-impl MergeTypes for Arc<str> {
-    fn merge(&self, other: &Self) -> Self {
-        self.clone()
-    }
-}
-
-impl<T: Clone> MergeTypes for Box<T> {
-    fn merge(&self, other: &Self) -> Self {
-        self.clone()
-    }
-}
-
-impl MergeTypes for clang_ast::IncludedFrom {
-    fn merge(&self, other: &Self) -> Self {
-        Self {
-            included_from: self.included_from.merge(&other.included_from),
-            file: self.file.merge(&other.file),
-        }
-    }
-}
-
-impl MergeTypes for clang_ast::BareSourceLocation {
-    fn merge(&self, other: &Self) -> Self {
-        Self {
-            offset: self.offset,
-            file: self.file.merge(&other.file),
-            line: self.line.merge(&other.line),
-            presumed_file: self.presumed_file.merge(&other.presumed_file),
-            presumed_line: self.presumed_line.merge(&other.presumed_line),
-            col: self.col,
-            tok_len: self.tok_len,
-            included_from: self.included_from.merge(&other.included_from),
-            is_macro_arg_expansion: self.is_macro_arg_expansion,
-        }
-    }
-}
-
-impl MergeTypes for clang_ast::SourceRange {
-    fn merge(&self, other: &Self) -> Self {
-        let begin = self.begin.merge(&other.begin);
-        Self {
-            end: self.end.merge(&begin).merge(&other.end),
-            begin: begin,
-        }
-    }
-}
-
-impl<T: MergeTypes + Clone> MergeTypes for Option<T> {
-    fn merge(&self, other: &Option<T>) -> Self {
-        if self.is_none() {
-            return (*other).clone();
-        }
-
-        if other.is_none() {
-            return self.clone();
-        }
-
-        Some(self.clone().unwrap().merge(&other.clone().unwrap()))
-    }
-}
-
-trait AsRange {
-    fn as_range(&self) -> Option<clang_ast::SourceRange>;
-}
-
-impl AsRange for clang_ast::SourceLocation {
-    fn as_range(&self) -> Option<clang_ast::SourceRange> {
-        Some(clang_ast::SourceRange {
-            begin: self.clone(),
-            end: self.clone(),
-        })
-    }
-}
-
-impl AsRange for Option<clang_ast::SourceLocation> {
-    fn as_range(&self) -> Option<clang_ast::SourceRange> {
-        if let Some(loc) = self {
-            Some(clang_ast::SourceRange {
-                begin: loc.clone(),
-                end: loc.clone(),
-            })
-        } else {
-            None
-        }
-    }
-}
-
-fn update_loc(
-    node: &mut Node,
-    parent_loc: &mut Option<clang_ast::SourceLocation>,
-    parent_range: &mut Option<clang_ast::SourceRange>,
-) {
-    let mut node_loc = None;
-    let mut node_range = None;
-
-    match &mut node.kind {
-        Clang::EnumConstantDecl(node) => {
-            node.loc = node.loc.merge(parent_loc);
-            node.range = node.range.merge(&node.loc.as_range()).merge(parent_range);
-            node_loc = node_loc.merge(&node.loc);
-            node_range = node_range.merge(&node.range);
-        }
-        Clang::FunctionDecl(node) => {
-            node.loc = node.loc.merge(parent_loc);
-            node.range = node.range.merge(&node.loc.as_range()).merge(parent_range);
-            node_loc = node_loc.merge(&node.loc);
-            node_range = node_range.merge(&node.range);
-        }
-        Clang::VarDecl(node) => {
-            node.loc = node.loc.merge(parent_loc);
-            node.range = node.range.merge(&node.loc.as_range()).merge(parent_range);
-            node_loc = node_loc.merge(&node.loc);
-            node_range = node_range.merge(&node.range);
-        }
-        Clang::CallExpr(node) => {
-            node.loc = node.loc.merge(parent_loc);
-            node.range = node.range.merge(&node.loc.as_range()).merge(parent_range);
-            node_loc = node_loc.merge(&node.loc);
-            node_range = node_range.merge(&node.range);
-        }
-        Clang::DeclRefExpr(node) => {
-            node.loc = node.loc.merge(parent_loc);
-            node.range = node.range.merge(&node.loc.as_range()).merge(parent_range);
-            node_loc = node_loc.merge(&node.loc);
-            node_range = node_range.merge(&node.range);
-        }
-        Clang::TranslationUnitDecl(node) => {
-            node.loc = node.loc.merge(parent_loc);
-            node.range = node.range.merge(&node.loc.as_range()).merge(parent_range);
-            node_loc = node_loc.merge(&node.loc);
-            node_range = node_range.merge(&node.range);
-        }
-        Clang::CompoundStmt(node) => {
-            node.loc = node.loc.merge(parent_loc);
-            node.range = node.range.merge(&node.loc.as_range()).merge(parent_range);
-            node_loc = node_loc.merge(&node.loc);
-            node_range = node_range.merge(&node.range);
-        }
-        Clang::Other(node) => {
-            node.loc = node.loc.merge(parent_loc);
-            node.range = node.range.merge(&node.loc.as_range()).merge(parent_range);
-            node_loc = node_loc.merge(&node.loc);
-            node_range = node_range.merge(&node.range);
-        }
-        Clang::ParmVarDecl => {
-            node_loc = node_loc.merge(parent_loc);
-            node_range = node_range.merge(parent_range);
-        }
-    };
-
-    for child in node.inner.iter_mut() {
-        update_loc(child, &mut node_loc, &mut node_range);
-        *parent_loc = parent_loc.merge(&node_loc);
-        *parent_range = parent_range.merge(&node_range);
-    }
-}
-
 fn extract_filter<'a>(root: &'a Node, f: &'a impl Fn(&Node) -> bool) -> Vec<&'a Node> {
     let mut result = vec![];
     if f(root) {
@@ -388,6 +208,8 @@ pub struct DeclRefExpr {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NamespaceDecl {
     pub name: Option<String>,
+    pub loc: Option<clang_ast::SourceLocation>,
+    pub range: Option<clang_ast::SourceRange>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -451,10 +273,9 @@ async fn run_ast_gen(args: Args, c: CompileCommand) -> anyhow::Result<(String, N
         return Err(anyhow!("Error: {}", stderr));
     }
 
-    let mut node: Node = serde_json::from_str(&json)?;
-    let mut parent_loc = None;
-    let mut parent_range = None;
-    update_loc(&mut node, &mut parent_loc, &mut parent_range);
+    // std::fs::write("ast.json", json.clone())?;
+    let node: Node = serde_json::from_str(&json)?;
+    // std::fs::write("node", format!("{:#?}", node))?;
 
     Ok((ast_file, node))
 }

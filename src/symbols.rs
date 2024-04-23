@@ -34,28 +34,24 @@ impl Occurence {
             return None
         };
 
-        let begin = if let Some(begin) = &range.begin.spelling_loc {
+        let begin = if let Some(begin) = &range.begin.expansion_loc {
             begin
         } else {
             return None;
         };
 
-        let end = if let Some(end) = &range.end.spelling_loc {
+        let end = if let Some(end) = &range.end.expansion_loc {
             end
         } else {
             return None;
         };
 
-        let file = if let Some(file) = &begin.file {
-            file.clone().to_string()
-        } else {
-            return None;
-        };
+        let file = begin.file.clone().to_string();
 
         Some(Self {
-            line_start: begin.line.unwrap() as i32,
+            line_start: begin.line as i32,
             column_start: begin.col as i32,
-            line_end: end.line.unwrap() as i32,
+            line_end: end.line as i32,
             column_end: end.col as i32,
             file: fs::canonicalize(file.clone())
                 .or::<PathBuf>(Ok(PathBuf::from(file)))

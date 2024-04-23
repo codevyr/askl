@@ -70,7 +70,7 @@ impl Edge {
             id: format!("{}-{}", from, to),
             from: from,
             to: to,
-            from_file: loc.file.into_os_string().into_string().unwrap(),
+            from_file: format!("file://{}", loc.file.into_os_string().into_string().unwrap()),
             from_line: loc.line_start,
         }
     }
