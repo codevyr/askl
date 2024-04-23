@@ -144,28 +144,6 @@ impl Verb for FilterVerb {
     }
 }
 
-#[derive(Debug)]
-struct ChildrenVerb {}
-
-impl ChildrenVerb {
-    const NAME: &'static str = "children";
-
-    fn new() -> Result<Box<dyn Verb>> {
-        Ok(Box::new(Self {}))
-    }
-}
-
-impl Verb for ChildrenVerb {
-    fn symbols(&self, _cfg: &ControlFlowGraph, _symbol: &SymbolId) -> bool {
-        true
-    }
-
-    fn update_context(&self, ctx: &mut ParserContext) -> bool {
-        ctx.set_scope_factory(ScopeFactory::Children);
-        true
-    }
-}
-
 /// Returns the same symbols as it have received
 #[derive(Debug)]
 pub struct UnitVerb {}
