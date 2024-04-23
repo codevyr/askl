@@ -479,4 +479,27 @@ mod tests {
             .collect();
         assert_eq!(edges, vec!["a-b", "a-b", "main-a", "main-b"]);
     }
+
+
+    #[test]
+    fn missing_child_query() {
+        const QUERY: &str = r#""a"{{}}"#;
+        let (_, res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+        assert_eq!(
+            res_nodes.0,
+            vec![
+                SymbolId::new("a".to_string()),
+                SymbolId::new("b".to_string())
+            ]
+        );
+        let edges: Vec<_> = res_edges
+            .0
+            .into_iter()
+            .map(|(f, t, _)| format!("{}-{}", f, t))
+            .collect();
+        assert_eq!(edges, vec!["a-b", "a-b"]);
+    }
 }
