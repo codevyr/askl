@@ -71,8 +71,6 @@ pub fn build_verb(
 }
 
 pub trait Verb: Debug {
-    fn symbols(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> bool;
-
     fn filter(&self, _cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
         symbols
     }
@@ -98,10 +96,6 @@ impl CompoundVerb {
 }
 
 impl Verb for CompoundVerb {
-    fn symbols(&self, _cfg: &ControlFlowGraph, _symbol: &SymbolId) -> bool {
-        true
-    }
-
     fn filter(&self, cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
         self.filter_verb
             .iter()
@@ -127,10 +121,6 @@ impl FilterVerb {
 }
 
 impl Verb for FilterVerb {
-    fn symbols(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> bool {
-        self.name == cfg.get_symbol(symbol).unwrap().name
-    }
-
     fn filter(&self, cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
         symbols
             .into_iter()
@@ -155,7 +145,4 @@ impl UnitVerb {
 }
 
 impl Verb for UnitVerb {
-    fn symbols(&self, _cfg: &ControlFlowGraph, _symbol: &SymbolId) -> bool {
-        true
-    }
 }
