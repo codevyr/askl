@@ -174,7 +174,6 @@ impl Statement for DefaultStatement {
         res_nodes.0.sort();
         res_nodes.0.dedup();
 
-        log::debug!("Statement return {:?}", res_nodes);
         res_edges = self.update_edges(res_edges, cfg, &res_nodes);
         return Some((res_resolution, res_nodes, res_edges));
     }
