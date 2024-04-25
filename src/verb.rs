@@ -1,6 +1,5 @@
 use crate::cfg::ControlFlowGraph;
 use crate::parser::{Identifier, NamedArgument, ParserContext, Rule};
-use crate::scope::ScopeFactory;
 use crate::symbols::{SymbolChild, SymbolId};
 use anyhow::{anyhow, bail, Result};
 use core::fmt::Debug;
@@ -10,7 +9,7 @@ use pest::error::ErrorVariant::CustomError;
 use std::collections::HashMap;
 
 fn build_generic_verb(
-    ctx: &ParserContext,
+    _ctx: &ParserContext,
     pair: pest::iterators::Pair<Rule>,
 ) -> Result<Box<dyn Verb>> {
     let mut pair = pair.into_inner();
@@ -70,9 +69,62 @@ pub fn build_verb(
     })
 }
 
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum VerbRole {
+    Filter,
+    Derive,
+    Children,
+    Resolution
+}
+
+#[derive(PartialEq, Debug, Copy, Clone)]
+pub enum Resolution {
+    None,
+    Weak,
+    Strong,
+}
+
+impl Resolution {
+    pub fn max(self, other: Resolution) -> Self {
+        if self == Resolution::Strong || other == Resolution::Strong {
+            return Resolution::Strong;
+        }
+
+        if self == Resolution::Weak || other == Resolution::Weak {
+            return Resolution::Weak;
+        }
+
+        Resolution::None
+    }
+}
+
 pub trait Verb: Debug {
-    fn filter(&self, _cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
-        symbols
+    fn is_role(&self, _role: VerbRole) -> bool {
+        true
+    }
+
+    fn resolution(&self) -> Resolution {
+        Resolution::Weak
+    }
+
+    fn derive(&self, _cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<Vec<SymbolId>> {
+        Some(vec![symbol.clone()])
+    }
+
+    fn derive_children(
+        &self,
+        _cfg: &ControlFlowGraph,
+        _symbol: &SymbolId,
+    ) -> Option<Vec<SymbolChild>> {
+        None
+    }
+
+    fn filter(
+        &self,
+        _cfg: &ControlFlowGraph,
+        symbols: Vec<SymbolId>,
+    ) -> Option<Vec<SymbolId>> {
+        Some(symbols)
     }
 
     fn update_context(&self, _ctx: &mut ParserContext) -> bool {
@@ -82,24 +134,61 @@ pub trait Verb: Debug {
 
 #[derive(Debug)]
 pub struct CompoundVerb {
-    filter_verb: Vec<Box<dyn Verb>>,
+    verbs: Vec<Box<dyn Verb>>,
 }
 
 impl CompoundVerb {
     const NAME: &'static str = "verb";
 
+    fn verb_role(&self, role: VerbRole) -> &Box<dyn Verb> {
+        for v in self.verbs.iter() {
+            if v.is_role(role) {
+                return v;
+            }
+        }
+
+        panic!("Role {:?} does not exist", role);
+    }
+
     pub fn new(verbs: Vec<Box<dyn Verb>>) -> Result<Box<dyn Verb>> {
-        Ok(Box::new(Self {
-            filter_verb: verbs,
-        }))
+        Ok(Box::new(Self { verbs }))
     }
 }
 
 impl Verb for CompoundVerb {
-    fn filter(&self, cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
-        self.filter_verb
+    fn derive(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<Vec<SymbolId>> {
+        self.verb_role(VerbRole::Derive).derive(cfg, symbol)
+    }
+
+    fn resolution(&self) -> Resolution {
+        let mut res = Resolution::Weak;
+        for v in self.verbs.iter() {
+            res = res.max(v.resolution());
+        }
+
+        res
+    }
+
+    fn derive_children(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbol: &SymbolId,
+    ) -> Option<Vec<SymbolChild>> {
+        self.verb_role(VerbRole::Children)
+            .derive_children(cfg, symbol)
+    }
+
+    fn filter(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbols: Vec<SymbolId>,
+    ) -> Option<Vec<SymbolId>> {
+        self.verbs
             .iter()
-            .fold(symbols, |symbols, verb| verb.filter(cfg, symbols))
+            .filter(|v| v.is_role(VerbRole::Filter))
+            .try_fold(symbols, |symbols, verb| {
+                verb.filter(cfg, symbols)
+            })
     }
 }
 
@@ -121,16 +210,33 @@ impl FilterVerb {
 }
 
 impl Verb for FilterVerb {
-    fn filter(&self, cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
-        symbols
+    fn is_role(&self, role: VerbRole) -> bool {
+        role == VerbRole::Filter ||
+        role == VerbRole::Resolution
+    }
+
+    fn resolution(&self) -> Resolution {
+        Resolution::Strong
+    }
+
+    fn filter(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbols: Vec<SymbolId>,
+    ) -> Option<Vec<SymbolId>> {
+        let res: Vec<_> = symbols
             .into_iter()
             .filter_map(|s| {
-                if self.name == cfg.get_symbol(&s.symbol_id).unwrap().name {
+                if self.name == cfg.get_symbol(&s).unwrap().name {
                     return Some(s);
                 }
                 None
             })
-            .collect()
+            .collect();
+        if res.len() == 0 {
+            return None;
+        }
+        Some(res)
     }
 }
 
@@ -144,5 +250,37 @@ impl UnitVerb {
     }
 }
 
-impl Verb for UnitVerb {
+impl Verb for UnitVerb {}
+
+#[derive(Debug)]
+pub struct ChildrenVerb {}
+
+impl ChildrenVerb {
+    pub fn new() -> Box<dyn Verb> {
+        Box::new(Self {})
+    }
+}
+
+impl Verb for ChildrenVerb {
+    fn is_role(&self, role: VerbRole) -> bool {
+        role == VerbRole::Children || role == VerbRole::Derive
+    }
+
+    fn derive(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<Vec<SymbolId>> {
+        Some(
+            cfg.symbols
+                .get_children(symbol)
+                .into_iter()
+                .map(|s| s.id)
+                .collect(),
+        )
+    }
+
+    fn derive_children(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbol: &SymbolId,
+    ) -> Option<Vec<SymbolChild>> {
+        Some(cfg.symbols.get_children(symbol))
+    }
 }

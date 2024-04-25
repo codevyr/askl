@@ -1,7 +1,8 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::parser::{ParserContext, Rule};
 use crate::statement::{build_statement, Statement};
-use crate::symbols::SymbolChild;
+use crate::symbols::SymbolId;
+use crate::verb::Resolution;
 use core::fmt::Debug;
 use pest::error::Error;
 
@@ -36,67 +37,48 @@ type StatementIter<'a> = Box<dyn Iterator<Item = &'a Box<dyn Statement + 'a>> + 
 pub trait Scope: Debug {
     fn statements(&self) -> StatementIter;
 
-    fn derive(&self, cfg: &ControlFlowGraph, symbol: &SymbolChild) -> Vec<SymbolChild>;
+    fn run_all(&self, cfg: &ControlFlowGraph, symbols: Vec<SymbolId>) -> (NodeList, EdgeList) {
+        let mut res_nodes = NodeList(vec![]);
+        let mut res_edges = EdgeList(vec![]);
+
+        for symbol in symbols.into_iter() {
+            if let Some((_, nodes, edges)) = self.run(cfg, &symbol, Resolution::Weak) {
+                res_nodes.0.extend(nodes.0.into_iter());
+                res_edges.0.extend(edges.0.into_iter());
+            }
+        }
+
+        (res_nodes, res_edges)
+    }
 
     fn run(
         &self,
         cfg: &ControlFlowGraph,
-        active_symbols: &Vec<SymbolChild>,
-    ) -> (Vec<SymbolChild>, NodeList, EdgeList) {
-        let mut res_symbols: Vec<SymbolChild> = vec![];
+        symbol: &SymbolId,
+        parent_resolution: Resolution,
+    ) -> Option<(Resolution, NodeList, EdgeList)> {
         let mut res_nodes = NodeList(vec![]);
         let mut res_edges = EdgeList(vec![]);
+        let mut resolution = Resolution::None;
 
         for statement in self.statements() {
             // Iterate through all the statements in the scope or subscope of
             // the query
-            if let Some((passed_symbols, scope_nodes, scope_edges)) =
-                statement.execute(cfg, &active_symbols)
+            if let Some((scope_resolution, scope_nodes, scope_edges)) =
+                statement.execute(cfg, &symbol, parent_resolution)
             {
-                res_symbols.extend(passed_symbols.into_iter());
-
+                // res_nodes.0.push(symbol.clone());
                 res_nodes.0.extend(scope_nodes.0.into_iter());
-                res_nodes
-                    .0
-                    .extend(res_symbols.iter().map(|s| s.symbol_id.clone()));
                 res_edges.0.extend(scope_edges.0.into_iter());
+                resolution = resolution.max(scope_resolution);
             }
         }
 
         // Sort and deduplicate the sources
-        res_symbols.sort();
-        res_symbols.dedup();
         res_nodes.0.sort();
         res_nodes.0.dedup();
 
-        for node_i in res_nodes.0.iter() {
-            for node_j in res_nodes.0.iter() {
-                if node_i == node_j {
-                    continue;
-                };
-                let derived = self.derive(
-                    cfg,
-                    &SymbolChild {
-                        symbol_id: node_i.clone(),
-                        occurence: None,
-                    },
-                );
-
-                derived.into_iter().for_each(|s| {
-                    if s.symbol_id == *node_j {
-                        res_edges.0.push((
-                            node_i.clone(),
-                            s.symbol_id,
-                            s.occurence.unwrap(),
-                        ))
-                    }
-                })
-            }
-        }
-
-        res_edges.0.sort();
-        res_edges.0.dedup();
-        (res_symbols, res_nodes, res_edges)
+        Some((resolution, res_nodes, res_edges))
     }
 }
 
@@ -112,10 +94,6 @@ impl DefaultScope {
 impl Scope for DefaultScope {
     fn statements(&self) -> StatementIter {
         Box::new(self.0.iter())
-    }
-
-    fn derive(&self, cfg: &ControlFlowGraph, symbol: &SymbolChild) -> Vec<SymbolChild> {
-        cfg.symbols.get_children(&symbol.symbol_id)
     }
 }
 
@@ -133,8 +111,41 @@ impl Scope for GlobalScope {
         Box::new(self.0.iter())
     }
 
-    fn derive(&self, _cfg: &ControlFlowGraph, symbol: &SymbolChild) -> Vec<SymbolChild> {
-        vec![symbol.clone()]
+    // fn run_all(&self, cfg: &ControlFlowGraph, symbols: Vec<SymbolId>) -> (NodeList, EdgeList) {
+    //     let mut res_symbols: Vec<SymbolId> = vec![];
+    //     let mut res_nodes = NodeList(vec![]);
+    //     let mut res_edges = EdgeList(vec![]);
+
+    //     for statement in self.statements() {
+    //         // Iterate through all the statements in the scope or subscope of
+    //         // the query
+    //         if let Some((passed_symbols, scope_nodes, scope_edges)) =
+    //             statement.execute(cfg, &symbols)
+    //         {
+    //             res_symbols.extend(passed_symbols.into_iter());
+    //             res_nodes.0.extend(scope_nodes.0.into_iter());
+    //             res_nodes.0.extend(res_symbols.iter().map(|s| s.clone()));
+    //             res_edges.0.extend(scope_edges.0.into_iter());
+    //         }
+    //     }
+
+    //     // Sort and deduplicate the sources
+    //     res_symbols.sort();
+    //     res_symbols.dedup();
+    //     res_nodes.0.sort();
+    //     res_nodes.0.dedup();
+
+    //     res_edges = self.update_edges(res_edges, cfg, &res_nodes);
+    //     (res_nodes, res_edges)
+    // }
+
+    fn run(
+        &self,
+        _cfg: &ControlFlowGraph,
+        _symbol: &SymbolId,
+        _parent_resolution: Resolution,
+    ) -> Option<(Resolution, NodeList, EdgeList)> {
+        None
     }
 }
 
@@ -152,25 +163,12 @@ impl Scope for EmptyScope {
         Box::new(std::iter::empty::<_>())
     }
 
-    fn derive(&self, _cfg: &ControlFlowGraph, symbol: &SymbolChild) -> Vec<SymbolChild> {
-        vec![symbol.clone()]
-    }
-
     fn run(
         &self,
         _cfg: &ControlFlowGraph,
-        active_symbols: &Vec<SymbolChild>,
-    ) -> (Vec<SymbolChild>, NodeList, EdgeList) {
-        (
-            active_symbols
-                .iter()
-                .map(|s| SymbolChild {
-                    symbol_id: s.symbol_id.clone(),
-                    occurence: None,
-                })
-                .collect(),
-            NodeList(vec![]),
-            EdgeList(vec![]),
-        )
+        _symbol: &SymbolId,
+        parent_resolution: Resolution,
+    ) -> Option<(Resolution, NodeList, EdgeList)> {
+        Some((parent_resolution, NodeList(vec![]), EdgeList(vec![])))
     }
 }

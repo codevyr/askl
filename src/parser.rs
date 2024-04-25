@@ -1,6 +1,7 @@
 use crate::{
-    scope::{GlobalScope, Scope, build_scope, DefaultScope, ScopeFactory},
-    statement::{build_statement, Statement}, verb::Verb,
+    scope::{Scope, ScopeFactory},
+    statement::{build_statement, DefaultStatement, Statement},
+    verb::Verb,
 };
 use anyhow::Result;
 use core::fmt::Debug;
@@ -69,7 +70,7 @@ impl<'a> ParserContext<'a> {
     }
 
     pub fn derive(&'a self) -> Box<Self> {
-        Box::new(Self{
+        Box::new(Self {
             prev: Some(self),
             ..Default::default()
         })
@@ -81,7 +82,7 @@ impl<'a> ParserContext<'a> {
 
     pub fn new_scope(&self, statements: Vec<Box<dyn Statement>>) -> Box<dyn Scope> {
         if let Some(factory) = &self.scope_factory {
-            return factory.create(statements)
+            return factory.create(statements);
         }
 
         let factory = self.prev.expect("Should never try uninitialized factory");
@@ -97,8 +98,7 @@ impl<'a> ParserContext<'a> {
     }
 }
 
-
-pub fn parse(ask_code: &str) -> Result<Box<dyn Scope>> {
+pub fn parse(ask_code: &str) -> Result<Box<dyn Statement>> {
     let pairs = AsklParser::parse(Rule::ask, ask_code)?;
 
     let ctx = ParserContext::new(ScopeFactory::Children);
@@ -111,5 +111,7 @@ pub fn parse(ask_code: &str) -> Result<Box<dyn Scope>> {
         };
     }
 
-    Ok(DefaultScope::new(ast))
+    let scope = ctx.new_scope(ast);
+
+    Ok(DefaultStatement::new_main(scope))
 }

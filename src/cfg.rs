@@ -19,7 +19,7 @@ impl ControlFlowGraph {
         let mut g = DiGraphMap::new();
         for (parent_l, s) in symbols.iter() {
             for child_l in s.children.iter() {
-                g.add_edge(parent_l, &child_l.symbol_id, ());
+                g.add_edge(parent_l, &child_l.id, ());
             }
         }
         Self {

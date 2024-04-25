@@ -9,7 +9,7 @@ use askl::symbols::{Occurence, Symbols};
 use askl::{
     cfg::ControlFlowGraph,
     parser::parse,
-    symbols::{Symbol, SymbolChild, SymbolId, SymbolMap},
+    symbols::{Symbol, SymbolId, SymbolMap},
 };
 use clap::Parser;
 use log::{debug, info};
@@ -33,7 +33,7 @@ struct Args {
 
 struct AsklData {
     cfg: ControlFlowGraph,
-    sources: Vec<SymbolChild>,
+    sources: Vec<SymbolId>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,7 +70,10 @@ impl Edge {
             id: format!("{}-{}", from, to),
             from: from,
             to: to,
-            from_file: format!("file://{}", loc.file.into_os_string().into_string().unwrap()),
+            from_file: format!(
+                "file://{}",
+                loc.file.into_os_string().into_string().unwrap()
+            ),
             from_line: loc.line_start,
         }
     }
@@ -109,7 +112,7 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     };
     debug!("Global scope: {:#?}", ast);
 
-    let (_, res_nodes, res_edges) = ast.run(&data.cfg, &data.sources);
+    let (res_nodes, res_edges) = ast.execute_all(&data.cfg, data.sources.clone());
 
     info!("Symbols: {:#?}", res_nodes.0.len());
     info!("Edges: {:#?}", res_edges.0.len());
@@ -156,13 +159,7 @@ fn read_data(args: &Args) -> Result<AsklData> {
     match args.format.as_str() {
         "askl" => {
             let symbols: SymbolMap = serde_json::from_slice(&std::fs::read(&args.index)?)?;
-            let sources: Vec<SymbolChild> = symbols
-                .iter()
-                .map(|(id, _)| SymbolChild {
-                    symbol_id: id.clone(),
-                    occurence: None,
-                })
-                .collect();
+            let sources: Vec<SymbolId> = symbols.iter().map(|(id, _)| id.clone()).collect();
             let cfg = ControlFlowGraph::from_symbols(symbols);
             Ok(AsklData {
                 cfg: cfg,
@@ -253,7 +250,7 @@ async fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use askl::{symbols::SymbolChild, cfg::{EdgeList, NodeList}};
+    use askl::cfg::{EdgeList, NodeList};
 
     use super::*;
 
@@ -286,7 +283,7 @@ mod tests {
             ],
             "children": [
                 {
-                "symbol_id": "b",
+                "id": "b",
                 "occurence": {
                     "line_start": 7,
                     "line_end": 7,
@@ -296,7 +293,7 @@ mod tests {
                 }
                 },
                 {
-                "symbol_id": "b",
+                "id": "b",
                 "occurence": {
                     "line_start": 7,
                     "line_end": 7,
@@ -320,7 +317,7 @@ mod tests {
             ],
             "children": [
                 {
-                "symbol_id": "a",
+                "id": "a",
                 "occurence": {
                     "line_start": 11,
                     "line_end": 11,
@@ -330,7 +327,7 @@ mod tests {
                 }
                 },
                 {
-                "symbol_id": "b",
+                "id": "b",
                 "occurence": {
                     "line_start": 11,
                     "line_end": 11,
@@ -355,7 +352,7 @@ mod tests {
         const QUERY: &str = r#""a""#;
         let ast = parse(QUERY).unwrap();
 
-        let statements: Vec<_> = ast.statements().collect();
+        let statements: Vec<_> = ast.scope().statements().collect();
         assert_eq!(statements.len(), 1);
         let statement = &statements[0];
 
@@ -368,7 +365,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }])"#
+            r#"DefaultStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }]) }"#
         );
     }
 
@@ -379,7 +376,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }]) }])"#
+            r#"DefaultStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }]) }]) }"#
         );
     }
 
@@ -390,24 +387,18 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb, FilterVerb { name: "a" }] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { filter_verb: [UnitVerb] }, scope: EmptyScope }]) }])"#
+            r#"DefaultStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, FilterVerb { name: "a" }] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb] }, scope: EmptyScope }]) }]) }"#
         );
     }
 
-    fn run_query(askl_input: &str, askl_query: &str) -> (Vec<SymbolChild>, NodeList, EdgeList) {
+    fn run_query(askl_input: &str, askl_query: &str) -> (NodeList, EdgeList) {
         let symbols: SymbolMap = serde_json::from_slice(askl_input.as_bytes()).unwrap();
-        let sources: Vec<SymbolChild> = symbols
-            .iter()
-            .map(|(id, _)| SymbolChild {
-                symbol_id: id.clone(),
-                occurence: None,
-            })
-            .collect();
+        let sources: Vec<SymbolId> = symbols.iter().map(|(id, _)| id.clone()).collect();
         let cfg = ControlFlowGraph::from_symbols(symbols);
 
         let ast = parse(askl_query).unwrap();
 
-        ast.run(&cfg, &sources)
+        ast.execute_all(&cfg, sources)
     }
 
     #[test]
@@ -415,7 +406,7 @@ mod tests {
         env_logger::init();
 
         const QUERY: &str = r#""a""#;
-        let (_, res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -426,7 +417,7 @@ mod tests {
     #[test]
     fn single_child_query() {
         const QUERY: &str = r#""a"{}"#;
-        let (_, res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -437,13 +428,18 @@ mod tests {
                 SymbolId::new("b".to_string())
             ]
         );
-        assert_eq!(res_edges.0.len(), 2);
+        let edges: Vec<_> = res_edges
+            .0
+            .into_iter()
+            .map(|(f, t, _)| format!("{}-{}", f, t))
+            .collect();
+        assert_eq!(edges, vec!["a-b", "a-b"]);
     }
 
     #[test]
     fn single_parent_query() {
         const QUERY: &str = r#"{"a"}"#;
-        let (_, res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -460,7 +456,7 @@ mod tests {
     #[test]
     fn double_parent_query() {
         const QUERY: &str = r#"{{"b"}}"#;
-        let (_, res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -480,11 +476,10 @@ mod tests {
         assert_eq!(edges, vec!["a-b", "a-b", "main-a", "main-b"]);
     }
 
-
     #[test]
     fn missing_child_query() {
         const QUERY: &str = r#""a"{{}}"#;
-        let (_, res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);

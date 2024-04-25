@@ -135,8 +135,8 @@ impl FunctionDecl {
                     let referenced_decl = ref_expr.referenced_decl.as_ref().unwrap();
                     match &referenced_decl.kind {
                         Clang::FunctionDecl(f) => Some(SymbolChild {
-                            symbol_id: SymbolId::new(f.name.as_ref().unwrap().clone()),
-                            occurence: Occurence::new(&ref_expr.range),
+                            id: SymbolId::new(f.name.as_ref().unwrap().clone()),
+                            occurence: Occurence::new(&ref_expr.range).unwrap(),
                         }),
                         // Clang::VarDecl(v) => {
                         //     Some(SymbolChild {

@@ -1,7 +1,7 @@
 use clang_ast::SourceRange;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
-use std::fmt::{self, Display};
+use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 use std::{collections::HashMap, hash, hash::Hasher};
@@ -31,7 +31,7 @@ impl Occurence {
         let range = if let Some(range) = range {
             range
         } else {
-            return None
+            return None;
         };
 
         let begin = if let Some(begin) = &range.begin.expansion_loc {
@@ -62,8 +62,8 @@ impl Occurence {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct SymbolChild {
-    pub symbol_id: SymbolId,
-    pub occurence: Option<Occurence>,
+    pub id: SymbolId,
+    pub occurence: Occurence,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
