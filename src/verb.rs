@@ -56,6 +56,13 @@ pub fn build_verb(
             let mut named = HashMap::new();
             named.insert("name".into(), ident.as_str().into());
             FilterVerb::new(&positional, &named)
+        },
+        Rule::forced_verb => {
+            let ident = verb.into_inner().next().unwrap();
+            let positional = vec![];
+            let mut named = HashMap::new();
+            named.insert("name".into(), ident.as_str().into());
+            ForcedVerb::new(&positional, &named)
         }
         _ => unreachable!("Unknown rule: {:#?}", verb.as_rule()),
     }
@@ -74,7 +81,8 @@ pub enum VerbRole {
     Filter,
     Derive,
     Children,
-    Resolution
+    Resolution,
+    Forced
 }
 
 #[derive(PartialEq, Debug, Copy, Clone)]
@@ -237,6 +245,48 @@ impl Verb for FilterVerb {
             return None;
         }
         Some(res)
+    }
+}
+
+#[derive(Debug)]
+struct ForcedVerb {
+    name: String,
+}
+
+impl ForcedVerb {
+    const NAME: &'static str = "forced";
+
+    fn new(_positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Box<dyn Verb>> {
+        if let Some(name) = named.get("name") {
+            Ok(Box::new(Self { name: name.clone() }))
+        } else {
+            bail!("Must contain name field");
+        }
+    }
+}
+
+impl Verb for ForcedVerb {
+    fn is_role(&self, role: VerbRole) -> bool {
+        role == VerbRole::Forced ||
+        role == VerbRole::Filter ||
+        role == VerbRole::Resolution
+    }
+
+    fn resolution(&self) -> Resolution {
+        Resolution::Weak
+    }
+
+    fn filter(
+        &self,
+        cfg: &ControlFlowGraph,
+        _symbols: Vec<SymbolId>,
+    ) -> Option<Vec<SymbolId>> {
+        let id = SymbolId::new(self.name.clone());
+        if let Some(_) = cfg.get_symbol(&id) {
+            Some(vec![id])
+        } else {
+            None
+        }
     }
 }
 

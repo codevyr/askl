@@ -397,6 +397,7 @@ mod tests {
         let cfg = ControlFlowGraph::from_symbols(symbols);
 
         let ast = parse(askl_query).unwrap();
+        println!("{:?}", ast);
 
         ast.execute_all(&cfg, sources)
     }
@@ -496,5 +497,40 @@ mod tests {
             .map(|(f, t, _)| format!("{}-{}", f, t))
             .collect();
         assert_eq!(edges, vec!["a-b", "a-b"]);
+    }
+
+    #[test]
+    fn forced_query() {
+        const QUERY: &str = r#"!"a""#;
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+
+        assert_eq!(res_nodes.0, vec![]);
+        assert_eq!(res_edges.0.len(), 0);
+    }
+
+    #[test]
+    fn forced_child_query() {
+        const QUERY: &str = r#""b"{!"a"}"#;
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+
+        assert_eq!(
+            res_nodes.0,
+            vec![
+                SymbolId::new("a".to_string()),
+                SymbolId::new("b".to_string())
+            ]
+        );
+        let edges: Vec<_> = res_edges
+            .0
+            .into_iter()
+            .map(|(f, t, _)| format!("{}-{}", f, t))
+            .collect();
+        assert_eq!(edges, vec!["b-a"]);
     }
 }
