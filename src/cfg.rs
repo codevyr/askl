@@ -12,7 +12,13 @@ pub struct ControlFlowGraph {
 pub struct NodeList(pub Vec<SymbolId>);
 
 #[derive(Debug, Clone)]
-pub struct EdgeList(pub Vec<(SymbolId, SymbolId, Occurence)>);
+pub struct EdgeList(pub Vec<(SymbolId, SymbolId, Option<Occurence>)>);
+
+impl EdgeList {
+    pub fn new() -> Self {
+        EdgeList(vec![])
+    }
+}
 
 impl ControlFlowGraph {
     pub fn from_symbols(symbols: SymbolMap) -> Self {

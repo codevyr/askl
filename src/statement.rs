@@ -1,7 +1,7 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::parser::{ParserContext, Rule};
 use crate::scope::{build_scope, EmptyScope, Scope};
-use crate::symbols::SymbolId;
+use crate::symbols::{SymbolChild, SymbolId};
 use crate::verb::{build_verb, ChildrenVerb, CompoundVerb, Resolution, UnitVerb, Verb};
 use core::fmt::Debug;
 use pest::error::Error;
@@ -52,8 +52,8 @@ pub fn build_statement<'a>(
 }
 
 pub trait Statement: Debug {
-    fn update_edges(&self, edges: EdgeList, cfg: &ControlFlowGraph, nodes: &NodeList) -> EdgeList {
-        let mut edges = edges;
+    fn update_edges(&self, cfg: &ControlFlowGraph, nodes: &NodeList) -> EdgeList {
+        let mut edges = EdgeList::new();
         for node_i in nodes.0.iter() {
             for node_j in nodes.0.iter() {
                 if node_i == node_j {
@@ -73,8 +73,6 @@ pub trait Statement: Debug {
             }
         }
 
-        edges.0.sort();
-        edges.0.dedup();
         edges
     }
 
@@ -82,12 +80,18 @@ pub trait Statement: Debug {
         let mut res_nodes = NodeList(vec![]);
         let mut res_edges = EdgeList(vec![]);
 
-        for symbol in symbols.into_iter() {
-            if let Some((resolution, nodes, edges)) = self.execute(cfg, &symbol, Resolution::Weak) {
-                if resolution != Resolution::Strong {
-                    continue;
-                }
+        let symbols = symbols
+            .into_iter()
+            .map(|s| SymbolChild {
+                id: s,
+                occurence: None,
+            })
+            .collect();
 
+        if let Some((resolution, resolved_symbols, nodes, edges)) =
+            self.execute(cfg, symbols, Resolution::Weak)
+        {
+            if resolution == Resolution::Strong {
                 res_nodes.0.extend(nodes.0.into_iter());
                 res_edges.0.extend(edges.0.into_iter());
             }
@@ -103,9 +107,9 @@ pub trait Statement: Debug {
     fn execute(
         &self,
         cfg: &ControlFlowGraph,
-        symbol: &SymbolId,
+        symbols: Vec<SymbolChild>,
         parent_resolution: Resolution,
-    ) -> Option<(Resolution, NodeList, EdgeList)>;
+    ) -> Option<(Resolution, Vec<SymbolChild>, NodeList, EdgeList)>;
     fn verb(&self) -> &dyn Verb;
     fn scope(&self) -> &dyn Scope;
 }
@@ -123,59 +127,122 @@ impl DefaultStatement {
             scope: scope,
         })
     }
-
-    pub fn new_main(scope: Box<dyn Scope>) -> Box<dyn Statement> {
-        let verbs = vec![UnitVerb::new()];
-        let verb: Box<dyn Verb> = CompoundVerb::new(verbs).unwrap();
-        Self::new(verb, scope)
-    }
 }
 
 impl Statement for DefaultStatement {
     fn execute(
         &self,
         cfg: &ControlFlowGraph,
-        symbol: &SymbolId,
+        symbols: Vec<SymbolChild>,
         parent_resolution: Resolution,
-    ) -> Option<(Resolution, NodeList, EdgeList)> {
-        let symbols = vec![symbol.clone()];
+    ) -> Option<(Resolution, Vec<SymbolChild>, NodeList, EdgeList)> {
         let filtered_symbols = if let Some(sym) = self.verb().filter(cfg, symbols) {
             sym
         } else {
             return None;
         };
 
-        let derived_symbols = if let Some(derived) = self.verb().derive(cfg, &filtered_symbols[0]) {
-            derived
-        } else {
-            return None;
-        };
+        let child_resolution = parent_resolution.max(self.verb().resolution());
 
         let mut res_edges = EdgeList(vec![]);
         let mut res_nodes = NodeList(vec![]);
-        let child_resolution = parent_resolution.max(self.verb().resolution());
+        let mut res_symbols = vec![];
         let mut res_resolution = child_resolution;
-        for derived_symbol in derived_symbols {
-            if let Some((scope_resolution, nodes, edges)) =
-                self.scope().run(cfg, &derived_symbol, child_resolution)
+
+        for filtered_symbol in filtered_symbols.into_iter() {
+            let derived_symbols = if let Some(derived) = self.verb().derive(cfg, &filtered_symbol.id) {
+                derived
+            } else {
+                return None;
+            };
+
+            if let Some((scope_resolution, resolved_symbols, nodes, edges)) =
+                self.scope().run(cfg, derived_symbols, child_resolution)
             {
                 if scope_resolution == Resolution::Strong {
                     res_nodes.0.extend(nodes.0.into_iter());
                     res_edges.0.extend(edges.0.into_iter());
                     res_resolution = res_resolution.max(scope_resolution);
+                    res_nodes.0.extend(resolved_symbols.iter().map(|s|s.id.clone()));
+                    res_nodes.0.push(filtered_symbol.id.clone());
+                    res_symbols.push(filtered_symbol.clone());
+
+                    for resolved_symbol in resolved_symbols {
+                        res_edges.0.push((filtered_symbol.id.clone(), resolved_symbol.id, resolved_symbol.occurence));
+                    }
                 }
             }
         }
 
-        if res_resolution == Resolution::Strong {
-            res_nodes.0.extend(filtered_symbols);
-        }
         // Sort and deduplicate the sources
         res_nodes.0.sort();
         res_nodes.0.dedup();
 
-        res_edges = self.update_edges(res_edges, cfg, &res_nodes);
-        return Some((res_resolution, res_nodes, res_edges));
+        res_edges
+            .0
+            .extend(self.update_edges(cfg, &res_nodes).0.into_iter());
+        res_edges.0.sort();
+        res_edges.0.dedup();
+        return Some((res_resolution, res_symbols, res_nodes, res_edges));
+    }
+
+    fn verb(&self) -> &dyn Verb {
+        &*self.verb
+    }
+
+    fn scope(&self) -> &dyn Scope {
+        &*self.scope
+    }
+}
+
+#[derive(Debug)]
+pub struct GlobalStatement {
+    pub verb: Box<dyn Verb>,
+    pub scope: Box<dyn Scope>,
+}
+
+impl GlobalStatement {
+    pub fn new(scope: Box<dyn Scope>) -> Box<dyn Statement> {
+        let verbs = vec![UnitVerb::new()];
+        let verb: Box<dyn Verb> = CompoundVerb::new(verbs).unwrap();
+        Box::new(GlobalStatement {
+            verb: verb,
+            scope: scope,
+        })
+    }
+}
+
+impl Statement for GlobalStatement {
+    fn execute(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbols: Vec<SymbolChild>,
+        parent_resolution: Resolution,
+    ) -> Option<(Resolution, Vec<SymbolChild>, NodeList, EdgeList)> {
+        let mut res_edges = EdgeList(vec![]);
+        let mut res_nodes = NodeList(vec![]);
+        let child_resolution = parent_resolution.max(self.verb().resolution());
+        let mut res_resolution = child_resolution;
+        if let Some((scope_resolution, _, nodes, edges)) =
+            self.scope().run(cfg, symbols, child_resolution)
+        {
+            if scope_resolution == Resolution::Strong {
+                res_nodes.0.extend(nodes.0.into_iter());
+                res_edges.0.extend(edges.0.into_iter());
+                res_resolution = res_resolution.max(scope_resolution);
+            }
+        }
+
+        // Sort and deduplicate the sources
+        res_nodes.0.sort();
+        res_nodes.0.dedup();
+
+        res_edges
+            .0
+            .extend(self.update_edges(cfg, &res_nodes).0.into_iter());
+        res_edges.0.sort();
+        res_edges.0.dedup();
+        return Some((res_resolution, vec![], res_nodes, res_edges));
     }
 
     fn verb(&self) -> &dyn Verb {

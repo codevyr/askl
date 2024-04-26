@@ -24,7 +24,7 @@ fn build_generic_verb(
         named.insert(arg.name.0, arg.value.0);
     }
 
-    let span = ident.as_span();
+    let _span = ident.as_span();
     match Identifier::build(ident)?.0.as_str() {
         FilterVerb::NAME => FilterVerb::new(&positional, &named),
         unknown => Err(anyhow!("Unknown filter: {}", unknown)),
@@ -56,7 +56,7 @@ pub fn build_verb(
             let mut named = HashMap::new();
             named.insert("name".into(), ident.as_str().into());
             FilterVerb::new(&positional, &named)
-        },
+        }
         Rule::forced_verb => {
             let ident = verb.into_inner().next().unwrap();
             let positional = vec![];
@@ -82,7 +82,7 @@ pub enum VerbRole {
     Derive,
     Children,
     Resolution,
-    Forced
+    Forced,
 }
 
 #[derive(PartialEq, Debug, Copy, Clone)]
@@ -115,8 +115,8 @@ pub trait Verb: Debug {
         Resolution::Weak
     }
 
-    fn derive(&self, _cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<Vec<SymbolId>> {
-        Some(vec![symbol.clone()])
+    fn derive(&self, _cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<Vec<SymbolChild>> {
+        None
     }
 
     fn derive_children(
@@ -130,8 +130,8 @@ pub trait Verb: Debug {
     fn filter(
         &self,
         _cfg: &ControlFlowGraph,
-        symbols: Vec<SymbolId>,
-    ) -> Option<Vec<SymbolId>> {
+        symbols: Vec<SymbolChild>,
+    ) -> Option<Vec<SymbolChild>> {
         Some(symbols)
     }
 
@@ -164,8 +164,14 @@ impl CompoundVerb {
 }
 
 impl Verb for CompoundVerb {
-    fn derive(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<Vec<SymbolId>> {
-        self.verb_role(VerbRole::Derive).derive(cfg, symbol)
+    fn derive(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<Vec<SymbolChild>> {
+        if let Some(mut res) = self.verb_role(VerbRole::Derive).derive(cfg, symbol) {
+            res.sort();
+            res.dedup();
+            Some(res)
+        } else {
+            None
+        }
     }
 
     fn resolution(&self) -> Resolution {
@@ -189,14 +195,12 @@ impl Verb for CompoundVerb {
     fn filter(
         &self,
         cfg: &ControlFlowGraph,
-        symbols: Vec<SymbolId>,
-    ) -> Option<Vec<SymbolId>> {
+        symbols: Vec<SymbolChild>,
+    ) -> Option<Vec<SymbolChild>> {
         self.verbs
             .iter()
             .filter(|v| v.is_role(VerbRole::Filter))
-            .try_fold(symbols, |symbols, verb| {
-                verb.filter(cfg, symbols)
-            })
+            .try_fold(symbols, |symbols, verb| verb.filter(cfg, symbols))
     }
 }
 
@@ -219,8 +223,7 @@ impl FilterVerb {
 
 impl Verb for FilterVerb {
     fn is_role(&self, role: VerbRole) -> bool {
-        role == VerbRole::Filter ||
-        role == VerbRole::Resolution
+        role == VerbRole::Filter || role == VerbRole::Resolution
     }
 
     fn resolution(&self) -> Resolution {
@@ -230,12 +233,12 @@ impl Verb for FilterVerb {
     fn filter(
         &self,
         cfg: &ControlFlowGraph,
-        symbols: Vec<SymbolId>,
-    ) -> Option<Vec<SymbolId>> {
+        symbols: Vec<SymbolChild>,
+    ) -> Option<Vec<SymbolChild>> {
         let res: Vec<_> = symbols
             .into_iter()
             .filter_map(|s| {
-                if self.name == cfg.get_symbol(&s).unwrap().name {
+                if self.name == cfg.get_symbol(&s.id).unwrap().name {
                     return Some(s);
                 }
                 None
@@ -267,23 +270,36 @@ impl ForcedVerb {
 
 impl Verb for ForcedVerb {
     fn is_role(&self, role: VerbRole) -> bool {
-        role == VerbRole::Forced ||
-        role == VerbRole::Filter ||
-        role == VerbRole::Resolution
+        role == VerbRole::Filter || role == VerbRole::Resolution
     }
 
     fn resolution(&self) -> Resolution {
         Resolution::Weak
     }
 
-    fn filter(
-        &self,
-        cfg: &ControlFlowGraph,
-        _symbols: Vec<SymbolId>,
-    ) -> Option<Vec<SymbolId>> {
+    fn filter(&self, cfg: &ControlFlowGraph, _symbols: Vec<SymbolChild>) -> Option<Vec<SymbolChild>> {
         let id = SymbolId::new(self.name.clone());
         if let Some(_) = cfg.get_symbol(&id) {
-            Some(vec![id])
+            Some(vec![SymbolChild {
+                id: id,
+                occurence: None,
+            }])
+        } else {
+            None
+        }
+    }
+
+    fn derive_children(
+        &self,
+        cfg: &ControlFlowGraph,
+        _symbol: &SymbolId,
+    ) -> Option<Vec<SymbolChild>> {
+        let id = SymbolId::new(self.name.clone());
+        if let Some(_) = cfg.get_symbol(&id) {
+            Some(vec![SymbolChild {
+                id: id,
+                occurence: None,
+            }])
         } else {
             None
         }
@@ -316,14 +332,8 @@ impl Verb for ChildrenVerb {
         role == VerbRole::Children || role == VerbRole::Derive
     }
 
-    fn derive(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<Vec<SymbolId>> {
-        Some(
-            cfg.symbols
-                .get_children(symbol)
-                .into_iter()
-                .map(|s| s.id)
-                .collect(),
-        )
+    fn derive(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<Vec<SymbolChild>> {
+        Some(cfg.symbols.get_children(symbol))
     }
 
     fn derive_children(

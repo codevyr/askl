@@ -63,7 +63,7 @@ impl Occurence {
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct SymbolChild {
     pub id: SymbolId,
-    pub occurence: Occurence,
+    pub occurence: Option<Occurence>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

@@ -60,21 +60,29 @@ struct Edge {
     id: String,
     from: SymbolId,
     to: SymbolId,
-    from_file: String,
-    from_line: i32,
+    from_file: Option<String>,
+    from_line: Option<i32>,
 }
 
 impl Edge {
-    fn new(from: SymbolId, to: SymbolId, loc: Occurence) -> Self {
+    fn new(from: SymbolId, to: SymbolId, occurence: Option<Occurence>) -> Self {
+        let (filename, line) = if let Some(occ) = occurence {
+            (
+                Some(format!(
+                    "file://{}",
+                    occ.file.into_os_string().into_string().unwrap()
+                )),
+                Some(occ.line_start),
+            )
+        } else {
+            (None, None)
+        };
         Self {
             id: format!("{}-{}", from, to),
             from: from,
             to: to,
-            from_file: format!(
-                "file://{}",
-                loc.file.into_os_string().into_string().unwrap()
-            ),
-            from_line: loc.line_start,
+            from_file: filename,
+            from_line: line,
         }
     }
 }
@@ -337,9 +345,22 @@ mod tests {
                 }
                 }
             ]
-            }
+            },
+            "c": {
+                "name": "c",
+                "ranges": [
+                    {
+                    "line_start": 13,
+                    "line_end": 14,
+                    "column_start": 1,
+                    "column_end": 1,
+                    "file": "main.c"
+                    }
+                ],
+                "children": []
+            }   
         }
-        }
+    }
     "#;
 
     #[test]
@@ -365,7 +386,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"DefaultStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }]) }"#
+            r#"GlobalStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }]) }"#
         );
     }
 
@@ -376,7 +397,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"DefaultStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }]) }]) }"#
+            r#"GlobalStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }]) }]) }"#
         );
     }
 
@@ -387,7 +408,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"DefaultStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, FilterVerb { name: "a" }] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb] }, scope: EmptyScope }]) }]) }"#
+            r#"GlobalStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, FilterVerb { name: "a" }] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb] }, scope: EmptyScope }]) }]) }"#
         );
     }
 
@@ -512,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn forced_child_query() {
+    fn forced_child_query_1() {
         const QUERY: &str = r#""b"{!"a"}"#;
         let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
 
@@ -531,6 +552,29 @@ mod tests {
             .into_iter()
             .map(|(f, t, _)| format!("{}-{}", f, t))
             .collect();
-        assert_eq!(edges, vec!["b-a"]);
+        assert_eq!(edges, vec!["a-b", "a-b", "b-a"]);
+    }
+
+    #[test]
+    fn forced_child_query_2() {
+        const QUERY: &str = r#""b"{!"c"}"#;
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+
+        assert_eq!(
+            res_nodes.0,
+            vec![
+                SymbolId::new("b".to_string()),
+                SymbolId::new("c".to_string())
+            ]
+        );
+        let edges: Vec<_> = res_edges
+            .0
+            .into_iter()
+            .map(|(f, t, _)| format!("{}-{}", f, t))
+            .collect();
+        assert_eq!(edges, vec!["b-c"]);
     }
 }

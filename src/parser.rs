@@ -1,6 +1,6 @@
 use crate::{
     scope::{Scope, ScopeFactory},
-    statement::{build_statement, DefaultStatement, Statement},
+    statement::{build_statement, Statement, GlobalStatement},
     verb::Verb,
 };
 use anyhow::Result;
@@ -113,5 +113,5 @@ pub fn parse(ask_code: &str) -> Result<Box<dyn Statement>> {
 
     let scope = ctx.new_scope(ast);
 
-    Ok(DefaultStatement::new_main(scope))
+    Ok(GlobalStatement::new(scope))
 }
