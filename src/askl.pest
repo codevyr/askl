@@ -1,5 +1,5 @@
 COMMENT = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
-WHITESPACE = _{(" " | "\t")+}
+WHITESPACE = _{(" " | "\t" | NEWLINE)+}
 ident = @{ XID_START ~ XID_CONTINUE* }
 string = @{(!"\"" ~ ANY)*}
 quoted_string = _{ "\"" ~ string  ~ "\""}
@@ -11,6 +11,6 @@ special_verb = _{ plain_filter | forced_verb }
 verb = { generic_verb | special_verb}
 scope = { "{" ~ statements ~ "}" }
 statement = {verb* ~ scope?}
-statement_terminator = _{";" | NEWLINE}
+statement_terminator = _{";"}
 statements = _{ statement ~ (statement_terminator ~ statement)* }
 ask = _{SOI ~ statements ~ EOI }

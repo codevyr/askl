@@ -418,7 +418,7 @@ mod tests {
         let cfg = ControlFlowGraph::from_symbols(symbols);
 
         let ast = parse(askl_query).unwrap();
-        println!("{:?}", ast);
+        println!("{:#?}", ast);
 
         ast.execute_all(&cfg, sources)
     }
@@ -576,6 +576,31 @@ mod tests {
             .map(|(f, t, _)| format!("{}-{}", f, t))
             .collect();
         assert_eq!(edges, vec!["b-c"]);
+    }
+
+    #[test]
+    fn forced_child_query_3() {
+        const QUERY: &str = r#""main" {
+            !"c"
+        }"#;
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+
+        assert_eq!(
+            res_nodes.0,
+            vec![
+                SymbolId::new("c".to_string()),
+                SymbolId::new("main".to_string())
+            ]
+        );
+        let edges: Vec<_> = res_edges
+            .0
+            .into_iter()
+            .map(|(f, t, _)| format!("{}-{}", f, t))
+            .collect();
+        assert_eq!(edges, vec!["main-c"]);
     }
 
     #[test]
