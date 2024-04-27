@@ -146,8 +146,6 @@ pub struct CompoundVerb {
 }
 
 impl CompoundVerb {
-    const NAME: &'static str = "verb";
-
     fn verb_role(&self, role: VerbRole) -> &Box<dyn Verb> {
         for v in self.verbs.iter() {
             if v.is_role(role) {
