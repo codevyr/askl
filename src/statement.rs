@@ -136,7 +136,7 @@ impl Statement for DefaultStatement {
         symbols: Vec<SymbolChild>,
         parent_resolution: Resolution,
     ) -> Option<(Resolution, Vec<SymbolChild>, NodeList, EdgeList)> {
-        let filtered_symbols = if let Some(sym) = self.verb().filter(cfg, symbols) {
+        let filtered_symbols = if let Some(sym) = self.verb().select(cfg, symbols) {
             sym
         } else {
             return None;

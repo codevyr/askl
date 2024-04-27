@@ -386,7 +386,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"GlobalStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }]) }"#
+            r#"GlobalStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, SelectVerb { name: "a" }] }, scope: EmptyScope }]) }"#
         );
     }
 
@@ -397,7 +397,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"GlobalStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, FilterVerb { name: "a" }] }, scope: EmptyScope }]) }]) }"#
+            r#"GlobalStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, SelectVerb { name: "a" }] }, scope: EmptyScope }]) }]) }"#
         );
     }
 
@@ -408,7 +408,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"GlobalStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, FilterVerb { name: "a" }] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb] }, scope: EmptyScope }]) }]) }"#
+            r#"GlobalStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, SelectVerb { name: "a" }] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb] }, scope: EmptyScope }]) }]) }"#
         );
     }
 
@@ -576,5 +576,28 @@ mod tests {
             .map(|(f, t, _)| format!("{}-{}", f, t))
             .collect();
         assert_eq!(edges, vec!["b-c"]);
+    }
+
+    #[test]
+    fn two_selectors() {
+        const QUERY: &str = r#""b" "a""#;
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+
+        assert_eq!(
+            res_nodes.0,
+            vec![
+                SymbolId::new("a".to_string()),
+                SymbolId::new("b".to_string()),
+            ]
+        );
+        let edges: Vec<_> = res_edges
+            .0
+            .into_iter()
+            .map(|(f, t, _)| format!("{}-{}", f, t))
+            .collect();
+        assert_eq!(edges, vec!["a-b", "a-b"]);
     }
 }
