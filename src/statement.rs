@@ -51,6 +51,18 @@ pub fn build_statement<'a>(
     Ok(DefaultStatement::new(verb, scope))
 }
 
+pub fn build_empty_statement<'a>(
+    _ctx: &ParserContext,
+) -> Box<dyn Statement> {
+    let scope: Box<dyn Scope> = Box::new(EmptyScope::new());
+
+    let verbs = vec![ChildrenVerb::new()];
+
+    let verb: Box<dyn Verb> = CompoundVerb::new(verbs).unwrap();
+
+    DefaultStatement::new(verb, scope)
+}
+
 pub trait Statement: Debug {
     fn update_edges(&self, cfg: &ControlFlowGraph, nodes: &NodeList) -> EdgeList {
         let mut edges = EdgeList::new();

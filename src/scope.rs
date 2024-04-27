@@ -1,6 +1,6 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::parser::{ParserContext, Rule};
-use crate::statement::{build_statement, Statement};
+use crate::statement::{build_statement, Statement, self, build_empty_statement};
 use crate::symbols::{SymbolId, SymbolChild};
 use crate::verb::Resolution;
 use core::fmt::Debug;
@@ -13,7 +13,14 @@ pub fn build_scope(
     let statements: Result<Vec<Box<dyn Statement>>, _> =
         pair.into_inner().map(|p| build_statement(ctx, p)).collect();
 
-    Ok(ctx.new_scope(statements?))
+    let statements = statements?;
+    let statements = if statements.len() == 0 {
+        vec![build_empty_statement(ctx)]
+    } else {
+        statements
+    };
+
+    Ok(ctx.new_scope(statements))
 }
 
 #[derive(Debug)]
