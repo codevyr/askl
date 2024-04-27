@@ -363,6 +363,14 @@ mod tests {
     }
     "#;
 
+    fn format_edges(edges: EdgeList) -> Vec<String> {
+        edges
+            .0
+            .into_iter()
+            .map(|(f, t, _)| format!("{}-{}", f, t))
+            .collect()
+    }
+
     #[test]
     fn parse_askl() {
         let _symbols: SymbolMap = serde_json::from_slice(INPUT_A.as_bytes()).unwrap();
@@ -450,11 +458,7 @@ mod tests {
                 SymbolId::new("b".to_string())
             ]
         );
-        let edges: Vec<_> = res_edges
-            .0
-            .into_iter()
-            .map(|(f, t, _)| format!("{}-{}", f, t))
-            .collect();
+        let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["a-b", "a-b"]);
     }
 
@@ -490,11 +494,7 @@ mod tests {
                 SymbolId::new("main".to_string())
             ]
         );
-        let edges: Vec<_> = res_edges
-            .0
-            .into_iter()
-            .map(|(f, t, _)| format!("{}-{}", f, t))
-            .collect();
+        let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["a-b", "a-b", "main-a", "main-b"]);
     }
 
@@ -512,11 +512,7 @@ mod tests {
                 SymbolId::new("b".to_string())
             ]
         );
-        let edges: Vec<_> = res_edges
-            .0
-            .into_iter()
-            .map(|(f, t, _)| format!("{}-{}", f, t))
-            .collect();
+        let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["a-b", "a-b"]);
     }
 
@@ -547,11 +543,7 @@ mod tests {
                 SymbolId::new("b".to_string())
             ]
         );
-        let edges: Vec<_> = res_edges
-            .0
-            .into_iter()
-            .map(|(f, t, _)| format!("{}-{}", f, t))
-            .collect();
+        let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["a-b", "a-b", "b-a"]);
     }
 
@@ -570,11 +562,7 @@ mod tests {
                 SymbolId::new("c".to_string())
             ]
         );
-        let edges: Vec<_> = res_edges
-            .0
-            .into_iter()
-            .map(|(f, t, _)| format!("{}-{}", f, t))
-            .collect();
+        let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["b-c"]);
     }
 
@@ -595,11 +583,7 @@ mod tests {
                 SymbolId::new("main".to_string())
             ]
         );
-        let edges: Vec<_> = res_edges
-            .0
-            .into_iter()
-            .map(|(f, t, _)| format!("{}-{}", f, t))
-            .collect();
+        let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["main-c"]);
     }
 
@@ -618,11 +602,7 @@ mod tests {
                 SymbolId::new("b".to_string()),
             ]
         );
-        let edges: Vec<_> = res_edges
-            .0
-            .into_iter()
-            .map(|(f, t, _)| format!("{}-{}", f, t))
-            .collect();
+        let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["a-b", "a-b"]);
     }
 
@@ -641,11 +621,7 @@ mod tests {
                 SymbolId::new("b".to_string()),
             ]
         );
-        let edges: Vec<_> = res_edges
-            .0
-            .into_iter()
-            .map(|(f, t, _)| format!("{}-{}", f, t))
-            .collect();
+        let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["a-b", "a-b"]);
     }
 
@@ -664,11 +640,7 @@ mod tests {
                 SymbolId::new("b".to_string()),
             ]
         );
-        let edges: Vec<_> = res_edges
-            .0
-            .into_iter()
-            .map(|(f, t, _)| format!("{}-{}", f, t))
-            .collect();
+        let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["a-b", "a-b"]);
     }
 
@@ -688,11 +660,7 @@ mod tests {
                 SymbolId::new("b".to_string()),
             ]
         );
-        let edges: Vec<_> = res_edges
-            .0
-            .into_iter()
-            .map(|(f, t, _)| format!("{}-{}", f, t))
-            .collect();
+        let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["a-b", "a-b"]);
     }
 }
