@@ -4,7 +4,12 @@ ident = @{ XID_START ~ XID_CONTINUE* }
 string = @{(!"\"" ~ ANY)*}
 quoted_string = _{ "\"" ~ string  ~ "\""}
 named_argument = ${ident ~ "=" ~ quoted_string}
-generic_verb = ${ "@" ~ ident ~ ("(" ~ named_argument ~ ("," ~ named_argument)* ~ ")")?}
+named_arguments = _{named_argument ~ ("," ~ named_argument)*}
+positional_argument = { quoted_string }
+positional_arguments = _{positional_argument ~ ("," ~ positional_argument)* }
+verb_arguments = _{ (positional_arguments ~ "," ~  named_arguments) | positional_arguments | named_arguments }
+generic_ident = ${ "@" ~ ident }
+generic_verb = { generic_ident ~ ("(" ~ verb_arguments ~ ")")?}
 plain_filter = { quoted_string }
 forced_verb = { "!" ~ quoted_string }
 special_verb = _{ plain_filter | forced_verb }

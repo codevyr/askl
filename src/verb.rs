@@ -1,5 +1,5 @@
 use crate::cfg::ControlFlowGraph;
-use crate::parser::{Identifier, NamedArgument, ParserContext, Rule};
+use crate::parser::{Identifier, NamedArgument, ParserContext, PositionalArgument, Rule};
 use crate::symbols::{SymbolChild, SymbolId};
 use anyhow::{anyhow, bail, Result};
 use core::fmt::Debug;
@@ -14,19 +14,33 @@ fn build_generic_verb(
 ) -> Result<Box<dyn Verb>> {
     let mut pair = pair.into_inner();
     let ident = pair.next().unwrap();
-    let args = pair
-        .map(NamedArgument::build)
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let positional = vec![];
+    let mut positional = vec![];
     let mut named = HashMap::new();
-    for arg in args.into_iter() {
-        named.insert(arg.name.0, arg.value.0);
-    }
+    pair.map(|pair| match pair.as_rule() {
+        Rule::positional_argument => {
+            let arg = PositionalArgument::build(pair)?;
+            positional.push(arg.value.0);
+            Ok(())
+        }
+        Rule::named_argument => {
+            let arg = NamedArgument::build(pair)?;
+            named.insert(arg.name.0, arg.value.0);
+            Ok(())
+        }
+        rule => Err(Error::new_from_span(
+            pest::error::ErrorVariant::ParsingError {
+                positives: vec![Rule::positional_argument, Rule::named_argument],
+                negatives: vec![rule],
+            },
+            pair.as_span(),
+        )),
+    })
+    .collect::<Result<Vec<_>, _>>()?;
 
     let _span = ident.as_span();
     match Identifier::build(ident)?.0.as_str() {
         SelectVerb::NAME => SelectVerb::new(&positional, &named),
+        IgnoreVerb::NAME => IgnoreVerb::new(&positional, &named),
         unknown => Err(anyhow!("Unknown filter: {}", unknown)),
     }
 }
@@ -83,6 +97,7 @@ pub enum VerbRole {
     Children,
     Resolution,
     Forced,
+    Filter,
 }
 
 #[derive(PartialEq, Debug, Copy, Clone)]
@@ -135,6 +150,10 @@ pub trait Verb: Debug {
         Some(symbols)
     }
 
+    fn filter(&self, _cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
+        symbols
+    }
+
     fn update_context(&self, _ctx: &mut ParserContext) -> bool {
         false
     }
@@ -160,12 +179,8 @@ impl CompoundVerb {
         Ok(Box::new(Self { verbs }))
     }
 
-    fn verbs<'a>(&'a self, role: VerbRole) -> Option<Vec<&'a Box<dyn Verb>>>
-    {
-        let role_verbs: Vec<_> = self.verbs
-        .iter()
-        .filter(|v| v.is_role(role))
-        .collect();
+    fn verbs<'a>(&'a self, role: VerbRole) -> Option<Vec<&'a Box<dyn Verb>>> {
+        let role_verbs: Vec<_> = self.verbs.iter().filter(|v| v.is_role(role)).collect();
 
         if role_verbs.len() == 0 {
             return None;
@@ -204,13 +219,24 @@ impl Verb for CompoundVerb {
             .derive_children(cfg, symbol)
     }
 
+    fn filter(&self, cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
+        if let Some(verbs) = self.verbs(VerbRole::Filter) {
+            verbs
+                .into_iter()
+                .fold(symbols, |symbols, verb| verb.filter(cfg, symbols))
+        } else {
+            symbols
+        }
+    }
+
     fn select(
         &self,
         cfg: &ControlFlowGraph,
         symbols: Vec<SymbolChild>,
     ) -> Option<Vec<SymbolChild>> {
         if let Some(verbs) = self.verbs(VerbRole::Select) {
-            let mut verb_results = verbs.into_iter()
+            let mut verb_results = verbs
+                .into_iter()
                 .filter_map(|v| v.select(cfg, symbols.clone()))
                 .peekable();
 
@@ -367,5 +393,35 @@ impl Verb for ChildrenVerb {
         symbol: &SymbolId,
     ) -> Option<Vec<SymbolChild>> {
         Some(cfg.symbols.get_children(symbol))
+    }
+}
+
+#[derive(Debug)]
+struct IgnoreVerb {
+    name: String,
+}
+
+impl IgnoreVerb {
+    const NAME: &'static str = "ignore";
+
+    fn new(positional: &Vec<String>, _named: &HashMap<String, String>) -> Result<Box<dyn Verb>> {
+        if let Some(name) = positional.iter().next() {
+            Ok(Box::new(Self { name: name.clone() }))
+        } else {
+            bail!("Expected a positional argument");
+        }
+    }
+}
+
+impl Verb for IgnoreVerb {
+    fn is_role(&self, role: VerbRole) -> bool {
+        role == VerbRole::Filter
+    }
+
+    fn filter(&self, cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
+        symbols
+            .into_iter()
+            .filter(|s| self.name != cfg.get_symbol(&s.id).unwrap().name)
+            .collect()
     }
 }

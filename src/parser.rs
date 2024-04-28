@@ -1,6 +1,6 @@
 use crate::{
     scope::{Scope, ScopeFactory},
-    statement::{build_statement, Statement, GlobalStatement},
+    statement::{build_statement, GlobalStatement, Statement},
     verb::Verb,
 };
 use anyhow::Result;
@@ -17,6 +17,17 @@ pub struct Identifier(pub String);
 
 impl Identifier {
     pub fn build(pair: pest::iterators::Pair<Rule>) -> Result<Identifier, Error<Rule>> {
+        match pair.as_rule() {
+            Rule::generic_ident => {},
+            rule => Err(Error::new_from_span(
+                pest::error::ErrorVariant::ParsingError {
+                    positives: vec![Rule::generic_ident],
+                    negatives: vec![rule],
+                },
+                pair.as_span(),
+            ))?,
+        }
+        let pair = pair.into_inner();
         let ident = pair.as_str();
         Ok(Identifier(ident.into()))
     }
@@ -52,6 +63,20 @@ impl NamedArgument {
             name: ident,
             value: value,
         })
+    }
+}
+
+#[derive(Debug)]
+pub struct PositionalArgument {
+    pub value: Value,
+}
+
+impl PositionalArgument {
+    pub fn build(pair: pest::iterators::Pair<Rule>) -> Result<Self, Error<Rule>> {
+        let mut pair = pair.into_inner();
+        let value = pair.next().unwrap();
+        let value = Value::build(value).unwrap();
+        Ok(Self { value })
     }
 }
 

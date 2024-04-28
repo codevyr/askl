@@ -148,7 +148,9 @@ impl Statement for DefaultStatement {
         symbols: Vec<SymbolChild>,
         parent_resolution: Resolution,
     ) -> Option<(Resolution, Vec<SymbolChild>, NodeList, EdgeList)> {
-        let filtered_symbols = if let Some(sym) = self.verb().select(cfg, symbols) {
+        let filtered_symbols = self.verb().filter(cfg, symbols);
+
+        let selected_symbols = if let Some(sym) = self.verb().select(cfg, filtered_symbols) {
             sym
         } else {
             return None;
@@ -161,8 +163,8 @@ impl Statement for DefaultStatement {
         let mut res_symbols = vec![];
         let mut res_resolution = child_resolution;
 
-        for filtered_symbol in filtered_symbols.into_iter() {
-            let derived_symbols = if let Some(derived) = self.verb().derive(cfg, &filtered_symbol.id) {
+        for selected_symbol in selected_symbols.into_iter() {
+            let derived_symbols = if let Some(derived) = self.verb().derive(cfg, &selected_symbol.id) {
                 derived
             } else {
                 return None;
@@ -176,11 +178,11 @@ impl Statement for DefaultStatement {
                     res_edges.0.extend(edges.0.into_iter());
                     res_resolution = res_resolution.max(scope_resolution);
                     res_nodes.0.extend(resolved_symbols.iter().map(|s|s.id.clone()));
-                    res_nodes.0.push(filtered_symbol.id.clone());
-                    res_symbols.push(filtered_symbol.clone());
+                    res_nodes.0.push(selected_symbol.id.clone());
+                    res_symbols.push(selected_symbol.clone());
 
                     for resolved_symbol in resolved_symbols {
-                        res_edges.0.push((filtered_symbol.id.clone(), resolved_symbol.id, resolved_symbol.occurence));
+                        res_edges.0.push((selected_symbol.id.clone(), resolved_symbol.id, resolved_symbol.occurence));
                     }
                 }
             }
