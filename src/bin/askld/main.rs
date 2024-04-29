@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn statement_after_scope_newline() {
         const QUERY: &str = r#""a" {}
-        "a""#;
+        "a""#; 
         let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);

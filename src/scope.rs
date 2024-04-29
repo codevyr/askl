@@ -26,7 +26,6 @@ pub fn build_scope(
 #[derive(Debug)]
 pub enum ScopeFactory {
     Children,
-    Global,
     Empty,
 }
 
@@ -34,7 +33,6 @@ impl ScopeFactory {
     pub fn create(&self, statements: Vec<Box<dyn Statement>>) -> Box<dyn Scope> {
         match self {
             Self::Children => DefaultScope::new(statements),
-            Self::Global => GlobalScope::new(statements),
             _ => panic!("Impossible: {:?}", self),
         }
     }

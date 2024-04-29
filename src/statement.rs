@@ -15,17 +15,16 @@ pub fn build_statement<'a>(
 
     let mut iter = pair.into_inner();
     let mut sub_ctx = ctx.derive();
-    let mut verbs = sub_ctx.create_verbs();
     for pair in iter.by_ref() {
         match pair.as_rule() {
             Rule::verb => {
                 let new_verb = build_verb(&sub_ctx, pair)?;
-                if let Some(verb) = sub_ctx.consume(new_verb) {
-                    verbs.push(verb);
+                if let Some(new_verb) = sub_ctx.consume(new_verb) {
+                    sub_ctx.extend_verb(new_verb);
                 }
             }
             Rule::scope => {
-                scope = build_scope(ctx, pair)?;
+                scope = build_scope(&sub_ctx, pair)?;
                 break;
             }
             _ => Err(Error::new_from_span(
@@ -38,8 +37,6 @@ pub fn build_statement<'a>(
         }
     }
 
-    let verb: Arc<dyn Verb> = CompoundVerb::new(verbs).unwrap();
-
     if let Some(pair) = iter.next() {
         return Err(Error::new_from_span(
             pest::error::ErrorVariant::CustomError {
@@ -49,19 +46,17 @@ pub fn build_statement<'a>(
         ));
     }
 
-    Ok(DefaultStatement::new(verb, scope))
+    Ok(DefaultStatement::new(sub_ctx.verb().into(), scope))
 }
 
 pub fn build_empty_statement<'a>(
-    _ctx: &ParserContext,
+    ctx: &ParserContext,
 ) -> Box<dyn Statement> {
     let scope: Box<dyn Scope> = Box::new(EmptyScope::new());
+    let sub_ctx = ctx.derive();
+    let verb = sub_ctx.verb();
 
-    let verbs = vec![ChildrenVerb::new()];
-
-    let verb: Arc<dyn Verb> = CompoundVerb::new(verbs).unwrap();
-
-    DefaultStatement::new(verb, scope)
+    DefaultStatement::new(verb.into(), scope)
 }
 
 pub trait Statement: Debug {
@@ -165,7 +160,7 @@ impl Statement for DefaultStatement {
         let mut res_resolution = child_resolution;
 
         for selected_symbol in selected_symbols.into_iter() {
-            let derived_symbols = if let Some(derived) = self.verb().derive(cfg, &selected_symbol.id) {
+            let derived_symbols = if let Some(derived) = self.verb().derive_symbols(cfg, &selected_symbol.id) {
                 derived
             } else {
                 return None;
@@ -218,8 +213,7 @@ pub struct GlobalStatement {
 
 impl GlobalStatement {
     pub fn new(scope: Box<dyn Scope>) -> Box<dyn Statement> {
-        let verbs = vec![UnitVerb::new()];
-        let verb: Arc<dyn Verb> = CompoundVerb::new(verbs).unwrap();
+        let verb: Arc<dyn Verb> = CompoundVerb::new().unwrap().into();
         Box::new(GlobalStatement {
             verb: verb,
             scope: scope,
