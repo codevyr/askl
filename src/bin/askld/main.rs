@@ -681,4 +681,23 @@ mod tests {
         let edges = format_edges(res_edges);
         assert_eq!(edges, Vec::<String>::new());
     }
+
+
+    #[test]
+    fn ignore_node_recurse() {
+        const QUERY: &str = r#""a" @ignore("b") {}"#;
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+
+        assert_eq!(
+            res_nodes.0,
+            vec![
+                SymbolId::new("a".to_string()),
+            ]
+        );
+        let edges = format_edges(res_edges);
+        assert_eq!(edges, Vec::<String>::new());
+    }
 }

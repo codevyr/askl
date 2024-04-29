@@ -1,10 +1,11 @@
 use crate::{
     scope::{Scope, ScopeFactory},
     statement::{build_statement, GlobalStatement, Statement},
-    verb::Verb,
+    verb::{Verb, ChildrenVerb},
 };
 use anyhow::Result;
 use core::fmt::Debug;
+use std::sync::Arc;
 use pest::{error::Error, Parser};
 use pest_derive::Parser;
 
@@ -114,12 +115,16 @@ impl<'a> ParserContext<'a> {
         factory.new_scope(statements)
     }
 
-    pub fn consume(&mut self, verb: Box<dyn Verb>) -> Option<Box<dyn Verb>> {
+    pub fn consume(&mut self, verb: Arc<dyn Verb>) -> Option<Arc<dyn Verb>> {
         if !verb.update_context(self) {
             Some(verb)
         } else {
             None
         }
+    }
+
+    pub fn create_verbs(&self) -> Vec<Arc<dyn Verb>> {
+        vec![ChildrenVerb::new()]
     }
 }
 

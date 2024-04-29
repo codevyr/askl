@@ -4,6 +4,7 @@ use crate::scope::{build_scope, EmptyScope, Scope};
 use crate::symbols::{SymbolChild, SymbolId};
 use crate::verb::{build_verb, ChildrenVerb, CompoundVerb, Resolution, UnitVerb, Verb};
 use core::fmt::Debug;
+use std::sync::Arc;
 use pest::error::Error;
 
 pub fn build_statement<'a>(
@@ -14,7 +15,7 @@ pub fn build_statement<'a>(
 
     let mut iter = pair.into_inner();
     let mut sub_ctx = ctx.derive();
-    let mut verbs = vec![ChildrenVerb::new()];
+    let mut verbs = sub_ctx.create_verbs();
     for pair in iter.by_ref() {
         match pair.as_rule() {
             Rule::verb => {
@@ -37,7 +38,7 @@ pub fn build_statement<'a>(
         }
     }
 
-    let verb: Box<dyn Verb> = CompoundVerb::new(verbs).unwrap();
+    let verb: Arc<dyn Verb> = CompoundVerb::new(verbs).unwrap();
 
     if let Some(pair) = iter.next() {
         return Err(Error::new_from_span(
@@ -58,7 +59,7 @@ pub fn build_empty_statement<'a>(
 
     let verbs = vec![ChildrenVerb::new()];
 
-    let verb: Box<dyn Verb> = CompoundVerb::new(verbs).unwrap();
+    let verb: Arc<dyn Verb> = CompoundVerb::new(verbs).unwrap();
 
     DefaultStatement::new(verb, scope)
 }
@@ -128,12 +129,12 @@ pub trait Statement: Debug {
 
 #[derive(Debug)]
 pub struct DefaultStatement {
-    pub verb: Box<dyn Verb>,
+    pub verb: Arc<dyn Verb>,
     pub scope: Box<dyn Scope>,
 }
 
 impl DefaultStatement {
-    fn new(verb: Box<dyn Verb>, scope: Box<dyn Scope>) -> Box<dyn Statement> {
+    fn new(verb: Arc<dyn Verb>, scope: Box<dyn Scope>) -> Box<dyn Statement> {
         Box::new(DefaultStatement {
             verb: verb,
             scope: scope,
@@ -211,14 +212,14 @@ impl Statement for DefaultStatement {
 
 #[derive(Debug)]
 pub struct GlobalStatement {
-    pub verb: Box<dyn Verb>,
+    pub verb: Arc<dyn Verb>,
     pub scope: Box<dyn Scope>,
 }
 
 impl GlobalStatement {
     pub fn new(scope: Box<dyn Scope>) -> Box<dyn Statement> {
         let verbs = vec![UnitVerb::new()];
-        let verb: Box<dyn Verb> = CompoundVerb::new(verbs).unwrap();
+        let verb: Arc<dyn Verb> = CompoundVerb::new(verbs).unwrap();
         Box::new(GlobalStatement {
             verb: verb,
             scope: scope,

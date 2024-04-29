@@ -3,6 +3,7 @@ use crate::parser::{Identifier, NamedArgument, ParserContext, PositionalArgument
 use crate::symbols::{SymbolChild, SymbolId};
 use anyhow::{anyhow, bail, Result};
 use core::fmt::Debug;
+use std::sync::Arc;
 use log::debug;
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
@@ -11,7 +12,7 @@ use std::collections::HashMap;
 fn build_generic_verb(
     _ctx: &ParserContext,
     pair: pest::iterators::Pair<Rule>,
-) -> Result<Box<dyn Verb>> {
+) -> Result<Arc<dyn Verb>> {
     let mut pair = pair.into_inner();
     let ident = pair.next().unwrap();
     let mut positional = vec![];
@@ -48,7 +49,7 @@ fn build_generic_verb(
 pub fn build_verb(
     ctx: &ParserContext,
     pair: pest::iterators::Pair<Rule>,
-) -> Result<Box<dyn Verb>, Error<Rule>> {
+) -> Result<Arc<dyn Verb>, Error<Rule>> {
     let span = pair.as_span();
     debug!("Build verb {:#?}", pair);
     let verb = if let Some(verb) = pair.into_inner().next() {
@@ -161,25 +162,25 @@ pub trait Verb: Debug {
 
 #[derive(Debug)]
 pub struct CompoundVerb {
-    verbs: Vec<Box<dyn Verb>>,
+    verbs: Vec<Arc<dyn Verb>>,
 }
 
 impl CompoundVerb {
-    fn verb_role(&self, role: VerbRole) -> &Box<dyn Verb> {
+    fn verb_role(&self, role: VerbRole) -> &Arc<dyn Verb> {
         for v in self.verbs.iter() {
             if v.is_role(role) {
-                return v;
+                return &v;
             }
         }
 
         panic!("Role {:?} does not exist", role);
     }
 
-    pub fn new(verbs: Vec<Box<dyn Verb>>) -> Result<Box<dyn Verb>> {
-        Ok(Box::new(Self { verbs }))
+    pub fn new(verbs: Vec<Arc<dyn Verb>>) -> Result<Arc<dyn Verb>> {
+        Ok(Arc::new(Self { verbs }))
     }
 
-    fn verbs<'a>(&'a self, role: VerbRole) -> Option<Vec<&'a Box<dyn Verb>>> {
+    fn verbs<'a>(&'a self, role: VerbRole) -> Option<Vec<&'a Arc<dyn Verb>>> {
         let role_verbs: Vec<_> = self.verbs.iter().filter(|v| v.is_role(role)).collect();
 
         if role_verbs.len() == 0 {
@@ -259,9 +260,9 @@ struct SelectVerb {
 impl SelectVerb {
     const NAME: &'static str = "select";
 
-    fn new(_positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Box<dyn Verb>> {
+    fn new(_positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
         if let Some(name) = named.get("name") {
-            Ok(Box::new(Self { name: name.clone() }))
+            Ok(Arc::new(Self { name: name.clone() }))
         } else {
             bail!("Must contain name field");
         }
@@ -306,9 +307,9 @@ struct ForcedVerb {
 impl ForcedVerb {
     const NAME: &'static str = "forced";
 
-    fn new(_positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Box<dyn Verb>> {
+    fn new(_positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
         if let Some(name) = named.get("name") {
-            Ok(Box::new(Self { name: name.clone() }))
+            Ok(Arc::new(Self { name: name.clone() }))
         } else {
             bail!("Must contain name field");
         }
@@ -362,8 +363,8 @@ impl Verb for ForcedVerb {
 pub struct UnitVerb {}
 
 impl UnitVerb {
-    pub fn new() -> Box<dyn Verb> {
-        Box::new(Self {})
+    pub fn new() -> Arc<dyn Verb> {
+        Arc::new(Self {})
     }
 }
 
@@ -373,8 +374,8 @@ impl Verb for UnitVerb {}
 pub struct ChildrenVerb {}
 
 impl ChildrenVerb {
-    pub fn new() -> Box<dyn Verb> {
-        Box::new(Self {})
+    pub fn new() -> Arc<dyn Verb> {
+        Arc::new(Self {})
     }
 }
 
@@ -404,9 +405,9 @@ struct IgnoreVerb {
 impl IgnoreVerb {
     const NAME: &'static str = "ignore";
 
-    fn new(positional: &Vec<String>, _named: &HashMap<String, String>) -> Result<Box<dyn Verb>> {
+    fn new(positional: &Vec<String>, _named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
         if let Some(name) = positional.iter().next() {
-            Ok(Box::new(Self { name: name.clone() }))
+            Ok(Arc::new(Self { name: name.clone() }))
         } else {
             bail!("Expected a positional argument");
         }
