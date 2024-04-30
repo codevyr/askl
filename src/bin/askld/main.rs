@@ -475,7 +475,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"GlobalStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, SelectVerb { name: "a" }] }, scope: EmptyScope }]) }"#
+            r#"GlobalStatement { command: Command { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { command: Command { verbs: [UnitVerb, ChildrenVerb, NameSelector { name: "a" }] }, scope: EmptyScope }]) }"#
         );
     }
 
@@ -486,7 +486,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"GlobalStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, SelectVerb { name: "a" }] }, scope: EmptyScope }]) }]) }"#
+            r#"GlobalStatement { command: Command { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { command: Command { verbs: [UnitVerb, ChildrenVerb] }, scope: DefaultScope([DefaultStatement { command: Command { verbs: [UnitVerb, ChildrenVerb, NameSelector { name: "a" }] }, scope: EmptyScope }]) }]) }"#
         );
     }
 
@@ -497,7 +497,7 @@ mod tests {
         println!("{:?}", ast);
         assert_eq!(
             format!("{:?}", ast),
-            r#"GlobalStatement { verb: CompoundVerb { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb, SelectVerb { name: "a" }] }, scope: DefaultScope([DefaultStatement { verb: CompoundVerb { verbs: [ChildrenVerb] }, scope: EmptyScope }]) }]) }"#
+            r#"GlobalStatement { command: Command { verbs: [UnitVerb] }, scope: DefaultScope([DefaultStatement { command: Command { verbs: [UnitVerb, ChildrenVerb, NameSelector { name: "a" }] }, scope: DefaultScope([DefaultStatement { command: Command { verbs: [UnitVerb, ChildrenVerb] }, scope: EmptyScope }]) }]) }"#
         );
     }
 
