@@ -3,11 +3,11 @@ use crate::parser::{Identifier, NamedArgument, ParserContext, PositionalArgument
 use crate::symbols::{SymbolChild, SymbolId};
 use anyhow::{anyhow, bail, Result};
 use core::fmt::Debug;
-use std::sync::Arc;
 use log::debug;
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 fn build_generic_verb(
     _ctx: &ParserContext,
@@ -40,7 +40,7 @@ fn build_generic_verb(
 
     let _span = ident.as_span();
     match Identifier::build(ident)?.0.as_str() {
-        SelectVerb::NAME => SelectVerb::new(&positional, &named),
+        NameSelector::NAME => NameSelector::new(&positional, &named),
         IgnoreVerb::NAME => IgnoreVerb::new(&positional, &named),
         unknown => Err(anyhow!("Unknown filter: {}", unknown)),
     }
@@ -70,7 +70,7 @@ pub fn build_verb(
             let positional = vec![];
             let mut named = HashMap::new();
             named.insert("name".into(), ident.as_str().into());
-            SelectVerb::new(&positional, &named)
+            NameSelector::new(&positional, &named)
         }
         Rule::forced_verb => {
             let ident = verb.into_inner().next().unwrap();
@@ -89,16 +89,6 @@ pub fn build_verb(
             span,
         )
     })
-}
-
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub enum VerbRole {
-    Select,
-    Derive,
-    Children,
-    Resolution,
-    Forced,
-    Filter,
 }
 
 #[derive(PartialEq, Debug, Copy, Clone)]
@@ -122,29 +112,19 @@ impl Resolution {
     }
 }
 
-pub fn derive_verb(verb: &Arc<dyn Verb>) -> Arc<dyn Verb> {
+pub fn derive_verb(verb: &Arc<dyn Verb>) -> Option<Arc<dyn Verb>> {
     match verb.derive_method() {
-        DeriveMethod::Clone => verb.clone(),
-        DeriveMethod::Derive => verb.derive().into(),
-        DeriveMethod::Skip => CompoundVerb::new().unwrap().into(),
+        DeriveMethod::Clone => Some(verb.clone()),
+        DeriveMethod::Skip => None,
     }
 }
 
 pub enum DeriveMethod {
-    Derive,
     Clone,
-    Skip
+    Skip,
 }
 
 pub trait Verb: Debug {
-    fn is_role(&self, _role: VerbRole) -> bool {
-        true
-    }
-
-    fn extend(&mut self, _other: Arc<dyn Verb>) {
-        unimplemented!("Only CompoundVerb can extend");
-    }
-
     fn resolution(&self) -> Resolution {
         Resolution::Weak
     }
@@ -153,22 +133,30 @@ pub trait Verb: Debug {
         DeriveMethod::Skip
     }
 
-    fn derive(&self) -> Box<dyn Verb> {
-        unimplemented!("Only CompoundVerb can derive")
+    fn update_context(&self, _ctx: &mut ParserContext) -> bool {
+        false
     }
 
-    fn derive_symbols(&self, _cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<Vec<SymbolChild>> {
-        None
+    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
+        bail!("Not a selector verb")
     }
 
-    fn derive_children(
-        &self,
-        _cfg: &ControlFlowGraph,
-        _symbol: &SymbolId,
-    ) -> Option<Vec<SymbolChild>> {
-        None
+    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
+        bail!("Not a filter verb")
     }
 
+    fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
+        bail!("Not a filter verb")
+    }
+}
+
+pub trait Filter: Debug {
+    fn filter(&self, _cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
+        symbols
+    }
+}
+
+pub trait Selector: Debug {
     fn select(
         &self,
         _cfg: &ControlFlowGraph,
@@ -176,136 +164,29 @@ pub trait Verb: Debug {
     ) -> Option<Vec<SymbolChild>> {
         Some(symbols)
     }
-
-    fn filter(&self, _cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
-        symbols
-    }
-
-    fn update_context(&self, _ctx: &mut ParserContext) -> bool {
-        false
-    }
 }
 
-#[derive(Debug)]
-pub struct CompoundVerb {
-    verbs: Vec<Arc<dyn Verb>>,
-    unit_verb: Arc<dyn Verb>,
-}
-
-impl CompoundVerb {
-    fn verb_role(&self, role: VerbRole) -> &Arc<dyn Verb> {
-        for v in self.verbs.iter() {
-            if v.is_role(role) {
-                return &v;
-            }
-        }
-
-        &self.unit_verb
-    }
-
-    pub fn new() -> Result<Box<dyn Verb>> {
-        Ok(Box::new(Self { verbs: vec![], unit_verb: UnitVerb::new() }))
-    }
-
-    fn new_verbs(verbs: Vec<Arc<dyn Verb>>) -> Result<Box<dyn Verb>> {
-        Ok(Box::new(Self { verbs , unit_verb: UnitVerb::new()}))
-    }
-
-    fn verbs<'a>(&'a self, role: VerbRole) -> Option<Vec<&'a Arc<dyn Verb>>> {
-        let role_verbs: Vec<_> = self.verbs.iter().filter(|v| v.is_role(role)).collect();
-
-        if role_verbs.len() == 0 {
-            return None;
-        }
-
-        Some(role_verbs)
-    }
-}
-
-impl Verb for CompoundVerb {
-    fn derive(&self) -> Box<dyn Verb> {
-        let mut res = vec![];
-        for verb in self.verbs.iter() {
-            match verb.derive_method() {
-                DeriveMethod::Clone => res.push(verb.clone()),
-                DeriveMethod::Derive => res.push(verb.derive().into()),
-                DeriveMethod::Skip => {},
-            }
-        };
-
-        CompoundVerb::new_verbs(res).unwrap()
-    }
-
-    fn extend(&mut self, other: Arc<dyn Verb>) {
-        self.verbs.push(other);
-    }
-
-    fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<Vec<SymbolChild>> {
-        if let Some(mut res) = self.verb_role(VerbRole::Derive).derive_symbols(cfg, symbol) {
-            res.sort();
-            res.dedup();
-            Some(res)
-        } else {
-            None
-        }
-    }
-
-    fn resolution(&self) -> Resolution {
-        let mut res = Resolution::Weak;
-        for v in self.verbs.iter() {
-            res = res.max(v.resolution());
-        }
-
-        res
-    }
+pub trait Deriver: Debug {
+    fn derive_symbols(
+        &self,
+        _cfg: &ControlFlowGraph,
+        _symbol: &SymbolId,
+    ) -> Option<Vec<SymbolChild>>;
 
     fn derive_children(
         &self,
-        cfg: &ControlFlowGraph,
-        symbol: &SymbolId,
-    ) -> Option<Vec<SymbolChild>> {
-        self.verb_role(VerbRole::Children)
-            .derive_children(cfg, symbol)
-    }
-
-    fn filter(&self, cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
-        if let Some(verbs) = self.verbs(VerbRole::Filter) {
-            verbs
-                .into_iter()
-                .fold(symbols, |symbols, verb| verb.filter(cfg, symbols))
-        } else {
-            symbols
-        }
-    }
-
-    fn select(
-        &self,
-        cfg: &ControlFlowGraph,
-        symbols: Vec<SymbolChild>,
-    ) -> Option<Vec<SymbolChild>> {
-        if let Some(verbs) = self.verbs(VerbRole::Select) {
-            let mut verb_results = verbs
-                .into_iter()
-                .filter_map(|v| v.select(cfg, symbols.clone()))
-                .peekable();
-
-            if verb_results.peek().is_none() {
-                return None;
-            }
-
-            Some(verb_results.flatten().collect())
-        } else {
-            Some(symbols)
-        }
-    }
+        _cfg: &ControlFlowGraph,
+        _symbol: &SymbolId,
+    ) -> Option<Vec<SymbolChild>>;
 }
 
+
 #[derive(Debug)]
-struct SelectVerb {
+struct NameSelector {
     name: String,
 }
 
-impl SelectVerb {
+impl NameSelector {
     const NAME: &'static str = "select";
 
     fn new(_positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
@@ -317,15 +198,17 @@ impl SelectVerb {
     }
 }
 
-impl Verb for SelectVerb {
-    fn is_role(&self, role: VerbRole) -> bool {
-        role == VerbRole::Select || role == VerbRole::Resolution
+impl Verb for NameSelector {
+    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
+        Ok(self)
     }
 
     fn resolution(&self) -> Resolution {
         Resolution::Strong
     }
+}
 
+impl Selector for NameSelector {
     fn select(
         &self,
         cfg: &ControlFlowGraph,
@@ -365,18 +248,28 @@ impl ForcedVerb {
 }
 
 impl Verb for ForcedVerb {
-    fn is_role(&self, role: VerbRole) -> bool {
-        role == VerbRole::Select || role == VerbRole::Resolution
+    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
+        Ok(self)
     }
 
     fn resolution(&self) -> Resolution {
         Resolution::Weak
     }
+}
 
-    fn select(
+impl Deriver for ForcedVerb {
+    fn derive_symbols(
         &self,
         cfg: &ControlFlowGraph,
-        _symbols: Vec<SymbolChild>,
+        symbol: &SymbolId,
+    ) -> Option<Vec<SymbolChild>> {
+        Some(cfg.symbols.get_children(symbol))
+    }
+
+    fn derive_children(
+        &self,
+        cfg: &ControlFlowGraph,
+        _symbol: &SymbolId,
     ) -> Option<Vec<SymbolChild>> {
         let id = SymbolId::new(self.name.clone());
         if let Some(_) = cfg.get_symbol(&id) {
@@ -388,11 +281,13 @@ impl Verb for ForcedVerb {
             None
         }
     }
+}
 
-    fn derive_children(
+impl Selector for ForcedVerb {
+    fn select(
         &self,
         cfg: &ControlFlowGraph,
-        _symbol: &SymbolId,
+        _symbols: Vec<SymbolChild>,
     ) -> Option<Vec<SymbolChild>> {
         let id = SymbolId::new(self.name.clone());
         if let Some(_) = cfg.get_symbol(&id) {
@@ -416,7 +311,33 @@ impl UnitVerb {
     }
 }
 
-impl Verb for UnitVerb {}
+impl Verb for UnitVerb {
+    fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
+        Ok(self)
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Clone
+    }
+}
+
+impl Deriver for UnitVerb {
+    fn derive_children(
+            &self,
+            _cfg: &ControlFlowGraph,
+            _symbol: &SymbolId,
+        ) -> Option<Vec<SymbolChild>> {
+        None
+    }
+
+    fn derive_symbols(
+            &self,
+            _cfg: &ControlFlowGraph,
+            _symbol: &SymbolId,
+        ) -> Option<Vec<SymbolChild>> {
+        None
+    }
+}
 
 #[derive(Debug)]
 pub struct ChildrenVerb {}
@@ -428,15 +349,21 @@ impl ChildrenVerb {
 }
 
 impl Verb for ChildrenVerb {
-    fn is_role(&self, role: VerbRole) -> bool {
-        role == VerbRole::Children || role == VerbRole::Derive
+    fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
+        Ok(self)
     }
 
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Clone
     }
+}
 
-    fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<Vec<SymbolChild>> {
+impl Deriver for ChildrenVerb {
+    fn derive_symbols(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbol: &SymbolId,
+    ) -> Option<Vec<SymbolChild>> {
         Some(cfg.symbols.get_children(symbol))
     }
 
@@ -467,14 +394,16 @@ impl IgnoreVerb {
 }
 
 impl Verb for IgnoreVerb {
+    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
+        Ok(self)
+    }
+
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Clone
     }
+}
 
-    fn is_role(&self, role: VerbRole) -> bool {
-        role == VerbRole::Filter
-    }
-
+impl Filter for IgnoreVerb {
     fn filter(&self, cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
         symbols
             .into_iter()

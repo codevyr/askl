@@ -469,7 +469,7 @@ mod tests {
         assert_eq!(statements.len(), 1);
         let statement = &statements[0];
 
-        let _verb = statement.verb();
+        let _verb = statement.command();
         let scope = statement.scope();
 
         let statements: Vec<_> = scope.statements().collect();

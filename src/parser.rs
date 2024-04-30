@@ -1,7 +1,7 @@
 use crate::{
     scope::{Scope, ScopeFactory},
     statement::{build_statement, GlobalStatement, Statement},
-    verb::{ChildrenVerb, CompoundVerb, Verb},
+    verb::{ChildrenVerb, Verb}, command::Command,
 };
 use anyhow::Result;
 use core::fmt::Debug;
@@ -85,16 +85,16 @@ impl PositionalArgument {
 pub struct ParserContext<'a> {
     prev: Option<&'a ParserContext<'a>>,
     scope_factory: Option<ScopeFactory>,
-    verb: Box<dyn Verb>,
+    command: Command,
 }
 
 impl<'a> ParserContext<'a> {
     pub fn new(scope_factory: ScopeFactory) -> Self {
-        let mut verb = CompoundVerb::new().unwrap();
-        verb.extend(ChildrenVerb::new());
+        let mut command = Command::new();
+        command.extend(ChildrenVerb::new());
         Self {
             prev: None,
-            verb: verb,
+            command: command,
             scope_factory: Some(scope_factory),
         }
     }
@@ -103,7 +103,7 @@ impl<'a> ParserContext<'a> {
         println!("{:#?}", self);
         Box::new(Self {
             prev: Some(self),
-            verb: self.verb.derive(),
+            command: self.command.derive(),
             scope_factory: None,
         })
     }
@@ -129,12 +129,12 @@ impl<'a> ParserContext<'a> {
         }
     }
 
-    pub fn verb(self) -> Box<dyn Verb> {
-        self.verb
+    pub fn command(self) -> Command {
+        self.command
     }
 
     pub fn extend_verb(&mut self, verb: Arc<dyn Verb>) {
-        self.verb.extend(verb)
+        self.command.extend(verb)
     }
 }
 

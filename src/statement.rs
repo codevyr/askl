@@ -1,10 +1,10 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
+use crate::command::Command;
 use crate::parser::{ParserContext, Rule};
 use crate::scope::{build_scope, EmptyScope, Scope};
 use crate::symbols::{SymbolChild, SymbolId};
-use crate::verb::{build_verb, CompoundVerb, Resolution, Verb};
+use crate::verb::{build_verb, Resolution, Verb};
 use core::fmt::Debug;
-use std::sync::Arc;
 use pest::error::Error;
 
 pub fn build_statement<'a>(
@@ -46,7 +46,7 @@ pub fn build_statement<'a>(
         ));
     }
 
-    Ok(DefaultStatement::new(sub_ctx.verb().into(), scope))
+    Ok(DefaultStatement::new(sub_ctx.command(), scope))
 }
 
 pub fn build_empty_statement<'a>(
@@ -54,7 +54,7 @@ pub fn build_empty_statement<'a>(
 ) -> Box<dyn Statement> {
     let scope: Box<dyn Scope> = Box::new(EmptyScope::new());
     let sub_ctx = ctx.derive();
-    let verb = sub_ctx.verb();
+    let verb = sub_ctx.command();
 
     DefaultStatement::new(verb.into(), scope)
 }
@@ -68,7 +68,7 @@ pub trait Statement: Debug {
                     continue;
                 };
                 let derived = self
-                    .verb()
+                    .command()
                     .derive_children(cfg, node_i)
                     .or(Some(vec![]))
                     .unwrap();
@@ -118,20 +118,20 @@ pub trait Statement: Debug {
         symbols: Vec<SymbolChild>,
         parent_resolution: Resolution,
     ) -> Option<(Resolution, Vec<SymbolChild>, NodeList, EdgeList)>;
-    fn verb(&self) -> &dyn Verb;
+    fn command(&self) -> &Command;
     fn scope(&self) -> &dyn Scope;
 }
 
 #[derive(Debug)]
 pub struct DefaultStatement {
-    pub verb: Arc<dyn Verb>,
+    pub command: Command,
     pub scope: Box<dyn Scope>,
 }
 
 impl DefaultStatement {
-    fn new(verb: Arc<dyn Verb>, scope: Box<dyn Scope>) -> Box<dyn Statement> {
+    fn new(command: Command, scope: Box<dyn Scope>) -> Box<dyn Statement> {
         Box::new(DefaultStatement {
-            verb: verb,
+            command: command,
             scope: scope,
         })
     }
@@ -144,15 +144,15 @@ impl Statement for DefaultStatement {
         symbols: Vec<SymbolChild>,
         parent_resolution: Resolution,
     ) -> Option<(Resolution, Vec<SymbolChild>, NodeList, EdgeList)> {
-        let filtered_symbols = self.verb().filter(cfg, symbols);
+        let filtered_symbols = self.command().filter(cfg, symbols);
 
-        let selected_symbols = if let Some(sym) = self.verb().select(cfg, filtered_symbols) {
+        let selected_symbols = if let Some(sym) = self.command().select(cfg, filtered_symbols) {
             sym
         } else {
             return None;
         };
 
-        let child_resolution = parent_resolution.max(self.verb().resolution());
+        let child_resolution = parent_resolution.max(self.command().resolution());
 
         let mut res_edges = EdgeList(vec![]);
         let mut res_nodes = NodeList(vec![]);
@@ -160,7 +160,7 @@ impl Statement for DefaultStatement {
         let mut res_resolution = child_resolution;
 
         for selected_symbol in selected_symbols.into_iter() {
-            let derived_symbols = if let Some(derived) = self.verb().derive_symbols(cfg, &selected_symbol.id) {
+            let derived_symbols = if let Some(derived) = self.command().derive_symbols(cfg, &selected_symbol.id) {
                 derived
             } else {
                 return None;
@@ -196,8 +196,8 @@ impl Statement for DefaultStatement {
         return Some((res_resolution, res_symbols, res_nodes, res_edges));
     }
 
-    fn verb(&self) -> &dyn Verb {
-        &*self.verb
+    fn command(&self) -> &Command {
+        &self.command
     }
 
     fn scope(&self) -> &dyn Scope {
@@ -207,15 +207,14 @@ impl Statement for DefaultStatement {
 
 #[derive(Debug)]
 pub struct GlobalStatement {
-    pub verb: Arc<dyn Verb>,
+    pub command: Command,
     pub scope: Box<dyn Scope>,
 }
 
 impl GlobalStatement {
     pub fn new(scope: Box<dyn Scope>) -> Box<dyn Statement> {
-        let verb: Arc<dyn Verb> = CompoundVerb::new().unwrap().into();
         Box::new(GlobalStatement {
-            verb: verb,
+            command: Command::new(),
             scope: scope,
         })
     }
@@ -230,7 +229,7 @@ impl Statement for GlobalStatement {
     ) -> Option<(Resolution, Vec<SymbolChild>, NodeList, EdgeList)> {
         let mut res_edges = EdgeList(vec![]);
         let mut res_nodes = NodeList(vec![]);
-        let child_resolution = parent_resolution.max(self.verb().resolution());
+        let child_resolution = parent_resolution.max(self.command().resolution());
         let mut res_resolution = child_resolution;
         if let Some((scope_resolution, _, nodes, edges)) =
             self.scope().run(cfg, symbols, child_resolution)
@@ -254,8 +253,8 @@ impl Statement for GlobalStatement {
         return Some((res_resolution, vec![], res_nodes, res_edges));
     }
 
-    fn verb(&self) -> &dyn Verb {
-        &*self.verb
+    fn command(&self) -> &Command {
+        &self.command
     }
 
     fn scope(&self) -> &dyn Scope {

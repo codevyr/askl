@@ -1,0 +1,108 @@
+use crate::cfg::ControlFlowGraph;
+use crate::symbols::{SymbolChild, SymbolId};
+use crate::verb::{Verb, DeriveMethod, Filter, Selector, Deriver, Resolution, UnitVerb};
+use core::fmt::Debug;
+use std::sync::Arc;
+
+#[derive(Debug)]
+pub struct Command {
+    verbs: Vec<Arc<dyn Verb>>,
+}
+
+impl Command {
+    pub fn new() -> Command {
+        Self { verbs: vec![
+            UnitVerb::new()
+        ] }
+    }
+
+    pub fn derive(&self) -> Self {
+        let mut verbs = vec![];
+        for verb in self.verbs.iter() {
+            match verb.derive_method() {
+                DeriveMethod::Clone => verbs.push(verb.clone()),
+                DeriveMethod::Skip => {}
+            }
+        }
+
+        Self { verbs }
+    }
+
+    pub fn extend(&mut self, other: Arc<dyn Verb>) {
+        self.verbs.push(other);
+    }
+
+    fn filters<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Filter> + 'a> {
+        Box::new(self.verbs.iter().filter_map(|verb| verb.as_filter().ok()))
+    }
+
+    fn selectors<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Selector> + 'a> {
+        Box::new(self.verbs.iter().filter_map(|verb| verb.as_selector().ok()))
+    }
+
+    fn derivers<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Deriver> + 'a> {
+        Box::new(self.verbs.iter().filter_map(|verb| verb.as_deriver().ok()))
+    }
+
+    pub fn filter(&self, cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
+        self.filters()
+            .fold(symbols, |symbols, verb| verb.filter(cfg, symbols))
+    }
+
+    pub fn select(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbols: Vec<SymbolChild>,
+    ) -> Option<Vec<SymbolChild>> {
+        let selectors: Vec<_> = self
+            .selectors()
+            .collect();
+
+        if selectors.len() == 0 {
+            return Some(symbols);
+        }
+
+        let symbols: Vec<_> = selectors.into_iter()
+            .filter_map(|v| v.select(cfg, symbols.clone()))
+            .flatten().collect();
+
+        if symbols.len() == 0 {
+            return None;
+        }
+
+        Some(symbols)
+    }
+
+    pub fn derive_symbols(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbol: &SymbolId,
+    ) -> Option<Vec<SymbolChild>> {
+        if let Some(mut res) = self.derivers().last().unwrap().derive_symbols(cfg, symbol) {
+            res.sort();
+            res.dedup();
+            Some(res)
+        } else {
+            None
+        }
+    }
+
+    pub fn derive_children(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbol: &SymbolId,
+    ) -> Option<Vec<SymbolChild>> {
+        self.derivers().last().unwrap().derive_children(cfg, symbol)
+    }
+}
+
+impl Verb for Command {
+    fn resolution(&self) -> Resolution {
+        let mut res = Resolution::Weak;
+        for v in self.verbs.iter() {
+            res = res.max(v.resolution());
+        }
+
+        res
+    }
+}
