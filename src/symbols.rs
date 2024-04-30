@@ -66,6 +66,8 @@ pub struct SymbolChild {
     pub occurence: Option<Occurence>,
 }
 
+pub type SymbolRefs = HashMap<SymbolId, Vec<Occurence>>;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Symbol {
     pub name: String,
@@ -119,14 +121,20 @@ impl SymbolMap {
         self.map.iter()
     }
 
-    pub fn get_children(&self, symbol_id: &SymbolId) -> Vec<SymbolChild> {
+    pub fn get_children(&self, symbol_id: &SymbolId) -> SymbolRefs {
         let symbol = if let Some(symbol) = self.map.get(&symbol_id) {
             symbol
         } else {
-            return vec![];
+            return SymbolRefs::new();
         };
 
-        symbol.children.clone().into_iter().collect::<Vec<_>>()
+        let mut refs = SymbolRefs::new();
+        for child in symbol.children.iter() {
+            refs.entry(child.id.clone())
+                .and_modify(|occ| occ.push(child.occurence.clone().unwrap()))
+                .or_insert_with(|| vec![child.occurence.clone().unwrap()]);
+        }
+        refs
     }
 }
 

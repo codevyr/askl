@@ -1,7 +1,7 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::parser::{ParserContext, Rule};
 use crate::statement::{build_empty_statement, build_statement, Statement};
-use crate::symbols::SymbolChild;
+use crate::symbols::{SymbolChild, SymbolRefs};
 use crate::verb::Resolution;
 use core::fmt::Debug;
 use pest::error::Error;
@@ -45,12 +45,12 @@ pub trait Scope: Debug {
     fn run(
         &self,
         cfg: &ControlFlowGraph,
-        symbols: Vec<SymbolChild>,
+        symbols: SymbolRefs,
         parent_resolution: Resolution,
-    ) -> Option<(Resolution, Vec<SymbolChild>, NodeList, EdgeList)> {
+    ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)> {
         let mut res_nodes = NodeList(vec![]);
         let mut res_edges = EdgeList(vec![]);
-        let mut res_symbols = vec![];
+        let mut res_symbols = SymbolRefs::new();
         let mut resolution = Resolution::None;
 
         for statement in self.statements() {
@@ -70,8 +70,6 @@ pub trait Scope: Debug {
         // Sort and deduplicate the sources
         res_nodes.0.sort();
         res_nodes.0.dedup();
-        res_symbols.sort();
-        res_symbols.dedup();
 
         Some((resolution, res_symbols, res_nodes, res_edges))
     }
@@ -109,9 +107,9 @@ impl Scope for GlobalScope {
     fn run(
         &self,
         _cfg: &ControlFlowGraph,
-        _symbol: Vec<SymbolChild>,
+        _symbol: SymbolRefs,
         _parent_resolution: Resolution,
-    ) -> Option<(Resolution, Vec<SymbolChild>, NodeList, EdgeList)> {
+    ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)> {
         None
     }
 }
@@ -133,12 +131,12 @@ impl Scope for EmptyScope {
     fn run(
         &self,
         _cfg: &ControlFlowGraph,
-        _symbols: Vec<SymbolChild>,
+        _symbols: SymbolRefs,
         parent_resolution: Resolution,
-    ) -> Option<(Resolution, Vec<SymbolChild>, NodeList, EdgeList)> {
+    ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)> {
         Some((
             parent_resolution,
-            vec![],
+            SymbolRefs::new(),
             NodeList(vec![]),
             EdgeList(vec![]),
         ))

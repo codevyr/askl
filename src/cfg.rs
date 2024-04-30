@@ -1,10 +1,11 @@
-use std::iter::Iterator;
+use std::{iter::Iterator, collections::HashSet};
 
 use crate::symbols::{Symbol, SymbolId, SymbolMap, Occurence};
 
 #[derive(Debug, Clone)]
 pub struct ControlFlowGraph {
     pub symbols: SymbolMap,
+    pub nodes: HashSet<SymbolId>,
 }
 
 #[derive(Debug, Clone)]
@@ -21,8 +22,10 @@ impl EdgeList {
 
 impl ControlFlowGraph {
     pub fn from_symbols(symbols: SymbolMap) -> Self {
+        let nodes: HashSet<SymbolId> = symbols.iter().map(|(id, _)| id.clone()).collect();
         Self {
             symbols: symbols,
+            nodes: nodes,
         }
     }
 

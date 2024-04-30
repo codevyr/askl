@@ -1,7 +1,8 @@
 use crate::cfg::ControlFlowGraph;
-use crate::symbols::{SymbolChild, SymbolId};
-use crate::verb::{Verb, DeriveMethod, Filter, Selector, Deriver, Resolution, UnitVerb};
+use crate::symbols::{Occurence, SymbolChild, SymbolId, SymbolRefs};
+use crate::verb::{DeriveMethod, Deriver, Filter, Resolution, Selector, UnitVerb, Verb};
 use core::fmt::Debug;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -11,9 +12,9 @@ pub struct Command {
 
 impl Command {
     pub fn new() -> Command {
-        Self { verbs: vec![
-            UnitVerb::new()
-        ] }
+        Self {
+            verbs: vec![UnitVerb::new()],
+        }
     }
 
     pub fn derive(&self) -> Self {
@@ -44,27 +45,23 @@ impl Command {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_deriver().ok()))
     }
 
-    pub fn filter(&self, cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
+    pub fn filter(&self, cfg: &ControlFlowGraph, symbols: SymbolRefs) -> SymbolRefs {
         self.filters()
             .fold(symbols, |symbols, verb| verb.filter(cfg, symbols))
     }
 
-    pub fn select(
-        &self,
-        cfg: &ControlFlowGraph,
-        symbols: Vec<SymbolChild>,
-    ) -> Option<Vec<SymbolChild>> {
-        let selectors: Vec<_> = self
-            .selectors()
-            .collect();
+    pub fn select(&self, cfg: &ControlFlowGraph, symbols: SymbolRefs) -> Option<SymbolRefs> {
+        let selectors: Vec<_> = self.selectors().collect();
 
         if selectors.len() == 0 {
             return Some(symbols);
         }
 
-        let symbols: Vec<_> = selectors.into_iter()
+        let symbols: SymbolRefs = selectors
+            .into_iter()
             .filter_map(|v| v.select(cfg, symbols.clone()))
-            .flatten().collect();
+            .flatten()
+            .collect();
 
         if symbols.len() == 0 {
             return None;
@@ -77,10 +74,8 @@ impl Command {
         &self,
         cfg: &ControlFlowGraph,
         symbol: &SymbolId,
-    ) -> Option<Vec<SymbolChild>> {
+    ) -> Option<SymbolRefs> {
         if let Some(mut res) = self.derivers().last().unwrap().derive_symbols(cfg, symbol) {
-            res.sort();
-            res.dedup();
             Some(res)
         } else {
             None
@@ -91,7 +86,7 @@ impl Command {
         &self,
         cfg: &ControlFlowGraph,
         symbol: &SymbolId,
-    ) -> Option<Vec<SymbolChild>> {
+    ) -> Option<SymbolRefs> {
         self.derivers().last().unwrap().derive_children(cfg, symbol)
     }
 }

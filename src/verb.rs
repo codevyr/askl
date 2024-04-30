@@ -1,6 +1,6 @@
 use crate::cfg::ControlFlowGraph;
 use crate::parser::{Identifier, NamedArgument, ParserContext, PositionalArgument, Rule};
-use crate::symbols::{SymbolChild, SymbolId};
+use crate::symbols::{Occurence, SymbolChild, SymbolId, SymbolRefs};
 use anyhow::{anyhow, bail, Result};
 use core::fmt::Debug;
 use log::debug;
@@ -151,35 +151,22 @@ pub trait Verb: Debug {
 }
 
 pub trait Filter: Debug {
-    fn filter(&self, _cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
+    fn filter(&self, _cfg: &ControlFlowGraph, symbols: SymbolRefs) -> SymbolRefs {
         symbols
     }
 }
 
 pub trait Selector: Debug {
-    fn select(
-        &self,
-        _cfg: &ControlFlowGraph,
-        symbols: Vec<SymbolChild>,
-    ) -> Option<Vec<SymbolChild>> {
+    fn select(&self, _cfg: &ControlFlowGraph, symbols: SymbolRefs) -> Option<SymbolRefs> {
         Some(symbols)
     }
 }
 
 pub trait Deriver: Debug {
-    fn derive_symbols(
-        &self,
-        _cfg: &ControlFlowGraph,
-        _symbol: &SymbolId,
-    ) -> Option<Vec<SymbolChild>>;
+    fn derive_symbols(&self, _cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<SymbolRefs>;
 
-    fn derive_children(
-        &self,
-        _cfg: &ControlFlowGraph,
-        _symbol: &SymbolId,
-    ) -> Option<Vec<SymbolChild>>;
+    fn derive_children(&self, _cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<SymbolRefs>;
 }
-
 
 #[derive(Debug)]
 struct NameSelector {
@@ -209,20 +196,12 @@ impl Verb for NameSelector {
 }
 
 impl Selector for NameSelector {
-    fn select(
-        &self,
-        cfg: &ControlFlowGraph,
-        symbols: Vec<SymbolChild>,
-    ) -> Option<Vec<SymbolChild>> {
-        let res: Vec<_> = symbols
+    fn select(&self, cfg: &ControlFlowGraph, symbols: SymbolRefs) -> Option<SymbolRefs> {
+        let res: SymbolRefs = symbols
             .into_iter()
-            .filter_map(|s| {
-                if self.name == cfg.get_symbol(&s.id).unwrap().name {
-                    return Some(s);
-                }
-                None
-            })
+            .filter(|(s, _)| self.name == cfg.get_symbol(&s).unwrap().name)
             .collect();
+
         if res.len() == 0 {
             return None;
         }
@@ -258,25 +237,16 @@ impl Verb for ForcedVerb {
 }
 
 impl Deriver for ForcedVerb {
-    fn derive_symbols(
-        &self,
-        cfg: &ControlFlowGraph,
-        symbol: &SymbolId,
-    ) -> Option<Vec<SymbolChild>> {
+    fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<SymbolRefs> {
         Some(cfg.symbols.get_children(symbol))
     }
 
-    fn derive_children(
-        &self,
-        cfg: &ControlFlowGraph,
-        _symbol: &SymbolId,
-    ) -> Option<Vec<SymbolChild>> {
+    fn derive_children(&self, cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<SymbolRefs> {
         let id = SymbolId::new(self.name.clone());
         if let Some(_) = cfg.get_symbol(&id) {
-            Some(vec![SymbolChild {
-                id: id,
-                occurence: None,
-            }])
+            let mut res = SymbolRefs::new();
+            res.insert(id, vec![]);
+            Some(res)
         } else {
             None
         }
@@ -284,17 +254,12 @@ impl Deriver for ForcedVerb {
 }
 
 impl Selector for ForcedVerb {
-    fn select(
-        &self,
-        cfg: &ControlFlowGraph,
-        _symbols: Vec<SymbolChild>,
-    ) -> Option<Vec<SymbolChild>> {
+    fn select(&self, cfg: &ControlFlowGraph, _symbols: SymbolRefs) -> Option<SymbolRefs> {
         let id = SymbolId::new(self.name.clone());
         if let Some(_) = cfg.get_symbol(&id) {
-            Some(vec![SymbolChild {
-                id: id,
-                occurence: None,
-            }])
+            let mut sym_refs = HashMap::new();
+            sym_refs.insert(id, vec![]);
+            Some(sym_refs)
         } else {
             None
         }
@@ -323,18 +288,14 @@ impl Verb for UnitVerb {
 
 impl Deriver for UnitVerb {
     fn derive_children(
-            &self,
-            _cfg: &ControlFlowGraph,
-            _symbol: &SymbolId,
-        ) -> Option<Vec<SymbolChild>> {
+        &self,
+        _cfg: &ControlFlowGraph,
+        _symbol: &SymbolId,
+    ) -> Option<SymbolRefs> {
         None
     }
 
-    fn derive_symbols(
-            &self,
-            _cfg: &ControlFlowGraph,
-            _symbol: &SymbolId,
-        ) -> Option<Vec<SymbolChild>> {
+    fn derive_symbols(&self, _cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<SymbolRefs> {
         None
     }
 }
@@ -359,19 +320,11 @@ impl Verb for ChildrenVerb {
 }
 
 impl Deriver for ChildrenVerb {
-    fn derive_symbols(
-        &self,
-        cfg: &ControlFlowGraph,
-        symbol: &SymbolId,
-    ) -> Option<Vec<SymbolChild>> {
+    fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<SymbolRefs> {
         Some(cfg.symbols.get_children(symbol))
     }
 
-    fn derive_children(
-        &self,
-        cfg: &ControlFlowGraph,
-        symbol: &SymbolId,
-    ) -> Option<Vec<SymbolChild>> {
+    fn derive_children(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<SymbolRefs> {
         Some(cfg.symbols.get_children(symbol))
     }
 }
@@ -404,10 +357,14 @@ impl Verb for IgnoreVerb {
 }
 
 impl Filter for IgnoreVerb {
-    fn filter(&self, cfg: &ControlFlowGraph, symbols: Vec<SymbolChild>) -> Vec<SymbolChild> {
+    fn filter(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbols: HashMap<SymbolId, Vec<Occurence>>,
+    ) -> HashMap<SymbolId, Vec<Occurence>> {
         symbols
             .into_iter()
-            .filter(|s| self.name != cfg.get_symbol(&s.id).unwrap().name)
+            .filter(|(s, occ)| self.name != cfg.get_symbol(s).unwrap().name)
             .collect()
     }
 }

@@ -33,7 +33,6 @@ struct Args {
 
 struct AsklData {
     cfg: ControlFlowGraph,
-    sources: Vec<SymbolId>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -120,7 +119,7 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     };
     debug!("Global scope: {:#?}", ast);
 
-    let (res_nodes, res_edges) = ast.execute_all(&data.cfg, data.sources.clone());
+    let (res_nodes, res_edges) = ast.execute_all(&data.cfg);
 
     info!("Symbols: {:#?}", res_nodes.0.len());
     info!("Edges: {:#?}", res_edges.0.len());
@@ -167,11 +166,9 @@ fn read_data(args: &Args) -> Result<AsklData> {
     match args.format.as_str() {
         "askl" => {
             let symbols: SymbolMap = serde_json::from_slice(&std::fs::read(&args.index)?)?;
-            let sources: Vec<SymbolId> = symbols.iter().map(|(id, _)| id.clone()).collect();
             let cfg = ControlFlowGraph::from_symbols(symbols);
             Ok(AsklData {
                 cfg: cfg,
-                sources: sources,
             })
         }
         "scip" => {
@@ -506,13 +503,12 @@ mod tests {
 
     fn run_query(askl_input: &str, askl_query: &str) -> (NodeList, EdgeList) {
         let symbols: SymbolMap = serde_json::from_slice(askl_input.as_bytes()).unwrap();
-        let sources: Vec<SymbolId> = symbols.iter().map(|(id, _)| id.clone()).collect();
         let cfg = ControlFlowGraph::from_symbols(symbols);
 
         let ast = parse(askl_query).unwrap();
         println!("{:#?}", ast);
 
-        ast.execute_all(&cfg, sources)
+        ast.execute_all(&cfg)
     }
 
     #[test]
