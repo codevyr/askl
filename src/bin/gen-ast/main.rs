@@ -1,10 +1,9 @@
-use std::{fs::File, path::PathBuf, sync::Arc};
+use std::{fs::File, sync::Arc};
 
 use anyhow::{anyhow, Result};
 use askl::symbols::{Occurence, Symbol, SymbolChild, SymbolId, SymbolMap, Symbols};
 use clap::Parser;
 use indicatif::ProgressBar;
-use log::debug;
 use serde::{Deserialize, Serialize};
 use tokio::{process::Command, sync::Semaphore};
 
