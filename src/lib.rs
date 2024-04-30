@@ -4,4 +4,3 @@ pub mod scope;
 pub mod symbols;
 pub mod verb;
 pub mod statement;
-pub mod language_server;
