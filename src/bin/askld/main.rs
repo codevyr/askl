@@ -358,7 +358,91 @@ mod tests {
                     }
                 ],
                 "children": []
-            }   
+            },
+            "e": {
+                "name": "e",
+                "ranges": [
+                    {
+                    "line_start": 13,
+                    "line_end": 14,
+                    "column_start": 1,
+                    "column_end": 1,
+                    "file": "main.c"
+                    }
+                ],
+                "children": []
+            },
+            "f": {
+                "name": "f",
+                "ranges": [
+                    {
+                    "line_start": 13,
+                    "line_end": 14,
+                    "column_start": 1,
+                    "column_end": 1,
+                    "file": "main.c"
+                    }
+                ],
+                "children": [
+                    {
+                        "id": "g",
+                        "occurence": {
+                            "line_start": 11,
+                            "line_end": 11,
+                            "column_start": 16,
+                            "column_end": 16,
+                            "file": "main.c"
+                        }
+                    }
+                ]
+            },
+            "g": {
+                "name": "g",
+                "ranges": [
+                    {
+                    "line_start": 13,
+                    "line_end": 14,
+                    "column_start": 1,
+                    "column_end": 1,
+                    "file": "main.c"
+                    }
+                ],
+                "children": []
+            },
+            "d": {
+                "name": "d",
+                "ranges": [
+                    {
+                    "line_start": 13,
+                    "line_end": 14,
+                    "column_start": 1,
+                    "column_end": 1,
+                    "file": "main.c"
+                    }
+                ],
+                "children": [
+                    {
+                        "id": "e",
+                        "occurence": {
+                            "line_start": 11,
+                            "line_end": 11,
+                            "column_start": 16,
+                            "column_end": 16,
+                            "file": "main.c"
+                        }
+                    },
+                    {
+                        "id": "f",
+                        "occurence": {
+                            "line_start": 11,
+                            "line_end": 11,
+                            "column_start": 22,
+                            "column_end": 22,
+                            "file": "main.c"
+                        }
+                    }
+                ]
+            }
         }
     }
     "#;
@@ -699,5 +783,25 @@ mod tests {
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, Vec::<String>::new());
+    }
+
+    #[test]
+    fn unselect_children() {
+        const QUERY: &str = r#""d" {"f"; {}}"#;
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+
+        assert_eq!(
+            res_nodes.0,
+            vec![
+                SymbolId::new("d".to_string()),
+                SymbolId::new("e".to_string()),
+                SymbolId::new("f".to_string()),
+            ]
+        );
+        let edges = format_edges(res_edges);
+        assert_eq!(edges, vec!["d-e", "d-f"]);
     }
 }
