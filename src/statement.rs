@@ -2,7 +2,7 @@ use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::parser::{ParserContext, Rule};
 use crate::scope::{build_scope, EmptyScope, Scope};
 use crate::symbols::{SymbolChild, SymbolId};
-use crate::verb::{build_verb, ChildrenVerb, CompoundVerb, Resolution, UnitVerb, Verb};
+use crate::verb::{build_verb, CompoundVerb, Resolution, Verb};
 use core::fmt::Debug;
 use std::sync::Arc;
 use pest::error::Error;
@@ -96,7 +96,7 @@ pub trait Statement: Debug {
             })
             .collect();
 
-        if let Some((resolution, resolved_symbols, nodes, edges)) =
+        if let Some((resolution, _resolved_symbols, nodes, edges)) =
             self.execute(cfg, symbols, Resolution::Weak)
         {
             if resolution == Resolution::Strong {

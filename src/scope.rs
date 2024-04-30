@@ -1,7 +1,7 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::parser::{ParserContext, Rule};
-use crate::statement::{build_statement, Statement, self, build_empty_statement};
-use crate::symbols::{SymbolId, SymbolChild};
+use crate::statement::{build_empty_statement, build_statement, Statement};
+use crate::symbols::SymbolChild;
 use crate::verb::Resolution;
 use core::fmt::Debug;
 use pest::error::Error;
@@ -133,9 +133,14 @@ impl Scope for EmptyScope {
     fn run(
         &self,
         _cfg: &ControlFlowGraph,
-        symbols: Vec<SymbolChild>,
+        _symbols: Vec<SymbolChild>,
         parent_resolution: Resolution,
     ) -> Option<(Resolution, Vec<SymbolChild>, NodeList, EdgeList)> {
-        Some((parent_resolution, vec![], NodeList(vec![]), EdgeList(vec![])))
+        Some((
+            parent_resolution,
+            vec![],
+            NodeList(vec![]),
+            EdgeList(vec![]),
+        ))
     }
 }

@@ -1,13 +1,13 @@
 use crate::{
     scope::{Scope, ScopeFactory},
     statement::{build_statement, GlobalStatement, Statement},
-    verb::{Verb, ChildrenVerb, UnitVerb, CompoundVerb},
+    verb::{ChildrenVerb, CompoundVerb, Verb},
 };
 use anyhow::Result;
 use core::fmt::Debug;
-use std::sync::Arc;
 use pest::{error::Error, Parser};
 use pest_derive::Parser;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[grammar = "askl.pest"]
@@ -19,7 +19,7 @@ pub struct Identifier(pub String);
 impl Identifier {
     pub fn build(pair: pest::iterators::Pair<Rule>) -> Result<Identifier, Error<Rule>> {
         match pair.as_rule() {
-            Rule::generic_ident => {},
+            Rule::generic_ident => {}
             rule => Err(Error::new_from_span(
                 pest::error::ErrorVariant::ParsingError {
                     positives: vec![Rule::generic_ident],

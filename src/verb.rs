@@ -141,7 +141,7 @@ pub trait Verb: Debug {
         true
     }
 
-    fn extend(&mut self, other: Arc<dyn Verb>) {
+    fn extend(&mut self, _other: Arc<dyn Verb>) {
         unimplemented!("Only CompoundVerb can extend");
     }
 
