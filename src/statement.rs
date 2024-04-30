@@ -89,10 +89,10 @@ pub trait Statement: Debug {
         let mut res_nodes = NodeList(vec![]);
         let mut res_edges = EdgeList(vec![]);
 
-        let symbols = cfg.nodes.iter().map(|s| (s.clone(), vec![])).collect();
+        let symbols: SymbolRefs = cfg.nodes.iter().map(|s| (s.clone(), Vec::<Occurence>::new())).collect();
 
         if let Some((resolution, _resolved_symbols, nodes, edges)) =
-            self.execute(cfg, symbols, Resolution::Weak)
+            self.execute(cfg, &symbols, Resolution::Weak)
         {
             if resolution == Resolution::Strong {
                 res_nodes.0.extend(nodes.0.into_iter());
@@ -110,7 +110,7 @@ pub trait Statement: Debug {
     fn execute(
         &self,
         cfg: &ControlFlowGraph,
-        symbols: SymbolRefs,
+        symbols: &SymbolRefs,
         parent_resolution: Resolution,
     ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)>;
     fn command(&self) -> &Command;
@@ -136,10 +136,10 @@ impl Statement for DefaultStatement {
     fn execute(
         &self,
         cfg: &ControlFlowGraph,
-        symbols: SymbolRefs,
+        symbols: &SymbolRefs,
         parent_resolution: Resolution,
     ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)> {
-        let filtered_symbols = self.command().filter(cfg, symbols);
+        let filtered_symbols = self.command().filter(cfg, symbols.clone());
 
         let selected_symbols = if let Some(sym) = self.command().select(cfg, filtered_symbols) {
             sym
@@ -236,7 +236,7 @@ impl Statement for GlobalStatement {
     fn execute(
         &self,
         cfg: &ControlFlowGraph,
-        symbols: SymbolRefs,
+        symbols: &SymbolRefs,
         parent_resolution: Resolution,
     ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)> {
         let mut res_edges = EdgeList(vec![]);
@@ -244,7 +244,7 @@ impl Statement for GlobalStatement {
         let child_resolution = parent_resolution.max(self.command().resolution());
         let mut res_resolution = child_resolution;
         if let Some((scope_resolution, _, nodes, edges)) =
-            self.scope().run(cfg, symbols, child_resolution)
+            self.scope().run(cfg, symbols.clone(), child_resolution)
         {
             if scope_resolution == Resolution::Strong {
                 res_nodes.0.extend(nodes.0.into_iter());

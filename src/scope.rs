@@ -53,12 +53,16 @@ pub trait Scope: Debug {
         let mut res_symbols = SymbolRefs::new();
         let mut resolution = Resolution::None;
 
+        let mut statement_symbols = symbols.clone();
         for statement in self.statements() {
             // Iterate through all the statements in the scope or subscope of
             // the query
             if let Some((scope_resolution, resolved_symbols, scope_nodes, scope_edges)) =
-                statement.execute(cfg, symbols.clone(), parent_resolution)
+                statement.execute(cfg, &statement_symbols, parent_resolution)
             {
+                for (sym, _) in resolved_symbols.iter() {
+                    statement_symbols.remove(sym);
+                }
                 // res_nodes.0.push(symbol.clone());
                 res_nodes.0.extend(scope_nodes.0.into_iter());
                 res_edges.0.extend(scope_edges.0.into_iter());
