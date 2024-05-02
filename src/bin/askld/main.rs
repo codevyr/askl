@@ -171,64 +171,6 @@ fn read_data(args: &Args) -> Result<AsklData> {
                 cfg: cfg,
             })
         }
-        "scip" => {
-            info!("Index format: SCIP");
-
-            let bytes = std::fs::read(&args.index)?;
-            let index = Index::parse_from_bytes(&bytes).unwrap();
-
-            debug!(
-                "Index: documents {} external symbols {}",
-                index.documents.len(),
-                index.external_symbols.len()
-            );
-            debug!("Index: metadata {:#?}", index.metadata);
-
-            debug!("Index: documents {:#?}", index.documents);
-
-            let mut occurence_map: HashMap<&String, Vec<Occurence>> = HashMap::new();
-            index.documents.iter().for_each(|doc| {
-                doc.occurrences.iter().for_each(|occ| {
-                    let range = if occ.range.len() == 4 {
-                        Occurence {
-                            file: PathBuf::from(doc.relative_path.clone()),
-                            line_start: occ.range[0],
-                            column_start: occ.range[1],
-                            line_end: occ.range[2],
-                            column_end: occ.range[3],
-                        }
-                    } else {
-                        Occurence {
-                            file: PathBuf::from(doc.relative_path.clone()),
-                            line_start: occ.range[0],
-                            column_start: occ.range[1],
-                            line_end: occ.range[0],
-                            column_end: occ.range[2],
-                        }
-                    };
-                    occurence_map
-                        .entry(&occ.symbol)
-                        .and_modify(|ranges: &mut Vec<Occurence>| ranges.push(range.clone()))
-                        .or_insert_with(|| vec![range]);
-                });
-            });
-            let mut symbols = SymbolMap::new();
-            index.documents.iter().for_each(|doc| {
-                doc.symbols.iter().for_each(|si| {
-                    let id = SymbolId::new(si.symbol.clone());
-
-                    let range = occurence_map.get(&si.symbol).unwrap();
-                    let symbol = Symbol {
-                        name: si.symbol.clone(),
-                        ranges: range.clone(),
-                        children: Default::default(),
-                    };
-                    symbols.add(id, symbol);
-                });
-            });
-
-            Err(anyhow!("Unimplemented index format: {}", args.format))
-        }
         _ => Err(anyhow!("Unsupported index format: {}", args.format)),
     }
 }
