@@ -6,7 +6,7 @@ use core::fmt::Debug;
 use log::debug;
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 fn build_generic_verb(
@@ -245,9 +245,8 @@ impl Deriver for ForcedVerb {
         let sym_refs: SymbolRefs = cfg
             .get_symbol_by_name(&self.name)
             .iter()
-            .map(|s| s.children.clone())
             .fold(SymbolRefs::new(), |mut acc, refs| {
-                acc.extend(refs);
+                acc.insert(refs.id, HashSet::new());
                 acc
             });
         if sym_refs.is_empty() {
@@ -263,9 +262,8 @@ impl Selector for ForcedVerb {
         let sym_refs: SymbolRefs = cfg
             .get_symbol_by_name(&self.name)
             .iter()
-            .map(|s| s.children.clone())
             .fold(SymbolRefs::new(), |mut acc, refs| {
-                acc.extend(refs);
+                acc.insert(refs.id, HashSet::new());
                 acc
             });
         if sym_refs.is_empty() {
