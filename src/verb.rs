@@ -1,6 +1,6 @@
 use crate::cfg::ControlFlowGraph;
 use crate::parser::{Identifier, NamedArgument, ParserContext, PositionalArgument, Rule};
-use crate::symbols::{Occurence, SymbolChild, SymbolId, SymbolRefs};
+use crate::symbols::{SymbolId, SymbolRefs};
 use anyhow::{anyhow, bail, Result};
 use core::fmt::Debug;
 use log::debug;
@@ -363,14 +363,10 @@ impl Verb for IgnoreVerb {
 }
 
 impl Filter for IgnoreVerb {
-    fn filter(
-        &self,
-        cfg: &ControlFlowGraph,
-        symbols: SymbolRefs,
-    ) -> SymbolRefs {
+    fn filter(&self, cfg: &ControlFlowGraph, symbols: SymbolRefs) -> SymbolRefs {
         symbols
             .into_iter()
-            .filter(|(s, occ)| self.name != cfg.get_symbol(s).unwrap().name)
+            .filter(|(s, _)| self.name != cfg.get_symbol(s).unwrap().name)
             .collect()
     }
 }

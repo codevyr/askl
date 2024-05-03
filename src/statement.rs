@@ -2,7 +2,7 @@ use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::command::Command;
 use crate::parser::{ParserContext, Rule};
 use crate::scope::{build_scope, EmptyScope, Scope};
-use crate::symbols::{Occurence, SymbolChild, SymbolId, SymbolRefs};
+use crate::symbols::SymbolRefs;
 use crate::verb::{build_verb, Resolution, Verb};
 use core::fmt::Debug;
 use pest::error::Error;
@@ -89,7 +89,11 @@ pub trait Statement: Debug {
         let mut res_nodes = NodeList(vec![]);
         let mut res_edges = EdgeList(vec![]);
 
-        let symbols: SymbolRefs = cfg.nodes.iter().map(|s| (s.clone(), HashSet::new())).collect();
+        let symbols: SymbolRefs = cfg
+            .nodes
+            .iter()
+            .map(|s| (s.clone(), HashSet::new()))
+            .collect();
 
         if let Some((resolution, _resolved_symbols, nodes, edges)) =
             self.execute(cfg, &symbols, Resolution::Weak)

@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Result};
-use askl::symbols::{Occurence, Symbol, SymbolChild, SymbolId, SymbolMap, Symbols, SymbolRefs};
+use askl::symbols::{Occurence, Symbol, SymbolId, SymbolMap, Symbols, SymbolRefs};
 use clap::Parser;
 use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};

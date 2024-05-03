@@ -1,8 +1,7 @@
 use crate::cfg::ControlFlowGraph;
-use crate::symbols::{Occurence, SymbolChild, SymbolId, SymbolRefs};
+use crate::symbols::{SymbolId, SymbolRefs};
 use crate::verb::{DeriveMethod, Deriver, Filter, Resolution, Selector, UnitVerb, Verb};
 use core::fmt::Debug;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -75,7 +74,7 @@ impl Command {
         cfg: &ControlFlowGraph,
         symbol: &SymbolId,
     ) -> Option<SymbolRefs> {
-        if let Some(mut res) = self.derivers().last().unwrap().derive_symbols(cfg, symbol) {
+        if let Some(res) = self.derivers().last().unwrap().derive_symbols(cfg, symbol) {
             Some(res)
         } else {
             None

@@ -1,20 +1,15 @@
-use std::{
-    collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
-};
+use std::{collections::HashSet, path::Path};
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::{anyhow, Result};
-use askl::symbols::{Occurence, Symbols};
+use askl::symbols::Occurence;
 use askl::{
     cfg::ControlFlowGraph,
     parser::parse,
-    symbols::{Symbol, SymbolId, SymbolMap},
+    symbols::{SymbolId, SymbolMap},
 };
 use clap::Parser;
 use log::{debug, info};
-use protobuf::Message;
-use scip::types::Index;
 use serde::{Deserialize, Serialize, Serializer};
 use url::Url;
 
@@ -177,9 +172,7 @@ fn read_data(args: &Args) -> Result<AsklData> {
         "askl" => {
             let symbols: SymbolMap = serde_json::from_slice(&std::fs::read(&args.index)?)?;
             let cfg = ControlFlowGraph::from_symbols(symbols);
-            Ok(AsklData {
-                cfg: cfg,
-            })
+            Ok(AsklData { cfg: cfg })
         }
         _ => Err(anyhow!("Unsupported index format: {}", args.format)),
     }
@@ -217,187 +210,179 @@ mod tests {
             "2": {
                 "id": 2,
                 "name": "b",
-                "ranges": [{
-                    "line_start": 1,
-                    "line_end": 3,
-                    "column_start": 1,
-                    "column_end": 1,
-                    "file": "main.c"
-                }
-            ],
-            "children": []
+                "ranges": [
+                    {
+                        "line_start": 1,
+                        "line_end": 3,
+                        "column_start": 1,
+                        "column_end": 1,
+                        "file": "main.c"
+                    }
+                ],
+                "children": {}
             },
             "1": {
-            "id": 1,
-            "name": "a",
-            "ranges": [
-                {
-                "line_start": 5,
-                "line_end": 7,
-                "column_start": 1,
-                "column_end": 1,
-                "file": "main.c"
+                "id": 1,
+                "name": "a",
+                "ranges": [
+                    {
+                        "line_start": 5,
+                        "line_end": 7,
+                        "column_start": 1,
+                        "column_end": 1,
+                        "file": "main.c"
+                    }
+                ],
+                "children": {
+                    "2": [
+                        {
+                            "line_start": 7,
+                            "line_end": 7,
+                            "column_start": 16,
+                            "column_end": 16,
+                            "file": "main.c"
+                        },
+                        {
+                            "line_start": 7,
+                            "line_end": 7,
+                            "column_start": 22,
+                            "column_end": 22,
+                            "file": "main.c"
+                        }
+                    ]
                 }
-            ],
-            "children": [
-                {
-                "id": 2,
-                "occurence": {
-                    "line_start": 7,
-                    "line_end": 7,
-                    "column_start": 16,
-                    "column_end": 16,
-                    "file": "main.c"
-                }
-                },
-                {
-                "id": 2,
-                "occurence": {
-                    "line_start": 7,
-                    "line_end": 7,
-                    "column_start": 22,
-                    "column_end": 22,
-                    "file": "main.c"
-                }
-                }
-            ]
             },
             "42": {
                 "id": 42,
                 "name": "main",
                 "ranges": [
                     {
-                    "line_start": 9,
-                    "line_end": 11,
-                    "column_start": 1,
-                    "column_end": 1,
-                    "file": "main.c"
-                    }
-                ],
-                "children": [
-                    {
-                    "id": 1,
-                    "occurence": {
-                        "line_start": 11,
+                        "line_start": 9,
                         "line_end": 11,
-                        "column_start": 16,
-                        "column_end": 16,
+                        "column_start": 1,
+                        "column_end": 1,
                         "file": "main.c"
                     }
-                    },
-                    {
-                    "id": 2,
-                    "occurence": {
-                        "line_start": 11,
-                        "line_end": 11,
-                        "column_start": 22,
-                        "column_end": 22,
-                        "file": "main.c"
-                    }
-                    }
-            ]
-            },
-            "3": {
-                "id": 3,
-                "name": "c",
-                "ranges": [
-                    {
-                    "line_start": 13,
-                    "line_end": 14,
-                    "column_start": 1,
-                    "column_end": 1,
-                    "file": "main.c"
-                    }
                 ],
-                "children": []
-            },
-            "5": {
-                "id": 5,
-                "name": "e",
-                "ranges": [
-                    {
-                    "line_start": 13,
-                    "line_end": 14,
-                    "column_start": 1,
-                    "column_end": 1,
-                    "file": "main.c"
-                    }
-                ],
-                "children": []
-            },
-            "6": {
-                "id": 6,
-                "name": "f",
-                "ranges": [
-                    {
-                    "line_start": 13,
-                    "line_end": 14,
-                    "column_start": 1,
-                    "column_end": 1,
-                    "file": "main.c"
-                    }
-                ],
-                "children": [
-                    {
-                        "id": 7,
-                        "occurence": {
+                "children": {
+                    "1": [
+                        {
                             "line_start": 11,
                             "line_end": 11,
                             "column_start": 16,
                             "column_end": 16,
                             "file": "main.c"
                         }
-                    }
-                ]
-            },
-            "7": {
-                "id": 7,
-                "name": "g",
-                "ranges": [
-                    {
-                    "line_start": 13,
-                    "line_end": 14,
-                    "column_start": 1,
-                    "column_end": 1,
-                    "file": "main.c"
-                    }
-                ],
-                "children": []
-            },
-            "4": {
-                "id": 4,
-                "name": "d",
-                "ranges": [
-                    {
-                    "line_start": 13,
-                    "line_end": 14,
-                    "column_start": 1,
-                    "column_end": 1,
-                    "file": "main.c"
-                    }
-                ],
-                "children": [
-                    {
-                        "id": 5,
-                        "occurence": {
-                            "line_start": 11,
-                            "line_end": 11,
-                            "column_start": 16,
-                            "column_end": 16,
-                            "file": "main.c"
-                        }
-                    },
-                    {
-                        "id": 6,
-                        "occurence": {
+                    ],
+                    "2": [
+                        {
                             "line_start": 11,
                             "line_end": 11,
                             "column_start": 22,
                             "column_end": 22,
                             "file": "main.c"
                         }
+                    ]
+                }
+            },
+            "3": {
+                "id": 3,
+                "name": "c",
+                "ranges": [
+                    {
+                        "line_start": 13,
+                        "line_end": 14,
+                        "column_start": 1,
+                        "column_end": 1,
+                        "file": "main.c"
                     }
-                ]
+                ],
+                "children": {}
+            },
+            "5": {
+                "id": 5,
+                "name": "e",
+                "ranges": [
+                    {
+                        "line_start": 13,
+                        "line_end": 14,
+                        "column_start": 1,
+                        "column_end": 1,
+                        "file": "main.c"
+                    }
+                ],
+                "children": {}
+            },
+            "6": {
+                "id": 6,
+                "name": "f",
+                "ranges": [
+                    {
+                        "line_start": 13,
+                        "line_end": 14,
+                        "column_start": 1,
+                        "column_end": 1,
+                        "file": "main.c"
+                    }
+                ],
+                "children": {
+                    "7": [
+                        {
+                            "line_start": 11,
+                            "line_end": 11,
+                            "column_start": 16,
+                            "column_end": 16,
+                            "file": "main.c"
+                        }
+                    ]
+                }
+            },
+            "7": {
+                "id": 7,
+                "name": "g",
+                "ranges": [
+                    {
+                        "line_start": 13,
+                        "line_end": 14,
+                        "column_start": 1,
+                        "column_end": 1,
+                        "file": "main.c"
+                    }
+                ],
+                "children": {}
+            },
+            "4": {
+                "id": 4,
+                "name": "d",
+                "ranges": [
+                    {
+                        "line_start": 13,
+                        "line_end": 14,
+                        "column_start": 1,
+                        "column_end": 1,
+                        "file": "main.c"
+                    }
+                ],
+                "children": {
+                    "5": [
+                        {
+                            "line_start": 11,
+                            "line_end": 11,
+                            "column_start": 16,
+                            "column_end": 16,
+                            "file": "main.c"
+                        }
+                    ],
+                    "6": [
+                        {
+                            "line_start": 11,
+                            "line_end": 11,
+                            "column_start": 22,
+                            "column_end": 22,
+                            "file": "main.c"
+                        }
+                    ]
+                }
             }
         }
     }
@@ -490,13 +475,7 @@ mod tests {
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(
-            res_nodes.0,
-            vec![
-                SymbolId::new(1),
-                SymbolId::new(2)
-            ]
-        );
+        assert_eq!(res_nodes.0, vec![SymbolId::new(1), SymbolId::new(2)]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2"]);
     }
@@ -508,13 +487,7 @@ mod tests {
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(
-            res_nodes.0,
-            vec![
-                SymbolId::new(1),
-                SymbolId::new(42)
-            ]
-        );
+        assert_eq!(res_nodes.0, vec![SymbolId::new(1), SymbolId::new(42)]);
         assert_eq!(res_edges.0.len(), 1);
     }
 
@@ -527,11 +500,7 @@ mod tests {
         println!("{:#?}", res_edges);
         assert_eq!(
             res_nodes.0,
-            vec![
-                SymbolId::new(1),
-                SymbolId::new(2),
-                SymbolId::new(42)
-            ]
+            vec![SymbolId::new(1), SymbolId::new(2), SymbolId::new(42)]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2", "42-1", "42-2"]);
@@ -544,13 +513,7 @@ mod tests {
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(
-            res_nodes.0,
-            vec![
-                SymbolId::new(1),
-                SymbolId::new(2)
-            ]
-        );
+        assert_eq!(res_nodes.0, vec![SymbolId::new(1), SymbolId::new(2)]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2"]);
     }
@@ -575,13 +538,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(
-            res_nodes.0,
-            vec![
-                SymbolId::new(1),
-                SymbolId::new(2)
-            ]
-        );
+        assert_eq!(res_nodes.0, vec![SymbolId::new(1), SymbolId::new(2)]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2", "2-1"]);
     }
@@ -594,13 +551,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(
-            res_nodes.0,
-            vec![
-                SymbolId::new(2),
-                SymbolId::new(3)
-            ]
-        );
+        assert_eq!(res_nodes.0, vec![SymbolId::new(2), SymbolId::new(3)]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["2-3"]);
     }
@@ -615,13 +566,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(
-            res_nodes.0,
-            vec![
-                SymbolId::new(3),
-                SymbolId::new(42)
-            ]
-        );
+        assert_eq!(res_nodes.0, vec![SymbolId::new(3), SymbolId::new(42)]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["42-3"]);
     }
@@ -634,13 +579,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(
-            res_nodes.0,
-            vec![
-                SymbolId::new(1),
-                SymbolId::new(2),
-            ]
-        );
+        assert_eq!(res_nodes.0, vec![SymbolId::new(1), SymbolId::new(2),]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2"]);
     }
@@ -653,13 +592,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(
-            res_nodes.0,
-            vec![
-                SymbolId::new(1),
-                SymbolId::new(2),
-            ]
-        );
+        assert_eq!(res_nodes.0, vec![SymbolId::new(1), SymbolId::new(2),]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2"]);
     }
@@ -672,13 +605,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(
-            res_nodes.0,
-            vec![
-                SymbolId::new(1),
-                SymbolId::new(2),
-            ]
-        );
+        assert_eq!(res_nodes.0, vec![SymbolId::new(1), SymbolId::new(2),]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2"]);
     }
@@ -686,19 +613,13 @@ mod tests {
     #[test]
     fn statement_after_scope_newline() {
         const QUERY: &str = r#""a" {}
-        "a""#; 
+        "a""#;
         let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(
-            res_nodes.0,
-            vec![
-                SymbolId::new(1),
-                SymbolId::new(2),
-            ]
-        );
+        assert_eq!(res_nodes.0, vec![SymbolId::new(1), SymbolId::new(2),]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2"]);
     }
@@ -711,16 +632,10 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(
-            res_nodes.0,
-            vec![
-                SymbolId::new(1),
-            ]
-        );
+        assert_eq!(res_nodes.0, vec![SymbolId::new(1),]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, Vec::<String>::new());
     }
-
 
     #[test]
     fn ignore_node_recurse() {
@@ -730,12 +645,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(
-            res_nodes.0,
-            vec![
-                SymbolId::new(1),
-            ]
-        );
+        assert_eq!(res_nodes.0, vec![SymbolId::new(1),]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, Vec::<String>::new());
     }
@@ -750,11 +660,7 @@ mod tests {
 
         assert_eq!(
             res_nodes.0,
-            vec![
-                SymbolId::new(4),
-                SymbolId::new(5),
-                SymbolId::new(6),
-            ]
+            vec![SymbolId::new(4), SymbolId::new(5), SymbolId::new(6),]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["4-5", "4-6"]);

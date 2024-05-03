@@ -41,7 +41,7 @@ impl ControlFlowGraph {
         self.symbols
             .map
             .iter()
-            .filter_map(|(k, v)| if v.name == *name { Some(v) } else { None })
+            .filter_map(|(_, v)| if v.name == *name { Some(v) } else { None })
             .collect()
     }
 }

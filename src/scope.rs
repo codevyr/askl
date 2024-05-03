@@ -1,7 +1,7 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::parser::{ParserContext, Rule};
 use crate::statement::{build_empty_statement, build_statement, Statement};
-use crate::symbols::{SymbolChild, SymbolRefs};
+use crate::symbols::SymbolRefs;
 use crate::verb::Resolution;
 use core::fmt::Debug;
 use pest::error::Error;
