@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Result};
-use askl::symbols::{Occurence, Symbol, SymbolId, SymbolMap, Symbols, SymbolRefs};
+use askl::symbols::{Occurence, Symbol, SymbolId, SymbolMap, SymbolRefs, Symbols};
 use clap::Parser;
 use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};
@@ -369,9 +369,14 @@ fn extract_symbol_map_root(root: Node, state: &mut VisitorState) -> Result<()> {
             .1
             .clone();
         for u in unresolved {
-            state.symbol_map.map.entry(u.parent_id).and_modify(|s| {
-                s.add_child(child.id, u.occurence);
-            }).or_insert_with(|| panic!("Did not find the parent"));
+            state
+                .symbol_map
+                .map
+                .entry(u.parent_id)
+                .and_modify(|s| {
+                    s.add_child(child.id, u.occurence);
+                })
+                .or_insert_with(|| panic!("Did not find the parent"));
         }
     }
 
