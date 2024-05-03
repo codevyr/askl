@@ -238,15 +238,18 @@ impl Verb for ForcedVerb {
 
 impl Deriver for ForcedVerb {
     fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<SymbolRefs> {
-        Some(cfg.symbols.get_children(symbol))
+        Some(cfg.symbols.get_children(symbol).clone())
     }
 
     fn derive_children(&self, cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<SymbolRefs> {
         let sym_refs: SymbolRefs = cfg
             .get_symbol_by_name(&self.name)
-            .into_iter()
-            .map(|s| (s.id, vec![]))
-            .collect();
+            .iter()
+            .map(|s| s.children.clone())
+            .fold(SymbolRefs::new(), |mut acc, refs| {
+                acc.extend(refs);
+                acc
+            });
         if sym_refs.is_empty() {
             return None;
         }
@@ -259,9 +262,12 @@ impl Selector for ForcedVerb {
     fn select(&self, cfg: &ControlFlowGraph, _symbols: SymbolRefs) -> Option<SymbolRefs> {
         let sym_refs: SymbolRefs = cfg
             .get_symbol_by_name(&self.name)
-            .into_iter()
-            .map(|s| (s.id, vec![]))
-            .collect();
+            .iter()
+            .map(|s| s.children.clone())
+            .fold(SymbolRefs::new(), |mut acc, refs| {
+                acc.extend(refs);
+                acc
+            });
         if sym_refs.is_empty() {
             return None;
         }
@@ -321,11 +327,11 @@ impl Verb for ChildrenVerb {
 
 impl Deriver for ChildrenVerb {
     fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<SymbolRefs> {
-        Some(cfg.symbols.get_children(symbol))
+        Some(cfg.symbols.get_children(symbol).clone())
     }
 
     fn derive_children(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<SymbolRefs> {
-        Some(cfg.symbols.get_children(symbol))
+        Some(cfg.symbols.get_children(symbol).clone())
     }
 }
 
@@ -360,8 +366,8 @@ impl Filter for IgnoreVerb {
     fn filter(
         &self,
         cfg: &ControlFlowGraph,
-        symbols: HashMap<SymbolId, Vec<Occurence>>,
-    ) -> HashMap<SymbolId, Vec<Occurence>> {
+        symbols: SymbolRefs,
+    ) -> SymbolRefs {
         symbols
             .into_iter()
             .filter(|(s, occ)| self.name != cfg.get_symbol(s).unwrap().name)

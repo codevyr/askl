@@ -1,8 +1,8 @@
 use anyhow::{anyhow, bail, Result};
 use clang_ast::SourceRange;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;
@@ -68,14 +68,23 @@ pub struct SymbolChild {
     pub occurence: Option<Occurence>,
 }
 
-pub type SymbolRefs = HashMap<SymbolId, Vec<Occurence>>;
+pub type SymbolRefs = HashMap<SymbolId, HashSet<Occurence>>;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Symbol {
     pub id: SymbolId,
     pub name: String,
     pub ranges: HashSet<Occurence>,
-    pub children: HashSet<SymbolChild>,
+    pub children: SymbolRefs,
+}
+
+impl Symbol {
+    pub fn add_child(&mut self, id: SymbolId, occurence: Occurence) {
+        self.children.entry(id).and_modify(|occurences| {
+            occurences.insert(occurence.clone());
+        })
+        .or_insert(HashSet::from([occurence]));
+    }
 }
 
 pub trait Symbols: ToString {
@@ -124,20 +133,14 @@ impl SymbolMap {
         self.map.iter()
     }
 
-    pub fn get_children(&self, symbol_id: &SymbolId) -> SymbolRefs {
+    pub fn get_children(&self, symbol_id: &SymbolId) -> &SymbolRefs {
         let symbol = if let Some(symbol) = self.map.get(&symbol_id) {
             symbol
         } else {
-            return SymbolRefs::new();
+            panic!("Unknown symbol");
         };
 
-        let mut refs = SymbolRefs::new();
-        for child in symbol.children.iter() {
-            refs.entry(child.id.clone())
-                .and_modify(|occ| occ.push(child.occurence.clone().unwrap()))
-                .or_insert_with(|| vec![child.occurence.clone().unwrap()]);
-        }
-        refs
+        &symbol.children
     }
 
     pub fn find(&self, symbol_name: &str) -> Option<&Symbol> {
