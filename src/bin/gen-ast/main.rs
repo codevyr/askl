@@ -1,6 +1,11 @@
-use std::{fs::File, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    mem::replace,
+    sync::Arc,
+};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use askl::symbols::{Occurence, Symbol, SymbolChild, SymbolId, SymbolMap, Symbols};
 use clap::Parser;
 use indicatif::ProgressBar;
@@ -78,15 +83,11 @@ pub struct TranslationUnitDecl {
 }
 
 impl TranslationUnitDecl {
-    fn extract_symbol_map(&self, inner: &Vec<Node>) -> Option<SymbolMap> {
-        inner
-            .iter()
-            .filter_map(|child| match &child.kind {
-                Clang::FunctionDecl(f) => Some(f.extract_symbol_map(&child.inner)),
-                _ => None,
-            })
-            .map(|s| s.unwrap())
-            .reduce(|acc, next| acc.merge(next))
+    fn extract_symbol_map(&self, state: &mut VisitorState, inner: &Vec<Node>) -> Result<()> {
+        inner.iter().try_for_each(|child| match &child.kind {
+            Clang::FunctionDecl(f) => f.extract_symbol_map(state, &child.inner),
+            _ => Ok(()),
+        })
     }
 }
 
@@ -113,9 +114,26 @@ pub struct FunctionDecl {
 }
 
 impl FunctionDecl {
-    fn extract_symbol_map(&self, inner: &Vec<Node>) -> Option<SymbolMap> {
+    fn extract_symbol_map(&self, state: &mut VisitorState, inner: &Vec<Node>) -> Result<()> {
         let clang_range = self.range.clone();
-        let range = Occurence::new(&clang_range);
+        let range = Occurence::new(&clang_range).unwrap();
+        let name = self.name.clone().unwrap();
+
+        let parent_id = if let Some(symbol) = state.symbol_map.find_mut(&name) {
+            symbol.ranges.insert(range);
+            symbol.id
+        } else {
+            let next_id = state.next_symbol_id();
+            let new_symbol = Symbol {
+                id: next_id,
+                name: name,
+                ranges: HashSet::from([range]),
+                children: HashSet::new(),
+            };
+
+            state.symbol_map.add(next_id, new_symbol);
+            next_id
+        };
 
         let children: Vec<_> = inner
             .iter()
@@ -133,19 +151,14 @@ impl FunctionDecl {
                 Clang::DeclRefExpr(ref_expr) => {
                     let referenced_decl = ref_expr.referenced_decl.as_ref().unwrap();
                     match &referenced_decl.kind {
-                        Clang::FunctionDecl(f) => Some(SymbolChild {
-                            id: SymbolId::new(f.name.as_ref().unwrap().clone()),
-                            occurence: Occurence::new(&ref_expr.range),
-                        }),
-                        // Clang::VarDecl(v) => {
-                        //     Some(SymbolChild {
-                        //         symbol_id: SymbolId::new(v.name.as_ref().unwrap().clone()),
-                        //         occurence: Occurence::new(
-                        //             ref_expr.range.as_ref().unwrap().begin.expansion_loc.as_ref().unwrap().file.clone().to_string(),
-                        //             ref_expr.range.as_ref().unwrap().clone(),
-                        //         ),
-                        //     })
-                        // }
+                        Clang::FunctionDecl(f) => {
+                            let name = f.name.as_ref().unwrap().clone();
+                            Some(UnresolvedChild {
+                                parent_id: parent_id,
+                                child_name: name,
+                                occurence: Occurence::new(&ref_expr.range).unwrap(),
+                            })
+                        }
                         Clang::ParmVarDecl | Clang::EnumConstantDecl(_) | Clang::VarDecl(_) => None,
                         _ => {
                             panic!("Impossible node kind: {:#?}", ref_expr);
@@ -158,17 +171,9 @@ impl FunctionDecl {
             })
             .collect();
 
-        let mut symbol_map = SymbolMap::new();
-        symbol_map.add(
-            SymbolId::new(self.name.clone().unwrap()),
-            Symbol {
-                name: self.name.clone().unwrap(),
-                ranges: range.into_iter().collect(),
-                children: children,
-            },
-        );
+        state.add_unresolved_children(children);
 
-        Some(symbol_map)
+        Ok(())
     }
 }
 
@@ -309,13 +314,71 @@ async fn parse_all(
     outputs
 }
 
-fn extract_symbol_map_root(root: Node) -> Result<SymbolMap> {
-    match root.kind {
-        Clang::TranslationUnitDecl(node) => Ok(node
-            .extract_symbol_map(&root.inner)
-            .unwrap_or_else(|| SymbolMap::new())),
-        _ => Err(anyhow!("Not implemented")),
+#[derive(Debug, Clone)]
+struct UnresolvedChild {
+    parent_id: SymbolId,
+    child_name: String,
+    occurence: Occurence,
+}
+
+struct VisitorState {
+    symbol_id: u64,
+    unresolved_children: HashMap<String, Vec<UnresolvedChild>>,
+    symbol_map: SymbolMap,
+}
+
+impl VisitorState {
+    fn new() -> Self {
+        VisitorState {
+            symbol_id: 1,
+            unresolved_children: HashMap::new(),
+            symbol_map: SymbolMap::new(),
+        }
     }
+
+    fn next_symbol_id(&mut self) -> SymbolId {
+        let next_id = SymbolId::new(self.symbol_id);
+        self.symbol_id = self.symbol_id + 1;
+        return next_id;
+    }
+
+    fn add_unresolved_children(&mut self, children: Vec<UnresolvedChild>) {
+        for child in children {
+            self.unresolved_children
+                .entry(child.child_name.clone())
+                .and_modify(|v| v.push(child.clone()))
+                .or_insert_with(|| vec![child]);
+        }
+    }
+}
+
+fn extract_symbol_map_root(root: Node, state: &mut VisitorState) -> Result<()> {
+    match root.kind {
+        Clang::TranslationUnitDecl(node) => node.extract_symbol_map(state, &root.inner)?,
+        _ => bail!("Not implemented"),
+    };
+
+    let unresolved_children = replace(&mut state.unresolved_children, HashMap::new());
+    for (child_name, unresolved) in unresolved_children {
+        let child = state
+            .symbol_map
+            .map
+            .iter()
+            .find(|(_, s)| s.name == *child_name)
+            .unwrap()
+            .1
+            .clone();
+        for u in unresolved {
+            state.symbol_map.map.entry(u.parent_id).and_modify(|s| {
+                s.children.insert(SymbolChild {
+                    id: child.id,
+                    occurence: Some(u.occurence),
+                });
+            }).or_insert_with(|| panic!("Did not find the parent"));
+        }
+    }
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -332,27 +395,18 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let outputs = parse_all(&args, compile_commands).await;
-
-    let symbol_map = outputs
+    let mut state = VisitorState::new();
+    outputs
         .into_iter()
-        .map(|r| {
-            if let Err(err) = &r {
-                println!("Failed parsing: {:?}", err);
-            }
-            r
-        })
         .filter(|r| r.is_ok())
         .map(|r| r.unwrap())
         .map(|(_, node)| node)
-        .map(extract_symbol_map_root)
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .reduce(|acc, next| acc.merge(next))
-        .unwrap();
+        .map(|root| extract_symbol_map_root(root, &mut state))
+        .collect::<Result<Vec<_>>>()?;
 
     std::fs::write(
         args.symbol_map,
-        serde_json::to_string_pretty(&symbol_map).unwrap(),
+        serde_json::to_string_pretty(&state.symbol_map).unwrap(),
     )
     .unwrap();
     Ok(())

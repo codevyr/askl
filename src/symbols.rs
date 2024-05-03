@@ -1,5 +1,7 @@
+use anyhow::{anyhow, bail, Result};
 use clang_ast::SourceRange;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::fs;
@@ -70,9 +72,10 @@ pub type SymbolRefs = HashMap<SymbolId, Vec<Occurence>>;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Symbol {
+    pub id: SymbolId,
     pub name: String,
-    pub ranges: Vec<Occurence>,
-    pub children: Vec<SymbolChild>,
+    pub ranges: HashSet<Occurence>,
+    pub children: HashSet<SymbolChild>,
 }
 
 pub trait Symbols: ToString {
@@ -80,11 +83,11 @@ pub trait Symbols: ToString {
     fn into_vec(&self) -> Vec<SymbolId>;
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct SymbolId(pub String);
+#[derive(Debug, Serialize, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct SymbolId(pub u64);
 
 impl SymbolId {
-    pub fn new(id: String) -> Self {
+    pub fn new(id: u64) -> Self {
         Self(id)
     }
 }
@@ -136,13 +139,29 @@ impl SymbolMap {
         }
         refs
     }
+
+    pub fn find(&self, symbol_name: &str) -> Option<&Symbol> {
+        self.map
+            .iter()
+            .find_map(|(_, s)| if s.name == symbol_name { Some(s) } else { None })
+    }
+
+    pub fn find_mut(&mut self, symbol_name: &str) -> Option<&mut Symbol> {
+        self.map
+            .iter_mut()
+            .find_map(|(_, s)| if s.name == symbol_name { Some(s) } else { None })
+    }
+
+    pub fn get_mut(&mut self, symbol_id: &SymbolId) -> Option<&mut Symbol> {
+        self.map.get_mut(symbol_id)
+    }
 }
 
 impl Symbols for SymbolMap {
-    fn add(&mut self, id: SymbolId, mut symbol: Symbol) {
+    fn add(&mut self, id: SymbolId, symbol: Symbol) {
         if let Some(existing) = self.map.get_mut(&id) {
             assert_eq!(existing.name, symbol.name);
-            existing.ranges.append(&mut symbol.ranges);
+            existing.ranges.extend(symbol.ranges);
             existing.children.extend(symbol.children);
         } else {
             self.map.insert(id, symbol);

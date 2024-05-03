@@ -15,7 +15,7 @@ use clap::Parser;
 use log::{debug, info};
 use protobuf::Message;
 use scip::types::Index;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use url::Url;
 
 /// Indexer for askl
@@ -35,8 +35,16 @@ struct AsklData {
     cfg: ControlFlowGraph,
 }
 
+fn symbolid_as_string<S>(x: &SymbolId, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    s.serialize_str(&format!("{}", x))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Node {
+    #[serde(serialize_with = "symbolid_as_string")]
     id: SymbolId,
     label: String,
     uri: Url,
@@ -57,7 +65,9 @@ impl Node {
 #[derive(Debug, Serialize, Deserialize)]
 struct Edge {
     id: String,
+    #[serde(serialize_with = "symbolid_as_string")]
     from: SymbolId,
+    #[serde(serialize_with = "symbolid_as_string")]
     to: SymbolId,
     from_file: Option<String>,
     from_line: Option<i32>,
@@ -139,8 +149,8 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
 
     for loc in all_symbols {
         let sym = data.cfg.get_symbol(&loc).unwrap();
-        let filename = sym.ranges[0].file.clone();
-        let line = sym.ranges[0].line_start;
+        let filename = sym.ranges.iter().next().unwrap().file.clone();
+        let line = sym.ranges.iter().next().unwrap().line_start;
         debug!("filename {}", filename.display());
         let url = Url::from_file_path(filename).unwrap();
         result_graph.add_node(Node::new(loc, sym.name.clone(), url, format!("{}", line)));
@@ -204,20 +214,21 @@ mod tests {
     const INPUT_A: &str = r#"
     {
         "map": {
-            "b": {
-            "name": "b",
-            "ranges": [
-                {
-                "line_start": 1,
-                "line_end": 3,
-                "column_start": 1,
-                "column_end": 1,
-                "file": "main.c"
+            "2": {
+                "id": 2,
+                "name": "b",
+                "ranges": [{
+                    "line_start": 1,
+                    "line_end": 3,
+                    "column_start": 1,
+                    "column_end": 1,
+                    "file": "main.c"
                 }
             ],
             "children": []
             },
-            "a": {
+            "1": {
+            "id": 1,
             "name": "a",
             "ranges": [
                 {
@@ -230,7 +241,7 @@ mod tests {
             ],
             "children": [
                 {
-                "id": "b",
+                "id": 2,
                 "occurence": {
                     "line_start": 7,
                     "line_end": 7,
@@ -240,7 +251,7 @@ mod tests {
                 }
                 },
                 {
-                "id": "b",
+                "id": 2,
                 "occurence": {
                     "line_start": 7,
                     "line_end": 7,
@@ -251,41 +262,43 @@ mod tests {
                 }
             ]
             },
-            "main": {
-            "name": "main",
-            "ranges": [
-                {
-                "line_start": 9,
-                "line_end": 11,
-                "column_start": 1,
-                "column_end": 1,
-                "file": "main.c"
-                }
-            ],
-            "children": [
-                {
-                "id": "a",
-                "occurence": {
-                    "line_start": 11,
+            "42": {
+                "id": 42,
+                "name": "main",
+                "ranges": [
+                    {
+                    "line_start": 9,
                     "line_end": 11,
-                    "column_start": 16,
-                    "column_end": 16,
+                    "column_start": 1,
+                    "column_end": 1,
                     "file": "main.c"
-                }
-                },
-                {
-                "id": "b",
-                "occurence": {
-                    "line_start": 11,
-                    "line_end": 11,
-                    "column_start": 22,
-                    "column_end": 22,
-                    "file": "main.c"
-                }
-                }
+                    }
+                ],
+                "children": [
+                    {
+                    "id": 1,
+                    "occurence": {
+                        "line_start": 11,
+                        "line_end": 11,
+                        "column_start": 16,
+                        "column_end": 16,
+                        "file": "main.c"
+                    }
+                    },
+                    {
+                    "id": 2,
+                    "occurence": {
+                        "line_start": 11,
+                        "line_end": 11,
+                        "column_start": 22,
+                        "column_end": 22,
+                        "file": "main.c"
+                    }
+                    }
             ]
             },
-            "c": {
+            "3": {
+                "id": 3,
                 "name": "c",
                 "ranges": [
                     {
@@ -298,7 +311,8 @@ mod tests {
                 ],
                 "children": []
             },
-            "e": {
+            "5": {
+                "id": 5,
                 "name": "e",
                 "ranges": [
                     {
@@ -311,7 +325,8 @@ mod tests {
                 ],
                 "children": []
             },
-            "f": {
+            "6": {
+                "id": 6,
                 "name": "f",
                 "ranges": [
                     {
@@ -324,7 +339,7 @@ mod tests {
                 ],
                 "children": [
                     {
-                        "id": "g",
+                        "id": 7,
                         "occurence": {
                             "line_start": 11,
                             "line_end": 11,
@@ -335,7 +350,8 @@ mod tests {
                     }
                 ]
             },
-            "g": {
+            "7": {
+                "id": 7,
                 "name": "g",
                 "ranges": [
                     {
@@ -348,7 +364,8 @@ mod tests {
                 ],
                 "children": []
             },
-            "d": {
+            "4": {
+                "id": 4,
                 "name": "d",
                 "ranges": [
                     {
@@ -361,7 +378,7 @@ mod tests {
                 ],
                 "children": [
                     {
-                        "id": "e",
+                        "id": 5,
                         "occurence": {
                             "line_start": 11,
                             "line_end": 11,
@@ -371,7 +388,7 @@ mod tests {
                         }
                     },
                     {
-                        "id": "f",
+                        "id": 6,
                         "occurence": {
                             "line_start": 11,
                             "line_end": 11,
@@ -462,7 +479,7 @@ mod tests {
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.0, vec![SymbolId::new("a".to_string())]);
+        assert_eq!(res_nodes.0, vec![SymbolId::new(1)]);
         assert_eq!(res_edges.0.len(), 0);
     }
 
@@ -476,12 +493,12 @@ mod tests {
         assert_eq!(
             res_nodes.0,
             vec![
-                SymbolId::new("a".to_string()),
-                SymbolId::new("b".to_string())
+                SymbolId::new(1),
+                SymbolId::new(2)
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["a-b", "a-b"]);
+        assert_eq!(edges, vec!["1-2", "1-2"]);
     }
 
     #[test]
@@ -494,8 +511,8 @@ mod tests {
         assert_eq!(
             res_nodes.0,
             vec![
-                SymbolId::new("a".to_string()),
-                SymbolId::new("main".to_string())
+                SymbolId::new(1),
+                SymbolId::new(42)
             ]
         );
         assert_eq!(res_edges.0.len(), 1);
@@ -511,13 +528,13 @@ mod tests {
         assert_eq!(
             res_nodes.0,
             vec![
-                SymbolId::new("a".to_string()),
-                SymbolId::new("b".to_string()),
-                SymbolId::new("main".to_string())
+                SymbolId::new(1),
+                SymbolId::new(2),
+                SymbolId::new(42)
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["a-b", "a-b", "main-a", "main-b"]);
+        assert_eq!(edges, vec!["1-2", "1-2", "42-1", "42-2"]);
     }
 
     #[test]
@@ -530,12 +547,12 @@ mod tests {
         assert_eq!(
             res_nodes.0,
             vec![
-                SymbolId::new("a".to_string()),
-                SymbolId::new("b".to_string())
+                SymbolId::new(1),
+                SymbolId::new(2)
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["a-b", "a-b"]);
+        assert_eq!(edges, vec!["1-2", "1-2"]);
     }
 
     #[test]
@@ -561,12 +578,12 @@ mod tests {
         assert_eq!(
             res_nodes.0,
             vec![
-                SymbolId::new("a".to_string()),
-                SymbolId::new("b".to_string())
+                SymbolId::new(1),
+                SymbolId::new(2)
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["a-b", "a-b", "b-a"]);
+        assert_eq!(edges, vec!["1-2", "1-2", "2-1"]);
     }
 
     #[test]
@@ -580,12 +597,12 @@ mod tests {
         assert_eq!(
             res_nodes.0,
             vec![
-                SymbolId::new("b".to_string()),
-                SymbolId::new("c".to_string())
+                SymbolId::new(2),
+                SymbolId::new(3)
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["b-c"]);
+        assert_eq!(edges, vec!["2-3"]);
     }
 
     #[test]
@@ -601,12 +618,12 @@ mod tests {
         assert_eq!(
             res_nodes.0,
             vec![
-                SymbolId::new("c".to_string()),
-                SymbolId::new("main".to_string())
+                SymbolId::new(3),
+                SymbolId::new(42)
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["main-c"]);
+        assert_eq!(edges, vec!["42-3"]);
     }
 
     #[test]
@@ -620,12 +637,12 @@ mod tests {
         assert_eq!(
             res_nodes.0,
             vec![
-                SymbolId::new("a".to_string()),
-                SymbolId::new("b".to_string()),
+                SymbolId::new(1),
+                SymbolId::new(2),
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["a-b", "a-b"]);
+        assert_eq!(edges, vec!["1-2", "1-2"]);
     }
 
     #[test]
@@ -639,12 +656,12 @@ mod tests {
         assert_eq!(
             res_nodes.0,
             vec![
-                SymbolId::new("a".to_string()),
-                SymbolId::new("b".to_string()),
+                SymbolId::new(1),
+                SymbolId::new(2),
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["a-b", "a-b"]);
+        assert_eq!(edges, vec!["1-2", "1-2"]);
     }
 
     #[test]
@@ -658,12 +675,12 @@ mod tests {
         assert_eq!(
             res_nodes.0,
             vec![
-                SymbolId::new("a".to_string()),
-                SymbolId::new("b".to_string()),
+                SymbolId::new(1),
+                SymbolId::new(2),
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["a-b", "a-b"]);
+        assert_eq!(edges, vec!["1-2", "1-2"]);
     }
 
     #[test]
@@ -678,12 +695,12 @@ mod tests {
         assert_eq!(
             res_nodes.0,
             vec![
-                SymbolId::new("a".to_string()),
-                SymbolId::new("b".to_string()),
+                SymbolId::new(1),
+                SymbolId::new(2),
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["a-b", "a-b"]);
+        assert_eq!(edges, vec!["1-2", "1-2"]);
     }
 
     #[test]
@@ -697,7 +714,7 @@ mod tests {
         assert_eq!(
             res_nodes.0,
             vec![
-                SymbolId::new("a".to_string()),
+                SymbolId::new(1),
             ]
         );
         let edges = format_edges(res_edges);
@@ -716,7 +733,7 @@ mod tests {
         assert_eq!(
             res_nodes.0,
             vec![
-                SymbolId::new("a".to_string()),
+                SymbolId::new(1),
             ]
         );
         let edges = format_edges(res_edges);
@@ -734,12 +751,12 @@ mod tests {
         assert_eq!(
             res_nodes.0,
             vec![
-                SymbolId::new("d".to_string()),
-                SymbolId::new("e".to_string()),
-                SymbolId::new("f".to_string()),
+                SymbolId::new(4),
+                SymbolId::new(5),
+                SymbolId::new(6),
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["d-e", "d-f"]);
+        assert_eq!(edges, vec!["4-5", "4-6"]);
     }
 }

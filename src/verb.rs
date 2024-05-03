@@ -242,27 +242,31 @@ impl Deriver for ForcedVerb {
     }
 
     fn derive_children(&self, cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<SymbolRefs> {
-        let id = SymbolId::new(self.name.clone());
-        if let Some(_) = cfg.get_symbol(&id) {
-            let mut res = SymbolRefs::new();
-            res.insert(id, vec![]);
-            Some(res)
-        } else {
-            None
+        let sym_refs: SymbolRefs = cfg
+            .get_symbol_by_name(&self.name)
+            .into_iter()
+            .map(|s| (s.id, vec![]))
+            .collect();
+        if sym_refs.is_empty() {
+            return None;
         }
+
+        Some(sym_refs)
     }
 }
 
 impl Selector for ForcedVerb {
     fn select(&self, cfg: &ControlFlowGraph, _symbols: SymbolRefs) -> Option<SymbolRefs> {
-        let id = SymbolId::new(self.name.clone());
-        if let Some(_) = cfg.get_symbol(&id) {
-            let mut sym_refs = HashMap::new();
-            sym_refs.insert(id, vec![]);
-            Some(sym_refs)
-        } else {
-            None
+        let sym_refs: SymbolRefs = cfg
+            .get_symbol_by_name(&self.name)
+            .into_iter()
+            .map(|s| (s.id, vec![]))
+            .collect();
+        if sym_refs.is_empty() {
+            return None;
         }
+
+        Some(sym_refs)
     }
 }
 
@@ -287,11 +291,7 @@ impl Verb for UnitVerb {
 }
 
 impl Deriver for UnitVerb {
-    fn derive_children(
-        &self,
-        _cfg: &ControlFlowGraph,
-        _symbol: &SymbolId,
-    ) -> Option<SymbolRefs> {
+    fn derive_children(&self, _cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<SymbolRefs> {
         None
     }
 
