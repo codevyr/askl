@@ -1,4 +1,5 @@
 use clang_ast::SourceRange;
+use serde::Serializer;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
@@ -24,11 +25,11 @@ pub struct Occurence {
     pub line_end: i32,
     pub column_start: i32,
     pub column_end: i32,
-    pub file: PathBuf,
+    pub file: FileId,
 }
 
 impl Occurence {
-    pub fn new(range: &Option<SourceRange>) -> Option<Self> {
+    pub fn new(range: &Option<SourceRange>, file_id: FileId) -> Option<Self> {
         let range = if let Some(range) = range {
             range
         } else {
@@ -47,17 +48,39 @@ impl Occurence {
             return None;
         };
 
-        let file = begin.file.clone().to_string();
+        // let file = begin.file.clone().to_string();
+        // fs::canonicalize(file.clone())
+        // .or::<PathBuf>(Ok(PathBuf::from(file)))
+        // .unwrap()
 
         Some(Self {
             line_start: begin.line as i32,
             column_start: begin.col as i32,
             line_end: end.line as i32,
             column_end: end.col as i32,
-            file: fs::canonicalize(file.clone())
-                .or::<PathBuf>(Ok(PathBuf::from(file)))
-                .unwrap(),
+            file: file_id,
         })
+    }
+
+    pub fn get_file(range: &Option<SourceRange>) -> Option<PathBuf> {
+        let range = if let Some(range) = range {
+            range
+        } else {
+            return None;
+        };
+
+        let begin = if let Some(begin) = &range.begin.expansion_loc {
+            begin
+        } else {
+            return None;
+        };
+
+        let file = begin.file.clone().to_string();
+        if let Ok(path) = fs::canonicalize(file.clone()) {
+            Some(path)
+        } else {
+            Some(PathBuf::from(file))
+        }
     }
 }
 
@@ -79,10 +102,12 @@ pub struct Symbol {
 
 impl Symbol {
     pub fn add_child(&mut self, id: SymbolId, occurence: Occurence) {
-        self.children.entry(id).and_modify(|occurences| {
-            occurences.insert(occurence.clone());
-        })
-        .or_insert(HashSet::from([occurence]));
+        self.children
+            .entry(id)
+            .and_modify(|occurences| {
+                occurences.insert(occurence.clone());
+            })
+            .or_insert(HashSet::from([occurence]));
     }
 }
 
@@ -106,21 +131,47 @@ impl fmt::Display for SymbolId {
     }
 }
 
+#[derive(Debug, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct FileId(u64);
+
+impl FileId {
+    pub fn new(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+impl fmt::Display for FileId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl serde::Serialize for FileId {
+    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        s.serialize_str(&format!("{}", self.0))
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SymbolMap {
-    pub map: HashMap<SymbolId, Symbol>,
+    pub symbols: HashMap<SymbolId, Symbol>,
+    pub files: HashMap<FileId, String>,
 }
 
 impl SymbolMap {
     pub fn new() -> Self {
         Self {
-            map: HashMap::new(),
+            symbols: HashMap::new(),
+            files: HashMap::new(),
         }
     }
 
     pub fn merge(mut self, other: SymbolMap) -> Self {
-        other.map.into_iter().for_each(|(key, value)| {
-            self.map
+        other.symbols.into_iter().for_each(|(key, value)| {
+            self.symbols
                 .entry(key)
                 .and_modify(|cur_symbol| cur_symbol.children.extend(value.children.clone()))
                 .or_insert(value);
@@ -129,11 +180,11 @@ impl SymbolMap {
     }
 
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = (&SymbolId, &Symbol)> + 'a {
-        self.map.iter()
+        self.symbols.iter()
     }
 
     pub fn get_children(&self, symbol_id: &SymbolId) -> &SymbolRefs {
-        let symbol = if let Some(symbol) = self.map.get(&symbol_id) {
+        let symbol = if let Some(symbol) = self.symbols.get(&symbol_id) {
             symbol
         } else {
             panic!("Unknown symbol");
@@ -143,41 +194,54 @@ impl SymbolMap {
     }
 
     pub fn find(&self, symbol_name: &str) -> Option<&Symbol> {
-        self.map
+        self.symbols
             .iter()
             .find_map(|(_, s)| if s.name == symbol_name { Some(s) } else { None })
     }
 
     pub fn find_mut(&mut self, symbol_name: &str) -> Option<&mut Symbol> {
-        self.map
+        self.symbols
             .iter_mut()
             .find_map(|(_, s)| if s.name == symbol_name { Some(s) } else { None })
     }
 
     pub fn get_mut(&mut self, symbol_id: &SymbolId) -> Option<&mut Symbol> {
-        self.map.get_mut(symbol_id)
+        self.symbols.get_mut(symbol_id)
+    }
+
+    pub fn get_file_id(&self, file: String) -> Option<FileId> {
+        self.files
+            .iter()
+            .find_map(|(id, f)| if **f == file { Some(*id) } else { None })
+    }
+
+    pub fn set_file_id(&mut self, id: FileId, file: String) {
+        self.files.insert(id, file);
     }
 }
 
 impl Symbols for SymbolMap {
     fn add(&mut self, id: SymbolId, symbol: Symbol) {
-        if let Some(existing) = self.map.get_mut(&id) {
+        if let Some(existing) = self.symbols.get_mut(&id) {
             assert_eq!(existing.name, symbol.name);
             existing.ranges.extend(symbol.ranges);
             existing.children.extend(symbol.children);
         } else {
-            self.map.insert(id, symbol);
+            self.symbols.insert(id, symbol);
         }
     }
 
     fn into_vec(&self) -> Vec<SymbolId> {
-        self.map.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()
+        self.symbols
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect::<Vec<_>>()
     }
 }
 
 impl ToString for SymbolMap {
     fn to_string(&self) -> String {
-        serde_json::to_string_pretty(&self.map.clone().into_values().collect::<Vec<Symbol>>())
+        serde_json::to_string_pretty(&self.symbols.clone().into_values().collect::<Vec<Symbol>>())
             .unwrap()
     }
 }

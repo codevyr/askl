@@ -34,12 +34,12 @@ impl ControlFlowGraph {
     }
 
     pub fn get_symbol(&self, loc: &SymbolId) -> Option<&Symbol> {
-        self.symbols.map.get(loc)
+        self.symbols.symbols.get(loc)
     }
 
     pub fn get_symbol_by_name(&self, name: &str) -> Vec<&Symbol> {
         self.symbols
-            .map
+            .symbols
             .iter()
             .filter_map(|(_, v)| if v.name == *name { Some(v) } else { None })
             .collect()

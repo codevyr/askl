@@ -1,8 +1,8 @@
-use std::{collections::HashSet, path::Path};
+use std::collections::HashSet;
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::{anyhow, Result};
-use askl::symbols::Occurence;
+use askl::symbols::{FileId, Occurence};
 use askl::{
     cfg::ControlFlowGraph,
     parser::parse,
@@ -11,7 +11,6 @@ use askl::{
 use clap::Parser;
 use log::{debug, info};
 use serde::{Deserialize, Serialize, Serializer};
-use url::Url;
 
 /// Indexer for askl
 #[derive(Parser, Debug)]
@@ -42,17 +41,17 @@ struct Node {
     #[serde(serialize_with = "symbolid_as_string")]
     id: SymbolId,
     label: String,
-    uri: Url,
-    loc: String,
+    file_id: FileId,
+    line: i32,
 }
 
 impl Node {
-    fn new(id: SymbolId, label: String, uri: Url, loc: String) -> Self {
+    fn new(id: SymbolId, label: String, file_id: FileId, line: i32) -> Self {
         Self {
-            id: id,
-            label: label,
-            uri: uri,
-            loc: loc,
+            id,
+            label,
+            file_id,
+            line,
         }
     }
 }
@@ -64,20 +63,14 @@ struct Edge {
     from: SymbolId,
     #[serde(serialize_with = "symbolid_as_string")]
     to: SymbolId,
-    from_file: Option<String>,
+    from_file: Option<FileId>,
     from_line: Option<i32>,
 }
 
 impl Edge {
     fn new(from: SymbolId, to: SymbolId, occurence: Option<Occurence>) -> Self {
         let (filename, line) = if let Some(occ) = occurence {
-            (
-                Some(format!(
-                    "file://{}",
-                    occ.file.into_os_string().into_string().unwrap()
-                )),
-                Some(occ.line_start),
-            )
+            (Some(occ.file), Some(occ.line_start))
         } else {
             (None, None)
         };
@@ -144,22 +137,24 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
 
     for loc in all_symbols {
         let sym = data.cfg.get_symbol(&loc).unwrap();
-        let filename = sym.ranges.iter().next().unwrap().file.clone();
+        let file_id = sym.ranges.iter().next().unwrap().file.clone();
         let line = sym.ranges.iter().next().unwrap().line_start;
-        debug!("filename {}", filename.display());
-        let url = Url::from_file_path(filename).unwrap();
-        result_graph.add_node(Node::new(loc, sym.name.clone(), url, format!("{}", line)));
+        debug!("filename {}", file_id);
+        result_graph.add_node(Node::new(loc, sym.name.clone(), file_id, line));
     }
 
     let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();
     HttpResponse::Ok().body(json_graph)
 }
 
-#[get["/source/{path:.*}"]]
-async fn file(_data: web::Data<AsklData>, path: web::Path<String>) -> impl Responder {
-    let path = Path::new("/").join(Path::new(path.as_str()));
-    debug!("Received request for file: {:#?}", path);
-    debug!("XXX: This function is unsafe, because it can read any file on the system");
+#[get["/source/{file_id}"]]
+async fn file(data: web::Data<AsklData>, file_id: web::Path<FileId>) -> impl Responder {
+    let path = if let Some(path) = data.cfg.symbols.files.get(&file_id) {
+        path
+    } else {
+        return HttpResponse::NotFound().body("File not found");
+    };
+
     if let Ok(source) = std::fs::read_to_string(&path) {
         HttpResponse::Ok().body(source)
     } else {
@@ -206,7 +201,10 @@ mod tests {
 
     const INPUT_A: &str = r#"
     {
-        "map": {
+        "files": {
+            "1": "main.c"
+        },
+        "symbols": {
             "2": {
                 "id": 2,
                 "name": "b",
@@ -216,7 +214,7 @@ mod tests {
                         "line_end": 3,
                         "column_start": 1,
                         "column_end": 1,
-                        "file": "main.c"
+                        "file": 1
                     }
                 ],
                 "children": {}
@@ -230,7 +228,7 @@ mod tests {
                         "line_end": 7,
                         "column_start": 1,
                         "column_end": 1,
-                        "file": "main.c"
+                        "file": 1
                     }
                 ],
                 "children": {
@@ -240,14 +238,14 @@ mod tests {
                             "line_end": 7,
                             "column_start": 16,
                             "column_end": 16,
-                            "file": "main.c"
+                            "file": 1
                         },
                         {
                             "line_start": 7,
                             "line_end": 7,
                             "column_start": 22,
                             "column_end": 22,
-                            "file": "main.c"
+                            "file": 1
                         }
                     ]
                 }
@@ -261,7 +259,7 @@ mod tests {
                         "line_end": 11,
                         "column_start": 1,
                         "column_end": 1,
-                        "file": "main.c"
+                        "file": 1
                     }
                 ],
                 "children": {
@@ -271,7 +269,7 @@ mod tests {
                             "line_end": 11,
                             "column_start": 16,
                             "column_end": 16,
-                            "file": "main.c"
+                            "file": 1
                         }
                     ],
                     "2": [
@@ -280,7 +278,7 @@ mod tests {
                             "line_end": 11,
                             "column_start": 22,
                             "column_end": 22,
-                            "file": "main.c"
+                            "file": 1
                         }
                     ]
                 }
@@ -294,7 +292,7 @@ mod tests {
                         "line_end": 14,
                         "column_start": 1,
                         "column_end": 1,
-                        "file": "main.c"
+                        "file": 1
                     }
                 ],
                 "children": {}
@@ -308,7 +306,7 @@ mod tests {
                         "line_end": 14,
                         "column_start": 1,
                         "column_end": 1,
-                        "file": "main.c"
+                        "file": 1
                     }
                 ],
                 "children": {}
@@ -322,7 +320,7 @@ mod tests {
                         "line_end": 14,
                         "column_start": 1,
                         "column_end": 1,
-                        "file": "main.c"
+                        "file": 1
                     }
                 ],
                 "children": {
@@ -332,7 +330,7 @@ mod tests {
                             "line_end": 11,
                             "column_start": 16,
                             "column_end": 16,
-                            "file": "main.c"
+                            "file": 1
                         }
                     ]
                 }
@@ -346,7 +344,7 @@ mod tests {
                         "line_end": 14,
                         "column_start": 1,
                         "column_end": 1,
-                        "file": "main.c"
+                        "file": 1
                     }
                 ],
                 "children": {}
@@ -360,7 +358,7 @@ mod tests {
                         "line_end": 14,
                         "column_start": 1,
                         "column_end": 1,
-                        "file": "main.c"
+                        "file": 1
                     }
                 ],
                 "children": {
@@ -370,7 +368,7 @@ mod tests {
                             "line_end": 11,
                             "column_start": 16,
                             "column_end": 16,
-                            "file": "main.c"
+                            "file": 1
                         }
                     ],
                     "6": [
@@ -379,7 +377,7 @@ mod tests {
                             "line_end": 11,
                             "column_start": 22,
                             "column_end": 22,
-                            "file": "main.c"
+                            "file": 1
                         }
                     ]
                 }

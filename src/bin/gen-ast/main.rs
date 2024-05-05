@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Result};
-use askl::symbols::{Occurence, Symbol, SymbolId, SymbolMap, SymbolRefs, Symbols};
+use askl::symbols::{Occurence, Symbol, SymbolId, SymbolMap, SymbolRefs, Symbols, FileId};
 use clap::Parser;
 use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};
@@ -116,7 +116,9 @@ pub struct FunctionDecl {
 impl FunctionDecl {
     fn extract_symbol_map(&self, state: &mut VisitorState, inner: &Vec<Node>) -> Result<()> {
         let clang_range = self.range.clone();
-        let range = Occurence::new(&clang_range).unwrap();
+        let file_id = state.extract_file_from_range(&clang_range).unwrap();
+
+        let range = Occurence::new(&clang_range, file_id).unwrap();
         let name = self.name.clone().unwrap();
 
         let parent_id = if let Some(symbol) = state.symbol_map.find_mut(&name) {
@@ -156,7 +158,7 @@ impl FunctionDecl {
                             Some(UnresolvedChild {
                                 parent_id: parent_id,
                                 child_name: name,
-                                occurence: Occurence::new(&ref_expr.range).unwrap(),
+                                occurence: ref_expr.range.clone(),
                             })
                         }
                         Clang::ParmVarDecl | Clang::EnumConstantDecl(_) | Clang::VarDecl(_) => None,
@@ -318,11 +320,12 @@ async fn parse_all(
 struct UnresolvedChild {
     parent_id: SymbolId,
     child_name: String,
-    occurence: Occurence,
+    occurence: Option<clang_ast::SourceRange>,
 }
 
 struct VisitorState {
-    symbol_id: u64,
+    next_symbol_id: u64,
+    next_file_id: u64,
     unresolved_children: HashMap<String, Vec<UnresolvedChild>>,
     symbol_map: SymbolMap,
 }
@@ -330,15 +333,22 @@ struct VisitorState {
 impl VisitorState {
     fn new() -> Self {
         VisitorState {
-            symbol_id: 1,
+            next_symbol_id: 1,
+            next_file_id: 1,
             unresolved_children: HashMap::new(),
             symbol_map: SymbolMap::new(),
         }
     }
 
     fn next_symbol_id(&mut self) -> SymbolId {
-        let next_id = SymbolId::new(self.symbol_id);
-        self.symbol_id = self.symbol_id + 1;
+        let next_id = SymbolId::new(self.next_symbol_id);
+        self.next_symbol_id = self.next_symbol_id + 1;
+        return next_id;
+    }
+
+    fn next_file_id(&mut self) -> FileId {
+        let next_id = FileId::new(self.next_file_id);
+        self.next_file_id = self.next_file_id + 1;
         return next_id;
     }
 
@@ -349,6 +359,19 @@ impl VisitorState {
                 .and_modify(|v| v.push(child.clone()))
                 .or_insert_with(|| vec![child]);
         }
+    }
+
+    fn extract_file_from_range(&mut self, range: &Option<clang_ast::SourceRange>) -> Option<FileId> {
+        let file = Occurence::get_file(range)?;
+        let file_string = file.into_os_string().into_string().unwrap();
+
+        if let Some(id) =  self.symbol_map.get_file_id(file_string.clone()){
+            Some(id)
+        } else {
+            let id = self.next_file_id();
+            self.symbol_map.set_file_id(id, file_string);
+            Some(id)
+        }        
     }
 }
 
@@ -362,19 +385,22 @@ fn extract_symbol_map_root(root: Node, state: &mut VisitorState) -> Result<()> {
     for (child_name, unresolved) in unresolved_children {
         let child = state
             .symbol_map
-            .map
+            .symbols
             .iter()
             .find(|(_, s)| s.name == *child_name)
             .unwrap()
             .1
             .clone();
         for u in unresolved {
+            let file_id = state.extract_file_from_range(&u.occurence).unwrap();
+
             state
                 .symbol_map
-                .map
+                .symbols
                 .entry(u.parent_id)
                 .and_modify(|s| {
-                    s.add_child(child.id, u.occurence);
+
+                    s.add_child(child.id, Occurence::new(&u.occurence, file_id).unwrap());
                 })
                 .or_insert_with(|| panic!("Did not find the parent"));
         }
