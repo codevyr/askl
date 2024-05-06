@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::{anyhow, Result};
-use askl::symbols::{FileId, Occurence};
+use askl::symbols::{FileId, Occurrence};
 use askl::{
     cfg::ControlFlowGraph,
     parser::parse,
@@ -68,7 +68,7 @@ struct Edge {
 }
 
 impl Edge {
-    fn new(from: SymbolId, to: SymbolId, occurence: Option<Occurence>) -> Self {
+    fn new(from: SymbolId, to: SymbolId, occurence: Option<Occurrence>) -> Self {
         let (filename, line) = if let Some(occ) = occurence {
             (Some(occ.file), Some(occ.line_start))
         } else {

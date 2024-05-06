@@ -1,6 +1,6 @@
 use std::{collections::HashSet, iter::Iterator};
 
-use crate::symbols::{Occurence, Symbol, SymbolId, SymbolMap};
+use crate::symbols::{Occurrence, Symbol, SymbolId, SymbolMap};
 
 #[derive(Debug, Clone)]
 pub struct ControlFlowGraph {
@@ -12,7 +12,7 @@ pub struct ControlFlowGraph {
 pub struct NodeList(pub Vec<SymbolId>);
 
 #[derive(Debug, Clone)]
-pub struct EdgeList(pub Vec<(SymbolId, SymbolId, Option<Occurence>)>);
+pub struct EdgeList(pub Vec<(SymbolId, SymbolId, Option<Occurrence>)>);
 
 impl EdgeList {
     pub fn new() -> Self {

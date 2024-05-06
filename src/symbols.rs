@@ -20,7 +20,7 @@ impl FileHash {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct Occurence {
+pub struct Occurrence {
     pub line_start: i32,
     pub line_end: i32,
     pub column_start: i32,
@@ -28,7 +28,7 @@ pub struct Occurence {
     pub file: FileId,
 }
 
-impl Occurence {
+impl Occurrence {
     pub fn new(range: &Option<SourceRange>, file_id: FileId) -> Option<Self> {
         let range = if let Some(range) = range {
             range
@@ -87,27 +87,27 @@ impl Occurence {
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct SymbolChild {
     pub id: SymbolId,
-    pub occurence: Option<Occurence>,
+    pub occurrence: Option<Occurrence>,
 }
 
-pub type SymbolRefs = HashMap<SymbolId, HashSet<Occurence>>;
+pub type SymbolRefs = HashMap<SymbolId, HashSet<Occurrence>>;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Symbol {
     pub id: SymbolId,
     pub name: String,
-    pub ranges: HashSet<Occurence>,
+    pub ranges: HashSet<Occurrence>,
     pub children: SymbolRefs,
 }
 
 impl Symbol {
-    pub fn add_child(&mut self, id: SymbolId, occurence: Occurence) {
+    pub fn add_child(&mut self, id: SymbolId, occurrence: Occurrence) {
         self.children
             .entry(id)
             .and_modify(|occurences| {
-                occurences.insert(occurence.clone());
+                occurences.insert(occurrence.clone());
             })
-            .or_insert(HashSet::from([occurence]));
+            .or_insert(HashSet::from([occurrence]));
     }
 }
 
@@ -116,11 +116,12 @@ pub trait Symbols: ToString {
     fn into_vec(&self) -> Vec<SymbolId>;
 }
 
-#[derive(Debug, Serialize, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct SymbolId(pub u64);
+#[derive(Debug, Serialize, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, sqlx::Type, sqlx::FromRow)]
+#[sqlx(transparent)]
+pub struct SymbolId(pub i64);
 
 impl SymbolId {
-    pub fn new(id: u64) -> Self {
+    pub fn new(id: i64) -> Self {
         Self(id)
     }
 }
@@ -131,12 +132,25 @@ impl fmt::Display for SymbolId {
     }
 }
 
-#[derive(Debug, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct FileId(u64);
+impl From<Option<i64>> for SymbolId {
+    fn from(value: Option<i64>) -> Self {
+        Self(value.unwrap())
+    }
+}
+
+#[derive(Debug, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, sqlx::Type)]
+#[sqlx(transparent)]
+pub struct FileId(i64);
 
 impl FileId {
-    pub fn new(id: u64) -> Self {
+    pub fn new(id: i64) -> Self {
         Self(id)
+    }
+}
+
+impl From<i64> for FileId {
+    fn from(value: i64) -> Self {
+        Self(value)
     }
 }
 
@@ -152,6 +166,23 @@ impl serde::Serialize for FileId {
         S: Serializer,
     {
         s.serialize_str(&format!("{}", self.0))
+    }
+}
+
+#[derive(sqlx::Type, Debug)]
+#[repr(i32)]
+pub enum SymbolType {
+    Definition = 1,
+    Declaration = 2,
+}
+
+impl From<i64> for SymbolType {
+    fn from(value: i64) -> Self {
+        match value {
+            x if x == SymbolType::Definition as i64 => SymbolType::Definition,
+            x if x == SymbolType::Declaration as i64 => SymbolType::Declaration,
+            _ => panic!("Invalid symbol type value")
+        }
     }
 }
 

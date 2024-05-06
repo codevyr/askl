@@ -28,3 +28,4 @@ clang-ast = "0.1"
 futures = "0.3"
 actix-web = "4"
 rand = "0.8.5"
+sqlx = { version = "0.7", features = [ "runtime-tokio", "sqlite", "macros" ] }

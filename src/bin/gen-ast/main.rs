@@ -1,12 +1,14 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
-    mem::replace,
     sync::Arc,
 };
 
 use anyhow::{anyhow, bail, Result};
-use askl::symbols::{Occurence, Symbol, SymbolId, SymbolMap, SymbolRefs, Symbols, FileId};
+use askl::{
+    index::Index,
+    symbols::{FileId, Occurrence, SymbolId, SymbolMap, SymbolType},
+};
 use clap::Parser;
 use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};
@@ -33,8 +35,8 @@ struct Args {
     trim: Option<usize>,
 
     /// Output file to store the resulting symbol map
-    #[clap(short, long, default_value = "symbol_map.json")]
-    symbol_map: String,
+    #[clap(short, long, default_value = "askli.db")]
+    output: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -83,11 +85,15 @@ pub struct TranslationUnitDecl {
 }
 
 impl TranslationUnitDecl {
-    fn extract_symbol_map(&self, state: &mut VisitorState, inner: &Vec<Node>) -> Result<()> {
-        inner.iter().try_for_each(|child| match &child.kind {
-            Clang::FunctionDecl(f) => f.extract_symbol_map(state, &child.inner),
-            _ => Ok(()),
-        })
+    async fn extract_symbol_map(&self, state: &mut VisitorState, inner: &Vec<Node>) -> Result<()> {
+        for child in inner.iter() {
+            match &child.kind {
+                Clang::FunctionDecl(f) => f.extract_symbol_map(state, &child.inner).await?,
+                _ => {}
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -114,30 +120,19 @@ pub struct FunctionDecl {
 }
 
 impl FunctionDecl {
-    fn extract_symbol_map(&self, state: &mut VisitorState, inner: &Vec<Node>) -> Result<()> {
+    async fn extract_symbol_map(&self, state: &mut VisitorState, inner: &Vec<Node>) -> Result<()> {
         let clang_range = self.range.clone();
-        let file_id = state.extract_file_from_range(&clang_range).unwrap();
+        let file_id = state.extract_file_from_range(&clang_range).await.unwrap();
 
-        let range = Occurence::new(&clang_range, file_id).unwrap();
+        let range = Occurrence::new(&clang_range, file_id).unwrap();
         let name = self.name.clone().unwrap();
 
-        let parent_id = if let Some(symbol) = state.symbol_map.find_mut(&name) {
-            symbol.ranges.insert(range);
-            symbol.id
-        } else {
-            let next_id = state.next_symbol_id();
-            let new_symbol = Symbol {
-                id: next_id,
-                name: name,
-                ranges: HashSet::from([range]),
-                children: SymbolRefs::new(),
-            };
+        let parent_id = state
+            .index
+            .create_or_get_symbolid(&name, SymbolType::Definition, range)
+            .await?;
 
-            state.symbol_map.add(next_id, new_symbol);
-            next_id
-        };
-
-        let children: Vec<_> = inner
+        let inner_nodes = inner
             .iter()
             .map(|node| {
                 extract_filter(node, &|node: &Node| matches!(node.kind, Clang::CallExpr(_)))
@@ -148,20 +143,29 @@ impl FunctionDecl {
                     matches!(node.kind, Clang::DeclRefExpr(_))
                 })
             })
-            .flatten()
-            .filter_map(|node| match &node.kind {
+            .flatten();
+
+        let mut children = Vec::new();
+        for node in inner_nodes {
+            match &node.kind {
                 Clang::DeclRefExpr(ref_expr) => {
                     let referenced_decl = ref_expr.referenced_decl.as_ref().unwrap();
+                    let file_id = state
+                        .extract_file_from_range(&ref_expr.range)
+                        .await
+                        .unwrap();
+                    let occurrence = Occurrence::new(&ref_expr.range, file_id).unwrap();
+
                     match &referenced_decl.kind {
                         Clang::FunctionDecl(f) => {
-                            let name = f.name.as_ref().unwrap().clone();
-                            Some(UnresolvedChild {
-                                parent_id: parent_id,
-                                child_name: name,
-                                occurence: ref_expr.range.clone(),
+                            let child_name = f.name.as_ref().unwrap().clone();
+                            children.push(UnresolvedChild {
+                                parent_id,
+                                child_name,
+                                occurrence,
                             })
                         }
-                        Clang::ParmVarDecl | Clang::EnumConstantDecl(_) | Clang::VarDecl(_) => None,
+                        Clang::ParmVarDecl | Clang::EnumConstantDecl(_) | Clang::VarDecl(_) => {}
                         _ => {
                             panic!("Impossible node kind: {:#?}", ref_expr);
                         }
@@ -170,8 +174,8 @@ impl FunctionDecl {
                 _ => {
                     panic!("Impossible node kind");
                 }
-            })
-            .collect();
+            }
+        }
 
         state.add_unresolved_children(children);
 
@@ -279,7 +283,7 @@ async fn run_ast_gen(args: Args, c: CompileCommand) -> anyhow::Result<(String, N
         return Err(anyhow!("Error: {}", stderr));
     }
 
-    // std::fs::write("ast.json", json.clone())?;
+    std::fs::write("ast.json", json.clone())?;
     let node: Node = serde_json::from_str(&json)?;
     // std::fs::write("node", format!("{:#?}", node))?;
 
@@ -316,95 +320,61 @@ async fn parse_all(
     outputs
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
 struct UnresolvedChild {
     parent_id: SymbolId,
     child_name: String,
-    occurence: Option<clang_ast::SourceRange>,
+    occurrence: Occurrence,
 }
 
 struct VisitorState {
-    next_symbol_id: u64,
-    next_file_id: u64,
-    unresolved_children: HashMap<String, Vec<UnresolvedChild>>,
+    unresolved_children: HashMap<String, HashSet<UnresolvedChild>>,
     symbol_map: SymbolMap,
+    index: Index,
+    project: String,
+    language: String,
 }
 
 impl VisitorState {
-    fn new() -> Self {
+    fn new(index: Index) -> Self {
         VisitorState {
-            next_symbol_id: 1,
-            next_file_id: 1,
             unresolved_children: HashMap::new(),
             symbol_map: SymbolMap::new(),
+            index: index,
+            project: "test".to_string(),
+            language: "cxx".to_string(),
         }
-    }
-
-    fn next_symbol_id(&mut self) -> SymbolId {
-        let next_id = SymbolId::new(self.next_symbol_id);
-        self.next_symbol_id = self.next_symbol_id + 1;
-        return next_id;
-    }
-
-    fn next_file_id(&mut self) -> FileId {
-        let next_id = FileId::new(self.next_file_id);
-        self.next_file_id = self.next_file_id + 1;
-        return next_id;
     }
 
     fn add_unresolved_children(&mut self, children: Vec<UnresolvedChild>) {
         for child in children {
             self.unresolved_children
                 .entry(child.child_name.clone())
-                .and_modify(|v| v.push(child.clone()))
-                .or_insert_with(|| vec![child]);
+                .and_modify(|v| {
+                    v.insert(child.clone());
+                })
+                .or_insert_with(|| HashSet::from([child]));
         }
     }
 
-    fn extract_file_from_range(&mut self, range: &Option<clang_ast::SourceRange>) -> Option<FileId> {
-        let file = Occurence::get_file(range)?;
+    async fn extract_file_from_range(
+        &self,
+        range: &Option<clang_ast::SourceRange>,
+    ) -> Result<FileId> {
+        let file = Occurrence::get_file(range).ok_or(anyhow!("Range does not provide file"))?;
         let file_string = file.into_os_string().into_string().unwrap();
 
-        if let Some(id) =  self.symbol_map.get_file_id(file_string.clone()){
-            Some(id)
-        } else {
-            let id = self.next_file_id();
-            self.symbol_map.set_file_id(id, file_string);
-            Some(id)
-        }        
+        self.index
+            .create_or_get_fileid(&file_string, &self.project, &self.language)
+            .await
     }
 }
 
-fn extract_symbol_map_root(root: Node, state: &mut VisitorState) -> Result<()> {
+async fn extract_symbol_map_root(root: Node, state: &mut VisitorState) -> Result<()> {
     match root.kind {
-        Clang::TranslationUnitDecl(node) => node.extract_symbol_map(state, &root.inner)?,
+        Clang::TranslationUnitDecl(node) => node.extract_symbol_map(state, &root.inner).await?,
         _ => bail!("Not implemented"),
     };
-
-    let unresolved_children = replace(&mut state.unresolved_children, HashMap::new());
-    for (child_name, unresolved) in unresolved_children {
-        let child = state
-            .symbol_map
-            .symbols
-            .iter()
-            .find(|(_, s)| s.name == *child_name)
-            .unwrap()
-            .1
-            .clone();
-        for u in unresolved {
-            let file_id = state.extract_file_from_range(&u.occurence).unwrap();
-
-            state
-                .symbol_map
-                .symbols
-                .entry(u.parent_id)
-                .and_modify(|s| {
-
-                    s.add_child(child.id, Occurence::new(&u.occurence, file_id).unwrap());
-                })
-                .or_insert_with(|| panic!("Did not find the parent"));
-        }
-    }
 
     Ok(())
 }
@@ -413,6 +383,8 @@ fn extract_symbol_map_root(root: Node, state: &mut VisitorState) -> Result<()> {
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args = Args::parse();
+
+    let index = Index::new_or_connect(&args.output).await?;
 
     let file = File::open(&args.compile_commands).expect("file should open read only");
     let mut compile_commands: Vec<CompileCommand> =
@@ -423,19 +395,32 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let outputs = parse_all(&args, compile_commands).await;
-    let mut state = VisitorState::new();
-    outputs
+    let mut state = VisitorState::new(index);
+    let nodes = outputs
         .into_iter()
         .filter(|r| r.is_ok())
         .map(|r| r.unwrap())
-        .map(|(_, node)| node)
-        .map(|root| extract_symbol_map_root(root, &mut state))
-        .collect::<Result<Vec<_>>>()?;
+        .map(|(_, node)| node);
 
-    std::fs::write(
-        args.symbol_map,
-        serde_json::to_string_pretty(&state.symbol_map).unwrap(),
-    )
-    .unwrap();
+    for node in nodes {
+        extract_symbol_map_root(node, &mut state).await?;
+    }
+
+    for (child_name, unresolved) in state.unresolved_children.iter() {
+        let resolved_children = state.index.find_symbols(&child_name).await?;
+        for resolved_child in resolved_children {
+            for u in unresolved.iter() {
+                let res = state
+                    .index
+                    .add_reference(u.parent_id, resolved_child.id, &u.occurrence)
+                    .await;
+                if res.is_err() {
+                    log::error!("{:#?}", unresolved);
+                }
+                res?;
+            }
+        }
+    }
+
     Ok(())
 }
