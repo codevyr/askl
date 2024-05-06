@@ -1,3 +1,4 @@
+use anyhow::Result;
 use clang_ast::SourceRange;
 use serde::Serializer;
 use serde::{Deserialize, Serialize};
@@ -7,6 +8,8 @@ use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 use std::{collections::HashMap, hash, hash::Hasher};
+
+use crate::index::{self, Index};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Copy, Clone, Serialize, Deserialize)]
 pub struct FileHash(u64);
@@ -84,6 +87,18 @@ impl Occurrence {
     }
 }
 
+impl From<index::Symbol> for Occurrence {
+    fn from(symbol: index::Symbol) -> Self {
+        Occurrence {
+            line_start: symbol.line_start as i32,
+            line_end: symbol.line_end as i32,
+            column_start: symbol.col_start as i32,
+            column_end: symbol.col_end as i32,
+            file: symbol.file_id,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct SymbolChild {
     pub id: SymbolId,
@@ -96,7 +111,7 @@ pub type SymbolRefs = HashMap<SymbolId, HashSet<Occurrence>>;
 pub struct Symbol {
     pub id: SymbolId,
     pub name: String,
-    pub ranges: HashSet<Occurrence>,
+    pub ranges: Occurrence,
     pub children: SymbolRefs,
 }
 
@@ -112,16 +127,28 @@ impl Symbol {
 }
 
 pub trait Symbols: ToString {
-    fn add(&mut self, id: SymbolId, symbol: Symbol);
     fn into_vec(&self) -> Vec<SymbolId>;
 }
 
-#[derive(Debug, Serialize, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, sqlx::Type, sqlx::FromRow)]
+#[derive(
+    Debug,
+    Serialize,
+    Deserialize,
+    Copy,
+    Clone,
+    Eq,
+    PartialEq,
+    Hash,
+    PartialOrd,
+    Ord,
+    sqlx::Type,
+    sqlx::FromRow,
+)]
 #[sqlx(transparent)]
-pub struct SymbolId(pub i64);
+pub struct SymbolId(pub i32);
 
 impl SymbolId {
-    pub fn new(id: i64) -> Self {
+    pub fn new(id: i32) -> Self {
         Self(id)
     }
 }
@@ -132,25 +159,49 @@ impl fmt::Display for SymbolId {
     }
 }
 
+impl From<Option<i32>> for SymbolId {
+    fn from(value: Option<i32>) -> Self {
+        Self(value.unwrap())
+    }
+}
+
 impl From<Option<i64>> for SymbolId {
     fn from(value: Option<i64>) -> Self {
-        Self(value.unwrap())
+        Self(value.unwrap() as i32)
+    }
+}
+
+impl From<i32> for SymbolId {
+    fn from(value: i32) -> Self {
+        Self(value)
+    }
+}
+
+impl From<i64> for SymbolId {
+    fn from(value: i64) -> Self {
+        Self(value as i32)
     }
 }
 
 #[derive(Debug, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, sqlx::Type)]
 #[sqlx(transparent)]
-pub struct FileId(i64);
+pub struct FileId(i32);
 
 impl FileId {
-    pub fn new(id: i64) -> Self {
+    pub fn new(id: i32) -> Self {
         Self(id)
+    }
+}
+
+impl From<i32> for FileId {
+    fn from(value: i32) -> Self {
+        Self(value)
     }
 }
 
 impl From<i64> for FileId {
     fn from(value: i64) -> Self {
-        Self(value)
+        Self(value as i32)
     }
 }
 
@@ -181,7 +232,7 @@ impl From<i64> for SymbolType {
         match value {
             x if x == SymbolType::Definition as i64 => SymbolType::Definition,
             x if x == SymbolType::Declaration as i64 => SymbolType::Declaration,
-            _ => panic!("Invalid symbol type value")
+            _ => panic!("Invalid symbol type value"),
         }
     }
 }
@@ -198,6 +249,50 @@ impl SymbolMap {
             symbols: HashMap::new(),
             files: HashMap::new(),
         }
+    }
+
+    pub async fn from_index(index: Index) -> Result<Self> {
+        let symbols = index.all_symbols().await?;
+        let mut symbols_map = HashMap::new();
+        for symbol in symbols {
+            symbols_map.insert(
+                symbol.id,
+                Symbol {
+                    id: symbol.id,
+                    children: HashMap::new(),
+                    name: symbol.name.clone(),
+                    ranges: symbol.into(),
+                },
+            );
+        }
+
+        let files = index.all_files().await?;
+        let mut files_map = HashMap::new();
+        for file in files {
+            files_map.insert(
+                file.id,
+                file.path,
+            );
+        }
+
+        let references = index.all_refs().await?;
+        for reference in references {
+            let from_symbol = symbols_map.get_mut(&reference.from_symbol).unwrap();
+            let occurrence = Occurrence{
+                file: from_symbol.ranges.file,
+                line_start: reference.from_line as i32,
+                line_end: reference.from_line as i32,
+                column_start: reference.from_col_start as i32,
+                column_end: reference.from_col_end as i32,
+            };
+            from_symbol.add_child(reference.to_symbol, occurrence);
+        }
+        
+
+        Ok(Self {
+            symbols: symbols_map,
+            files: files_map,
+        })
     }
 
     pub fn merge(mut self, other: SymbolMap) -> Self {
@@ -252,15 +347,6 @@ impl SymbolMap {
 }
 
 impl Symbols for SymbolMap {
-    fn add(&mut self, id: SymbolId, symbol: Symbol) {
-        if let Some(existing) = self.symbols.get_mut(&id) {
-            assert_eq!(existing.name, symbol.name);
-            existing.ranges.extend(symbol.ranges);
-            existing.children.extend(symbol.children);
-        } else {
-            self.symbols.insert(id, symbol);
-        }
-    }
 
     fn into_vec(&self) -> Vec<SymbolId> {
         self.symbols

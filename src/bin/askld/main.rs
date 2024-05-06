@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::{anyhow, Result};
+use askl::index::Index;
 use askl::symbols::{FileId, Occurrence};
 use askl::{
     cfg::ControlFlowGraph,
@@ -137,8 +138,8 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
 
     for loc in all_symbols {
         let sym = data.cfg.get_symbol(&loc).unwrap();
-        let file_id = sym.ranges.iter().next().unwrap().file.clone();
-        let line = sym.ranges.iter().next().unwrap().line_start;
+        let file_id = sym.ranges.file.clone();
+        let line = sym.ranges.line_start;
         debug!("filename {}", file_id);
         result_graph.add_node(Node::new(loc, sym.name.clone(), file_id, line));
     }
@@ -162,10 +163,16 @@ async fn file(data: web::Data<AsklData>, file_id: web::Path<FileId>) -> impl Res
     }
 }
 
-fn read_data(args: &Args) -> Result<AsklData> {
+async fn read_data(args: &Args) -> Result<AsklData> {
     match args.format.as_str() {
         "askl" => {
             let symbols: SymbolMap = serde_json::from_slice(&std::fs::read(&args.index)?)?;
+            let cfg = ControlFlowGraph::from_symbols(symbols);
+            Ok(AsklData { cfg })
+        }
+        "sqlite" => {
+            let index = Index::connect(&args.index).await?;
+            let symbols = SymbolMap::from_index(index).await?;
             let cfg = ControlFlowGraph::from_symbols(symbols);
             Ok(AsklData { cfg: cfg })
         }
@@ -178,7 +185,7 @@ async fn main() -> std::io::Result<()> {
     env_logger::init();
     let args = Args::parse();
 
-    let askl_data: AsklData = read_data(&args).expect("Failed to read data");
+    let askl_data: AsklData = read_data(&args).await.expect("Failed to read data");
     let askl_data = web::Data::new(askl_data);
     info!("Starting server...");
 
@@ -208,29 +215,25 @@ mod tests {
             "2": {
                 "id": 2,
                 "name": "b",
-                "ranges": [
-                    {
-                        "line_start": 1,
-                        "line_end": 3,
-                        "column_start": 1,
-                        "column_end": 1,
-                        "file": 1
-                    }
-                ],
+                "ranges": {
+                    "line_start": 1,
+                    "line_end": 3,
+                    "column_start": 1,
+                    "column_end": 1,
+                    "file": 1
+                },
                 "children": {}
             },
             "1": {
                 "id": 1,
                 "name": "a",
-                "ranges": [
-                    {
-                        "line_start": 5,
-                        "line_end": 7,
-                        "column_start": 1,
-                        "column_end": 1,
-                        "file": 1
-                    }
-                ],
+                "ranges": {
+                    "line_start": 5,
+                    "line_end": 7,
+                    "column_start": 1,
+                    "column_end": 1,
+                    "file": 1
+                },
                 "children": {
                     "2": [
                         {
@@ -253,15 +256,13 @@ mod tests {
             "42": {
                 "id": 42,
                 "name": "main",
-                "ranges": [
-                    {
-                        "line_start": 9,
-                        "line_end": 11,
-                        "column_start": 1,
-                        "column_end": 1,
-                        "file": 1
-                    }
-                ],
+                "ranges": {
+                    "line_start": 9,
+                    "line_end": 11,
+                    "column_start": 1,
+                    "column_end": 1,
+                    "file": 1
+                },
                 "children": {
                     "1": [
                         {
@@ -286,43 +287,37 @@ mod tests {
             "3": {
                 "id": 3,
                 "name": "c",
-                "ranges": [
-                    {
-                        "line_start": 13,
-                        "line_end": 14,
-                        "column_start": 1,
-                        "column_end": 1,
-                        "file": 1
-                    }
-                ],
+                "ranges": {
+                    "line_start": 13,
+                    "line_end": 14,
+                    "column_start": 1,
+                    "column_end": 1,
+                    "file": 1
+                },
                 "children": {}
             },
             "5": {
                 "id": 5,
                 "name": "e",
-                "ranges": [
-                    {
-                        "line_start": 13,
-                        "line_end": 14,
-                        "column_start": 1,
-                        "column_end": 1,
-                        "file": 1
-                    }
-                ],
+                "ranges": {
+                    "line_start": 13,
+                    "line_end": 14,
+                    "column_start": 1,
+                    "column_end": 1,
+                    "file": 1
+                },
                 "children": {}
             },
             "6": {
                 "id": 6,
                 "name": "f",
-                "ranges": [
-                    {
-                        "line_start": 13,
-                        "line_end": 14,
-                        "column_start": 1,
-                        "column_end": 1,
-                        "file": 1
-                    }
-                ],
+                "ranges": {
+                    "line_start": 13,
+                    "line_end": 14,
+                    "column_start": 1,
+                    "column_end": 1,
+                    "file": 1
+                },
                 "children": {
                     "7": [
                         {
@@ -338,29 +333,25 @@ mod tests {
             "7": {
                 "id": 7,
                 "name": "g",
-                "ranges": [
-                    {
-                        "line_start": 13,
-                        "line_end": 14,
-                        "column_start": 1,
-                        "column_end": 1,
-                        "file": 1
-                    }
-                ],
+                "ranges": {
+                    "line_start": 13,
+                    "line_end": 14,
+                    "column_start": 1,
+                    "column_end": 1,
+                    "file": 1
+                },
                 "children": {}
             },
             "4": {
                 "id": 4,
                 "name": "d",
-                "ranges": [
-                    {
-                        "line_start": 13,
-                        "line_end": 14,
-                        "column_start": 1,
-                        "column_end": 1,
-                        "file": 1
-                    }
-                ],
+                "ranges": {
+                    "line_start": 13,
+                    "line_end": 14,
+                    "column_start": 1,
+                    "column_end": 1,
+                    "file": 1
+                },
                 "children": {
                     "5": [
                         {

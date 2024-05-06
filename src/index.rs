@@ -15,11 +15,36 @@ pub struct Symbol {
     pub col_end: i64,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+pub struct File {
+    pub id: FileId,
+    pub path: String,
+    pub project: String,
+    pub filetype: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct Reference {
+    pub from_symbol: SymbolId,
+    pub to_symbol: SymbolId,
+    pub from_line: i64,
+    pub from_col_start: i64,
+    pub from_col_end: i64,
+}
+
 pub struct Index {
     pool: SqlitePool,
 }
 
 impl Index {
+    pub async fn connect(database: &str) -> Result<Self> {
+        let options = SqliteConnectOptions::new().filename(database);
+
+        let pool = SqlitePool::connect_with(options).await?;
+
+        Ok(Self { pool })
+    }
+
     pub async fn new_or_connect(database: &str) -> Result<Self> {
         let options = SqliteConnectOptions::new()
             .filename(database)
@@ -90,7 +115,7 @@ impl Index {
         .await?;
 
         if let Some(rec) = rec {
-            return Ok(FileId::new(rec.id.unwrap()));
+            return Ok(rec.id.unwrap().into());
         }
 
         let file_id = sqlx::query!(
@@ -106,7 +131,7 @@ impl Index {
         .await?
         .last_insert_rowid();
 
-        Ok(FileId::new(file_id))
+        Ok(file_id.into())
     }
 
     pub async fn create_or_get_symbolid(
@@ -129,7 +154,7 @@ impl Index {
         .await?;
 
         if let Some(rec) = rec {
-            return Ok(SymbolId::new(rec.id.unwrap()));
+            return Ok(rec.id.unwrap().into());
         }
 
         let symbol_id = sqlx::query!(
@@ -149,7 +174,7 @@ impl Index {
         .await?
         .last_insert_rowid();
 
-        Ok(SymbolId::new(symbol_id))
+        Ok(symbol_id.into())
     }
 
     pub async fn find_symbols(&self, name: &str) -> Result<Vec<Symbol>> {
@@ -193,10 +218,58 @@ impl Index {
         .await;
 
         if let Err(err) = &res {
-            log::error!("Failed to add reference {} {}->{} {:?}", err, from_symbol, to_symbol, occurrence);
+            log::error!(
+                "Failed to add reference {} {}->{} {:?}",
+                err,
+                from_symbol,
+                to_symbol,
+                occurrence
+            );
             res?;
         }
 
         Ok(())
+    }
+
+    pub async fn all_symbols(&self) -> Result<Vec<Symbol>> {
+        let symbols: Vec<Symbol> = sqlx::query_as!(
+            Symbol,
+            r#"
+            SELECT *
+            FROM symbols
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(symbols)
+    }
+
+    pub async fn all_files(&self) -> Result<Vec<File>> {
+        let files: Vec<File> = sqlx::query_as!(
+            File,
+            r#"
+            SELECT *
+            FROM files
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(files)
+    }
+
+    pub async fn all_refs(&self) -> Result<Vec<Reference>> {
+        let references: Vec<Reference> = sqlx::query_as!(
+            Reference,
+            r#"
+            SELECT *
+            FROM symbol_refs
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(references)
     }
 }
