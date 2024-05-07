@@ -17,5 +17,5 @@ verb = { generic_verb | special_verb}
 scope = { "{" ~ statements ~ "}" }
 statement = {(verb* ~ scope) | (verb+) | (scope)}
 statement_terminator = _{";"}
-statements = _{ (statement_terminator* ~ statement)* }
+statements = _{ (statement_terminator* ~ statement)* ~ statement_terminator* }
 ask = _{SOI ~ statements ~ EOI }

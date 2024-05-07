@@ -654,4 +654,20 @@ mod tests {
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["4-5", "4-6"]);
     }
+
+    #[test]
+    fn statement_semicolon() {
+        const QUERY: &str = r#""d" {"f";}"#;
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+
+        assert_eq!(
+            res_nodes.0,
+            vec![SymbolId::new(4), SymbolId::new(6),]
+        );
+        let edges = format_edges(res_edges);
+        assert_eq!(edges, vec!["4-6"]);
+    }
 }
