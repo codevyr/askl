@@ -55,7 +55,8 @@ fn build_generic_verb(
         NameSelector::NAME => NameSelector::new(&positional, &named),
         IgnoreVerb::NAME => IgnoreVerb::new(&positional, &named),
         ForcedVerb::NAME => ForcedVerb::new(&positional, &named),
-        unknown => Err(anyhow!("Unknown filter: {}", unknown)),
+        IsolatedScope::NAME => IsolatedScope::new(&positional, &named),
+        unknown => Err(anyhow!("unknown verb : {}", unknown)),
     };
 
     match res {
@@ -392,5 +393,45 @@ impl Filter for IgnoreVerb {
             .into_iter()
             .filter(|(s, _)| self.name != cfg.get_symbol(s).unwrap().name)
             .collect()
+    }
+}
+
+#[derive(Debug)]
+struct IsolatedScope {}
+
+impl IsolatedScope {
+    const NAME: &'static str = "scope";
+
+    fn new(positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
+        if positional.len() > 0 {
+            bail!("Unexpected positional arguments");
+        }
+
+        if named.len() > 0 {
+            bail!("Unexpected named arguments");
+        }
+
+        Ok(Arc::new(Self{}))
+    }
+}
+
+
+impl Verb for IsolatedScope {
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Skip
+    }
+
+    fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
+        bail!("Not a filter verb")
+    }
+}
+
+impl Deriver for IsolatedScope {
+    fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<SymbolRefs> {
+        Some(cfg.symbols.get_children(symbol).clone())
+    }
+
+    fn derive_children(&self, cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<SymbolRefs> {
+        return None;
     }
 }
