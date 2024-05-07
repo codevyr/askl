@@ -19,16 +19,15 @@ pub struct Identifier(pub String);
 impl Identifier {
     pub fn build(pair: pest::iterators::Pair<Rule>) -> Result<Identifier, Error<Rule>> {
         match pair.as_rule() {
-            Rule::generic_ident => {}
+            Rule::ident => {}
             rule => Err(Error::new_from_span(
                 pest::error::ErrorVariant::ParsingError {
-                    positives: vec![Rule::generic_ident],
+                    positives: vec![Rule::ident],
                     negatives: vec![rule],
                 },
                 pair.as_span(),
             ))?,
         }
-        let pair = pair.into_inner();
         let ident = pair.as_str();
         Ok(Identifier(ident.into()))
     }

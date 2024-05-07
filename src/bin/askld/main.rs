@@ -561,6 +561,21 @@ mod tests {
     }
 
     #[test]
+    fn generic_forced_child_query_3() {
+        const QUERY: &str = r#""main" {
+            @forced(name="c")
+        }"#;
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+
+        assert_eq!(res_nodes.0, vec![SymbolId::new(3), SymbolId::new(42)]);
+        let edges = format_edges(res_edges);
+        assert_eq!(edges, vec!["42-3"]);
+    }
+
+    #[test]
     fn two_selectors() {
         const QUERY: &str = r#""b" "a""#;
         let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);

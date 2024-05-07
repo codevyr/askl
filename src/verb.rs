@@ -12,7 +12,7 @@ use std::sync::Arc;
 fn build_generic_verb(
     _ctx: &ParserContext,
     pair: pest::iterators::Pair<Rule>,
-) -> Result<Arc<dyn Verb>> {
+) -> Result<Arc<dyn Verb>, Error<Rule>> {
     let mut pair = pair.into_inner();
     let ident = pair.next().unwrap();
     let mut positional = vec![];
@@ -38,11 +38,34 @@ fn build_generic_verb(
     })
     .collect::<Result<Vec<_>, _>>()?;
 
-    let _span = ident.as_span();
-    match Identifier::build(ident)?.0.as_str() {
+    let ident = if let Rule::generic_ident = ident.as_rule() {
+        ident.into_inner().next().unwrap()
+    } else {
+        let span = ident.as_span();
+        return Err(Error::new_from_span(
+            pest::error::ErrorVariant::CustomError {
+                message: format!("Expected verb name as @name"),
+            },
+            span,
+        ));
+    };
+
+    let span = ident.as_span();
+    let res = match Identifier::build(ident)?.0.as_str() {
         NameSelector::NAME => NameSelector::new(&positional, &named),
         IgnoreVerb::NAME => IgnoreVerb::new(&positional, &named),
+        ForcedVerb::NAME => ForcedVerb::new(&positional, &named),
         unknown => Err(anyhow!("Unknown filter: {}", unknown)),
+    };
+
+    match res {
+        Ok(res) => Ok(res),
+        Err(err) => Err(Error::new_from_span(
+            pest::error::ErrorVariant::CustomError {
+                message: format!("Failed to create a generic verb: {}", err),
+            },
+            span,
+        )),
     }
 }
 
@@ -63,8 +86,11 @@ pub fn build_verb(
         ));
     };
 
+    if let Rule::generic_verb = verb.as_rule() {
+        return build_generic_verb(ctx, verb);
+    }
+
     match verb.as_rule() {
-        Rule::generic_verb => build_generic_verb(ctx, verb),
         Rule::plain_filter => {
             let ident = verb.into_inner().next().unwrap();
             let positional = vec![];
@@ -242,13 +268,13 @@ impl Deriver for ForcedVerb {
     }
 
     fn derive_children(&self, cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<SymbolRefs> {
-        let sym_refs: SymbolRefs = cfg
-            .get_symbol_by_name(&self.name)
-            .iter()
-            .fold(SymbolRefs::new(), |mut acc, refs| {
-                acc.insert(refs.id, HashSet::new());
-                acc
-            });
+        let sym_refs: SymbolRefs =
+            cfg.get_symbol_by_name(&self.name)
+                .iter()
+                .fold(SymbolRefs::new(), |mut acc, refs| {
+                    acc.insert(refs.id, HashSet::new());
+                    acc
+                });
         if sym_refs.is_empty() {
             return None;
         }
@@ -259,13 +285,13 @@ impl Deriver for ForcedVerb {
 
 impl Selector for ForcedVerb {
     fn select(&self, cfg: &ControlFlowGraph, _symbols: SymbolRefs) -> Option<SymbolRefs> {
-        let sym_refs: SymbolRefs = cfg
-            .get_symbol_by_name(&self.name)
-            .iter()
-            .fold(SymbolRefs::new(), |mut acc, refs| {
-                acc.insert(refs.id, HashSet::new());
-                acc
-            });
+        let sym_refs: SymbolRefs =
+            cfg.get_symbol_by_name(&self.name)
+                .iter()
+                .fold(SymbolRefs::new(), |mut acc, refs| {
+                    acc.insert(refs.id, HashSet::new());
+                    acc
+                });
         if sym_refs.is_empty() {
             return None;
         }
