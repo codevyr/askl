@@ -143,13 +143,9 @@ impl Statement for DefaultStatement {
         symbols: &SymbolRefs,
         parent_resolution: Resolution,
     ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)> {
-        let filtered_symbols = self.command().filter(cfg, symbols.clone());
+        let selected_symbols = self.command().select(cfg, symbols.clone())?;
 
-        let selected_symbols = if let Some(sym) = self.command().select(cfg, filtered_symbols) {
-            sym
-        } else {
-            return None;
-        };
+        let filtered_symbols = self.command().filter(cfg, selected_symbols);
 
         let child_resolution = parent_resolution.max(self.command().resolution());
 
@@ -158,7 +154,7 @@ impl Statement for DefaultStatement {
         let mut res_symbols = HashMap::new();
         let mut res_resolution = child_resolution;
 
-        for (selected_symbol, occurences) in selected_symbols.into_iter() {
+        for (selected_symbol, occurences) in filtered_symbols.into_iter() {
             let derived_symbols =
                 if let Some(derived) = self.command().derive_symbols(cfg, &selected_symbol) {
                     derived
