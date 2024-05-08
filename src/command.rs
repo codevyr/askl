@@ -44,21 +44,37 @@ impl Command {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_deriver().ok()))
     }
 
-    pub fn filter(&self, cfg: &ControlFlowGraph, symbols: SymbolRefs) -> SymbolRefs {
-        self.filters()
-            .fold(symbols, |symbols, verb| verb.filter(cfg, symbols))
+    pub fn filter(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbols: Option<SymbolRefs>,
+    ) -> Option<SymbolRefs> {
+        Some(
+            self.filters()
+                .fold(symbols?, |symbols, verb| verb.filter(cfg, symbols)),
+        )
     }
 
-    pub fn select(&self, cfg: &ControlFlowGraph, symbols: SymbolRefs) -> Option<SymbolRefs> {
+    pub fn select(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbols: Option<SymbolRefs>,
+    ) -> Option<SymbolRefs> {
         let selectors: Vec<_> = self.selectors().collect();
 
+        // Nothing to do
         if selectors.len() == 0 {
-            return Some(symbols);
+            return symbols;
         }
+
+        let selector: Box<dyn Fn(&dyn Selector) -> Option<SymbolRefs>> = match symbols {
+            Some(symbols) => Box::new(move |v: &dyn Selector| v.select(cfg, symbols.clone())),
+            None => Box::new(|v: &dyn Selector| v.select_from_all(cfg)),
+        };
 
         let symbols: SymbolRefs = selectors
             .into_iter()
-            .filter_map(|v| v.select(cfg, symbols.clone()))
+            .filter_map(selector)
             .flatten()
             .collect();
 
@@ -69,11 +85,7 @@ impl Command {
         Some(symbols)
     }
 
-    pub fn derive_symbols(
-        &self,
-        cfg: &ControlFlowGraph,
-        symbol: &SymbolId,
-    ) -> Option<SymbolRefs> {
+    pub fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
         if let Some(res) = self.derivers().last().unwrap().derive_symbols(cfg, symbol) {
             Some(res)
         } else {
@@ -81,12 +93,12 @@ impl Command {
         }
     }
 
-    pub fn derive_children(
-        &self,
-        cfg: &ControlFlowGraph,
-        symbol: &SymbolId,
-    ) -> Option<SymbolRefs> {
+    pub fn derive_children(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
         self.derivers().last().unwrap().derive_children(cfg, symbol)
+    }
+
+    pub fn derive_parents(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
+        self.derivers().last().unwrap().derive_parents(cfg, symbol)
     }
 }
 

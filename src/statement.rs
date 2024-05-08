@@ -68,7 +68,7 @@ pub trait Statement: Debug {
                 };
                 let derived = self
                     .command()
-                    .derive_children(cfg, node_i)
+                    .derive_children(cfg, *node_i)
                     .or(Some(SymbolRefs::new()))
                     .unwrap();
 
@@ -89,14 +89,8 @@ pub trait Statement: Debug {
         let mut res_nodes = NodeList(vec![]);
         let mut res_edges = EdgeList(vec![]);
 
-        let symbols: SymbolRefs = cfg
-            .nodes
-            .iter()
-            .map(|s| (s.clone(), HashSet::new()))
-            .collect();
-
         if let Some((resolution, _resolved_symbols, nodes, edges)) =
-            self.execute(cfg, &symbols, Resolution::Weak)
+            self.execute(cfg, None, Resolution::Weak)
         {
             if resolution == Resolution::Strong {
                 res_nodes.0.extend(nodes.0.into_iter());
@@ -114,7 +108,7 @@ pub trait Statement: Debug {
     fn execute(
         &self,
         cfg: &ControlFlowGraph,
-        symbols: &SymbolRefs,
+        symbols: Option<SymbolRefs>,
         parent_resolution: Resolution,
     ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)>;
     fn command(&self) -> &Command;
@@ -140,10 +134,10 @@ impl Statement for DefaultStatement {
     fn execute(
         &self,
         cfg: &ControlFlowGraph,
-        symbols: &SymbolRefs,
+        symbols: Option<SymbolRefs>,
         parent_resolution: Resolution,
     ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)> {
-        let selected_symbols = self.command().select(cfg, symbols.clone())?;
+        let selected_symbols = self.command().select(cfg, symbols);
 
         let filtered_symbols = self.command().filter(cfg, selected_symbols);
 
@@ -154,36 +148,83 @@ impl Statement for DefaultStatement {
         let mut res_symbols = HashMap::new();
         let mut res_resolution = child_resolution;
 
-        for (selected_symbol, occurences) in filtered_symbols.into_iter() {
-            let derived_symbols = self.command().derive_symbols(cfg, &selected_symbol)?;
+        match filtered_symbols {
+            Some(filtered_symbols) => {
+                for (selected_symbol, occurences) in filtered_symbols.into_iter() {
+                    let derived_symbols = self.command().derive_symbols(cfg, selected_symbol);
 
-            if let Some((scope_resolution, resolved_symbols, nodes, edges)) =
-                self.scope().run(cfg, derived_symbols, child_resolution)
-            {
-                if scope_resolution == Resolution::Strong {
-                    res_nodes.0.extend(nodes.0.into_iter());
-                    res_edges.0.extend(edges.0.into_iter());
-                    res_resolution = res_resolution.max(scope_resolution);
-                    res_nodes
-                        .0
-                        .extend(resolved_symbols.iter().map(|(s, _)| s.clone()));
-                    res_nodes.0.push(selected_symbol.clone());
-                    res_symbols.insert(selected_symbol.clone(), occurences);
+                    if let Some((scope_resolution, resolved_symbols, nodes, edges)) =
+                        self.scope().run(cfg, derived_symbols, child_resolution)
+                    {
+                        if scope_resolution == Resolution::Strong {
+                            res_nodes.0.extend(nodes.0.into_iter());
+                            res_edges.0.extend(edges.0.into_iter());
+                            res_resolution = res_resolution.max(scope_resolution);
+                            res_nodes
+                                .0
+                                .extend(resolved_symbols.iter().map(|(s, _)| s.clone()));
+                            res_nodes.0.push(selected_symbol.clone());
+                            res_symbols.insert(selected_symbol.clone(), occurences);
 
-                    for (resolved_symbol, occurences) in resolved_symbols {
-                        if occurences.len() == 0 {
-                            res_edges.0.push((
-                                selected_symbol.clone(),
-                                resolved_symbol.clone(),
-                                None,
-                            ));
-                        } else {
-                            for occ in occurences {
-                                res_edges.0.push((
-                                    selected_symbol.clone(),
-                                    resolved_symbol.clone(),
-                                    Some(occ),
-                                ));
+                            for (resolved_symbol, occurrences) in resolved_symbols {
+                                if occurrences.len() == 0 {
+                                    res_edges.0.push((
+                                        selected_symbol.clone(),
+                                        resolved_symbol.clone(),
+                                        None,
+                                    ));
+                                } else {
+                                    for occ in occurrences {
+                                        res_edges.0.push((
+                                            selected_symbol.clone(),
+                                            resolved_symbol.clone(),
+                                            Some(occ),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                if let Some((scope_resolution, resolved_symbols, nodes, edges)) =
+                    self.scope().run(cfg, None, child_resolution)
+                {
+                    if scope_resolution == Resolution::Strong {
+                        res_nodes.0.extend(nodes.0.into_iter());
+                        res_edges.0.extend(edges.0.into_iter());
+                        res_resolution = res_resolution.max(scope_resolution);
+                        res_nodes
+                            .0
+                            .extend(resolved_symbols.iter().map(|(s, _)| s.clone()));
+                        for (resolved_symbol, occurences) in resolved_symbols {
+                            let derived_symbols =
+                                self.command().derive_parents(cfg, resolved_symbol);
+                            let filtered_symbols = self.command().filter(cfg, derived_symbols);
+                            let selected_symbols = self.command().select(cfg, filtered_symbols);
+
+                            if let Some(selected_symbols) = selected_symbols {
+                                for (selected_symbol, occurrences) in selected_symbols {
+                                    res_nodes.0.push(selected_symbol.clone());
+                                    res_symbols.insert(selected_symbol.clone(), occurrences.clone());
+
+                                    if occurrences.len() == 0 {
+                                        res_edges.0.push((
+                                            selected_symbol.clone(),
+                                            resolved_symbol.clone(),
+                                            None,
+                                        ));
+                                    } else {
+                                        for occ in occurrences {
+                                            res_edges.0.push((
+                                                selected_symbol.clone(),
+                                                resolved_symbol.clone(),
+                                                Some(occ),
+                                            ));
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -231,7 +272,7 @@ impl Statement for GlobalStatement {
     fn execute(
         &self,
         cfg: &ControlFlowGraph,
-        symbols: &SymbolRefs,
+        symbols: Option<SymbolRefs>,
         parent_resolution: Resolution,
     ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)> {
         let mut res_edges = EdgeList(vec![]);

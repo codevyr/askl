@@ -323,7 +323,7 @@ impl SymbolMap {
         self.symbols.iter()
     }
 
-    pub fn get_children(&self, symbol_id: &SymbolId) -> &SymbolRefs {
+    pub fn get_children(&self, symbol_id: SymbolId) -> &SymbolRefs {
         let symbol = if let Some(symbol) = self.symbols.get(&symbol_id) {
             symbol
         } else {
@@ -331,6 +331,16 @@ impl SymbolMap {
         };
 
         &symbol.children
+    }
+
+    pub fn get_parents(&self, symbol_id: SymbolId) -> &SymbolRefs {
+        let symbol = if let Some(symbol) = self.symbols.get(&symbol_id) {
+            symbol
+        } else {
+            panic!("Unknown symbol");
+        };
+
+        &symbol.parents
     }
 
     pub fn find(&self, symbol_name: &str) -> Option<&Symbol> {

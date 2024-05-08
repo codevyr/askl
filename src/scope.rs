@@ -1,6 +1,6 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::parser::{ParserContext, Rule};
-use crate::statement::{build_empty_statement, build_statement, Statement};
+use crate::statement::{self, build_empty_statement, build_statement, Statement};
 use crate::symbols::SymbolRefs;
 use crate::verb::Resolution;
 use core::fmt::Debug;
@@ -45,7 +45,7 @@ pub trait Scope: Debug {
     fn run(
         &self,
         cfg: &ControlFlowGraph,
-        symbols: SymbolRefs,
+        symbols: Option<SymbolRefs>,
         parent_resolution: Resolution,
     ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)> {
         let mut res_nodes = NodeList(vec![]);
@@ -58,10 +58,12 @@ pub trait Scope: Debug {
             // Iterate through all the statements in the scope or subscope of
             // the query
             if let Some((scope_resolution, resolved_symbols, scope_nodes, scope_edges)) =
-                statement.execute(cfg, &statement_symbols, parent_resolution)
+                statement.execute(cfg, statement_symbols.clone(), parent_resolution)
             {
                 for (sym, _) in resolved_symbols.iter() {
-                    statement_symbols.remove(sym);
+                    if let Some(statement_symbols) = &mut statement_symbols {
+                        statement_symbols.remove(sym);
+                    }
                 }
                 // res_nodes.0.push(symbol.clone());
                 res_nodes.0.extend(scope_nodes.0.into_iter());
@@ -111,7 +113,7 @@ impl Scope for GlobalScope {
     fn run(
         &self,
         _cfg: &ControlFlowGraph,
-        _symbol: SymbolRefs,
+        _symbols: Option<SymbolRefs>,
         _parent_resolution: Resolution,
     ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)> {
         None
@@ -135,7 +137,7 @@ impl Scope for EmptyScope {
     fn run(
         &self,
         _cfg: &ControlFlowGraph,
-        _symbols: SymbolRefs,
+        _symbols: Option<SymbolRefs>,
         parent_resolution: Resolution,
     ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)> {
         Some((

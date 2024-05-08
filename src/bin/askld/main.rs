@@ -222,7 +222,33 @@ mod tests {
                     "column_end": 1,
                     "file": 1
                 },
-                "parents": {},
+                "parents": {
+                    "1": [
+                        {
+                            "line_start": 7,
+                            "line_end": 7,
+                            "column_start": 16,
+                            "column_end": 16,
+                            "file": 1
+                        },
+                        {
+                            "line_start": 7,
+                            "line_end": 7,
+                            "column_start": 22,
+                            "column_end": 22,
+                            "file": 1
+                        }
+                    ],
+                    "42": [
+                        {
+                            "line_start": 11,
+                            "line_end": 11,
+                            "column_start": 22,
+                            "column_end": 22,
+                            "file": 1
+                        }
+                    ]
+                },
                 "children": {}
             },
             "1": {
@@ -235,7 +261,17 @@ mod tests {
                     "column_end": 1,
                     "file": 1
                 },
-                "parents": {},
+                "parents": {
+                    "42": [
+                        {
+                            "line_start": 11,
+                            "line_end": 11,
+                            "column_start": 16,
+                            "column_end": 16,
+                            "file": 1
+                        }
+                    ]                    
+                },
                 "children": {
                     "2": [
                         {
@@ -310,7 +346,17 @@ mod tests {
                     "column_end": 1,
                     "file": 1
                 },
-                "parents": {},
+                "parents": {
+                    "4": [
+                        {
+                            "line_start": 11,
+                            "line_end": 11,
+                            "column_start": 16,
+                            "column_end": 16,
+                            "file": 1
+                        }
+                    ]                    
+                },
                 "children": {}
             },
             "6": {
@@ -323,7 +369,17 @@ mod tests {
                     "column_end": 1,
                     "file": 1
                 },
-                "parents": {},
+                "parents": {
+                    "4": [
+                        {
+                            "line_start": 11,
+                            "line_end": 11,
+                            "column_start": 22,
+                            "column_end": 22,
+                            "file": 1
+                        }
+                    ]                    
+                },
                 "children": {
                     "7": [
                         {
@@ -346,7 +402,17 @@ mod tests {
                     "column_end": 1,
                     "file": 1
                 },
-                "parents": {},
+                "parents": {
+                    "6": [
+                        {
+                            "line_start": 11,
+                            "line_end": 11,
+                            "column_start": 16,
+                            "column_end": 16,
+                            "file": 1
+                        }
+                    ]                    
+                },
                 "children": {}
             },
             "4": {

@@ -187,12 +187,15 @@ pub trait Selector: Debug {
     fn select(&self, _cfg: &ControlFlowGraph, symbols: SymbolRefs) -> Option<SymbolRefs> {
         Some(symbols)
     }
+
+    fn select_from_all(&self, cfg: &ControlFlowGraph) -> Option<SymbolRefs>;
 }
 
 pub trait Deriver: Debug {
-    fn derive_symbols(&self, _cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<SymbolRefs>;
+    fn derive_symbols(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs>;
 
-    fn derive_children(&self, _cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<SymbolRefs>;
+    fn derive_children(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs>;
+    fn derive_parents(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs>;
 }
 
 #[derive(Debug)]
@@ -226,13 +229,29 @@ impl Selector for NameSelector {
     fn select(&self, cfg: &ControlFlowGraph, symbols: SymbolRefs) -> Option<SymbolRefs> {
         let res: SymbolRefs = symbols
             .into_iter()
-            .filter(|(s, _)| self.name == cfg.get_symbol(&s).unwrap().name)
+            .filter_map(|(id, refs)| {
+                let s = cfg.get_symbol(&id).unwrap();
+                if self.name == s.name {
+                    Some((id, refs.clone()))
+                } else {
+                    None
+                }
+            })
             .collect();
 
         if res.len() == 0 {
             return None;
         }
         Some(res)
+    }
+
+    fn select_from_all(&self, cfg: &ControlFlowGraph) -> Option<SymbolRefs> {
+        let symbols = cfg.get_symbol_by_name(&self.name);
+        if symbols.len() == 0 {
+            return None;
+        }
+
+        Some(symbols.into_iter().map(|s| (s.id, HashSet::new())).collect())
     }
 }
 
@@ -264,11 +283,11 @@ impl Verb for ForcedVerb {
 }
 
 impl Deriver for ForcedVerb {
-    fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<SymbolRefs> {
+    fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
         Some(cfg.symbols.get_children(symbol).clone())
     }
 
-    fn derive_children(&self, cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<SymbolRefs> {
+    fn derive_children(&self, cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs> {
         let sym_refs: SymbolRefs =
             cfg.get_symbol_by_name(&self.name)
                 .iter()
@@ -281,6 +300,10 @@ impl Deriver for ForcedVerb {
         }
 
         Some(sym_refs)
+    }
+
+    fn derive_parents(&self, _cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
+        Some(SymbolRefs::from([(symbol, HashSet::new())]))
     }
 }
 
@@ -298,6 +321,15 @@ impl Selector for ForcedVerb {
         }
 
         Some(sym_refs)
+    }
+
+    fn select_from_all(&self, cfg: &ControlFlowGraph) -> Option<SymbolRefs> {
+        let symbols = cfg.get_symbol_by_name(&self.name);
+        if symbols.len() == 0 {
+            return None;
+        }
+
+        Some(symbols.into_iter().map(|s| (s.id, HashSet::new())).collect())
     }
 }
 
@@ -322,11 +354,15 @@ impl Verb for UnitVerb {
 }
 
 impl Deriver for UnitVerb {
-    fn derive_children(&self, _cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<SymbolRefs> {
+    fn derive_children(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs> {
         None
     }
 
-    fn derive_symbols(&self, _cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<SymbolRefs> {
+    fn derive_parents(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs> {
+        None
+    }
+
+    fn derive_symbols(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs> {
         None
     }
 }
@@ -351,12 +387,16 @@ impl Verb for ChildrenVerb {
 }
 
 impl Deriver for ChildrenVerb {
-    fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<SymbolRefs> {
+    fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
         Some(cfg.symbols.get_children(symbol).clone())
     }
 
-    fn derive_children(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<SymbolRefs> {
+    fn derive_children(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
         Some(cfg.symbols.get_children(symbol).clone())
+    }
+
+    fn derive_parents(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
+        Some(cfg.symbols.get_parents(symbol).clone())
     }
 }
 
@@ -411,10 +451,9 @@ impl IsolatedScope {
             bail!("Unexpected named arguments");
         }
 
-        Ok(Arc::new(Self{}))
+        Ok(Arc::new(Self {}))
     }
 }
-
 
 impl Verb for IsolatedScope {
     fn derive_method(&self) -> DeriveMethod {
@@ -427,11 +466,15 @@ impl Verb for IsolatedScope {
 }
 
 impl Deriver for IsolatedScope {
-    fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: &SymbolId) -> Option<SymbolRefs> {
+    fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
         Some(cfg.symbols.get_children(symbol).clone())
     }
 
-    fn derive_children(&self, cfg: &ControlFlowGraph, _symbol: &SymbolId) -> Option<SymbolRefs> {
-        return None;
+    fn derive_children(&self, cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs> {
+        None
+    }
+
+    fn derive_parents(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs> {
+        None
     }
 }
