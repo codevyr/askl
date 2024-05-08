@@ -155,12 +155,7 @@ impl Statement for DefaultStatement {
         let mut res_resolution = child_resolution;
 
         for (selected_symbol, occurences) in filtered_symbols.into_iter() {
-            let derived_symbols =
-                if let Some(derived) = self.command().derive_symbols(cfg, &selected_symbol) {
-                    derived
-                } else {
-                    return None;
-                };
+            let derived_symbols = self.command().derive_symbols(cfg, &selected_symbol)?;
 
             if let Some((scope_resolution, resolved_symbols, nodes, edges)) =
                 self.scope().run(cfg, derived_symbols, child_resolution)
