@@ -113,11 +113,21 @@ pub struct Symbol {
     pub name: String,
     pub ranges: Occurrence,
     pub children: SymbolRefs,
+    pub parents: SymbolRefs,
 }
 
 impl Symbol {
     pub fn add_child(&mut self, id: SymbolId, occurrence: Occurrence) {
         self.children
+            .entry(id)
+            .and_modify(|occurences| {
+                occurences.insert(occurrence.clone());
+            })
+            .or_insert(HashSet::from([occurrence]));
+    }
+
+    pub fn add_parent(&mut self, id: SymbolId, occurrence: Occurrence) {
+        self.parents
             .entry(id)
             .and_modify(|occurences| {
                 occurences.insert(occurrence.clone());
@@ -259,7 +269,8 @@ impl SymbolMap {
                 symbol.id,
                 Symbol {
                     id: symbol.id,
-                    children: HashMap::new(),
+                    children: SymbolRefs::new(),
+                    parents: SymbolRefs::new(),
                     name: symbol.name.clone(),
                     ranges: symbol.into(),
                 },
@@ -285,7 +296,10 @@ impl SymbolMap {
                 column_start: reference.from_col_start as i32,
                 column_end: reference.from_col_end as i32,
             };
-            from_symbol.add_child(reference.to_symbol, occurrence);
+            from_symbol.add_child(reference.to_symbol, occurrence.clone());
+
+            let to_symbol = symbols_map.get_mut(&reference.to_symbol).unwrap();
+            to_symbol.add_parent(reference.from_symbol, occurrence);
         }
         
 
