@@ -1,8 +1,7 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::parser::{ParserContext, Rule};
-use crate::statement::{self, build_empty_statement, build_statement, Statement};
+use crate::statement::{build_empty_statement, build_statement, Statement};
 use crate::symbols::SymbolRefs;
-use crate::verb::Resolution;
 use core::fmt::Debug;
 use pest::error::Error;
 
@@ -46,19 +45,17 @@ pub trait Scope: Debug {
         &self,
         cfg: &ControlFlowGraph,
         symbols: Option<SymbolRefs>,
-        parent_resolution: Resolution,
-    ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)> {
+    ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
         let mut res_nodes = NodeList(vec![]);
         let mut res_edges = EdgeList(vec![]);
         let mut res_symbols = SymbolRefs::new();
-        let mut resolution = Resolution::None;
 
         let mut statement_symbols = symbols.clone();
         for statement in self.statements() {
             // Iterate through all the statements in the scope or subscope of
             // the query
-            if let Some((scope_resolution, resolved_symbols, scope_nodes, scope_edges)) =
-                statement.execute(cfg, statement_symbols.clone(), parent_resolution)
+            if let Some((resolved_symbols, scope_nodes, scope_edges)) =
+                statement.execute(cfg, statement_symbols.clone())
             {
                 for (sym, _) in resolved_symbols.iter() {
                     if let Some(statement_symbols) = &mut statement_symbols {
@@ -69,7 +66,6 @@ pub trait Scope: Debug {
                 res_nodes.0.extend(scope_nodes.0.into_iter());
                 res_edges.0.extend(scope_edges.0.into_iter());
                 res_symbols.extend(resolved_symbols.into_iter());
-                resolution = resolution.max(scope_resolution);
             }
         }
 
@@ -77,7 +73,7 @@ pub trait Scope: Debug {
         res_nodes.0.sort();
         res_nodes.0.dedup();
 
-        Some((resolution, res_symbols, res_nodes, res_edges))
+        Some((res_symbols, res_nodes, res_edges))
     }
 }
 
@@ -114,8 +110,7 @@ impl Scope for GlobalScope {
         &self,
         _cfg: &ControlFlowGraph,
         _symbols: Option<SymbolRefs>,
-        _parent_resolution: Resolution,
-    ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)> {
+    ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
         None
     }
 }
@@ -138,10 +133,8 @@ impl Scope for EmptyScope {
         &self,
         _cfg: &ControlFlowGraph,
         _symbols: Option<SymbolRefs>,
-        parent_resolution: Resolution,
-    ) -> Option<(Resolution, SymbolRefs, NodeList, EdgeList)> {
+    ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
         Some((
-            parent_resolution,
             SymbolRefs::new(),
             NodeList(vec![]),
             EdgeList(vec![]),

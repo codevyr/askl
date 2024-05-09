@@ -118,27 +118,6 @@ pub fn build_verb(
     })
 }
 
-#[derive(PartialEq, Debug, Copy, Clone)]
-pub enum Resolution {
-    None,
-    Weak,
-    Strong,
-}
-
-impl Resolution {
-    pub fn max(self, other: Resolution) -> Self {
-        if self == Resolution::Strong || other == Resolution::Strong {
-            return Resolution::Strong;
-        }
-
-        if self == Resolution::Weak || other == Resolution::Weak {
-            return Resolution::Weak;
-        }
-
-        Resolution::None
-    }
-}
-
 pub fn derive_verb(verb: &Arc<dyn Verb>) -> Option<Arc<dyn Verb>> {
     match verb.derive_method() {
         DeriveMethod::Clone => Some(verb.clone()),
@@ -152,10 +131,6 @@ pub enum DeriveMethod {
 }
 
 pub trait Verb: Debug {
-    fn resolution(&self) -> Resolution {
-        Resolution::Weak
-    }
-
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Skip
     }
@@ -219,10 +194,6 @@ impl Verb for NameSelector {
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
         Ok(self)
     }
-
-    fn resolution(&self) -> Resolution {
-        Resolution::Strong
-    }
 }
 
 impl Selector for NameSelector {
@@ -275,10 +246,6 @@ impl ForcedVerb {
 impl Verb for ForcedVerb {
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
         Ok(self)
-    }
-
-    fn resolution(&self) -> Resolution {
-        Resolution::Weak
     }
 }
 
@@ -470,7 +437,7 @@ impl Deriver for IsolatedScope {
         Some(cfg.symbols.get_children(symbol).clone())
     }
 
-    fn derive_children(&self, cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs> {
+    fn derive_children(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs> {
         None
     }
 

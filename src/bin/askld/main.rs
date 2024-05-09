@@ -589,7 +589,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(res_nodes.0, vec![]);
+        assert_eq!(res_nodes.0, vec![SymbolId::new(1)]);
         assert_eq!(res_edges.0.len(), 0);
     }
 

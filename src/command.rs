@@ -1,6 +1,6 @@
 use crate::cfg::ControlFlowGraph;
 use crate::symbols::{SymbolId, SymbolRefs};
-use crate::verb::{DeriveMethod, Deriver, Filter, Resolution, Selector, UnitVerb, Verb};
+use crate::verb::{DeriveMethod, Deriver, Filter, Selector, UnitVerb, Verb};
 use core::fmt::Debug;
 use std::sync::Arc;
 
@@ -99,16 +99,5 @@ impl Command {
 
     pub fn derive_parents(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
         self.derivers().last().unwrap().derive_parents(cfg, symbol)
-    }
-}
-
-impl Verb for Command {
-    fn resolution(&self) -> Resolution {
-        let mut res = Resolution::Weak;
-        for v in self.verbs.iter() {
-            res = res.max(v.resolution());
-        }
-
-        res
     }
 }
