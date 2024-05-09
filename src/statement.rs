@@ -156,21 +156,7 @@ impl Statement for DefaultStatement {
                         res_symbols.insert(selected_symbol.clone(), occurences);
 
                         for (resolved_symbol, occurrences) in resolved_symbols {
-                            if occurrences.len() == 0 {
-                                res_edges.0.push((
-                                    selected_symbol.clone(),
-                                    resolved_symbol.clone(),
-                                    None,
-                                ));
-                            } else {
-                                for occ in occurrences {
-                                    res_edges.0.push((
-                                        selected_symbol.clone(),
-                                        resolved_symbol.clone(),
-                                        Some(occ),
-                                    ));
-                                }
-                            }
+                            res_edges.add_references(selected_symbol, resolved_symbol, occurrences);
                         }
                     }
                 }
@@ -191,22 +177,7 @@ impl Statement for DefaultStatement {
                             for (selected_symbol, occurrences) in selected_symbols {
                                 res_nodes.0.push(selected_symbol.clone());
                                 res_symbols.insert(selected_symbol.clone(), occurrences.clone());
-
-                                if occurrences.len() == 0 {
-                                    res_edges.0.push((
-                                        selected_symbol.clone(),
-                                        resolved_symbol.clone(),
-                                        None,
-                                    ));
-                                } else {
-                                    for occ in occurrences {
-                                        res_edges.0.push((
-                                            selected_symbol.clone(),
-                                            resolved_symbol.clone(),
-                                            Some(occ),
-                                        ));
-                                    }
-                                }
+                                res_edges.add_references(selected_symbol, resolved_symbol, occurrences);
                             }
                         }
                     }

@@ -1,6 +1,6 @@
 use std::{collections::HashSet, iter::Iterator};
 
-use crate::symbols::{Occurrence, Symbol, SymbolId, SymbolMap};
+use crate::symbols::{Occurrence, Symbol, SymbolId, SymbolMap, SymbolRefs};
 
 #[derive(Debug, Clone)]
 pub struct ControlFlowGraph {
@@ -17,6 +17,17 @@ pub struct EdgeList(pub Vec<(SymbolId, SymbolId, Option<Occurrence>)>);
 impl EdgeList {
     pub fn new() -> Self {
         EdgeList(vec![])
+    }
+
+    pub fn add_references(&mut self, from: SymbolId, to: SymbolId, occurrences: HashSet<Occurrence>) {
+        if occurrences.len() == 0 {
+            self.0.push((from, to, None));
+            return;
+        }
+
+        for occ in occurrences {
+            self.0.push((from, to, Some(occ)));
+        }
     }
 }
 
