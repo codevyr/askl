@@ -85,14 +85,6 @@ impl Command {
         Some(symbols)
     }
 
-    pub fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
-        if let Some(res) = self.derivers().last().unwrap().derive_symbols(cfg, symbol) {
-            Some(res)
-        } else {
-            None
-        }
-    }
-
     pub fn derive_children(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
         self.derivers().last().unwrap().derive_children(cfg, symbol)
     }

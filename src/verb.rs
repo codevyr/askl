@@ -167,8 +167,6 @@ pub trait Selector: Debug {
 }
 
 pub trait Deriver: Debug {
-    fn derive_symbols(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs>;
-
     fn derive_children(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs>;
     fn derive_parents(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs>;
 }
@@ -250,10 +248,6 @@ impl Verb for ForcedVerb {
 }
 
 impl Deriver for ForcedVerb {
-    fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
-        Some(cfg.symbols.get_children(symbol).clone())
-    }
-
     fn derive_children(&self, cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs> {
         let sym_refs: SymbolRefs =
             cfg.get_symbol_by_name(&self.name)
@@ -328,10 +322,6 @@ impl Deriver for UnitVerb {
     fn derive_parents(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs> {
         None
     }
-
-    fn derive_symbols(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs> {
-        None
-    }
 }
 
 #[derive(Debug)]
@@ -354,10 +344,6 @@ impl Verb for ChildrenVerb {
 }
 
 impl Deriver for ChildrenVerb {
-    fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
-        Some(cfg.symbols.get_children(symbol).clone())
-    }
-
     fn derive_children(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
         Some(cfg.symbols.get_children(symbol).clone())
     }
@@ -433,10 +419,6 @@ impl Verb for IsolatedScope {
 }
 
 impl Deriver for IsolatedScope {
-    fn derive_symbols(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
-        Some(cfg.symbols.get_children(symbol).clone())
-    }
-
     fn derive_children(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs> {
         None
     }

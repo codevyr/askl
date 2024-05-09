@@ -142,7 +142,7 @@ impl Statement for DefaultStatement {
         match filtered_symbols {
             Some(filtered_symbols) => {
                 for (selected_symbol, occurences) in filtered_symbols.into_iter() {
-                    let derived_symbols = self.command().derive_symbols(cfg, selected_symbol);
+                    let derived_symbols = self.command().derive_children(cfg, selected_symbol);
 
                     if let Some((resolved_symbols, nodes, edges)) =
                         self.scope().run(cfg, derived_symbols)
