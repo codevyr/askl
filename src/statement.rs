@@ -6,7 +6,7 @@ use crate::symbols::SymbolRefs;
 use crate::verb::build_verb;
 use core::fmt::Debug;
 use pest::error::Error;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub fn build_statement<'a>(
     ctx: &ParserContext,
@@ -75,7 +75,7 @@ pub trait Statement: Debug {
                 derived.into_iter().for_each(|(s, occurences)| {
                     if s == *node_j {
                         for occ in occurences.into_iter() {
-                            edges.0.push((node_i.clone(), s.clone(), Some(occ)))
+                            edges.add_references(*node_i, s, HashSet::from([occ]))
                         }
                     }
                 })
@@ -86,18 +86,14 @@ pub trait Statement: Debug {
     }
 
     fn execute_all(&self, cfg: &ControlFlowGraph) -> (NodeList, EdgeList) {
-        let mut res_nodes = NodeList(vec![]);
-        let mut res_edges = EdgeList(vec![]);
+        let mut res_nodes = NodeList::new();
+        let mut res_edges = EdgeList::new();
 
         if let Some((_resolved_symbols, nodes, edges)) = self.execute(cfg, None) {
             res_nodes.0.extend(nodes.0.into_iter());
             res_edges.0.extend(edges.0.into_iter());
         }
 
-        res_edges.0.sort();
-        res_edges.0.dedup();
-        res_nodes.0.sort();
-        res_nodes.0.dedup();
         (res_nodes, res_edges)
     }
 
@@ -135,8 +131,8 @@ impl Statement for DefaultStatement {
 
         let filtered_symbols = self.command().filter(cfg, selected_symbols);
 
-        let mut res_edges = EdgeList(vec![]);
-        let mut res_nodes = NodeList(vec![]);
+        let mut res_edges = EdgeList::new();
+        let mut res_nodes = NodeList::new();
         let mut res_symbols = HashMap::new();
 
         match filtered_symbols {
@@ -152,7 +148,7 @@ impl Statement for DefaultStatement {
                         res_nodes
                             .0
                             .extend(resolved_symbols.iter().map(|(s, _)| s.clone()));
-                        res_nodes.0.push(selected_symbol.clone());
+                        res_nodes.add(selected_symbol);
                         res_symbols.insert(selected_symbol.clone(), occurences);
 
                         for (resolved_symbol, occurrences) in resolved_symbols {
@@ -175,7 +171,7 @@ impl Statement for DefaultStatement {
 
                         if let Some(selected_symbols) = selected_symbols {
                             for (selected_symbol, occurrences) in selected_symbols {
-                                res_nodes.0.push(selected_symbol.clone());
+                                res_nodes.add(selected_symbol);
                                 res_symbols.insert(selected_symbol.clone(), occurrences.clone());
                                 res_edges.add_references(selected_symbol, resolved_symbol, occurrences);
                             }
@@ -185,15 +181,9 @@ impl Statement for DefaultStatement {
             }
         }
 
-        // Sort and deduplicate the sources
-        res_nodes.0.sort();
-        res_nodes.0.dedup();
-
         res_edges
             .0
             .extend(self.update_edges(cfg, &res_nodes).0.into_iter());
-        res_edges.0.sort();
-        res_edges.0.dedup();
         return Some((res_symbols, res_nodes, res_edges));
     }
 
@@ -227,23 +217,17 @@ impl Statement for GlobalStatement {
         cfg: &ControlFlowGraph,
         symbols: Option<SymbolRefs>,
     ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
-        let mut res_edges = EdgeList(vec![]);
-        let mut res_nodes = NodeList(vec![]);
+        let mut res_edges = EdgeList::new();
+        let mut res_nodes = NodeList::new();
         if let Some((_, nodes, edges)) = self.scope().run(cfg, symbols.clone()) {
             res_nodes.0.extend(nodes.0.into_iter());
             res_edges.0.extend(edges.0.into_iter());
         }
 
-        // Sort and deduplicate the sources
-        res_nodes.0.sort();
-        res_nodes.0.dedup();
-
         res_edges
             .0
             .extend(self.update_edges(cfg, &res_nodes).0.into_iter());
-        res_edges.0.sort();
-        res_edges.0.dedup();
-        return Some((HashMap::new(), res_nodes, res_edges));
+        return Some((SymbolRefs::new(), res_nodes, res_edges));
     }
 
     fn command(&self) -> &Command {

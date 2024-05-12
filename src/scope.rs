@@ -46,8 +46,8 @@ pub trait Scope: Debug {
         cfg: &ControlFlowGraph,
         symbols: Option<SymbolRefs>,
     ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
-        let mut res_nodes = NodeList(vec![]);
-        let mut res_edges = EdgeList(vec![]);
+        let mut res_nodes = NodeList::new();
+        let mut res_edges = EdgeList::new();
         let mut res_symbols = SymbolRefs::new();
 
         let mut statement_symbols = symbols.clone();
@@ -68,10 +68,6 @@ pub trait Scope: Debug {
                 res_symbols.extend(resolved_symbols.into_iter());
             }
         }
-
-        // Sort and deduplicate the sources
-        res_nodes.0.sort();
-        res_nodes.0.dedup();
 
         Some((res_symbols, res_nodes, res_edges))
     }
@@ -136,8 +132,8 @@ impl Scope for EmptyScope {
     ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
         Some((
             SymbolRefs::new(),
-            NodeList(vec![]),
-            EdgeList(vec![]),
+            NodeList::new(),
+            EdgeList::new(),
         ))
     }
 }

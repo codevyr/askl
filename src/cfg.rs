@@ -1,6 +1,6 @@
 use std::{collections::HashSet, iter::Iterator};
 
-use crate::symbols::{Occurrence, Symbol, SymbolId, SymbolMap, SymbolRefs};
+use crate::symbols::{Occurrence, Symbol, SymbolId, SymbolMap};
 
 #[derive(Debug, Clone)]
 pub struct ControlFlowGraph {
@@ -9,25 +9,47 @@ pub struct ControlFlowGraph {
 }
 
 #[derive(Debug, Clone)]
-pub struct NodeList(pub Vec<SymbolId>);
+pub struct NodeList(pub HashSet<SymbolId>);
+
+impl NodeList {
+    pub fn new() -> Self {
+        Self(HashSet::new())
+    }
+
+    pub fn add(&mut self, node: SymbolId) {
+        self.0.insert(node);
+    }
+
+    pub fn as_vec(&self) -> Vec<SymbolId> {
+        let mut res: Vec<_> = self.0.clone().into_iter().collect();
+        res.sort();
+        res
+    }
+}
 
 #[derive(Debug, Clone)]
-pub struct EdgeList(pub Vec<(SymbolId, SymbolId, Option<Occurrence>)>);
+pub struct EdgeList(pub HashSet<(SymbolId, SymbolId, Option<Occurrence>)>);
 
 impl EdgeList {
     pub fn new() -> Self {
-        EdgeList(vec![])
+        Self(HashSet::new())
     }
 
     pub fn add_references(&mut self, from: SymbolId, to: SymbolId, occurrences: HashSet<Occurrence>) {
         if occurrences.len() == 0 {
-            self.0.push((from, to, None));
+            self.0.insert((from, to, None));
             return;
         }
 
         for occ in occurrences {
-            self.0.push((from, to, Some(occ)));
+            self.0.insert((from, to, Some(occ)));
         }
+    }
+
+    pub fn as_vec(&self) -> Vec<(SymbolId, SymbolId, Option<Occurrence>)> {
+        let mut res: Vec<_> = self.0.clone().into_iter().collect();
+        res.sort();
+        res
     }
 }
 
