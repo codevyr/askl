@@ -7,7 +7,7 @@ use std::{
 use anyhow::{anyhow, bail, Result};
 use askl::{
     index::Index,
-    symbols::{FileId, Occurrence, SymbolId, SymbolMap, SymbolType},
+    symbols::{FileId, Occurrence, SymbolId, SymbolType},
 };
 use clap::Parser;
 use indicatif::ProgressBar;
@@ -329,7 +329,6 @@ struct UnresolvedChild {
 
 struct VisitorState {
     unresolved_children: HashMap<String, HashSet<UnresolvedChild>>,
-    symbol_map: SymbolMap,
     index: Index,
     project: String,
     language: String,
@@ -339,7 +338,6 @@ impl VisitorState {
     fn new(index: Index) -> Self {
         VisitorState {
             unresolved_children: HashMap::new(),
-            symbol_map: SymbolMap::new(),
             index: index,
             project: "test".to_string(),
             language: "cxx".to_string(),
