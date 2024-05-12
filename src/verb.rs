@@ -414,7 +414,7 @@ impl Verb for IsolatedScope {
     }
 
     fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
-        bail!("Not a filter verb")
+        Ok(self)
     }
 }
 

@@ -782,15 +782,27 @@ mod tests {
     }
 
     #[test]
-    fn isolated_scope() {
-        const QUERY: &str = r#"@scope{{"b"}}"#;
+    fn single_isolated_scope() {
+        const QUERY: &str = r#"@scope{{"e"}}"#;
         let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(1), SymbolId::new(2)]);
+        assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(4), SymbolId::new(5)]);
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["1-2", "1-2"]);
+        assert_eq!(edges, vec!["4-5"]);
+    }
+
+    #[test]
+    fn double_isolated_scope() {
+        const QUERY: &str = r#"@scope{@scope{{"e"}}}"#;
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+        assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(4), SymbolId::new(5)]);
+        let edges = format_edges(res_edges);
+        assert_eq!(edges, vec!["4-5"]);
     }
 
     #[test]
