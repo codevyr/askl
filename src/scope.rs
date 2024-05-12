@@ -130,10 +130,6 @@ impl Scope for EmptyScope {
         _cfg: &ControlFlowGraph,
         _symbols: Option<SymbolRefs>,
     ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
-        Some((
-            SymbolRefs::new(),
-            NodeList::new(),
-            EdgeList::new(),
-        ))
+        Some((SymbolRefs::new(), NodeList::new(), EdgeList::new()))
     }
 }

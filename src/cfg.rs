@@ -35,7 +35,12 @@ impl EdgeList {
         Self(HashSet::new())
     }
 
-    pub fn add_references(&mut self, from: SymbolId, to: SymbolId, occurrences: HashSet<Occurrence>) {
+    pub fn add_references(
+        &mut self,
+        from: SymbolId,
+        to: SymbolId,
+        occurrences: HashSet<Occurrence>,
+    ) {
         if occurrences.len() == 0 {
             self.0.insert((from, to, None));
             return;
@@ -56,10 +61,7 @@ impl EdgeList {
 impl ControlFlowGraph {
     pub fn from_symbols(symbols: SymbolMap) -> Self {
         let nodes: HashSet<SymbolId> = symbols.iter().map(|(id, _)| id.clone()).collect();
-        Self {
-            symbols: symbols,
-            nodes: nodes,
-        }
+        Self { symbols, nodes }
     }
 
     pub fn iter_symbols(&self) -> impl Iterator<Item = (&SymbolId, &Symbol)> {

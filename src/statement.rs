@@ -164,7 +164,7 @@ impl Statement for DefaultStatement {
                     res_nodes
                         .0
                         .extend(resolved_symbols.iter().map(|(s, _)| s.clone()));
-                    for (resolved_symbol, occurences) in resolved_symbols {
+                    for (resolved_symbol, _) in resolved_symbols {
                         let derived_symbols = self.command().derive_parents(cfg, resolved_symbol);
                         let filtered_symbols = self.command().filter(cfg, derived_symbols);
                         let selected_symbols = self.command().select(cfg, filtered_symbols);

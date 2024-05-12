@@ -93,7 +93,7 @@ impl<'a> ParserContext<'a> {
         command.extend(ChildrenVerb::new());
         Self {
             prev: None,
-            command: command,
+            command,
             scope_factory: Some(scope_factory),
         }
     }
