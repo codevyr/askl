@@ -1,5 +1,6 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::command::Command;
+use crate::execution_context::ExecutionContext;
 use crate::parser::{ParserContext, Rule};
 use crate::scope::{build_scope, EmptyScope, Scope};
 use crate::symbols::SymbolRefs;
@@ -88,8 +89,9 @@ pub trait Statement: Debug {
     fn execute_all(&self, cfg: &ControlFlowGraph) -> (NodeList, EdgeList) {
         let mut res_nodes = NodeList::new();
         let mut res_edges = EdgeList::new();
+        let mut ctx = ExecutionContext::new();
 
-        if let Some((_resolved_symbols, nodes, edges)) = self.execute(cfg, None) {
+        if let Some((_resolved_symbols, nodes, edges)) = self.execute(&mut ctx, cfg, None) {
             res_nodes.0.extend(nodes.0.into_iter());
             res_edges.0.extend(edges.0.into_iter());
         }
@@ -99,6 +101,7 @@ pub trait Statement: Debug {
 
     fn execute(
         &self,
+        ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         symbols: Option<SymbolRefs>,
     ) -> Option<(SymbolRefs, NodeList, EdgeList)>;
@@ -124,10 +127,11 @@ impl DefaultStatement {
 impl Statement for DefaultStatement {
     fn execute(
         &self,
+        ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         symbols: Option<SymbolRefs>,
     ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
-        let selected_symbols = self.command().select(cfg, symbols);
+        let selected_symbols = self.command().select(ctx, cfg, symbols);
 
         let filtered_symbols = self.command().filter(cfg, selected_symbols);
 
@@ -141,7 +145,7 @@ impl Statement for DefaultStatement {
                     let derived_symbols = self.command().derive_children(cfg, selected_symbol);
 
                     if let Some((resolved_symbols, nodes, edges)) =
-                        self.scope().run(cfg, derived_symbols)
+                        self.scope().run(ctx, cfg, derived_symbols)
                     {
                         res_nodes.0.extend(nodes.0.into_iter());
                         res_edges.0.extend(edges.0.into_iter());
@@ -158,7 +162,7 @@ impl Statement for DefaultStatement {
                 }
             }
             None => {
-                if let Some((resolved_symbols, nodes, edges)) = self.scope().run(cfg, None) {
+                if let Some((resolved_symbols, nodes, edges)) = self.scope().run(ctx, cfg, None) {
                     res_nodes.0.extend(nodes.0.into_iter());
                     res_edges.0.extend(edges.0.into_iter());
                     res_nodes
@@ -167,13 +171,17 @@ impl Statement for DefaultStatement {
                     for (resolved_symbol, _) in resolved_symbols {
                         let derived_symbols = self.command().derive_parents(cfg, resolved_symbol);
                         let filtered_symbols = self.command().filter(cfg, derived_symbols);
-                        let selected_symbols = self.command().select(cfg, filtered_symbols);
+                        let selected_symbols = self.command().select(ctx, cfg, filtered_symbols);
 
                         if let Some(selected_symbols) = selected_symbols {
                             for (selected_symbol, occurrences) in selected_symbols {
                                 res_nodes.add(selected_symbol);
                                 res_symbols.insert(selected_symbol.clone(), occurrences.clone());
-                                res_edges.add_references(selected_symbol, resolved_symbol, occurrences);
+                                res_edges.add_references(
+                                    selected_symbol,
+                                    resolved_symbol,
+                                    occurrences,
+                                );
                             }
                         }
                     }
@@ -184,6 +192,8 @@ impl Statement for DefaultStatement {
         res_edges
             .0
             .extend(self.update_edges(cfg, &res_nodes).0.into_iter());
+
+        self.command().mark(ctx, cfg, &res_symbols).unwrap();
         return Some((res_symbols, res_nodes, res_edges));
     }
 
@@ -214,12 +224,13 @@ impl GlobalStatement {
 impl Statement for GlobalStatement {
     fn execute(
         &self,
+        ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         symbols: Option<SymbolRefs>,
     ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
         let mut res_edges = EdgeList::new();
         let mut res_nodes = NodeList::new();
-        if let Some((_, nodes, edges)) = self.scope().run(cfg, symbols.clone()) {
+        if let Some((_, nodes, edges)) = self.scope().run(ctx, cfg, symbols.clone()) {
             res_nodes.0.extend(nodes.0.into_iter());
             res_edges.0.extend(edges.0.into_iter());
         }

@@ -1,4 +1,5 @@
 use crate::cfg::ControlFlowGraph;
+use crate::execution_context::ExecutionContext;
 use crate::parser::{Identifier, NamedArgument, ParserContext, PositionalArgument, Rule};
 use crate::symbols::{SymbolId, SymbolRefs};
 use anyhow::{anyhow, bail, Result};
@@ -57,6 +58,8 @@ fn build_generic_verb(
         ProjectFilter::NAME => ProjectFilter::new(&positional, &named),
         ForcedVerb::NAME => ForcedVerb::new(&positional, &named),
         IsolatedScope::NAME => IsolatedScope::new(&positional, &named),
+        LabellerVerb::NAME => LabellerVerb::new(&positional, &named),
+        UserVerb::NAME => UserVerb::new(&positional, &named),
         unknown => Err(anyhow!("unknown verb : {}", unknown)),
     };
 
@@ -149,7 +152,11 @@ pub trait Verb: Debug {
     }
 
     fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
-        bail!("Not a filter verb")
+        bail!("Not a deriver verb")
+    }
+
+    fn as_marker<'a>(&'a self) -> Result<&'a dyn Marker> {
+        bail!("Not a marker verb")
     }
 }
 
@@ -160,16 +167,34 @@ pub trait Filter: Debug {
 }
 
 pub trait Selector: Debug {
-    fn select(&self, _cfg: &ControlFlowGraph, symbols: SymbolRefs) -> Option<SymbolRefs> {
+    fn select(
+        &self,
+        _ctx: &mut ExecutionContext,
+        _cfg: &ControlFlowGraph,
+        symbols: SymbolRefs,
+    ) -> Option<SymbolRefs> {
         Some(symbols)
     }
 
-    fn select_from_all(&self, cfg: &ControlFlowGraph) -> Option<SymbolRefs>;
+    fn select_from_all(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+    ) -> Option<SymbolRefs>;
 }
 
 pub trait Deriver: Debug {
     fn derive_children(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs>;
     fn derive_parents(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs>;
+}
+
+pub trait Marker: Debug {
+    fn mark(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        symbols: &SymbolRefs,
+    ) -> Result<()>;
 }
 
 #[derive(Debug)]
@@ -196,7 +221,12 @@ impl Verb for NameSelector {
 }
 
 impl Selector for NameSelector {
-    fn select(&self, cfg: &ControlFlowGraph, symbols: SymbolRefs) -> Option<SymbolRefs> {
+    fn select(
+        &self,
+        _ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        symbols: SymbolRefs,
+    ) -> Option<SymbolRefs> {
         let res: SymbolRefs = symbols
             .into_iter()
             .filter_map(|(id, refs)| {
@@ -215,7 +245,11 @@ impl Selector for NameSelector {
         Some(res)
     }
 
-    fn select_from_all(&self, cfg: &ControlFlowGraph) -> Option<SymbolRefs> {
+    fn select_from_all(
+        &self,
+        _ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+    ) -> Option<SymbolRefs> {
         let symbols = cfg.get_symbol_by_name(&self.name);
         if symbols.len() == 0 {
             return None;
@@ -275,7 +309,12 @@ impl Deriver for ForcedVerb {
 }
 
 impl Selector for ForcedVerb {
-    fn select(&self, cfg: &ControlFlowGraph, _symbols: SymbolRefs) -> Option<SymbolRefs> {
+    fn select(
+        &self,
+        _ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        _symbols: SymbolRefs,
+    ) -> Option<SymbolRefs> {
         let sym_refs: SymbolRefs =
             cfg.get_symbol_by_name(&self.name)
                 .iter()
@@ -290,7 +329,11 @@ impl Selector for ForcedVerb {
         Some(sym_refs)
     }
 
-    fn select_from_all(&self, cfg: &ControlFlowGraph) -> Option<SymbolRefs> {
+    fn select_from_all(
+        &self,
+        _ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+    ) -> Option<SymbolRefs> {
         let symbols = cfg.get_symbol_by_name(&self.name);
         if symbols.len() == 0 {
             return None;
@@ -478,5 +521,138 @@ impl Deriver for IsolatedScope {
 
     fn derive_parents(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs> {
         None
+    }
+}
+
+#[derive(Debug)]
+struct LabellerVerb {
+    label: String,
+}
+
+impl LabellerVerb {
+    const NAME: &'static str = "label";
+
+    fn new(positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
+        if named.len() > 0 {
+            bail!("Unexpected named arguments");
+        }
+
+        if let Some(label) = positional.iter().next() {
+            Ok(Arc::new(Self {
+                label: label.clone(),
+            }))
+        } else {
+            bail!("Expected a positional argument");
+        }
+    }
+}
+
+impl Verb for LabellerVerb {
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Skip
+    }
+
+    fn as_marker<'a>(&'a self) -> Result<&'a dyn Marker> {
+        Ok(self)
+    }
+}
+
+impl Marker for LabellerVerb {
+    fn mark(
+        &self,
+        ctx: &mut ExecutionContext,
+        _cfg: &ControlFlowGraph,
+        symbols: &SymbolRefs,
+    ) -> Result<()> {
+        let ids: HashSet<_> = symbols.iter().map(|(id, _)| *id).collect();
+
+        if ctx.saved_labels.contains_key(&self.label) {
+            bail!("Label {} already exists", self.label);
+        }
+
+        ctx.saved_labels.insert(self.label.clone(), ids);
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct UserVerb {
+    label: String,
+    forced: bool,
+}
+
+impl UserVerb {
+    const NAME: &'static str = "use";
+
+    fn new(positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
+        if named.len() > 0 {
+            bail!("Unexpected named arguments");
+        }
+
+        let forced = if let Some(forced) = named.get("forced") {
+            if forced == "true" {
+                true
+            } else if forced == "false" {
+                false
+            } else {
+                bail!("Unexpected value for forced parameter")
+            }
+        } else {
+            false
+        };
+
+        if let Some(label) = positional.iter().next() {
+            Ok(Arc::new(Self {
+                label: label.clone(),
+                forced,
+            }))
+        } else {
+            bail!("Expected a positional argument");
+        }
+    }
+}
+
+impl Verb for UserVerb {
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Skip
+    }
+
+    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
+        Ok(self)
+    }
+}
+
+impl Selector for UserVerb {
+    fn select_from_all(
+        &self,
+        ctx: &mut ExecutionContext,
+        _cfg: &ControlFlowGraph,
+    ) -> Option<SymbolRefs> {
+        if let Some(ids) = ctx.saved_labels.get(&self.label) {
+            Some(ids.into_iter().map(|id| (*id, HashSet::new())).collect())
+        } else {
+            // bail!("Label {} does not exist", self.label);
+            None
+        }
+    }
+
+    fn select(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        symbols: SymbolRefs,
+    ) -> Option<SymbolRefs> {
+        if self.forced {
+            return self.select_from_all(ctx, cfg);
+        }
+
+        let saved_ids = if let Some(saved) = ctx.saved_labels.get(&self.label) {
+            saved
+        } else {
+            return None;
+        };
+
+        Some(symbols.into_iter().filter(|(id, _)| saved_ids.contains(id)).collect())
     }
 }

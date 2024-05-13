@@ -1,4 +1,5 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
+use crate::execution_context::ExecutionContext;
 use crate::parser::{ParserContext, Rule};
 use crate::statement::{build_empty_statement, build_statement, Statement};
 use crate::symbols::SymbolRefs;
@@ -43,6 +44,7 @@ pub trait Scope: Debug {
 
     fn run(
         &self,
+        ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         symbols: Option<SymbolRefs>,
     ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
@@ -55,7 +57,7 @@ pub trait Scope: Debug {
             // Iterate through all the statements in the scope or subscope of
             // the query
             if let Some((resolved_symbols, scope_nodes, scope_edges)) =
-                statement.execute(cfg, statement_symbols.clone())
+                statement.execute(ctx, cfg, statement_symbols.clone())
             {
                 for (sym, _) in resolved_symbols.iter() {
                     if let Some(statement_symbols) = &mut statement_symbols {
@@ -104,6 +106,7 @@ impl Scope for GlobalScope {
 
     fn run(
         &self,
+        _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
         _symbols: Option<SymbolRefs>,
     ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
@@ -127,6 +130,7 @@ impl Scope for EmptyScope {
 
     fn run(
         &self,
+        _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
         _symbols: Option<SymbolRefs>,
     ) -> Option<(SymbolRefs, NodeList, EdgeList)> {

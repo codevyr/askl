@@ -1,6 +1,9 @@
 use std::{collections::HashSet, iter::Iterator};
 
-use crate::{symbols::{Occurrence, Symbol, SymbolId, SymbolMap, FileId}, index::File};
+use crate::{
+    index::File,
+    symbols::{FileId, Occurrence, Symbol, SymbolId, SymbolMap},
+};
 
 #[derive(Debug, Clone)]
 pub struct ControlFlowGraph {

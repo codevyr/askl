@@ -1,6 +1,8 @@
 use crate::cfg::ControlFlowGraph;
+use crate::execution_context::ExecutionContext;
 use crate::symbols::{SymbolId, SymbolRefs};
-use crate::verb::{DeriveMethod, Deriver, Filter, Selector, UnitVerb, Verb};
+use crate::verb::{DeriveMethod, Deriver, Filter, Marker, Selector, UnitVerb, Verb};
+use anyhow::Result;
 use core::fmt::Debug;
 use std::sync::Arc;
 
@@ -44,6 +46,10 @@ impl Command {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_deriver().ok()))
     }
 
+    fn markers<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Marker> + 'a> {
+        Box::new(self.verbs.iter().filter_map(|verb| verb.as_marker().ok()))
+    }
+
     pub fn filter(
         &self,
         cfg: &ControlFlowGraph,
@@ -57,6 +63,7 @@ impl Command {
 
     pub fn select(
         &self,
+        ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         symbols: Option<SymbolRefs>,
     ) -> Option<SymbolRefs> {
@@ -67,9 +74,9 @@ impl Command {
             return symbols;
         }
 
-        let selector: Box<dyn Fn(&dyn Selector) -> Option<SymbolRefs>> = match symbols {
-            Some(symbols) => Box::new(move |v: &dyn Selector| v.select(cfg, symbols.clone())),
-            None => Box::new(|v: &dyn Selector| v.select_from_all(cfg)),
+        let selector: Box<dyn FnMut(&dyn Selector) -> Option<SymbolRefs>> = match symbols {
+            Some(symbols) => Box::new(move |v: &dyn Selector| v.select(ctx, cfg, symbols.clone())),
+            None => Box::new(|v: &dyn Selector| v.select_from_all(ctx, cfg)),
         };
 
         let symbols: SymbolRefs = selectors
@@ -91,5 +98,14 @@ impl Command {
 
     pub fn derive_parents(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
         self.derivers().last().unwrap().derive_parents(cfg, symbol)
+    }
+
+    pub fn mark(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        symbols: &SymbolRefs,
+    ) -> Result<()> {
+        self.markers().try_for_each(|m| m.mark(ctx, cfg, symbols))
     }
 }

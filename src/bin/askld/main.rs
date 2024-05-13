@@ -836,4 +836,20 @@ mod tests {
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2", "42-1", "42-2"]);
     }
+
+    #[test]
+    fn label_use_syntax_check() {
+        const QUERY: &str = r#""b" "a" {@label("foo")}; @use("foo")"#;
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+
+        assert_eq!(
+            res_nodes.as_vec(),
+            vec![SymbolId::new(1), SymbolId::new(2),]
+        );
+        let edges = format_edges(res_edges);
+        assert_eq!(edges, vec!["1-2", "1-2"]);
+    }
 }
