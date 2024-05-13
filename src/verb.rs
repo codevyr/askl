@@ -169,12 +169,10 @@ pub trait Filter: Debug {
 pub trait Selector: Debug {
     fn select(
         &self,
-        _ctx: &mut ExecutionContext,
-        _cfg: &ControlFlowGraph,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
         symbols: SymbolRefs,
-    ) -> Option<SymbolRefs> {
-        Some(symbols)
-    }
+    ) -> Option<SymbolRefs>;
 
     fn select_from_all(
         &self,
@@ -653,6 +651,11 @@ impl Selector for UserVerb {
             return None;
         };
 
-        Some(symbols.into_iter().filter(|(id, _)| saved_ids.contains(id)).collect())
+        Some(
+            symbols
+                .into_iter()
+                .filter(|(id, _)| saved_ids.contains(id))
+                .collect(),
+        )
     }
 }
