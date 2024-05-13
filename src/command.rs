@@ -53,11 +53,11 @@ impl Command {
     pub fn filter(
         &self,
         cfg: &ControlFlowGraph,
-        symbols: Option<SymbolRefs>,
+        symbols: SymbolRefs,
     ) -> Option<SymbolRefs> {
         Some(
             self.filters()
-                .fold(symbols?, |symbols, verb| verb.filter(cfg, symbols)),
+                .fold(symbols, |symbols, verb| verb.filter(cfg, symbols)),
         )
     }
 
