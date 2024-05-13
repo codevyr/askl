@@ -54,6 +54,7 @@ fn build_generic_verb(
     let res = match Identifier::build(ident)?.0.as_str() {
         NameSelector::NAME => NameSelector::new(&positional, &named),
         IgnoreVerb::NAME => IgnoreVerb::new(&positional, &named),
+        ProjectFilter::NAME => ProjectFilter::new(&positional, &named),
         ForcedVerb::NAME => ForcedVerb::new(&positional, &named),
         IsolatedScope::NAME => IsolatedScope::new(&positional, &named),
         unknown => Err(anyhow!("unknown verb : {}", unknown)),
@@ -199,7 +200,7 @@ impl Selector for NameSelector {
         let res: SymbolRefs = symbols
             .into_iter()
             .filter_map(|(id, refs)| {
-                let s = cfg.get_symbol(&id).unwrap();
+                let s = cfg.get_symbol(id).unwrap();
                 if self.name == s.name {
                     Some((id, refs.clone()))
                 } else {
@@ -220,7 +221,12 @@ impl Selector for NameSelector {
             return None;
         }
 
-        Some(symbols.into_iter().map(|s| (s.id, HashSet::new())).collect())
+        Some(
+            symbols
+                .into_iter()
+                .map(|s| (s.id, HashSet::new()))
+                .collect(),
+        )
     }
 }
 
@@ -290,7 +296,12 @@ impl Selector for ForcedVerb {
             return None;
         }
 
-        Some(symbols.into_iter().map(|s| (s.id, HashSet::new())).collect())
+        Some(
+            symbols
+                .into_iter()
+                .map(|s| (s.id, HashSet::new()))
+                .collect(),
+        )
     }
 }
 
@@ -384,7 +395,49 @@ impl Filter for IgnoreVerb {
     fn filter(&self, cfg: &ControlFlowGraph, symbols: SymbolRefs) -> SymbolRefs {
         symbols
             .into_iter()
-            .filter(|(s, _)| self.name != cfg.get_symbol(s).unwrap().name)
+            .filter(|(s, _)| self.name != cfg.get_symbol(*s).unwrap().name)
+            .collect()
+    }
+}
+
+#[derive(Debug)]
+struct ProjectFilter {
+    project: String,
+}
+
+impl ProjectFilter {
+    const NAME: &'static str = "project";
+
+    fn new(positional: &Vec<String>, _named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
+        if let Some(project) = positional.iter().next() {
+            Ok(Arc::new(Self {
+                project: project.clone(),
+            }))
+        } else {
+            bail!("Expected a positional argument");
+        }
+    }
+}
+
+impl Verb for ProjectFilter {
+    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
+        Ok(self)
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Clone
+    }
+}
+
+impl Filter for ProjectFilter {
+    fn filter(&self, cfg: &ControlFlowGraph, symbols: SymbolRefs) -> SymbolRefs {
+        symbols
+            .into_iter()
+            .filter(|(symbol_id, _)| {
+                let symbol = cfg.get_symbol(*symbol_id).unwrap();
+                let file = cfg.get_file(symbol.occurrence.file).unwrap();
+                self.project == file.project
+            })
             .collect()
     }
 }

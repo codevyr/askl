@@ -111,7 +111,7 @@ pub type SymbolRefs = HashMap<SymbolId, HashSet<Occurrence>>;
 pub struct Symbol {
     pub id: SymbolId,
     pub name: String,
-    pub ranges: Occurrence,
+    pub occurrence: Occurrence,
     pub children: SymbolRefs,
     pub parents: SymbolRefs,
 }
@@ -272,7 +272,7 @@ impl SymbolMap {
                     children: SymbolRefs::new(),
                     parents: SymbolRefs::new(),
                     name: symbol.name.clone(),
-                    ranges: symbol.into(),
+                    occurrence: symbol.into(),
                 },
             );
         }
@@ -290,7 +290,7 @@ impl SymbolMap {
         for reference in references {
             let from_symbol = symbols_map.get_mut(&reference.from_symbol).unwrap();
             let occurrence = Occurrence{
-                file: from_symbol.ranges.file,
+                file: from_symbol.occurrence.file,
                 line_start: reference.from_line as i32,
                 line_end: reference.from_line as i32,
                 column_start: reference.from_col_start as i32,

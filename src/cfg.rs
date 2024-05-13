@@ -1,6 +1,6 @@
 use std::{collections::HashSet, iter::Iterator};
 
-use crate::symbols::{Occurrence, Symbol, SymbolId, SymbolMap};
+use crate::{symbols::{Occurrence, Symbol, SymbolId, SymbolMap, FileId}, index::File};
 
 #[derive(Debug, Clone)]
 pub struct ControlFlowGraph {
@@ -68,8 +68,8 @@ impl ControlFlowGraph {
         self.symbols.iter()
     }
 
-    pub fn get_symbol(&self, loc: &SymbolId) -> Option<&Symbol> {
-        self.symbols.symbols.get(loc)
+    pub fn get_symbol(&self, id: SymbolId) -> Option<&Symbol> {
+        self.symbols.symbols.get(&id)
     }
 
     pub fn get_symbol_by_name(&self, name: &str) -> Vec<&Symbol> {
@@ -78,5 +78,9 @@ impl ControlFlowGraph {
             .iter()
             .filter_map(|(_, v)| if v.name == *name { Some(v) } else { None })
             .collect()
+    }
+
+    pub fn get_file(&self, id: FileId) -> Option<&File> {
+        self.symbols.files.get(&id)
     }
 }

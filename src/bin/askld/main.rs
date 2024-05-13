@@ -136,12 +136,12 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
         all_symbols.insert(s.clone());
     }
 
-    for loc in all_symbols {
-        let sym = data.cfg.get_symbol(&loc).unwrap();
-        let file_id = sym.ranges.file.clone();
-        let line = sym.ranges.line_start;
+    for symbol_id in all_symbols {
+        let sym = data.cfg.get_symbol(symbol_id).unwrap();
+        let file_id = sym.occurrence.file.clone();
+        let line = sym.occurrence.line_start;
         debug!("filename {}", file_id);
-        result_graph.add_node(Node::new(loc, sym.name.clone(), file_id, line));
+        result_graph.add_node(Node::new(symbol_id, sym.name.clone(), file_id, line));
     }
 
     let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();
@@ -220,7 +220,7 @@ mod tests {
             "2": {
                 "id": 2,
                 "name": "b",
-                "ranges": {
+                "occurrence": {
                     "line_start": 1,
                     "line_end": 3,
                     "column_start": 1,
@@ -259,7 +259,7 @@ mod tests {
             "1": {
                 "id": 1,
                 "name": "a",
-                "ranges": {
+                "occurrence": {
                     "line_start": 5,
                     "line_end": 7,
                     "column_start": 1,
@@ -299,7 +299,7 @@ mod tests {
             "42": {
                 "id": 42,
                 "name": "main",
-                "ranges": {
+                "occurrence": {
                     "line_start": 9,
                     "line_end": 11,
                     "column_start": 1,
@@ -331,7 +331,7 @@ mod tests {
             "3": {
                 "id": 3,
                 "name": "c",
-                "ranges": {
+                "occurrence": {
                     "line_start": 13,
                     "line_end": 14,
                     "column_start": 1,
@@ -344,7 +344,7 @@ mod tests {
             "5": {
                 "id": 5,
                 "name": "e",
-                "ranges": {
+                "occurrence": {
                     "line_start": 13,
                     "line_end": 14,
                     "column_start": 1,
@@ -367,7 +367,7 @@ mod tests {
             "6": {
                 "id": 6,
                 "name": "f",
-                "ranges": {
+                "occurrence": {
                     "line_start": 13,
                     "line_end": 14,
                     "column_start": 1,
@@ -400,7 +400,7 @@ mod tests {
             "7": {
                 "id": 7,
                 "name": "g",
-                "ranges": {
+                "occurrence": {
                     "line_start": 13,
                     "line_end": 14,
                     "column_start": 1,
@@ -423,7 +423,7 @@ mod tests {
             "4": {
                 "id": 4,
                 "name": "d",
-                "ranges": {
+                "occurrence": {
                     "line_start": 13,
                     "line_end": 14,
                     "column_start": 1,
@@ -820,5 +820,20 @@ mod tests {
         assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(1), SymbolId::new(2)]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, Vec::<String>::new());
+    }
+
+    #[test]
+    fn project_double_parent_query() {
+        const QUERY: &str = r#"@project("test") {{"b"}}"#;
+        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+        assert_eq!(
+            res_nodes.as_vec(),
+            vec![SymbolId::new(1), SymbolId::new(2), SymbolId::new(42)]
+        );
+        let edges = format_edges(res_edges);
+        assert_eq!(edges, vec!["1-2", "1-2", "42-1", "42-2"]);
     }
 }
