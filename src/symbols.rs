@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::{collections::HashMap, hash, hash::Hasher};
 
-use crate::index::{self, Index};
+use crate::index::{self, Index, File};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Copy, Clone, Serialize, Deserialize)]
 pub struct FileHash(u64);
@@ -250,7 +250,7 @@ impl From<i64> for SymbolType {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SymbolMap {
     pub symbols: HashMap<SymbolId, Symbol>,
-    pub files: HashMap<FileId, String>,
+    pub files: HashMap<FileId, File>,
 }
 
 impl SymbolMap {
@@ -282,7 +282,7 @@ impl SymbolMap {
         for file in files {
             files_map.insert(
                 file.id,
-                file.path,
+                file,
             );
         }
 
@@ -362,10 +362,10 @@ impl SymbolMap {
     pub fn get_file_id(&self, file: String) -> Option<FileId> {
         self.files
             .iter()
-            .find_map(|(id, f)| if **f == file { Some(*id) } else { None })
+            .find_map(|(id, f)| if f.path == file { Some(*id) } else { None })
     }
 
-    pub fn set_file_id(&mut self, id: FileId, file: String) {
+    pub fn set_file_id(&mut self, id: FileId, file: File) {
         self.files.insert(id, file);
     }
 }

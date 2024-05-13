@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
 
 use crate::symbols::{FileId, Occurrence, SymbolId, SymbolType};
@@ -15,7 +16,7 @@ pub struct Symbol {
     pub col_end: i64,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow, Deserialize, Serialize, Clone)]
 pub struct File {
     pub id: FileId,
     pub path: String,

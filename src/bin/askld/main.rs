@@ -150,13 +150,13 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
 
 #[get["/source/{file_id}"]]
 async fn file(data: web::Data<AsklData>, file_id: web::Path<FileId>) -> impl Responder {
-    let path = if let Some(path) = data.cfg.symbols.files.get(&file_id) {
-        path
+    let path = if let Some(file) = data.cfg.symbols.files.get(&file_id) {
+        &file.path
     } else {
         return HttpResponse::NotFound().body("File not found");
     };
 
-    if let Ok(source) = std::fs::read_to_string(&path) {
+    if let Ok(source) = std::fs::read_to_string(path) {
         HttpResponse::Ok().body(source)
     } else {
         HttpResponse::NotFound().body("File not found")
@@ -209,7 +209,12 @@ mod tests {
     const INPUT_A: &str = r#"
     {
         "files": {
-            "1": "main.c"
+            "1": {
+                "id": 1,
+                "path": "main.c",
+                "project": "test",
+                "filetype": "c"
+            }
         },
         "symbols": {
             "2": {
