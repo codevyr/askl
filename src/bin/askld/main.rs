@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::{anyhow, Result};
+use askl::execution_context::ExecutionContext;
 use askl::index::Index;
 use askl::symbols::{FileId, Occurrence};
 use askl::{
@@ -118,7 +119,12 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     };
     debug!("Global scope: {:#?}", ast);
 
-    let (res_nodes, res_edges) = ast.execute_all(&data.cfg);
+    let mut ctx = ExecutionContext::new();
+    let res = ast.execute(&mut ctx, &data.cfg, None);
+    if res.is_none() {
+        return HttpResponse::NotFound().body("Did not resolve any symbols");
+    }
+    let (_, res_nodes, res_edges) = res.unwrap();
 
     info!("Symbols: {:#?}", res_nodes.as_vec().len());
     info!("Edges: {:#?}", res_edges.0.len());
@@ -520,7 +526,9 @@ mod tests {
         let ast = parse(askl_query).unwrap();
         println!("{:#?}", ast);
 
-        ast.execute_all(&cfg)
+        let mut ctx = ExecutionContext::new();
+        let (_, nodes, edges) = ast.execute(&mut ctx, &cfg, None).unwrap();
+        (nodes, edges)
     }
 
     #[test]

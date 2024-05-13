@@ -86,19 +86,6 @@ pub trait Statement: Debug {
         edges
     }
 
-    fn execute_all(&self, cfg: &ControlFlowGraph) -> (NodeList, EdgeList) {
-        let mut res_nodes = NodeList::new();
-        let mut res_edges = EdgeList::new();
-        let mut ctx = ExecutionContext::new();
-
-        if let Some((_resolved_symbols, nodes, edges)) = self.execute(&mut ctx, cfg, None) {
-            res_nodes.0.extend(nodes.0.into_iter());
-            res_edges.0.extend(edges.0.into_iter());
-        }
-
-        (res_nodes, res_edges)
-    }
-
     fn execute(
         &self,
         ctx: &mut ExecutionContext,
