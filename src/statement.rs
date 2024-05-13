@@ -115,7 +115,7 @@ impl DefaultStatement {
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         symbols: SymbolRefs,
-    ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
+    ) -> (SymbolRefs, NodeList, EdgeList) {
         let mut res_edges = EdgeList::new();
         let mut res_nodes = NodeList::new();
         let mut res_symbols = HashMap::new();
@@ -141,14 +141,14 @@ impl DefaultStatement {
             }
         }
 
-        return Some((res_symbols, res_nodes, res_edges));
+        return (res_symbols, res_nodes, res_edges);
     }
 
     fn execute_for_all(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-    ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
+    ) -> (SymbolRefs, NodeList, EdgeList) {
         let mut res_edges = EdgeList::new();
         let mut res_nodes = NodeList::new();
         let mut res_symbols = HashMap::new();
@@ -174,7 +174,7 @@ impl DefaultStatement {
             }
         }
 
-        return Some((res_symbols, res_nodes, res_edges));
+        return (res_symbols, res_nodes, res_edges);
     }
 }
 
@@ -188,8 +188,8 @@ impl Statement for DefaultStatement {
         let selected_symbols = self.command().select(ctx, cfg, symbols);
 
         let (res_symbols, res_nodes, mut res_edges) = match selected_symbols {
-            Some(selected_symbols) => self.execute_for_selected(ctx, cfg, selected_symbols)?,
-            None => self.execute_for_all(ctx, cfg)?,
+            Some(selected_symbols) => self.execute_for_selected(ctx, cfg, selected_symbols),
+            None => self.execute_for_all(ctx, cfg),
         };
 
         res_edges
