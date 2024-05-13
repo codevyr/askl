@@ -120,14 +120,13 @@ impl Statement for DefaultStatement {
     ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
         let selected_symbols = self.command().select(ctx, cfg, symbols);
 
-        let filtered_symbols = self.command().filter(cfg, selected_symbols);
-
         let mut res_edges = EdgeList::new();
         let mut res_nodes = NodeList::new();
         let mut res_symbols = HashMap::new();
 
-        match filtered_symbols {
-            Some(filtered_symbols) => {
+        match selected_symbols {
+            Some(selected_symbols) => {
+                let filtered_symbols = self.command().filter(cfg, Some(selected_symbols)).unwrap();
                 for (selected_symbol, occurences) in filtered_symbols.into_iter() {
                     let derived_symbols = self.command().derive_children(cfg, selected_symbol);
 
