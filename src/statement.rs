@@ -109,6 +109,73 @@ impl DefaultStatement {
             scope: scope,
         })
     }
+
+    fn execute_for_selected(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        symbols: SymbolRefs,
+    ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
+        let mut res_edges = EdgeList::new();
+        let mut res_nodes = NodeList::new();
+        let mut res_symbols = HashMap::new();
+
+        let filtered_symbols = self.command().filter(cfg, Some(symbols)).unwrap();
+        for (selected_symbol, occurences) in filtered_symbols.into_iter() {
+            let derived_symbols = self.command().derive_children(cfg, selected_symbol);
+
+            if let Some((resolved_symbols, nodes, edges)) =
+                self.scope().run(ctx, cfg, derived_symbols)
+            {
+                res_nodes.0.extend(nodes.0.into_iter());
+                res_edges.0.extend(edges.0.into_iter());
+                res_nodes
+                    .0
+                    .extend(resolved_symbols.iter().map(|(s, _)| s.clone()));
+                res_nodes.add(selected_symbol);
+                res_symbols.insert(selected_symbol.clone(), occurences);
+
+                for (resolved_symbol, occurrences) in resolved_symbols {
+                    res_edges.add_references(selected_symbol, resolved_symbol, occurrences);
+                }
+            }
+        }
+
+        return Some((res_symbols, res_nodes, res_edges));
+    }
+
+    fn execute_for_all(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+    ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
+        let mut res_edges = EdgeList::new();
+        let mut res_nodes = NodeList::new();
+        let mut res_symbols = HashMap::new();
+
+        if let Some((resolved_symbols, nodes, edges)) = self.scope().run(ctx, cfg, None) {
+            res_nodes.0.extend(nodes.0.into_iter());
+            res_edges.0.extend(edges.0.into_iter());
+            res_nodes
+                .0
+                .extend(resolved_symbols.iter().map(|(s, _)| s.clone()));
+            for (resolved_symbol, _) in resolved_symbols {
+                let derived_symbols = self.command().derive_parents(cfg, resolved_symbol);
+                let filtered_symbols = self.command().filter(cfg, derived_symbols);
+                let selected_symbols = self.command().select(ctx, cfg, filtered_symbols);
+
+                if let Some(selected_symbols) = selected_symbols {
+                    for (selected_symbol, occurrences) in selected_symbols {
+                        res_nodes.add(selected_symbol);
+                        res_symbols.insert(selected_symbol.clone(), occurrences.clone());
+                        res_edges.add_references(selected_symbol, resolved_symbol, occurrences);
+                    }
+                }
+            }
+        }
+
+        return Some((res_symbols, res_nodes, res_edges));
+    }
 }
 
 impl Statement for DefaultStatement {
@@ -120,60 +187,10 @@ impl Statement for DefaultStatement {
     ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
         let selected_symbols = self.command().select(ctx, cfg, symbols);
 
-        let mut res_edges = EdgeList::new();
-        let mut res_nodes = NodeList::new();
-        let mut res_symbols = HashMap::new();
-
-        match selected_symbols {
-            Some(selected_symbols) => {
-                let filtered_symbols = self.command().filter(cfg, Some(selected_symbols)).unwrap();
-                for (selected_symbol, occurences) in filtered_symbols.into_iter() {
-                    let derived_symbols = self.command().derive_children(cfg, selected_symbol);
-
-                    if let Some((resolved_symbols, nodes, edges)) =
-                        self.scope().run(ctx, cfg, derived_symbols)
-                    {
-                        res_nodes.0.extend(nodes.0.into_iter());
-                        res_edges.0.extend(edges.0.into_iter());
-                        res_nodes
-                            .0
-                            .extend(resolved_symbols.iter().map(|(s, _)| s.clone()));
-                        res_nodes.add(selected_symbol);
-                        res_symbols.insert(selected_symbol.clone(), occurences);
-
-                        for (resolved_symbol, occurrences) in resolved_symbols {
-                            res_edges.add_references(selected_symbol, resolved_symbol, occurrences);
-                        }
-                    }
-                }
-            }
-            None => {
-                if let Some((resolved_symbols, nodes, edges)) = self.scope().run(ctx, cfg, None) {
-                    res_nodes.0.extend(nodes.0.into_iter());
-                    res_edges.0.extend(edges.0.into_iter());
-                    res_nodes
-                        .0
-                        .extend(resolved_symbols.iter().map(|(s, _)| s.clone()));
-                    for (resolved_symbol, _) in resolved_symbols {
-                        let derived_symbols = self.command().derive_parents(cfg, resolved_symbol);
-                        let filtered_symbols = self.command().filter(cfg, derived_symbols);
-                        let selected_symbols = self.command().select(ctx, cfg, filtered_symbols);
-
-                        if let Some(selected_symbols) = selected_symbols {
-                            for (selected_symbol, occurrences) in selected_symbols {
-                                res_nodes.add(selected_symbol);
-                                res_symbols.insert(selected_symbol.clone(), occurrences.clone());
-                                res_edges.add_references(
-                                    selected_symbol,
-                                    resolved_symbol,
-                                    occurrences,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let (res_symbols, res_nodes, mut res_edges) = match selected_symbols {
+            Some(selected_symbols) => self.execute_for_selected(ctx, cfg, selected_symbols)?,
+            None => self.execute_for_all(ctx, cfg)?,
+        };
 
         res_edges
             .0
