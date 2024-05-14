@@ -40,6 +40,10 @@ impl ScopeFactory {
 }
 
 type StatementIter<'a> = Box<dyn Iterator<Item = &'a Box<dyn Statement + 'a>> + 'a>;
+
+/// Scope executes statements. One of the algorithmic difficulties is that each
+/// statement must be executed exactly once. Therefore, the statement must be
+/// able to accept multiple symbols at once.
 pub trait Scope: Debug {
     fn statements(&self) -> StatementIter;
 

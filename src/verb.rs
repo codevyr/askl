@@ -297,7 +297,7 @@ impl Verb for ForcedVerb {
 impl Deriver for ForcedVerb {
     fn derive_children(
         &self,
-        ctx: &mut ExecutionContext,
+        _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         parent_symbols: SymbolRefs,
     ) -> HashSet<Reference> {
@@ -379,7 +379,7 @@ impl Verb for UnitVerb {
 impl Deriver for UnitVerb {
     fn derive_children(
         &self,
-        ctx: &mut ExecutionContext,
+        _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
         _symbols: SymbolRefs,
     ) -> HashSet<Reference> {
@@ -413,7 +413,7 @@ impl Verb for ChildrenVerb {
 impl Deriver for ChildrenVerb {
     fn derive_children(
         &self,
-        ctx: &mut ExecutionContext,
+        _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         parent_symbols: SymbolRefs,
     ) -> HashSet<Reference> {
@@ -548,7 +548,7 @@ impl Verb for IsolatedScope {
 impl Deriver for IsolatedScope {
     fn derive_children(
         &self,
-        ctx: &mut ExecutionContext,
+        _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
         _symbols: SymbolRefs,
     ) -> HashSet<Reference> {
@@ -663,7 +663,7 @@ impl Deriver for UserVerb {
     fn derive_children(
         &self,
         ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
+        _cfg: &ControlFlowGraph,
         parent_symbols: SymbolRefs,
     ) -> HashSet<Reference> {
         let mut references = HashSet::new();
