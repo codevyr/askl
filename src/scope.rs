@@ -2,7 +2,7 @@ use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::execution_context::ExecutionContext;
 use crate::parser::{ParserContext, Rule};
 use crate::statement::{build_empty_statement, build_statement, Statement};
-use crate::symbols::{Reference, SymbolRefs, SymbolId};
+use crate::symbols::{SymbolRefs, SymbolId};
 use core::fmt::Debug;
 use pest::error::Error;
 use std::collections::HashSet;
@@ -53,18 +53,15 @@ pub trait Scope: Debug {
         let mut res_edges = EdgeList::new();
         let mut res_symbols = SymbolRefs::new();
 
-        let mut statement_symbols = symbols.clone();
+        let mut ignored_ids = HashSet::new();
+
         for statement in self.statements() {
             // Iterate through all the statements in the scope or subscope of
             // the query
             if let Some((resolved_symbols, scope_nodes, scope_edges)) =
-                statement.execute(ctx, cfg, statement_symbols.clone())
+                statement.execute(ctx, cfg, symbols.clone(), &ignored_ids)
             {
-                for (sym, _) in resolved_symbols.iter() {
-                    if let Some(statement_symbols) = &mut statement_symbols {
-                        statement_symbols.remove(sym);
-                    }
-                }
+                ignored_ids.extend(resolved_symbols.iter().map(|(id, _)| *id));
                 // res_nodes.0.push(symbol.clone());
                 res_nodes.0.extend(scope_nodes.0.into_iter());
                 res_edges.0.extend(scope_edges.0.into_iter());
@@ -85,29 +82,26 @@ pub trait Scope: Debug {
         let mut res_edges = EdgeList::new();
         let mut res_symbols = HashSet::new();
 
-        let mut statement_symbols = symbols.clone();
+        let mut ignored_ids = HashSet::new();
         for statement in self.statements() {
             // Iterate through all the statements in the scope or subscope of
             // the query
 
-            let statement_refs = statement_symbols
+            let statement_refs = symbols
                 .iter()
                 .map(|id| (*id, HashSet::new()))
                 .collect();
 
             if let Some((resolved_symbols, scope_nodes, scope_edges)) =
-                statement.execute(ctx, cfg, Some(statement_refs))
+                statement.execute(ctx, cfg, Some(statement_refs), &ignored_ids)
             {
                 res_symbols.extend(
-                    statement_symbols
+                    symbols
                         .iter()
                         .filter(|r| resolved_symbols.contains_key(r))
                         .map(|r| r.clone()),
                 );
-                statement_symbols = statement_symbols
-                    .into_iter()
-                    .filter(|r| !resolved_symbols.contains_key(r))
-                    .collect();
+                ignored_ids.extend(resolved_symbols.iter().map(|(id, _)| *id));
                 res_nodes.0.extend(scope_nodes.0.into_iter());
                 res_edges.0.extend(scope_edges.0.into_iter());
             }

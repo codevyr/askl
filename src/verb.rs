@@ -283,6 +283,10 @@ impl Verb for ForcedVerb {
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
         Ok(self)
     }
+
+    fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
+        Ok(self)
+    }
 }
 
 impl Deriver for ForcedVerb {

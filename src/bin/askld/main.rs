@@ -120,7 +120,7 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     debug!("Global scope: {:#?}", ast);
 
     let mut ctx = ExecutionContext::new();
-    let res = ast.execute(&mut ctx, &data.cfg, None);
+    let res = ast.execute(&mut ctx, &data.cfg, None, &HashSet::new());
     if res.is_none() {
         return HttpResponse::NotFound().body("Did not resolve any symbols");
     }
@@ -527,7 +527,7 @@ mod tests {
         println!("{:#?}", ast);
 
         let mut ctx = ExecutionContext::new();
-        let (_, nodes, edges) = ast.execute(&mut ctx, &cfg, None).unwrap();
+        let (_, nodes, edges) = ast.execute(&mut ctx, &cfg, None, &HashSet::new()).unwrap();
         (nodes, edges)
     }
 

@@ -3,7 +3,7 @@ use crate::command::Command;
 use crate::execution_context::ExecutionContext;
 use crate::parser::{ParserContext, Rule};
 use crate::scope::{build_scope, EmptyScope, Scope};
-use crate::symbols::{Reference, SymbolRefs};
+use crate::symbols::{Reference, SymbolId, SymbolRefs};
 use crate::verb::build_verb;
 use core::fmt::Debug;
 use pest::error::Error;
@@ -92,6 +92,7 @@ pub trait Statement: Debug {
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         symbols: Option<SymbolRefs>,
+        ignored_symbols: &HashSet<SymbolId>,
     ) -> Option<(SymbolRefs, NodeList, EdgeList)>;
     fn command(&self) -> &Command;
     fn scope(&self) -> &dyn Scope;
@@ -109,42 +110,6 @@ impl DefaultStatement {
             command: command,
             scope: scope,
         })
-    }
-
-    fn execute_for_selected(
-        &self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        symbols: SymbolRefs,
-    ) -> (SymbolRefs, NodeList, EdgeList) {
-        let mut res_edges = EdgeList::new();
-        let mut res_nodes = NodeList::new();
-        let mut res_symbols = HashMap::new();
-
-        let filtered_symbols = self.command().filter(cfg, symbols).unwrap();
-        let derived_references = self.command().derive_children(cfg, filtered_symbols.clone());
-        let derived_symbols: HashSet<_> = derived_references.iter().map(|r| r.to).collect();
-
-        if let Some((resolved_symbols, nodes, edges)) =
-            self.scope().run_symbols(ctx, cfg, derived_symbols.clone())
-        {
-            res_nodes.0.extend(nodes.0.into_iter());
-            res_edges.0.extend(edges.0.into_iter());
-            res_nodes.0.extend(resolved_symbols.clone());
-            // res_symbols.insert(selected_symbol.clone(), occurrences);
-
-            for reference in derived_references {
-                if resolved_symbols.contains(&reference.to) {
-                    res_edges.add_reference(reference);
-                }
-            }
-        }
-
-        res_nodes.0.extend(filtered_symbols.iter().map(|(id, _)| *id));
-        res_symbols.extend(filtered_symbols.into_iter());
-
-
-        return (res_symbols, res_nodes, res_edges);
     }
 
     fn execute_for_all(
@@ -200,14 +165,61 @@ impl Statement for DefaultStatement {
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        symbols: Option<SymbolRefs>,
+        parent_symbols: Option<SymbolRefs>,
+        ignored_symbols: &HashSet<SymbolId>,
     ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
-        let selected_symbols = self.command().select(ctx, cfg, symbols);
+        let mut res_edges = EdgeList::new();
+        let mut res_nodes = NodeList::new();
+        let mut res_symbols = HashMap::new();
 
-        let (res_symbols, res_nodes, mut res_edges) = match selected_symbols {
-            None => self.execute_for_all(ctx, cfg),
-            Some(selected_symbols) => self.execute_for_selected(ctx, cfg, selected_symbols),
+        let filtered_symbols = if let Some(parent_symbols) = parent_symbols {
+            let derived_references = self.command().derive_children(cfg, parent_symbols.clone());
+            let mut derived_ids = SymbolRefs::new();
+            for d in derived_references.iter() {
+                derived_ids.insert(d.to, HashSet::new());
+            }
+
+            let selected_symbols =
+                if let Some(selected) = self.command().select(ctx, cfg, Some(derived_ids)) {
+                    selected
+                } else {
+                    return Some((res_symbols, res_nodes, res_edges));
+                };
+
+            let filtered_symbols = self.command().filter(cfg, selected_symbols).unwrap();
+            let filtered_symbols: SymbolRefs = filtered_symbols
+                .into_iter()
+                .filter(|(id, _)| !ignored_symbols.contains(id))
+                .collect();
+            for reference in derived_references {
+                if filtered_symbols.contains_key(&reference.to) {
+                    res_edges.add_reference(reference);
+                }
+            }
+            filtered_symbols
+        } else {
+            if let Some(selected) = self.command().select(ctx, cfg, None) {
+                self.command().filter(cfg, selected).unwrap()
+            } else {
+                return Some(self.execute_for_all(ctx, cfg));
+            }
         };
+
+        let filtered_ids = filtered_symbols.iter().map(|(id, _)| *id).collect();
+
+        if let Some((resolved_symbols, nodes, edges)) =
+            self.scope().run_symbols(ctx, cfg, filtered_ids)
+        {
+            res_nodes.0.extend(nodes.0.into_iter());
+            res_edges.0.extend(edges.0.into_iter());
+            res_nodes.0.extend(resolved_symbols.clone());
+            // res_symbols.insert(selected_symbol.clone(), occurrences);
+        }
+
+        res_nodes
+            .0
+            .extend(filtered_symbols.iter().map(|(id, _)| *id));
+        res_symbols.extend(filtered_symbols.into_iter());
 
         res_edges
             .0
@@ -247,6 +259,7 @@ impl Statement for GlobalStatement {
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         symbols: Option<SymbolRefs>,
+        ignored_symbols: &HashSet<SymbolId>,
     ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
         let mut res_edges = EdgeList::new();
         let mut res_nodes = NodeList::new();
