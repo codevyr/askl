@@ -259,7 +259,7 @@ impl Statement for GlobalStatement {
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         symbols: Option<SymbolRefs>,
-        ignored_symbols: &HashSet<SymbolId>,
+        _ignored_symbols: &HashSet<SymbolId>,
     ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
         let mut res_edges = EdgeList::new();
         let mut res_nodes = NodeList::new();
