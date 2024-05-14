@@ -1,6 +1,6 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
-use crate::symbols::{SymbolId, SymbolRefs, Reference};
+use crate::symbols::{Reference, SymbolId, SymbolRefs};
 use crate::verb::{DeriveMethod, Deriver, Filter, Marker, Selector, UnitVerb, Verb};
 use anyhow::Result;
 use core::fmt::Debug;
@@ -51,11 +51,7 @@ impl Command {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_marker().ok()))
     }
 
-    pub fn filter(
-        &self,
-        cfg: &ControlFlowGraph,
-        symbols: SymbolRefs,
-    ) -> Option<SymbolRefs> {
+    pub fn filter(&self, cfg: &ControlFlowGraph, symbols: SymbolRefs) -> Option<SymbolRefs> {
         Some(
             self.filters()
                 .fold(symbols, |symbols, verb| verb.filter(cfg, symbols)),
@@ -93,8 +89,16 @@ impl Command {
         Some(symbols)
     }
 
-    pub fn derive_children(&self, cfg: &ControlFlowGraph, symbols: SymbolRefs) -> HashSet<Reference> {
-        self.derivers().last().unwrap().derive_children(cfg, symbols)
+    pub fn derive_children(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        symbols: SymbolRefs,
+    ) -> HashSet<Reference> {
+        self.derivers()
+            .last()
+            .unwrap()
+            .derive_children(ctx, cfg, symbols)
     }
 
     pub fn derive_parents(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {

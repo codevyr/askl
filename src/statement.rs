@@ -173,7 +173,7 @@ impl Statement for DefaultStatement {
         let mut res_symbols = HashMap::new();
 
         let filtered_symbols = if let Some(parent_symbols) = parent_symbols {
-            let derived_references = self.command().derive_children(cfg, parent_symbols.clone());
+            let derived_references = self.command().derive_children(ctx, cfg, parent_symbols.clone());
             let mut derived_ids = SymbolRefs::new();
             for d in derived_references.iter() {
                 derived_ids.insert(d.to, HashSet::new());

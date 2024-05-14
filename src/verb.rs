@@ -182,7 +182,12 @@ pub trait Selector: Debug {
 }
 
 pub trait Deriver: Debug {
-    fn derive_children(&self, cfg: &ControlFlowGraph, symbol: SymbolRefs) -> HashSet<Reference>;
+    fn derive_children(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        symbol: SymbolRefs,
+    ) -> HashSet<Reference>;
     fn derive_parents(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs>;
 }
 
@@ -292,6 +297,7 @@ impl Verb for ForcedVerb {
 impl Deriver for ForcedVerb {
     fn derive_children(
         &self,
+        ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         parent_symbols: SymbolRefs,
     ) -> HashSet<Reference> {
@@ -300,7 +306,7 @@ impl Deriver for ForcedVerb {
             for child_symbol in cfg.get_symbol_by_name(&self.name) {
                 references.insert(Reference::new(parent_symbol_id, child_symbol.id));
             }
-        };
+        }
 
         references
     }
@@ -371,7 +377,12 @@ impl Verb for UnitVerb {
 }
 
 impl Deriver for UnitVerb {
-    fn derive_children(&self, _cfg: &ControlFlowGraph, _symbols: SymbolRefs) -> HashSet<Reference> {
+    fn derive_children(
+        &self,
+        ctx: &mut ExecutionContext,
+        _cfg: &ControlFlowGraph,
+        _symbols: SymbolRefs,
+    ) -> HashSet<Reference> {
         HashSet::new()
     }
 
@@ -402,6 +413,7 @@ impl Verb for ChildrenVerb {
 impl Deriver for ChildrenVerb {
     fn derive_children(
         &self,
+        ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         parent_symbols: SymbolRefs,
     ) -> HashSet<Reference> {
@@ -409,10 +421,14 @@ impl Deriver for ChildrenVerb {
         for (parent_symbol_id, _) in parent_symbols {
             for (child_symbol_id, occurrences) in cfg.symbols.get_children(parent_symbol_id) {
                 for occ in occurrences {
-                    references.insert(Reference::new_occurrence(parent_symbol_id, *child_symbol_id, occ.clone()));
+                    references.insert(Reference::new_occurrence(
+                        parent_symbol_id,
+                        *child_symbol_id,
+                        occ.clone(),
+                    ));
                 }
             }
-        };
+        }
 
         references
     }
@@ -530,7 +546,12 @@ impl Verb for IsolatedScope {
 }
 
 impl Deriver for IsolatedScope {
-    fn derive_children(&self, _cfg: &ControlFlowGraph, _symbols: SymbolRefs) -> HashSet<Reference> {
+    fn derive_children(
+        &self,
+        ctx: &mut ExecutionContext,
+        _cfg: &ControlFlowGraph,
+        _symbols: SymbolRefs,
+    ) -> HashSet<Reference> {
         HashSet::new()
     }
 
@@ -601,10 +622,6 @@ impl UserVerb {
     const NAME: &'static str = "use";
 
     fn new(positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
-        if named.len() > 0 {
-            bail!("Unexpected named arguments");
-        }
-
         let forced = if let Some(forced) = named.get("forced") {
             if forced == "true" {
                 true
@@ -614,7 +631,7 @@ impl UserVerb {
                 bail!("Unexpected value for forced parameter")
             }
         } else {
-            false
+            true
         };
 
         if let Some(label) = positional.iter().next() {
@@ -635,6 +652,32 @@ impl Verb for UserVerb {
 
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
         Ok(self)
+    }
+
+    fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
+        Ok(self)
+    }
+}
+
+impl Deriver for UserVerb {
+    fn derive_children(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        parent_symbols: SymbolRefs,
+    ) -> HashSet<Reference> {
+        let mut references = HashSet::new();
+        for (parent_symbol_id, _) in parent_symbols {
+            for child_symbol_id in ctx.saved_labels.get(&self.label).unwrap() {
+                references.insert(Reference::new(parent_symbol_id, *child_symbol_id));
+            }
+        }
+
+        references
+    }
+
+    fn derive_parents(&self, _cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
+        Some(SymbolRefs::from([(symbol, HashSet::new())]))
     }
 }
 
