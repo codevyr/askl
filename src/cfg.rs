@@ -2,7 +2,7 @@ use std::{collections::HashSet, iter::Iterator};
 
 use crate::{
     index::File,
-    symbols::{FileId, Occurrence, Symbol, SymbolId, SymbolMap},
+    symbols::{FileId, Occurrence, Symbol, SymbolId, SymbolMap, Reference},
 };
 
 #[derive(Debug, Clone)]
@@ -38,20 +38,11 @@ impl EdgeList {
         Self(HashSet::new())
     }
 
-    pub fn add_references(
+    pub fn add_reference(
         &mut self,
-        from: SymbolId,
-        to: SymbolId,
-        occurrences: HashSet<Occurrence>,
+        reference: Reference
     ) {
-        if occurrences.len() == 0 {
-            self.0.insert((from, to, None));
-            return;
-        }
-
-        for occ in occurrences {
-            self.0.insert((from, to, Some(occ)));
-        }
+        self.0.insert((reference.from, reference.to, reference.occurrence));
     }
 
     pub fn as_vec(&self) -> Vec<(SymbolId, SymbolId, Option<Occurrence>)> {

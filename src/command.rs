@@ -1,9 +1,10 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
-use crate::symbols::{SymbolId, SymbolRefs};
+use crate::symbols::{SymbolId, SymbolRefs, Reference};
 use crate::verb::{DeriveMethod, Deriver, Filter, Marker, Selector, UnitVerb, Verb};
 use anyhow::Result;
 use core::fmt::Debug;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -92,8 +93,8 @@ impl Command {
         Some(symbols)
     }
 
-    pub fn derive_children(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
-        self.derivers().last().unwrap().derive_children(cfg, symbol)
+    pub fn derive_children(&self, cfg: &ControlFlowGraph, symbols: SymbolRefs) -> HashSet<Reference> {
+        self.derivers().last().unwrap().derive_children(cfg, symbols)
     }
 
     pub fn derive_parents(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {

@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::{collections::HashMap, hash, hash::Hasher};
 
-use crate::index::{self, Index, File};
+use crate::index::{self, File, Index};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Copy, Clone, Serialize, Deserialize)]
 pub struct FileHash(u64);
@@ -100,9 +100,28 @@ impl From<index::Symbol> for Occurrence {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct SymbolChild {
-    pub id: SymbolId,
+pub struct Reference {
+    pub from: SymbolId,
+    pub to: SymbolId,
     pub occurrence: Option<Occurrence>,
+}
+
+impl Reference {
+    pub fn new(from: SymbolId, to: SymbolId) -> Self {
+        Self {
+            from,
+            to,
+            occurrence: None,
+        }
+    }
+
+    pub fn new_occurrence(from: SymbolId, to: SymbolId, occurrence: Occurrence) -> Self {
+        Self {
+            from,
+            to,
+            occurrence: Some(occurrence),
+        }
+    }
 }
 
 pub type SymbolRefs = HashMap<SymbolId, HashSet<Occurrence>>;
@@ -280,16 +299,13 @@ impl SymbolMap {
         let files = index.all_files().await?;
         let mut files_map = HashMap::new();
         for file in files {
-            files_map.insert(
-                file.id,
-                file,
-            );
+            files_map.insert(file.id, file);
         }
 
         let references = index.all_refs().await?;
         for reference in references {
             let from_symbol = symbols_map.get_mut(&reference.from_symbol).unwrap();
-            let occurrence = Occurrence{
+            let occurrence = Occurrence {
                 file: from_symbol.occurrence.file,
                 line_start: reference.from_line as i32,
                 line_end: reference.from_line as i32,
@@ -301,7 +317,6 @@ impl SymbolMap {
             let to_symbol = symbols_map.get_mut(&reference.to_symbol).unwrap();
             to_symbol.add_parent(reference.from_symbol, occurrence);
         }
-        
 
         Ok(Self {
             symbols: symbols_map,
@@ -371,7 +386,6 @@ impl SymbolMap {
 }
 
 impl Symbols for SymbolMap {
-
     fn into_vec(&self) -> Vec<SymbolId> {
         self.symbols
             .iter()

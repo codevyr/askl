@@ -2,9 +2,10 @@ use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::execution_context::ExecutionContext;
 use crate::parser::{ParserContext, Rule};
 use crate::statement::{build_empty_statement, build_statement, Statement};
-use crate::symbols::SymbolRefs;
+use crate::symbols::{Reference, SymbolRefs, SymbolId};
 use core::fmt::Debug;
 use pest::error::Error;
+use std::collections::HashSet;
 
 pub fn build_scope(
     ctx: &ParserContext,
@@ -68,6 +69,47 @@ pub trait Scope: Debug {
                 res_nodes.0.extend(scope_nodes.0.into_iter());
                 res_edges.0.extend(scope_edges.0.into_iter());
                 res_symbols.extend(resolved_symbols.into_iter());
+            }
+        }
+
+        Some((res_symbols, res_nodes, res_edges))
+    }
+
+    fn run_symbols(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        symbols: HashSet<SymbolId>,
+    ) -> Option<(HashSet<SymbolId>, NodeList, EdgeList)> {
+        let mut res_nodes = NodeList::new();
+        let mut res_edges = EdgeList::new();
+        let mut res_symbols = HashSet::new();
+
+        let mut statement_symbols = symbols.clone();
+        for statement in self.statements() {
+            // Iterate through all the statements in the scope or subscope of
+            // the query
+
+            let statement_refs = statement_symbols
+                .iter()
+                .map(|id| (*id, HashSet::new()))
+                .collect();
+
+            if let Some((resolved_symbols, scope_nodes, scope_edges)) =
+                statement.execute(ctx, cfg, Some(statement_refs))
+            {
+                res_symbols.extend(
+                    statement_symbols
+                        .iter()
+                        .filter(|r| resolved_symbols.contains_key(r))
+                        .map(|r| r.clone()),
+                );
+                statement_symbols = statement_symbols
+                    .into_iter()
+                    .filter(|r| !resolved_symbols.contains_key(r))
+                    .collect();
+                res_nodes.0.extend(scope_nodes.0.into_iter());
+                res_edges.0.extend(scope_edges.0.into_iter());
             }
         }
 

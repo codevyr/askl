@@ -3,7 +3,7 @@ use crate::command::Command;
 use crate::execution_context::ExecutionContext;
 use crate::parser::{ParserContext, Rule};
 use crate::scope::{build_scope, EmptyScope, Scope};
-use crate::symbols::SymbolRefs;
+use crate::symbols::{Reference, SymbolRefs};
 use crate::verb::build_verb;
 use core::fmt::Debug;
 use pest::error::Error;
@@ -69,14 +69,15 @@ pub trait Statement: Debug {
                 };
                 let derived = self
                     .command()
-                    .derive_children(cfg, *node_i)
+                    .derive_parents(cfg, *node_i)
                     .or(Some(SymbolRefs::new()))
                     .unwrap();
 
                 derived.into_iter().for_each(|(s, occurences)| {
                     if s == *node_j {
                         for occ in occurences.into_iter() {
-                            edges.add_references(*node_i, s, HashSet::from([occ]))
+                            let reference = Reference::new_occurrence(s, *node_i, occ);
+                            edges.add_reference(reference)
                         }
                     }
                 })
@@ -121,25 +122,27 @@ impl DefaultStatement {
         let mut res_symbols = HashMap::new();
 
         let filtered_symbols = self.command().filter(cfg, symbols).unwrap();
-        for (selected_symbol, occurences) in filtered_symbols.into_iter() {
-            let derived_symbols = self.command().derive_children(cfg, selected_symbol);
+        let derived_references = self.command().derive_children(cfg, filtered_symbols.clone());
+        let derived_symbols: HashSet<_> = derived_references.iter().map(|r| r.to).collect();
 
-            if let Some((resolved_symbols, nodes, edges)) =
-                self.scope().run(ctx, cfg, derived_symbols)
-            {
-                res_nodes.0.extend(nodes.0.into_iter());
-                res_edges.0.extend(edges.0.into_iter());
-                res_nodes
-                    .0
-                    .extend(resolved_symbols.iter().map(|(s, _)| s.clone()));
-                res_nodes.add(selected_symbol);
-                res_symbols.insert(selected_symbol.clone(), occurences);
+        if let Some((resolved_symbols, nodes, edges)) =
+            self.scope().run_symbols(ctx, cfg, derived_symbols.clone())
+        {
+            res_nodes.0.extend(nodes.0.into_iter());
+            res_edges.0.extend(edges.0.into_iter());
+            res_nodes.0.extend(resolved_symbols.clone());
+            // res_symbols.insert(selected_symbol.clone(), occurrences);
 
-                for (resolved_symbol, occurrences) in resolved_symbols {
-                    res_edges.add_references(selected_symbol, resolved_symbol, occurrences);
+            for reference in derived_references {
+                if resolved_symbols.contains(&reference.to) {
+                    res_edges.add_reference(reference);
                 }
             }
         }
+
+        res_nodes.0.extend(filtered_symbols.iter().map(|(id, _)| *id));
+        res_symbols.extend(filtered_symbols.into_iter());
+
 
         return (res_symbols, res_nodes, res_edges);
     }
@@ -165,7 +168,7 @@ impl DefaultStatement {
                 let derived_symbols = if let Some(symbols) = derived_symbols {
                     symbols
                 } else {
-                    continue
+                    continue;
                 };
 
                 let filtered_symbols = self.command().filter(cfg, derived_symbols);
@@ -175,7 +178,14 @@ impl DefaultStatement {
                     for (selected_symbol, occurrences) in selected_symbols {
                         res_nodes.add(selected_symbol);
                         res_symbols.insert(selected_symbol.clone(), occurrences.clone());
-                        res_edges.add_references(selected_symbol, resolved_symbol, occurrences);
+                        for occurrence in occurrences {
+                            let reference = Reference::new_occurrence(
+                                selected_symbol,
+                                resolved_symbol,
+                                occurrence,
+                            );
+                            res_edges.add_reference(reference);
+                        }
                     }
                 }
             }
