@@ -1,7 +1,7 @@
 use std::env;
 
 use askl::{
-    index::{File, Index, Symbol},
+    index::{File, Index, Reference, Symbol},
     indexer::clang::{run_clang_ast, CompileCommand, VisitorState},
     symbols::{FileId, SymbolId, SymbolType},
 };
@@ -18,7 +18,11 @@ async fn index_files(files: Vec<&str>) -> VisitorState {
     test_directory.push("tests/clang-indexer-code");
     for test_file in files {
         let command = CompileCommand {
-            arguments: Some(vec![clang.to_string(), test_file.to_string()]),
+            arguments: Some(vec![
+                clang.to_string(),
+                "-Wno-implicit-function-declaration".to_string(),
+                test_file.to_string(),
+            ]),
             command: None,
             directory: test_directory.to_str().unwrap().to_string(),
             file: test_file.to_string(),
@@ -55,6 +59,26 @@ fn new_symbol(sym_id: i32, name: &str, file_id: i32, symbol_type: SymbolType) ->
     Symbol::new_nolines(SymbolId(sym_id), name, FileId::new(file_id), symbol_type)
 }
 
+fn mask_ref(reference: &Reference) -> Reference {
+    Reference {
+        from_symbol: reference.from_symbol,
+        to_symbol: reference.to_symbol,
+        from_line: 1,
+        from_col_start: 1,
+        from_col_end: 1,
+    }
+}
+
+fn new_ref(from_symbol: i32, to_symbol: i32) -> Reference {
+    Reference {
+        from_symbol: SymbolId(from_symbol),
+        to_symbol: SymbolId(to_symbol),
+        from_line: 1,
+        from_col_start: 1,
+        from_col_end: 1,
+    }
+}
+
 #[tokio::test]
 async fn create_state() {
     let state = index_files(vec!["test1.c"]).await;
@@ -72,7 +96,11 @@ async fn create_state() {
     let expected_symbols = [
         new_symbol(1, "foo", 1, SymbolType::Declaration),
         new_symbol(2, "foo", 1, SymbolType::Definition),
-        new_symbol(3, "main", 1, SymbolType::Definition),
+        new_symbol(3, "bar", 1, SymbolType::Definition),
+        new_symbol(4, "main", 1, SymbolType::Definition),
+        new_symbol(5, "tar", 1, SymbolType::Declaration),
+        new_symbol(6, "tar", 1, SymbolType::Declaration),
+        new_symbol(7, "tar", 1, SymbolType::Definition),
     ];
     for (i, s) in symbols.iter().enumerate() {
         assert_eq!(mask_symbol(&s), expected_symbols[i]);
@@ -81,12 +109,19 @@ async fn create_state() {
 
     let refs = state.get_index().all_refs().await.unwrap();
     log::debug!("{:#?}", refs);
-    let expected_refs = [];
+    let expected_refs = [new_ref(4, 3)];
     assert_eq!(refs.len(), expected_refs.len());
     for (i, s) in refs.into_iter().enumerate() {
-        assert_eq!(s, expected_refs[i]);
+        assert_eq!(mask_ref(&s), expected_refs[i]);
     }
 
     state.handle_unresolved_symbols().await.unwrap();
 
+    let refs = state.get_index().all_refs().await.unwrap();
+    log::debug!("{:#?}", refs);
+    let expected_refs = [new_ref(4, 3), new_ref(4, 1), new_ref(4, 2)];
+    assert_eq!(refs.len(), expected_refs.len());
+    for (i, s) in refs.into_iter().enumerate() {
+        assert_eq!(mask_ref(&s), expected_refs[i]);
+    }
 }
