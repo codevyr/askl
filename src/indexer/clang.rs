@@ -96,9 +96,20 @@ impl FunctionDecl {
         let range = Occurrence::new(&clang_range, file_id).unwrap();
         let name = self.name.clone().unwrap();
 
+        let compound_stmt: Vec<_> = inner
+            .iter()
+            .filter(|node| matches!(node.kind, Clang::CompoundStmt(_)))
+            .collect();
+
+        let symbol_type = match compound_stmt.len() {
+            0 => SymbolType::Declaration,
+            1 => SymbolType::Definition,
+            _ => panic!("Do not expect multiple compound statements"),
+        };
+
         let parent_id = state
             .index
-            .create_or_get_symbolid(&name, SymbolType::Definition, range)
+            .create_or_get_symbolid(&name, symbol_type, range)
             .await?;
 
         let inner_nodes = inner
@@ -335,5 +346,9 @@ impl VisitorState {
         };
 
         Ok(())
+    }
+
+    pub fn get_index(&self) -> &Index {
+        &self.index
     }
 }

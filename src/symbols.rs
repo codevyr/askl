@@ -249,7 +249,7 @@ impl serde::Serialize for FileId {
     }
 }
 
-#[derive(sqlx::Type, Debug)]
+#[derive(sqlx::Type, Debug, PartialEq, Eq, Copy, Clone)]
 #[repr(i32)]
 pub enum SymbolType {
     Definition = 1,

@@ -1,10 +1,15 @@
+use std::str::FromStr;
+
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePool},
+    Pool, Sqlite,
+};
 
 use crate::symbols::{FileId, Occurrence, SymbolId, SymbolType};
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
 pub struct Symbol {
     pub id: SymbolId,
     pub name: String,
@@ -16,7 +21,22 @@ pub struct Symbol {
     pub col_end: i64,
 }
 
-#[derive(Debug, sqlx::FromRow, Deserialize, Serialize, Clone)]
+impl Symbol {
+    pub fn new_nolines(id: SymbolId, name: &str, file_id: FileId, symbol_type: SymbolType) -> Self {
+        Self {
+            id,
+            name: name.to_string(),
+            file_id,
+            symbol_type,
+            line_start: 1,
+            col_start: 1,
+            line_end: 1,
+            col_end: 1,
+        }
+    }
+}
+
+#[derive(Debug, sqlx::FromRow, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct File {
     pub id: FileId,
     pub path: String,
@@ -24,7 +44,18 @@ pub struct File {
     pub filetype: String,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+impl File {
+    pub fn new(id: FileId, path: &str, project: &str, filetype: &str) -> Self {
+        Self {
+            id,
+            path: path.to_string(),
+            filetype: filetype.to_string(),
+            project: project.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
 pub struct Reference {
     pub from_symbol: SymbolId,
     pub to_symbol: SymbolId,
@@ -46,13 +77,7 @@ impl Index {
         Ok(Self { pool })
     }
 
-    pub async fn new_or_connect(database: &str) -> Result<Self> {
-        let options = SqliteConnectOptions::new()
-            .filename(database)
-            .create_if_missing(true);
-
-        let pool = SqlitePool::connect_with(options).await?;
-
+    async fn create_tables(pool: &Pool<Sqlite>) -> Result<()> {
         sqlx::query!(
             r#"
             CREATE TABLE IF NOT EXISTS files
@@ -91,8 +116,30 @@ impl Index {
             );
             "#
         )
-        .execute(&pool)
+        .execute(pool)
         .await?;
+
+        Ok(())
+    }
+
+    pub async fn new_in_memory() -> Result<Self> {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")?.create_if_missing(true);
+
+        let pool = SqlitePool::connect_with(options).await?;
+
+        Self::create_tables(&pool).await?;
+
+        Ok(Self { pool })
+    }
+
+    pub async fn new_or_connect(database: &str) -> Result<Self> {
+        let options = SqliteConnectOptions::new()
+            .filename(database)
+            .create_if_missing(true);
+
+        let pool = SqlitePool::connect_with(options).await?;
+
+        Self::create_tables(&pool).await?;
 
         Ok(Self { pool })
     }
