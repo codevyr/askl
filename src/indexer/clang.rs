@@ -54,7 +54,7 @@ pub struct TranslationUnitDecl {
 }
 
 impl TranslationUnitDecl {
-    async fn extract_symbol_map(&self, state: &mut VisitorState, inner: &Vec<Node>) -> Result<()> {
+    async fn extract_symbol_map(&self, state: &mut GlobalVisitorState, inner: &Vec<Node>) -> Result<()> {
         for child in inner.iter() {
             match &child.kind {
                 Clang::FunctionDecl(f) => f.extract_symbol_map(state, &child.inner).await?,
@@ -89,7 +89,7 @@ pub struct FunctionDecl {
 }
 
 impl FunctionDecl {
-    async fn extract_symbol_map(&self, state: &mut VisitorState, inner: &Vec<Node>) -> Result<()> {
+    async fn extract_symbol_map(&self, state: &mut GlobalVisitorState, inner: &Vec<Node>) -> Result<()> {
         let clang_range = self.range.clone();
         let file_id = state.extract_file_from_range(&clang_range).await.unwrap();
 
@@ -279,16 +279,16 @@ struct UnresolvedChild {
     occurrence: Occurrence,
 }
 
-pub struct VisitorState {
+pub struct GlobalVisitorState {
     unresolved_children: HashMap<String, HashSet<UnresolvedChild>>,
     index: Index,
     project: String,
     language: String,
 }
 
-impl VisitorState {
+impl GlobalVisitorState {
     pub fn new(index: Index) -> Self {
-        VisitorState {
+        GlobalVisitorState {
             unresolved_children: HashMap::new(),
             index: index,
             project: "test".to_string(),
@@ -319,7 +319,7 @@ impl VisitorState {
             .await
     }
 
-    pub async fn handle_unresolved_symbols(&self) -> Result<()> {
+    pub async fn resolve_global_symbols(&self) -> Result<()> {
         for (child_name, unresolved) in self.unresolved_children.iter() {
             let resolved_children = self.index.find_symbols(&child_name).await?;
             for resolved_child in resolved_children {

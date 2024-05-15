@@ -2,7 +2,7 @@ use std::{fs::File, sync::Arc};
 
 use askl::{
     index::Index,
-    indexer::clang::{run_clang_ast, CompileCommand, Node, VisitorState},
+    indexer::clang::{run_clang_ast, CompileCommand, Node, GlobalVisitorState},
 };
 use clap::Parser;
 use indicatif::ProgressBar;
@@ -85,12 +85,12 @@ async fn main() -> anyhow::Result<()> {
         .map(|r| r.unwrap())
         .map(|(_, node)| node);
 
-    let mut state = VisitorState::new(index);
+    let mut state = GlobalVisitorState::new(index);
     for node in nodes {
         state.extract_symbol_map_root(node).await?;
     }
 
-    state.handle_unresolved_symbols().await?;
+    state.resolve_global_symbols().await?;
 
     Ok(())
 }

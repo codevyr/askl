@@ -2,13 +2,13 @@ use std::env;
 
 use askl::{
     index::{File, Index, Reference, Symbol},
-    indexer::clang::{run_clang_ast, CompileCommand, VisitorState},
+    indexer::clang::{run_clang_ast, CompileCommand, GlobalVisitorState},
     symbols::{FileId, SymbolId, SymbolType},
 };
 
-async fn index_files(files: Vec<&str>) -> VisitorState {
+async fn index_files(files: Vec<&str>) -> GlobalVisitorState {
     let index = Index::new_in_memory().await.unwrap();
-    let mut state = VisitorState::new(index);
+    let mut state = GlobalVisitorState::new(index);
 
     let symbols = state.get_index().all_symbols().await.unwrap();
     assert!(symbols.is_empty());
@@ -115,7 +115,7 @@ async fn create_state() {
         assert_eq!(mask_ref(&s), expected_refs[i]);
     }
 
-    state.handle_unresolved_symbols().await.unwrap();
+    state.resolve_global_symbols().await.unwrap();
 
     let refs = state.get_index().all_refs().await.unwrap();
     log::debug!("{:#?}", refs);
