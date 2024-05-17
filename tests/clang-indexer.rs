@@ -3,7 +3,7 @@ use std::env;
 use askl::{
     index::{File, Index, Reference, Symbol},
     indexer::clang::{run_clang_ast, CompileCommand, GlobalVisitorState},
-    symbols::{FileId, SymbolId, SymbolType},
+    symbols::{FileId, SymbolId, SymbolScope, SymbolType},
 };
 
 async fn index_files(files: Vec<&str>) -> GlobalVisitorState {
@@ -14,6 +14,7 @@ async fn index_files(files: Vec<&str>) -> GlobalVisitorState {
     assert!(symbols.is_empty());
 
     let clang = "clang";
+    let clang = "/nix/store/2n2ranlijkkab8xqb1y0bha8mhl6j2gk-clang-wrapper-17.0.6/bin/clang";
     let mut test_directory = env::current_dir().unwrap();
     test_directory.push("tests/clang-indexer-code");
     for test_file in files {
@@ -48,6 +49,7 @@ fn mask_symbol(symbol: &Symbol) -> Symbol {
         name: symbol.name.clone(),
         file_id: symbol.file_id,
         symbol_type: symbol.symbol_type,
+        symbol_scope: symbol.symbol_scope,
         line_start: 1,
         col_start: 1,
         line_end: 1,
@@ -55,8 +57,20 @@ fn mask_symbol(symbol: &Symbol) -> Symbol {
     }
 }
 
-fn new_symbol(sym_id: i32, name: &str, file_id: i32, symbol_type: SymbolType) -> Symbol {
-    Symbol::new_nolines(SymbolId(sym_id), name, FileId::new(file_id), symbol_type)
+fn new_symbol(
+    sym_id: i32,
+    name: &str,
+    file_id: i32,
+    symbol_type: SymbolType,
+    symbol_scope: SymbolScope,
+) -> Symbol {
+    Symbol::new_nolines(
+        SymbolId(sym_id),
+        name,
+        FileId::new(file_id),
+        symbol_type,
+        symbol_scope,
+    )
 }
 
 fn mask_ref(reference: &Reference) -> Reference {
@@ -91,16 +105,18 @@ async fn create_state() {
     );
 
     let symbols = state.get_index().all_symbols().await.unwrap();
-    log::debug!("{:#?}", symbols);
+    println!("Symbols: {:#?}", symbols);
 
     let expected_symbols = [
-        new_symbol(1, "foo", 1, SymbolType::Declaration),
-        new_symbol(2, "foo", 1, SymbolType::Definition),
-        new_symbol(3, "bar", 1, SymbolType::Definition),
-        new_symbol(4, "main", 1, SymbolType::Definition),
-        new_symbol(5, "tar", 1, SymbolType::Declaration),
-        new_symbol(6, "tar", 1, SymbolType::Declaration),
-        new_symbol(7, "tar", 1, SymbolType::Definition),
+        new_symbol(1, "foo", 1, SymbolType::Declaration, SymbolScope::Global),
+        new_symbol(2, "foo", 1, SymbolType::Definition, SymbolScope::Global),
+        new_symbol(3, "bar", 1, SymbolType::Definition, SymbolScope::Local),
+        new_symbol(4, "zar", 1, SymbolType::Declaration, SymbolScope::Local),
+        new_symbol(5, "main", 1, SymbolType::Definition, SymbolScope::Global),
+        new_symbol(6, "tar", 1, SymbolType::Declaration, SymbolScope::Global),
+        new_symbol(7, "tar", 1, SymbolType::Declaration, SymbolScope::Global),
+        new_symbol(8, "tar", 1, SymbolType::Definition, SymbolScope::Global),
+        new_symbol(9, "zar", 1, SymbolType::Definition, SymbolScope::Local),
     ];
     for (i, s) in symbols.iter().enumerate() {
         assert_eq!(mask_symbol(&s), expected_symbols[i]);
@@ -109,7 +125,11 @@ async fn create_state() {
 
     let refs = state.get_index().all_refs().await.unwrap();
     log::debug!("{:#?}", refs);
-    let expected_refs = [new_ref(4, 3)];
+    let expected_refs = [
+        new_ref(5, 4), // main to zar
+        new_ref(5, 9), // main to zar
+        new_ref(5, 3), // main to bar
+    ];
     assert_eq!(refs.len(), expected_refs.len());
     for (i, s) in refs.into_iter().enumerate() {
         assert_eq!(mask_ref(&s), expected_refs[i]);

@@ -7,7 +7,7 @@ use sqlx::{
     Pool, Sqlite,
 };
 
-use crate::symbols::{FileId, Occurrence, SymbolId, SymbolType};
+use crate::symbols::{FileId, Occurrence, SymbolId, SymbolType, SymbolScope};
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
 pub struct Symbol {
@@ -15,6 +15,7 @@ pub struct Symbol {
     pub name: String,
     pub file_id: FileId,
     pub symbol_type: SymbolType,
+    pub symbol_scope: SymbolScope,
     pub line_start: i64,
     pub col_start: i64,
     pub line_end: i64,
@@ -22,12 +23,13 @@ pub struct Symbol {
 }
 
 impl Symbol {
-    pub fn new_nolines(id: SymbolId, name: &str, file_id: FileId, symbol_type: SymbolType) -> Self {
+    pub fn new_nolines(id: SymbolId, name: &str, file_id: FileId, symbol_type: SymbolType, symbol_scope: SymbolScope) -> Self {
         Self {
             id,
             name: name.to_string(),
             file_id,
             symbol_type,
+            symbol_scope,
             line_start: 1,
             col_start: 1,
             line_end: 1,
@@ -95,12 +97,12 @@ impl Index {
                 name TEXT NOT NULL,
                 file_id INTEGER NOT NULL,
                 symbol_type INTEGER NOT NULL,
+                symbol_scope INTEGER NOT NULL,
                 line_start INTEGER NOT NULL,
                 col_start INTEGER NOT NULL,
                 line_end INTEGER NOT NULL,
                 col_end INTEGER NOT NULL,
-                FOREIGN KEY (file_id) REFERENCES files(id),
-                UNIQUE (name, file_id, symbol_type)
+                FOREIGN KEY (file_id) REFERENCES files(id)
             );
 
             CREATE TABLE IF NOT EXISTS symbol_refs
@@ -182,6 +184,28 @@ impl Index {
         Ok(file_id.into())
     }
 
+    pub async fn create_symbol(&self, new_symbol: Symbol) -> Result<SymbolId> {
+        let id = sqlx::query!(
+                r#"
+                INSERT INTO symbols (name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+                new_symbol.name,
+                new_symbol.file_id,
+                new_symbol.symbol_type,
+                new_symbol.symbol_scope,
+                new_symbol.line_start,
+                new_symbol.col_start,
+                new_symbol.line_end,
+                new_symbol.col_end
+            )
+            .execute(&self.pool)
+            .await?
+            .last_insert_rowid();
+
+        Ok(id.into())
+    }
+
     pub async fn create_or_get_symbolid(
         &self,
         name: &str,
@@ -202,7 +226,7 @@ impl Index {
         .await?;
 
         if let Some(rec) = rec {
-            return Ok(rec.id.unwrap().into());
+            return Ok(rec.id.into());
         }
 
         let symbol_id = sqlx::query!(

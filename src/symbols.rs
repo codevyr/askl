@@ -182,6 +182,16 @@ impl SymbolId {
     }
 }
 
+impl From<clang_ast::Id> for SymbolId {
+    fn from(string: clang_ast::Id) -> Self {
+        let value = format!("{}", string)
+            .strip_prefix("0x")
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+            .unwrap();
+        Self(value as i32)
+    }
+}
+
 impl fmt::Display for SymbolId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -256,12 +266,41 @@ pub enum SymbolType {
     Declaration = 2,
 }
 
+impl SymbolType {
+    pub fn as_i64(&self) -> i64 {
+        return *self as i64;
+    }
+}
+
 impl From<i64> for SymbolType {
     fn from(value: i64) -> Self {
         match value {
             x if x == SymbolType::Definition as i64 => SymbolType::Definition,
             x if x == SymbolType::Declaration as i64 => SymbolType::Declaration,
             _ => panic!("Invalid symbol type value"),
+        }
+    }
+}
+
+#[derive(sqlx::Type, Debug, PartialEq, Eq, Copy, Clone)]
+#[repr(i32)]
+pub enum SymbolScope {
+    Local = 1,
+    Global = 2,
+}
+
+impl SymbolScope {
+    pub fn as_i64(&self) -> i64 {
+        return *self as i64;
+    }
+}
+
+impl From<i64> for SymbolScope {
+    fn from(value: i64) -> Self {
+        match value {
+            x if x == SymbolScope::Local as i64 => SymbolScope::Local,
+            x if x == SymbolScope::Global as i64 => SymbolScope::Global,
+            _ => panic!("Invalid symbol scope value"),
         }
     }
 }

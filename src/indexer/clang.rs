@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    index::Index,
-    symbols::{FileId, Occurrence, SymbolId, SymbolType},
+    index::{Index, Symbol},
+    symbols::{FileId, Occurrence, SymbolId, SymbolType, SymbolScope},
 };
 use anyhow::{anyhow, bail, Result};
+use clang_ast::Id;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
@@ -54,10 +55,17 @@ pub struct TranslationUnitDecl {
 }
 
 impl TranslationUnitDecl {
-    async fn extract_symbol_map(&self, state: &mut GlobalVisitorState, inner: &Vec<Node>) -> Result<()> {
+    async fn visit(
+        &self,
+        state: &mut GlobalVisitorState,
+        unit_state: &mut UnitVisitorState,
+        inner: &Vec<Node>,
+    ) -> Result<()> {
         for child in inner.iter() {
             match &child.kind {
-                Clang::FunctionDecl(f) => f.extract_symbol_map(state, &child.inner).await?,
+                Clang::FunctionDecl(f) => {
+                    f.visit(state, unit_state, child.id, &child.inner).await?
+                }
                 _ => {}
             }
         }
@@ -81,38 +89,40 @@ pub struct EnumDecl {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct FunctionDecl {
     pub name: Option<String>,
     pub loc: Option<clang_ast::SourceLocation>,
     pub range: Option<clang_ast::SourceRange>,
     pub inner: Option<Vec<Node>>,
+    pub storage_class: Option<String>,
+    pub previous_decl: Option<Id>,
 }
 
 impl FunctionDecl {
-    async fn extract_symbol_map(&self, state: &mut GlobalVisitorState, inner: &Vec<Node>) -> Result<()> {
-        let clang_range = self.range.clone();
-        let file_id = state.extract_file_from_range(&clang_range).await.unwrap();
-
-        let range = Occurrence::new(&clang_range, file_id).unwrap();
-        let name = self.name.clone().unwrap();
-
+    fn get_symbol_state(&self, inner: &Vec<Node>) -> SymbolType {
         let compound_stmt: Vec<_> = inner
             .iter()
             .filter(|node| matches!(node.kind, Clang::CompoundStmt(_)))
             .collect();
 
-        let symbol_type = match compound_stmt.len() {
+        match compound_stmt.len() {
             0 => SymbolType::Declaration,
             1 => SymbolType::Definition,
             _ => panic!("Do not expect multiple compound statements"),
-        };
+        }
+    }
 
-        let parent_id = state
-            .index
-            .create_or_get_symbolid(&name, symbol_type, range)
-            .await?;
+    fn get_symbol_scope(&self) -> SymbolScope {
+        match self.storage_class.as_deref() {
+            Some("static") => SymbolScope::Local,
+            None => SymbolScope::Global,
+            _ => panic!("Unknown symbol scope {:?}", self.storage_class)
+        }
+    }
 
-        let inner_nodes = inner
+    fn extract_call_refs<'a>(&'a self, nodes: &'a Vec<Node>) -> impl Iterator<Item = &Node> + 'a {
+        nodes
             .iter()
             .map(|node| {
                 extract_filter(node, &|node: &Node| matches!(node.kind, Clang::CallExpr(_)))
@@ -123,10 +133,35 @@ impl FunctionDecl {
                     matches!(node.kind, Clang::DeclRefExpr(_))
                 })
             })
-            .flatten();
+            .flatten()
+    }
+
+    async fn visit(
+        &self,
+        state: &mut GlobalVisitorState,
+        unit_state: &mut UnitVisitorState,
+        id: Id,
+        inner: &Vec<Node>,
+    ) -> Result<()> {
+        let clang_range = self.range.clone();
+        let file_id = state.extract_file_from_range(&clang_range).await.unwrap();
+
+        let occurrence = Occurrence::new(&clang_range, file_id).unwrap();
+        let name = self.name.as_ref().unwrap();
+
+        let symbol_type = self.get_symbol_state(inner);
+        let symbol_scope = self.get_symbol_scope();
+
+        println!(
+            "{:?} {:?} {:?}",
+            self.name, self.storage_class, self.previous_decl
+        );
+
+        let new_symbol = UnitSymbol::new(id, self.previous_decl, name, symbol_type, symbol_scope, occurrence);
+        unit_state.add_symbol(new_symbol.clone());
 
         let mut children = Vec::new();
-        for node in inner_nodes {
+        for node in self.extract_call_refs(inner) {
             match &node.kind {
                 Clang::DeclRefExpr(ref_expr) => {
                     let referenced_decl = ref_expr.referenced_decl.as_ref().unwrap();
@@ -138,10 +173,27 @@ impl FunctionDecl {
 
                     match &referenced_decl.kind {
                         Clang::FunctionDecl(f) => {
+                            // If the reference id is unknown, then the reference is
+                            // also an implicit symbol declaration
+                            let parent_symbol = if !unit_state.contains_symbol(&referenced_decl.id) {
+                                let new_symbol = UnitSymbol::new(
+                                    referenced_decl.id,
+                                    None,
+                                    f.name.as_ref().unwrap(),
+                                    SymbolType::Declaration,
+                                    SymbolScope::Global,
+                                    occurrence.clone(),
+                                );
+                                unit_state.add_symbol(new_symbol.clone());
+                                new_symbol
+                            } else {
+                                new_symbol.clone()
+                            };
+
                             let child_name = f.name.as_ref().unwrap().clone();
                             children.push(UnresolvedChild {
-                                parent_id,
-                                child_name,
+                                parent_id: parent_symbol.id,
+                                child_id: referenced_decl.id,
                                 occurrence,
                             })
                         }
@@ -274,13 +326,13 @@ pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<(St
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
 struct UnresolvedChild {
-    parent_id: SymbolId,
-    child_name: String,
+    parent_id: Id,
+    child_id: Id,
     occurrence: Occurrence,
 }
 
 pub struct GlobalVisitorState {
-    unresolved_children: HashMap<String, HashSet<UnresolvedChild>>,
+    unresolved_children: HashMap<Id, HashSet<UnresolvedChild>>,
     index: Index,
     project: String,
     language: String,
@@ -299,7 +351,7 @@ impl GlobalVisitorState {
     fn add_unresolved_children(&mut self, children: Vec<UnresolvedChild>) {
         for child in children {
             self.unresolved_children
-                .entry(child.child_name.clone())
+                .entry(child.child_id)
                 .and_modify(|v| {
                     v.insert(child.clone());
                 })
@@ -320,18 +372,19 @@ impl GlobalVisitorState {
     }
 
     pub async fn resolve_global_symbols(&self) -> Result<()> {
-        for (child_name, unresolved) in self.unresolved_children.iter() {
+        for (child_id, unresolved) in self.unresolved_children.iter() {
+            let child_name = "asdf";
             let resolved_children = self.index.find_symbols(&child_name).await?;
             for resolved_child in resolved_children {
                 for u in unresolved.iter() {
-                    let res = self
-                        .index
-                        .add_reference(u.parent_id, resolved_child.id, &u.occurrence)
-                        .await;
-                    if res.is_err() {
-                        log::error!("{:#?}", unresolved);
-                    }
-                    res?;
+                    // let res = self
+                    //     .index
+                    //     .add_reference(u.parent_id, resolved_child.id, &u.occurrence)
+                    //     .await;
+                    // if res.is_err() {
+                    //     log::error!("{:#?}", unresolved);
+                    // }
+                    // res?;
                 }
             }
         }
@@ -340,15 +393,109 @@ impl GlobalVisitorState {
     }
 
     pub async fn extract_symbol_map_root(&mut self, root: Node) -> Result<()> {
+        let mut unit_state = UnitVisitorState::new();
         match root.kind {
-            Clang::TranslationUnitDecl(node) => node.extract_symbol_map(self, &root.inner).await?,
+            Clang::TranslationUnitDecl(node) => {
+                node.visit(self, &mut unit_state, &root.inner).await?
+            }
             _ => bail!("Not implemented"),
         };
+
+        unit_state.resolve_local_symbols(&self.index).await?;
+        // let parent_id = state
+        // .index
+        // .create_or_get_symbolid(&name, symbol_type, range)
+        // .await?;
 
         Ok(())
     }
 
     pub fn get_index(&self) -> &Index {
         &self.index
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UnitSymbol {
+    id: Id,
+    prev: Option<Id>,
+    name: String,
+    symbol_type: SymbolType,
+    symbol_scope: SymbolScope,
+    occurrence: Occurrence,
+}
+
+impl UnitSymbol {
+    fn new(
+        id: Id,
+        prev: Option<Id>,
+        name: &str,
+        symbol_type: SymbolType,
+        symbol_scope: SymbolScope,
+        occurrence: Occurrence,
+    ) -> Self {
+        Self {
+            id,
+            prev,
+            name: name.to_string(),
+            symbol_type,
+            symbol_scope,
+            occurrence,
+        }
+    }
+}
+
+impl Into<crate::index::Symbol> for UnitSymbol {
+    fn into(self) -> crate::index::Symbol {
+        crate::index::Symbol {
+            id: self.id.into(),
+            name: self.name,
+            file_id: self.occurrence.file,
+            symbol_type: self.symbol_type,
+            symbol_scope: self.symbol_scope,
+            line_start: self.occurrence.line_start as i64,
+            col_start: self.occurrence.column_start as i64,
+            line_end: self.occurrence.line_end as i64,
+            col_end: self.occurrence.column_end as i64,
+        }
+    }
+}
+
+struct UnitVisitorState {
+    references: HashMap<String, HashSet<UnresolvedChild>>,
+    symbols: Vec<UnitSymbol>,
+    symbol_ids: HashSet<Id>,
+}
+
+impl UnitVisitorState {
+    fn new() -> Self {
+        Self {
+            references: HashMap::new(),
+            symbols: Vec::new(),
+            symbol_ids: HashSet::new(),
+        }
+    }
+
+    fn add_symbol(&mut self, new_symbol: UnitSymbol) {
+        self.symbol_ids.insert(new_symbol.id);
+        self.symbols.push(new_symbol);
+    }
+
+    fn contains_symbol(&self, id: &Id) -> bool {
+        self.symbol_ids.contains(id)
+    }
+
+    async fn resolve_local_symbols(&mut self, index: &Index) -> Result<()> {
+        let mut ids = Vec::new();
+        ids.reserve(self.symbol_ids.len());
+
+        for symbol in self.symbols.iter() {
+            let id = index
+                .create_symbol(symbol.clone().into())
+                .await?;
+            ids.push(id)
+        }
+
+        Ok(())
     }
 }
