@@ -210,6 +210,7 @@ impl Index {
         &self,
         name: &str,
         symbol_type: SymbolType,
+        symbol_scope: SymbolScope,
         occurrence: Occurrence,
     ) -> Result<SymbolId> {
         let rec = sqlx::query!(
@@ -231,12 +232,13 @@ impl Index {
 
         let symbol_id = sqlx::query!(
             r#"
-            INSERT INTO symbols (name, file_id, symbol_type, line_start, col_start, line_end, col_end)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO symbols (name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
             name,
             occurrence.file,
             symbol_type,
+            symbol_scope,
             occurrence.line_start,
             occurrence.column_start,
             occurrence.line_end,

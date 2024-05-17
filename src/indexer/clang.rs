@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     index::{Index, Symbol},
-    symbols::{FileId, Occurrence, SymbolId, SymbolType, SymbolScope},
+    symbols::{FileId, Occurrence, SymbolId, SymbolScope, SymbolType},
 };
 use anyhow::{anyhow, bail, Result};
 use clang_ast::Id;
@@ -117,7 +117,7 @@ impl FunctionDecl {
         match self.storage_class.as_deref() {
             Some("static") => SymbolScope::Local,
             None => SymbolScope::Global,
-            _ => panic!("Unknown symbol scope {:?}", self.storage_class)
+            _ => panic!("Unknown symbol scope {:?}", self.storage_class),
         }
     }
 
@@ -157,7 +157,10 @@ impl FunctionDecl {
             self.name, self.storage_class, self.previous_decl
         );
 
-        let new_symbol = UnitSymbol::new(id, self.previous_decl, name, symbol_type, symbol_scope, occurrence);
+        let parent_id = unit_state.get_parent_id(id, self.previous_decl);
+
+        let new_symbol =
+            UnitSymbol::new(id, parent_id, name, symbol_type, symbol_scope, occurrence);
         unit_state.add_symbol(new_symbol.clone());
 
         let mut children = Vec::new();
@@ -175,24 +178,22 @@ impl FunctionDecl {
                         Clang::FunctionDecl(f) => {
                             // If the reference id is unknown, then the reference is
                             // also an implicit symbol declaration
-                            let parent_symbol = if !unit_state.contains_symbol(&referenced_decl.id) {
+                            if !unit_state.contains_symbol(&referenced_decl.id) {
+                                unit_state.get_parent_id(referenced_decl.id, None);
                                 let new_symbol = UnitSymbol::new(
                                     referenced_decl.id,
-                                    None,
+                                    referenced_decl.id,
                                     f.name.as_ref().unwrap(),
                                     SymbolType::Declaration,
                                     SymbolScope::Global,
                                     occurrence.clone(),
                                 );
-                                unit_state.add_symbol(new_symbol.clone());
-                                new_symbol
-                            } else {
-                                new_symbol.clone()
+                                unit_state.add_symbol(new_symbol);
                             };
 
                             let child_name = f.name.as_ref().unwrap().clone();
                             children.push(UnresolvedChild {
-                                parent_id: parent_symbol.id,
+                                parent_id: new_symbol.id,
                                 child_id: referenced_decl.id,
                                 occurrence,
                             })
@@ -418,7 +419,7 @@ impl GlobalVisitorState {
 #[derive(Debug, Clone)]
 struct UnitSymbol {
     id: Id,
-    prev: Option<Id>,
+    parent: Id,
     name: String,
     symbol_type: SymbolType,
     symbol_scope: SymbolScope,
@@ -428,7 +429,7 @@ struct UnitSymbol {
 impl UnitSymbol {
     fn new(
         id: Id,
-        prev: Option<Id>,
+        parent: Id,
         name: &str,
         symbol_type: SymbolType,
         symbol_scope: SymbolScope,
@@ -436,7 +437,7 @@ impl UnitSymbol {
     ) -> Self {
         Self {
             id,
-            prev,
+            parent,
             name: name.to_string(),
             symbol_type,
             symbol_scope,
@@ -464,7 +465,10 @@ impl Into<crate::index::Symbol> for UnitSymbol {
 struct UnitVisitorState {
     references: HashMap<String, HashSet<UnresolvedChild>>,
     symbols: Vec<UnitSymbol>,
-    symbol_ids: HashSet<Id>,
+    /// A map of registered symbols with the list of related symbols. Related
+    /// symbols are the one which point to each other using [`previous_decl`]
+    symbol_ids: HashMap<Id, Vec<Id>>,
+    parent_ids: HashMap<Id, Id>,
 }
 
 impl UnitVisitorState {
@@ -472,17 +476,32 @@ impl UnitVisitorState {
         Self {
             references: HashMap::new(),
             symbols: Vec::new(),
-            symbol_ids: HashSet::new(),
+            symbol_ids: HashMap::new(),
+            parent_ids: HashMap::new(),
         }
     }
 
     fn add_symbol(&mut self, new_symbol: UnitSymbol) {
-        self.symbol_ids.insert(new_symbol.id);
+        self.symbol_ids.insert(new_symbol.id, Vec::new());
         self.symbols.push(new_symbol);
     }
 
     fn contains_symbol(&self, id: &Id) -> bool {
-        self.symbol_ids.contains(id)
+        self.symbol_ids.contains_key(id)
+    }
+
+    fn get_parent_id(&mut self, symbol_id: Id, previous_decl: Option<Id>) -> Id {
+        println!("Get parent ID {:?} {:?}", symbol_id, previous_decl);
+        if let Some(parent_id) = previous_decl {
+            let root_parent_id = self.parent_ids.get(&parent_id).expect(
+                "If a symbol has previous_decl, then the parent symbol should have been registered",
+            );
+            self.parent_ids.insert(symbol_id, *root_parent_id);
+            return parent_id;
+        }
+
+        self.parent_ids.insert(symbol_id, symbol_id);
+        symbol_id
     }
 
     async fn resolve_local_symbols(&mut self, index: &Index) -> Result<()> {
@@ -490,9 +509,7 @@ impl UnitVisitorState {
         ids.reserve(self.symbol_ids.len());
 
         for symbol in self.symbols.iter() {
-            let id = index
-                .create_symbol(symbol.clone().into())
-                .await?;
+            let id = index.create_symbol(symbol.clone().into()).await?;
             ids.push(id)
         }
 
