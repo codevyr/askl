@@ -163,7 +163,6 @@ impl FunctionDecl {
             UnitSymbol::new(id, parent_id, name, symbol_type, symbol_scope, occurrence);
         unit_state.add_symbol(new_symbol.clone());
 
-        let mut children = Vec::new();
         for node in self.extract_call_refs(inner) {
             match &node.kind {
                 Clang::DeclRefExpr(ref_expr) => {
@@ -178,8 +177,8 @@ impl FunctionDecl {
                         Clang::FunctionDecl(f) => {
                             // If the reference id is unknown, then the reference is
                             // also an implicit symbol declaration
-                            if !unit_state.contains_symbol(&referenced_decl.id) {
-                                unit_state.get_parent_id(referenced_decl.id, None);
+                            let root_symbol_id = if !unit_state.contains_symbol(&referenced_decl.id)
+                            {
                                 let new_symbol = UnitSymbol::new(
                                     referenced_decl.id,
                                     referenced_decl.id,
@@ -189,12 +188,15 @@ impl FunctionDecl {
                                     occurrence.clone(),
                                 );
                                 unit_state.add_symbol(new_symbol);
+                                unit_state.get_parent_id(referenced_decl.id, None)
+                            } else {
+                                unit_state
+                                    .get_parent_id(referenced_decl.id, Some(referenced_decl.id))
                             };
 
-                            let child_name = f.name.as_ref().unwrap().clone();
-                            children.push(UnresolvedChild {
-                                parent_id: new_symbol.id,
-                                child_id: referenced_decl.id,
+                            unit_state.add_reference(UnresolvedChild {
+                                from: new_symbol.id,
+                                to: root_symbol_id,
                                 occurrence,
                             })
                         }
@@ -209,8 +211,6 @@ impl FunctionDecl {
                 }
             }
         }
-
-        state.add_unresolved_children(children);
 
         Ok(())
     }
@@ -327,8 +327,8 @@ pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<(St
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
 struct UnresolvedChild {
-    parent_id: Id,
-    child_id: Id,
+    from: Id,
+    to: Id,
     occurrence: Occurrence,
 }
 
@@ -352,7 +352,7 @@ impl GlobalVisitorState {
     fn add_unresolved_children(&mut self, children: Vec<UnresolvedChild>) {
         for child in children {
             self.unresolved_children
-                .entry(child.child_id)
+                .entry(child.to)
                 .and_modify(|v| {
                     v.insert(child.clone());
                 })
@@ -463,7 +463,7 @@ impl Into<crate::index::Symbol> for UnitSymbol {
 }
 
 struct UnitVisitorState {
-    references: HashMap<String, HashSet<UnresolvedChild>>,
+    references: Vec<UnresolvedChild>,
     symbols: Vec<UnitSymbol>,
     /// A map of registered symbols with the list of related symbols. Related
     /// symbols are the one which point to each other using [`previous_decl`]
@@ -474,7 +474,7 @@ struct UnitVisitorState {
 impl UnitVisitorState {
     fn new() -> Self {
         Self {
-            references: HashMap::new(),
+            references: Vec::new(),
             symbols: Vec::new(),
             symbol_ids: HashMap::new(),
             parent_ids: HashMap::new(),
@@ -513,6 +513,12 @@ impl UnitVisitorState {
             ids.push(id)
         }
 
+        println!("{:#?}", self.references);
+
         Ok(())
+    }
+
+    fn add_reference(&mut self, child: UnresolvedChild) {
+        self.references.push(child);
     }
 }
