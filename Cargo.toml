@@ -1,16 +1,6 @@
-[package]
-name = "askl"
-version = "0.1.0"
-authors = ["Maksym Planeta <mplaneta@os.inf.tu-dresden.de>"]
-edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [workspace]
-members = ["index", "create-index", "askld"]
-
-[[bin]]
-name="gen-ast"
+resolver = "2"
+members = ["index", "create-index", "askld", "gen-ast"]
 
 [workspace.dependencies]
 pest="2.1"

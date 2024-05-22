@@ -246,10 +246,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f538837af36e6f6a9be0faa67f9a314f8119e4e4b5867c6ab40ed60360142519"
 
 [[package]]
-name = "askl"
-version = "0.1.0"
-
-[[package]]
 name = "askld"
 version = "0.1.0"
 dependencies = [
@@ -834,6 +830,33 @@ dependencies = [
  "pin-project-lite",
  "pin-utils",
  "slab",
+]
+
+[[package]]
+name = "gen-ast"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clang-ast",
+ "clap",
+ "console",
+ "env_logger",
+ "futures",
+ "index",
+ "indicatif",
+ "itertools 0.10.5",
+ "jsonrpc-core",
+ "log",
+ "lsp-types",
+ "pest",
+ "pest_derive",
+ "rand",
+ "serde",
+ "serde_json",
+ "shell-words",
+ "sqlx",
+ "tokio",
+ "url",
 ]
 
 [[package]]
