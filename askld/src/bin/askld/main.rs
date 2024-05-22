@@ -2,15 +2,12 @@ use std::collections::HashSet;
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::{anyhow, Result};
-use askl::execution_context::ExecutionContext;
-use askl::index::Index;
-use askl::symbols::{FileId, Occurrence};
-use askl::{
-    cfg::ControlFlowGraph,
-    parser::parse,
-    symbols::{SymbolId, SymbolMap},
-};
+use askld::execution_context::ExecutionContext;
+use askld::{cfg::ControlFlowGraph, parser::parse};
 use clap::Parser;
+use index::db::Index;
+use index::symbols::{FileId, Occurrence};
+use index::symbols::{SymbolId, SymbolMap};
 use log::{debug, info};
 use serde::{Deserialize, Serialize, Serializer};
 
@@ -208,7 +205,7 @@ async fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use askl::cfg::{EdgeList, NodeList};
+    use askld::cfg::{EdgeList, NodeList};
 
     use super::*;
 

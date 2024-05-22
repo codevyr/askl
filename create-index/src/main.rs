@@ -1,8 +1,7 @@
-use std::{path::Path, fs};
-
 use anyhow::bail;
-use askl::index::Index;
 use clap::Parser;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
+use std::{fs, path::Path};
 
 /// Indexer for askl
 #[derive(Parser, Debug, Clone)]
@@ -30,7 +29,15 @@ async fn main() -> anyhow::Result<()> {
         bail!("File exists");
     }
 
-    Index::new_or_connect(&args.output).await?;
+    let options = SqliteConnectOptions::new()
+        .filename(&args.output)
+        .create_if_missing(true);
+
+    let pool = SqlitePool::connect_with(options).await?;
+
+    sqlx::query_file!("../sql/create_tables.sql")
+        .execute(&pool)
+        .await?;
 
     Ok(())
 }

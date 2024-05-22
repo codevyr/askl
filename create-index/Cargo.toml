@@ -1,0 +1,13 @@
+[package]
+name = "create-index"
+version = "0.1.0"
+authors = ["Maksym Planeta <mplaneta@os.inf.tu-dresden.de>"]
+edition = "2021"
+
+[dependencies]
+
+anyhow = {workspace = true}
+clap = {workspace = true}
+tokio = {workspace = true}
+sqlx = {workspace = true}
+env_logger = {workspace = true}

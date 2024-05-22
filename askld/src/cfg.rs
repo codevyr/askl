@@ -1,7 +1,7 @@
 use std::{collections::HashSet, iter::Iterator};
 
-use crate::{
-    index::File,
+use index::db::File;
+use index::{
     symbols::{FileId, Occurrence, Symbol, SymbolId, SymbolMap, Reference},
 };
 

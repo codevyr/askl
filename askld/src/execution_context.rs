@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::symbols::SymbolId;
+use index::symbols::SymbolId;
 
 pub struct ExecutionContext {
     pub saved_labels: HashMap<String, HashSet<SymbolId>>,

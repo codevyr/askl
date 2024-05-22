@@ -2,7 +2,7 @@ use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::execution_context::ExecutionContext;
 use crate::parser::{ParserContext, Rule};
 use crate::statement::{build_empty_statement, build_statement, Statement};
-use crate::symbols::{SymbolRefs, SymbolId};
+use index::symbols::{SymbolRefs, SymbolId};
 use core::fmt::Debug;
 use pest::error::Error;
 use std::collections::HashSet;

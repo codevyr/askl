@@ -6,7 +6,13 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies]
+[workspace]
+members = ["index", "create-index", "askld"]
+
+[[bin]]
+name="gen-ast"
+
+[workspace.dependencies]
 pest="2.1"
 pest_derive="2.1"
 clap = { version = "3.2", features = ["derive"] }

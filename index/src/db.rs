@@ -12,6 +12,8 @@ use crate::symbols::{FileId, Occurrence, SymbolId, SymbolType, SymbolScope};
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
 pub struct Symbol {
     pub id: SymbolId,
+    #[sqlx(default)]
+    pub parent_id: Option<SymbolId>,
     pub name: String,
     pub file_id: FileId,
     pub symbol_type: SymbolType,
@@ -26,6 +28,7 @@ impl Symbol {
     pub fn new_nolines(id: SymbolId, name: &str, file_id: FileId, symbol_type: SymbolType, symbol_scope: SymbolScope) -> Self {
         Self {
             id,
+            parent_id: None,
             name: name.to_string(),
             file_id,
             symbol_type,
@@ -80,44 +83,7 @@ impl Index {
     }
 
     async fn create_tables(pool: &Pool<Sqlite>) -> Result<()> {
-        sqlx::query!(
-            r#"
-            CREATE TABLE IF NOT EXISTS files
-            (
-                id INTEGER PRIMARY KEY,
-                path TEXT NOT NULL,
-                project TEXT NOT NULL,
-                filetype TEXT NOT NULL,
-                UNIQUE (path, project)
-            );
-
-            CREATE TABLE IF NOT EXISTS symbols
-            (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                file_id INTEGER NOT NULL,
-                symbol_type INTEGER NOT NULL,
-                symbol_scope INTEGER NOT NULL,
-                line_start INTEGER NOT NULL,
-                col_start INTEGER NOT NULL,
-                line_end INTEGER NOT NULL,
-                col_end INTEGER NOT NULL,
-                FOREIGN KEY (file_id) REFERENCES files(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS symbol_refs
-            (
-                from_symbol INTEGER NOT NULL,
-                to_symbol INTEGER NOT NULL,
-                from_line INTEGER NOT NULL,
-                from_col_start INTEGER NOT NULL,
-                from_col_end INTEGER NOT NULL,
-                FOREIGN KEY (from_symbol) REFERENCES symbols(id),
-                FOREIGN KEY (to_symbol) REFERENCES symbols(id),
-                UNIQUE (from_symbol, to_symbol, from_line, from_col_start, from_col_end)
-            );
-            "#
-        )
+        sqlx::query_file!("../sql/create_tables.sql")
         .execute(pool)
         .await?;
 
@@ -206,16 +172,17 @@ impl Index {
         Ok(id.into())
     }
 
-    pub async fn create_or_get_symbolid(
+    pub async fn create_or_get_symbol(
         &self,
         name: &str,
         symbol_type: SymbolType,
         symbol_scope: SymbolScope,
         occurrence: Occurrence,
-    ) -> Result<SymbolId> {
-        let rec = sqlx::query!(
+    ) -> Result<Symbol> {
+        let rec = sqlx::query_as!(
+            Symbol,
             r#"
-            SELECT id
+            SELECT id, parent_id AS "parent_id?: SymbolId", name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end
             FROM symbols
             WHERE name = ?1 AND file_id = ?2 AND symbol_type = ?3
             "#,
@@ -227,13 +194,15 @@ impl Index {
         .await?;
 
         if let Some(rec) = rec {
-            return Ok(rec.id.into());
+            return Ok(rec.into());
         }
 
-        let symbol_id = sqlx::query!(
+        let symbol = sqlx::query_as!(
+            Symbol,
             r#"
             INSERT INTO symbols (name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            RETURNING id, parent_id AS "parent_id?: SymbolId", name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end
             "#,
             name,
             occurrence.file,
@@ -244,18 +213,17 @@ impl Index {
             occurrence.line_end,
             occurrence.column_end
         )
-        .execute(&self.pool)
-        .await?
-        .last_insert_rowid();
+        .fetch_one(&self.pool)
+        .await?;
 
-        Ok(symbol_id.into())
+        Ok(symbol.into())
     }
 
     pub async fn find_symbols(&self, name: &str) -> Result<Vec<Symbol>> {
         let symbols: Vec<Symbol> = sqlx::query_as!(
             Symbol,
             r#"
-            SELECT *
+            SELECT id, parent_id AS "parent_id?: SymbolId", name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end
             FROM symbols
             WHERE name = ?1
             "#,
@@ -309,7 +277,7 @@ impl Index {
         let symbols: Vec<Symbol> = sqlx::query_as!(
             Symbol,
             r#"
-            SELECT *
+            SELECT id, parent_id AS "parent_id?: SymbolId", name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end
             FROM symbols
             "#
         )

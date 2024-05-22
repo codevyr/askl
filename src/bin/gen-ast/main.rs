@@ -1,10 +1,8 @@
 use std::{fs::File, sync::Arc};
 
-use askl::{
-    index::Index,
-    indexer::clang::{run_clang_ast, CompileCommand, Node, GlobalVisitorState},
-};
 use clap::Parser;
+use index::db::Index;
+use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState, Node};
 use indicatif::ProgressBar;
 use tokio::sync::Semaphore;
 

@@ -3,7 +3,7 @@ use crate::command::Command;
 use crate::execution_context::ExecutionContext;
 use crate::parser::{ParserContext, Rule};
 use crate::scope::{build_scope, EmptyScope, Scope};
-use crate::symbols::{Reference, SymbolId, SymbolRefs};
+use index::symbols::{Reference, SymbolId, SymbolRefs};
 use crate::verb::build_verb;
 use core::fmt::Debug;
 use pest::error::Error;

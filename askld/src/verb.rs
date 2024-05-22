@@ -1,7 +1,7 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
 use crate::parser::{Identifier, NamedArgument, ParserContext, PositionalArgument, Rule};
-use crate::symbols::{Reference, SymbolId, SymbolRefs};
+use index::symbols::{Reference, SymbolId, SymbolRefs};
 use anyhow::{anyhow, bail, Result};
 use core::fmt::Debug;
 use log::debug;

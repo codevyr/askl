@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    index::{Index, Symbol},
+    db::{Index, Symbol},
     symbols::{FileId, Occurrence, SymbolId, SymbolScope, SymbolType},
 };
 use anyhow::{anyhow, bail, Result};
@@ -158,6 +158,9 @@ impl FunctionDecl {
         );
 
         let parent_id = unit_state.get_parent_id(id, self.previous_decl);
+
+        let symbols_id =
+            state.get_symbol(id, parent_id, name, symbol_type, symbol_scope, occurrence.clone()).await;
 
         let new_symbol =
             UnitSymbol::new(id, parent_id, name, symbol_type, symbol_scope, occurrence);
@@ -414,6 +417,18 @@ impl GlobalVisitorState {
     pub fn get_index(&self) -> &Index {
         &self.index
     }
+
+    async fn get_symbol(
+        &mut self,
+        id: Id,
+        parent: Id,
+        name: &str,
+        symbol_type: SymbolType,
+        symbol_scope: SymbolScope,
+        occurrence: Occurrence,
+    ) -> Symbol {
+        self.index.create_or_get_symbol(name, symbol_type, symbol_scope, occurrence).await.unwrap()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -446,10 +461,11 @@ impl UnitSymbol {
     }
 }
 
-impl Into<crate::index::Symbol> for UnitSymbol {
-    fn into(self) -> crate::index::Symbol {
-        crate::index::Symbol {
+impl Into<crate::db::Symbol> for UnitSymbol {
+    fn into(self) -> crate::db::Symbol {
+        crate::db::Symbol {
             id: self.id.into(),
+            parent_id: None,
             name: self.name,
             file_id: self.occurrence.file,
             symbol_type: self.symbol_type,
@@ -469,6 +485,7 @@ struct UnitVisitorState {
     /// symbols are the one which point to each other using [`previous_decl`]
     symbol_ids: HashMap<Id, Vec<Id>>,
     parent_ids: HashMap<Id, Id>,
+    known_symbols: HashMap<Id, SymbolId>,
 }
 
 impl UnitVisitorState {
@@ -478,6 +495,7 @@ impl UnitVisitorState {
             symbols: Vec::new(),
             symbol_ids: HashMap::new(),
             parent_ids: HashMap::new(),
+            known_symbols: HashMap::new(),
         }
     }
 

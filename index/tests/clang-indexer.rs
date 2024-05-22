@@ -1,10 +1,11 @@
 use std::env;
 
-use askl::{
-    index::{File, Index, Reference, Symbol},
-    indexer::clang::{run_clang_ast, CompileCommand, GlobalVisitorState},
-    symbols::{FileId, SymbolId, SymbolScope, SymbolType},
+use index::{
+    symbols::{FileId, SymbolId, SymbolScope, SymbolType}
 };
+
+use index::db::{File, Index, Reference, Symbol};
+use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState};
 
 async fn index_files(files: Vec<&str>) -> GlobalVisitorState {
     let index = Index::new_in_memory().await.unwrap();
@@ -46,6 +47,7 @@ async fn index_files(files: Vec<&str>) -> GlobalVisitorState {
 fn mask_symbol(symbol: &Symbol) -> Symbol {
     Symbol {
         id: symbol.id,
+        parent_id: None,
         name: symbol.name.clone(),
         file_id: symbol.file_id,
         symbol_type: symbol.symbol_type,

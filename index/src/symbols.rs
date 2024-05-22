@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::{collections::HashMap, hash, hash::Hasher};
 
-use crate::index::{self, File, Index};
+use crate::db::{File, Index, self};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Copy, Clone, Serialize, Deserialize)]
 pub struct FileHash(u64);
@@ -87,8 +87,8 @@ impl Occurrence {
     }
 }
 
-impl From<index::Symbol> for Occurrence {
-    fn from(symbol: index::Symbol) -> Self {
+impl From<db::Symbol> for Occurrence {
+    fn from(symbol: db::Symbol) -> Self {
         Occurrence {
             line_start: symbol.line_start as i32,
             line_end: symbol.line_end as i32,
@@ -161,6 +161,7 @@ pub trait Symbols: ToString {
 
 #[derive(
     Debug,
+    Default,
     Serialize,
     Deserialize,
     Copy,

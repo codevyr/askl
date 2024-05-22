@@ -1,0 +1,28 @@
+[package]
+name = "index"
+version = "0.1.0"
+authors = ["Maksym Planeta <mplaneta@os.inf.tu-dresden.de>"]
+edition = "2021"
+
+[dependencies]
+
+pest = {workspace = true}
+pest_derive = {workspace = true}
+clap = {workspace = true}
+tokio = {workspace = true}
+anyhow = {workspace = true}
+lsp-types = {workspace = true}
+url = {workspace = true}
+serde = {workspace = true}
+serde_json = {workspace = true}
+jsonrpc-core = {workspace = true}
+log = {workspace = true}
+env_logger = {workspace = true}
+console = {workspace = true}
+indicatif = {workspace = true}
+itertools = {workspace = true}
+shell-words = {workspace = true}
+clang-ast = {workspace = true}
+futures = {workspace = true}
+rand = {workspace = true}
+sqlx = {workspace = true}
