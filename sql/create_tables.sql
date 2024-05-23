@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS symbols
 
 CREATE TABLE IF NOT EXISTS declarations
 (
+    id INTEGER PRIMARY KEY,
     symbol INTEGER NOT NULL,
     file_id INTEGER NOT NULL,
     symbol_type INTEGER NOT NULL,

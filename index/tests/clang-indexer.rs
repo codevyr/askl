@@ -3,7 +3,7 @@ use std::env;
 
 use index::{
     db::Symbol,
-    symbols::{FileId, SymbolId, SymbolScope, SymbolType},
+    symbols::{DeclarationId, FileId, SymbolId, SymbolScope, SymbolType},
 };
 
 use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState};
@@ -59,8 +59,9 @@ async fn index_files(files: Vec<&str>) -> GlobalVisitorState {
 }
 
 /// We do not need all fields for comparison
-fn mask_occurrence(symbol: &Declaration) -> Declaration {
+fn mask_declaration(symbol: &Declaration) -> Declaration {
     Declaration {
+        id: DeclarationId::invalid(),
         symbol: symbol.symbol,
         // name: symbol.name.clone(),
         file_id: symbol.file_id,
@@ -134,26 +135,28 @@ async fn create_state() {
     }
     assert_eq!(symbols.len(), expected_symbols.len());
 
-    let occurrences = state.get_index().all_declarations().await.unwrap();
-    for occurrence in occurrences.iter() {
-        println!("Occurrence: {:?}", occurrence);
+    let declarations = state.get_index().all_declarations().await.unwrap();
+    for declaration in declarations.iter() {
+        println!("Declaration: {:?}", declaration);
     }
 
-    let expected_occurrences = [
-        Declaration::new_nolines(SymbolId::new(1), FileId::new(1), SymbolType::Declaration), // foo
-        Declaration::new_nolines(SymbolId::new(1), FileId::new(1), SymbolType::Definition),  // foo
-        Declaration::new_nolines(SymbolId::new(2), FileId::new(1), SymbolType::Definition),  // bar
-        Declaration::new_nolines(SymbolId::new(3), FileId::new(1), SymbolType::Declaration), // zar
-        Declaration::new_nolines(SymbolId::new(4), FileId::new(1), SymbolType::Definition),  // main
-        Declaration::new_nolines(SymbolId::new(5), FileId::new(1), SymbolType::Declaration), // tar
-        Declaration::new_nolines(SymbolId::new(5), FileId::new(1), SymbolType::Declaration), // tar
-        Declaration::new_nolines(SymbolId::new(5), FileId::new(1), SymbolType::Definition),  // tar
-        Declaration::new_nolines(SymbolId::new(3), FileId::new(1), SymbolType::Definition),  // zar
+    let did = DeclarationId::invalid();
+    let fid = FileId::new(1);
+    let expected_declarations = [
+        Declaration::new_nolines(did, SymbolId::new(1), fid, SymbolType::Declaration), // foo
+        Declaration::new_nolines(did, SymbolId::new(1), fid, SymbolType::Definition),  // foo
+        Declaration::new_nolines(did, SymbolId::new(2), fid, SymbolType::Definition),  // bar
+        Declaration::new_nolines(did, SymbolId::new(3), fid, SymbolType::Declaration), // zar
+        Declaration::new_nolines(did, SymbolId::new(4), fid, SymbolType::Definition),  // main
+        Declaration::new_nolines(did, SymbolId::new(5), fid, SymbolType::Declaration), // tar
+        Declaration::new_nolines(did, SymbolId::new(5), fid, SymbolType::Declaration), // tar
+        Declaration::new_nolines(did, SymbolId::new(5), fid, SymbolType::Definition),  // tar
+        Declaration::new_nolines(did, SymbolId::new(3), fid, SymbolType::Definition),  // zar
     ];
-    for (i, o) in occurrences.iter().enumerate() {
-        assert_eq!(mask_occurrence(o), expected_occurrences[i]);
+    for (i, o) in declarations.iter().enumerate() {
+        assert_eq!(mask_declaration(o), expected_declarations[i]);
     }
-    assert_eq!(occurrences.len(), expected_occurrences.len());
+    assert_eq!(declarations.len(), expected_declarations.len());
 
     let refs = state.get_index().all_refs().await.unwrap();
     for reference in refs.iter() {

@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::{collections::HashMap, hash, hash::Hasher};
 
-use crate::db::{File, Index, self};
+use crate::db::{self, File, Index};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Copy, Clone, Serialize, Deserialize)]
 pub struct FileHash(u64);
@@ -257,6 +257,36 @@ impl serde::Serialize for FileId {
         S: Serializer,
     {
         s.serialize_str(&format!("{}", self.0))
+    }
+}
+
+#[derive(
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    Copy,
+    Clone,
+    Eq,
+    PartialEq,
+    Hash,
+    PartialOrd,
+    Ord,
+    sqlx::Type,
+    sqlx::FromRow,
+)]
+#[sqlx(transparent)]
+pub struct DeclarationId(i32);
+
+impl DeclarationId {
+    pub fn invalid() -> Self {
+        Self(0)
+    }
+}
+
+impl From<i64> for DeclarationId {
+    fn from(value: i64) -> Self {
+        Self(value as i32)
     }
 }
 

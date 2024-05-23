@@ -240,8 +240,8 @@ impl FunctionDecl {
             .insert_symbol(name, module_id, symbol_scope)
             .await?;
 
-        let occurrence = Declaration::new(symbol.id, file_id, symbol_type, &clang_range).unwrap();
-        state.index.add_declaration(&occurrence).await?;
+        let declaration = Declaration::new(symbol.id, file_id, symbol_type, &clang_range).unwrap();
+        state.index.add_declaration(&declaration).await?;
         unit_state.add_symbol(id, symbol.id);
 
         self.visit_references(state, unit_state, symbol.id, inner)

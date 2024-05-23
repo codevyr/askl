@@ -7,7 +7,7 @@ use sqlx::{
     Pool, Sqlite,
 };
 
-use crate::symbols::{FileId, SymbolId, SymbolScope, SymbolType, Occurrence};
+use crate::symbols::{FileId, SymbolId, SymbolScope, SymbolType, Occurrence, DeclarationId};
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
 pub struct Symbol {
@@ -35,6 +35,7 @@ impl Symbol {
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
 pub struct Declaration {
+    pub id: DeclarationId,
     pub symbol: SymbolId,
     pub file_id: FileId,
     pub symbol_type: SymbolType,
@@ -45,8 +46,9 @@ pub struct Declaration {
 }
 
 impl Declaration {
-    pub fn new_nolines(symbol: SymbolId, file_id: FileId, symbol_type: SymbolType) -> Self {
+    pub fn new_nolines(id: DeclarationId, symbol: SymbolId, file_id: FileId, symbol_type: SymbolType) -> Self {
         Self {
+            id,
             symbol,
             file_id,
             symbol_type,
@@ -82,6 +84,7 @@ impl Declaration {
         };
 
         Ok(Self {
+            id: DeclarationId::invalid(),
             symbol,
             file_id,
             symbol_type,
@@ -396,7 +399,7 @@ impl Index {
         let declarations: Vec<Declaration> = sqlx::query_as!(
             Declaration,
             r#"
-            SELECT symbol, file_id, symbol_type, line_start, col_start, line_end, col_end
+            SELECT id, symbol, file_id, symbol_type, line_start, col_start, line_end, col_end
             FROM declarations
             "#
         )
