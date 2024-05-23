@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    db::{Index, Occurrence, Symbol},
+    db::{Index, Declaration, Symbol},
     symbols::{self, FileId, SymbolId, SymbolScope, SymbolType},
 };
 use anyhow::{anyhow, bail, Result};
@@ -175,14 +175,14 @@ impl FunctionDecl {
                                     .await?;
                                 unit_state.add_symbol(referenced_decl.id, symbol.id);
 
-                                let occurrence = Occurrence::new(
+                                let occurrence = Declaration::new(
                                     symbol.id,
                                     file_id,
                                     symbol_type,
                                     &ref_expr.range,
                                 )
                                 .unwrap();
-                                state.index.add_occurrence(&occurrence).await?;
+                                state.index.add_declaration(&occurrence).await?;
                                 
                                 symbol.id
                             };
@@ -239,8 +239,8 @@ impl FunctionDecl {
             .insert_symbol(name, module_id, symbol_scope)
             .await?;
 
-        let occurrence = Occurrence::new(symbol.id, file_id, symbol_type, &clang_range).unwrap();
-        state.index.add_occurrence(&occurrence).await?;
+        let occurrence = Declaration::new(symbol.id, file_id, symbol_type, &clang_range).unwrap();
+        state.index.add_declaration(&occurrence).await?;
         unit_state.add_symbol(id, symbol.id);
 
         self.visit_references(state, unit_state, symbol.id, inner)
@@ -488,7 +488,7 @@ impl GlobalVisitorState {
         name: &str,
         symbol_type: SymbolType,
         symbol_scope: SymbolScope,
-        occurrence: Occurrence,
+        occurrence: Declaration,
     ) -> Symbol {
         unimplemented!("Unimplemented")
         // self.index

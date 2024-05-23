@@ -34,7 +34,7 @@ impl Symbol {
 }
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
-pub struct Occurrence {
+pub struct Declaration {
     pub symbol: SymbolId,
     pub file_id: FileId,
     pub symbol_type: SymbolType,
@@ -44,7 +44,7 @@ pub struct Occurrence {
     pub col_end: i64,
 }
 
-impl Occurrence {
+impl Declaration {
     pub fn new_nolines(symbol: SymbolId, file_id: FileId, symbol_type: SymbolType) -> Self {
         Self {
             symbol,
@@ -260,19 +260,19 @@ impl Index {
         return Ok(new_symbol);
     }
 
-    pub async fn add_occurrence(&self, occurrence: &Occurrence) -> Result<()> {
+    pub async fn add_declaration(&self, declaration: &Declaration) -> Result<()> {
         sqlx::query!(
                 r#"
-                INSERT INTO occurrences (symbol, file_id, symbol_type, line_start, col_start, line_end, col_end)
+                INSERT INTO declarations (symbol, file_id, symbol_type, line_start, col_start, line_end, col_end)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 "#,
-                occurrence.symbol,
-                occurrence.file_id,
-                occurrence.symbol_type,
-                occurrence.line_start,
-                occurrence.col_start,
-                occurrence.line_end,
-                occurrence.col_end
+                declaration.symbol,
+                declaration.file_id,
+                declaration.symbol_type,
+                declaration.line_start,
+                declaration.col_start,
+                declaration.line_end,
+                declaration.col_end
             )
             .execute(&self.pool)
             .await?;
@@ -285,7 +285,7 @@ impl Index {
     //     name: &str,
     //     symbol_type: SymbolType,
     //     symbol_scope: SymbolScope,
-    //     occurrence: Occurrence,
+    //     declaration: Declaration,
     // ) -> Result<Symbol> {
     //     let rec = sqlx::query_as!(
     //         Symbol,
@@ -311,13 +311,13 @@ impl Index {
     //         RETURNING id, name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end
     //         "#,
     //         name,
-    //         occurrence.file,
+    //         declaration.file,
     //         symbol_type,
     //         symbol_scope,
-    //         occurrence.line_start,
-    //         occurrence.column_start,
-    //         occurrence.line_end,
-    //         occurrence.column_end
+    //         declaration.line_start,
+    //         declaration.column_start,
+    //         declaration.line_end,
+    //         declaration.column_end
     //     )
     //     .fetch_one(&self.pool)
     //     .await?;
@@ -349,7 +349,7 @@ impl Index {
         &self,
         from_symbol: SymbolId,
         to_symbol: SymbolId,
-        occurrence: &Occurrence,
+        declaration: &Declaration,
     ) -> Result<()> {
         let res = sqlx::query!(
             r#"
@@ -358,9 +358,9 @@ impl Index {
             "#,
             from_symbol,
             to_symbol,
-            occurrence.line_start,
-            occurrence.col_start,
-            occurrence.col_end
+            declaration.line_start,
+            declaration.col_start,
+            declaration.col_end
         )
         .execute(&self.pool)
         .await;
@@ -371,7 +371,7 @@ impl Index {
                 err,
                 from_symbol,
                 to_symbol,
-                occurrence
+                declaration
             );
             res?;
         }
@@ -393,18 +393,18 @@ impl Index {
         Ok(symbols)
     }
 
-    pub async fn all_occurrences(&self) -> Result<Vec<Occurrence>> {
-        let occurrences: Vec<Occurrence> = sqlx::query_as!(
-            Occurrence,
+    pub async fn all_declarations(&self) -> Result<Vec<Declaration>> {
+        let declarations: Vec<Declaration> = sqlx::query_as!(
+            Declaration,
             r#"
             SELECT symbol, file_id, symbol_type, line_start, col_start, line_end, col_end
-            FROM occurrences
+            FROM declarations
             "#
         )
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(occurrences)
+        Ok(declarations)
     }
 
     pub async fn all_files(&self) -> Result<Vec<File>> {

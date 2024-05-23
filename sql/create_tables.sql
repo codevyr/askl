@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS symbols
     UNIQUE (name, module_id, symbol_scope)
 );
 
-CREATE TABLE IF NOT EXISTS occurrences
+CREATE TABLE IF NOT EXISTS declarations
 (
     symbol INTEGER NOT NULL,
     file_id INTEGER NOT NULL,
