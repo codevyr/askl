@@ -147,8 +147,8 @@ async fn create_state() {
         Declaration::new_nolines(SymbolId::new(4), FileId::new(1), SymbolType::Definition),  // main
         Declaration::new_nolines(SymbolId::new(5), FileId::new(1), SymbolType::Declaration), // tar
         Declaration::new_nolines(SymbolId::new(5), FileId::new(1), SymbolType::Declaration), // tar
-        Declaration::new_nolines(SymbolId::new(5), FileId::new(1), SymbolType::Definition), // tar
-        Declaration::new_nolines(SymbolId::new(3), FileId::new(1), SymbolType::Definition), // zar
+        Declaration::new_nolines(SymbolId::new(5), FileId::new(1), SymbolType::Definition),  // tar
+        Declaration::new_nolines(SymbolId::new(3), FileId::new(1), SymbolType::Definition),  // zar
     ];
     for (i, o) in occurrences.iter().enumerate() {
         assert_eq!(mask_occurrence(o), expected_occurrences[i]);
@@ -156,24 +156,17 @@ async fn create_state() {
     assert_eq!(occurrences.len(), expected_occurrences.len());
 
     let refs = state.get_index().all_refs().await.unwrap();
-    log::debug!("{:#?}", refs);
+    for reference in refs.iter() {
+        println!("Reference: {:?}", reference);
+    }
     let expected_refs = [
-        new_ref(5, 4), // main to zar
-        new_ref(5, 9), // main to zar
-        new_ref(5, 3), // main to bar
+        new_ref(4, 3), // main to zar
+        new_ref(4, 1), // main to foo
+        new_ref(4, 5), // main to tar
+        new_ref(4, 2), // main to bar
     ];
-    assert_eq!(refs.len(), expected_refs.len());
-    for (i, s) in refs.into_iter().enumerate() {
+    for (i, s) in refs.iter().enumerate() {
         assert_eq!(mask_ref(&s), expected_refs[i]);
     }
-
-    state.resolve_global_symbols().await.unwrap();
-
-    let refs = state.get_index().all_refs().await.unwrap();
-    log::debug!("{:#?}", refs);
-    let expected_refs = [new_ref(4, 3), new_ref(4, 1), new_ref(4, 2)];
     assert_eq!(refs.len(), expected_refs.len());
-    for (i, s) in refs.into_iter().enumerate() {
-        assert_eq!(mask_ref(&s), expected_refs[i]);
-    }
 }

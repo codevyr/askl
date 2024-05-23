@@ -7,7 +7,7 @@ use sqlx::{
     Pool, Sqlite,
 };
 
-use crate::symbols::{FileId, SymbolId, SymbolScope, SymbolType};
+use crate::symbols::{FileId, SymbolId, SymbolScope, SymbolType, Occurrence};
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
 pub struct Symbol {
@@ -256,7 +256,6 @@ impl Index {
 
         let id: SymbolId = rec.id.into();
         let new_symbol = Symbol::new(id, name, module, scope);
-        println!("NEW SYMBOL {:?}", new_symbol);
         return Ok(new_symbol);
     }
 
@@ -349,7 +348,7 @@ impl Index {
         &self,
         from_symbol: SymbolId,
         to_symbol: SymbolId,
-        declaration: &Declaration,
+        occurrence: &Occurrence,
     ) -> Result<()> {
         let res = sqlx::query!(
             r#"
@@ -358,9 +357,9 @@ impl Index {
             "#,
             from_symbol,
             to_symbol,
-            declaration.line_start,
-            declaration.col_start,
-            declaration.col_end
+            occurrence.line_start,
+            occurrence.column_start,
+            occurrence.column_end
         )
         .execute(&self.pool)
         .await;
@@ -371,7 +370,7 @@ impl Index {
                 err,
                 from_symbol,
                 to_symbol,
-                declaration
+                occurrence
             );
             res?;
         }

@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, fmt, io::Write};
 
 use crate::{
-    db::{Index, Declaration, Symbol},
+    db::{Declaration, Index, Symbol},
     symbols::{self, FileId, SymbolId, SymbolScope, SymbolType},
 };
 use anyhow::{anyhow, bail, Result};
@@ -124,10 +124,16 @@ impl FunctionDecl {
     fn extract_call_refs<'a>(&'a self, nodes: &'a Vec<Node>) -> impl Iterator<Item = &Node> + 'a {
         nodes
             .iter()
-            .map(|node| {
-                extract_filter(node, &|node: &Node| matches!(node.kind, Clang::CallExpr(_)))
-            })
-            .flatten()
+            // XXX: Normally I would like to save only the references, which are
+            // actual function calls, but extract_filter is not correct for
+            // recursive filter, for example if there is CallExpr inside of a
+            // CallExpr. Or rather it will traverse nested CallExpr multiple
+            // times. So, at least for now, I grab all function pointers. Which
+            // is not too bad.
+            //
+            // .map(|node| {
+            //     extract_filter(node, &|node: &Node| matches!(node.kind, Clang::CallExpr(_)))
+            // }) .flatten()
             .map(|node| {
                 extract_filter(node, &|node: &Node| {
                     matches!(node.kind, Clang::DeclRefExpr(_))
@@ -183,15 +189,14 @@ impl FunctionDecl {
                                 )
                                 .unwrap();
                                 state.index.add_declaration(&occurrence).await?;
-                                
+
                                 symbol.id
                             };
 
-                            // unit_state.add_reference(UnresolvedChild {
-                            //     from: from_id,
-                            //     to: to_id,
-                            //     occurrence,
-                            // })
+                            state
+                                .get_index()
+                                .add_reference(from_id, to_id, &occurrence)
+                                .await?;
                         }
                         Clang::ParmVarDecl | Clang::EnumConstantDecl(_) | Clang::VarDecl(_) => {}
                         _ => {
