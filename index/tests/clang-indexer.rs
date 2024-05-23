@@ -1,3 +1,4 @@
+use dotenv::dotenv;
 use std::env;
 
 use index::{
@@ -6,19 +7,29 @@ use index::{
 };
 
 use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState};
-use index::db::{File, Index, Declaration, Reference};
+use index::db::{Declaration, File, Index, Reference};
 
 async fn index_files(files: Vec<&str>) -> GlobalVisitorState {
+    dotenv().ok();
+    env_logger::init();
+
     let index = Index::new_in_memory().await.unwrap();
     let mut state = GlobalVisitorState::new(index);
 
     let symbols = state.get_index().all_symbols().await.unwrap();
     assert!(symbols.is_empty());
 
-    let clang = "clang";
-    let clang = "/nix/store/2n2ranlijkkab8xqb1y0bha8mhl6j2gk-clang-wrapper-17.0.6/bin/clang";
+    let clang = std::env::var("CLANG_PATH")
+        .ok()
+        .or(Some("clang".to_string()))
+        .unwrap();
+    let test_directory_rel = std::env::var("TEST_DIR")
+        .ok()
+        .or(Some("tests/clang-indexer-code".to_string()))
+        .unwrap();
     let mut test_directory = env::current_dir().unwrap();
-    test_directory.push("tests/clang-indexer-code");
+    println!("{}", test_directory.display());
+    test_directory.push(test_directory_rel);
     for test_file in files {
         let command = CompileCommand {
             arguments: Some(vec![

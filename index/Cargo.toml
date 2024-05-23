@@ -26,3 +26,4 @@ clang-ast = {workspace = true}
 futures = {workspace = true}
 rand = {workspace = true}
 sqlx = {workspace = true}
+dotenv = "0.15.0"
