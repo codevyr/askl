@@ -1,11 +1,12 @@
 use std::env;
 
 use index::{
-    symbols::{FileId, SymbolId, SymbolScope, SymbolType}
+    db::Symbol,
+    symbols::{FileId, SymbolId, SymbolScope, SymbolType},
 };
 
-use index::db::{File, Index, Reference, Symbol};
 use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState};
+use index::db::{File, Index, Occurrence, Reference};
 
 async fn index_files(files: Vec<&str>) -> GlobalVisitorState {
     let index = Index::new_in_memory().await.unwrap();
@@ -37,21 +38,22 @@ async fn index_files(files: Vec<&str>) -> GlobalVisitorState {
 
         log::debug!("{}", ast_file);
 
-        state.extract_symbol_map_root(node).await.unwrap();
+        state
+            .extract_symbol_map_root(test_file, node)
+            .await
+            .unwrap();
     }
 
     state
 }
 
 /// We do not need all fields for comparison
-fn mask_symbol(symbol: &Symbol) -> Symbol {
-    Symbol {
-        id: symbol.id,
-        parent_id: None,
-        name: symbol.name.clone(),
+fn mask_symbol(symbol: &Occurrence) -> Occurrence {
+    Occurrence {
+        symbol: symbol.symbol,
+        // name: symbol.name.clone(),
         file_id: symbol.file_id,
         symbol_type: symbol.symbol_type,
-        symbol_scope: symbol.symbol_scope,
         line_start: 1,
         col_start: 1,
         line_end: 1,
@@ -62,17 +64,15 @@ fn mask_symbol(symbol: &Symbol) -> Symbol {
 fn new_symbol(
     sym_id: i32,
     name: &str,
-    file_id: i32,
-    symbol_type: SymbolType,
+    module_id: Option<i32>,
     symbol_scope: SymbolScope,
 ) -> Symbol {
-    Symbol::new_nolines(
-        SymbolId(sym_id),
-        name,
-        FileId::new(file_id),
-        symbol_type,
-        symbol_scope,
-    )
+    let module_id = if let Some(module_id) = module_id {
+        Some(FileId::new(module_id))
+    } else {
+        None
+    };
+    Symbol::new(SymbolId(sym_id), name, module_id, symbol_scope)
 }
 
 fn mask_ref(reference: &Reference) -> Reference {
@@ -107,23 +107,38 @@ async fn create_state() {
     );
 
     let symbols = state.get_index().all_symbols().await.unwrap();
-    println!("Symbols: {:#?}", symbols);
+    for symbol in symbols.iter() {
+        println!("Symbols: {:?}", symbol);
+    }
 
     let expected_symbols = [
-        new_symbol(1, "foo", 1, SymbolType::Declaration, SymbolScope::Global),
-        new_symbol(2, "foo", 1, SymbolType::Definition, SymbolScope::Global),
-        new_symbol(3, "bar", 1, SymbolType::Definition, SymbolScope::Local),
-        new_symbol(4, "zar", 1, SymbolType::Declaration, SymbolScope::Local),
-        new_symbol(5, "main", 1, SymbolType::Definition, SymbolScope::Global),
-        new_symbol(6, "tar", 1, SymbolType::Declaration, SymbolScope::Global),
-        new_symbol(7, "tar", 1, SymbolType::Declaration, SymbolScope::Global),
-        new_symbol(8, "tar", 1, SymbolType::Definition, SymbolScope::Global),
-        new_symbol(9, "zar", 1, SymbolType::Definition, SymbolScope::Local),
+        new_symbol(1, "foo", None, SymbolScope::Global),
+        new_symbol(2, "bar", Some(1), SymbolScope::Local),
+        new_symbol(3, "zar", Some(1), SymbolScope::Local),
+        new_symbol(4, "main", None, SymbolScope::Global),
+        new_symbol(5, "tar", None, SymbolScope::Global),
     ];
     for (i, s) in symbols.iter().enumerate() {
-        assert_eq!(mask_symbol(&s), expected_symbols[i]);
+        assert_eq!(*s, expected_symbols[i]);
     }
     assert_eq!(symbols.len(), expected_symbols.len());
+
+    let occurrences = state.get_index().all_occurrences().await.unwrap();
+    for occurrence in occurrences.iter() {
+        println!("Occurrence: {:?}", occurrence);
+    }
+
+    let expected_occurrences = [
+        Occurrence::new_nolines(SymbolId::new(1), FileId::new(1), SymbolType::Declaration),
+        Occurrence::new_nolines(SymbolId::new(2), FileId::new(1), SymbolType::Declaration),
+        Occurrence::new_nolines(SymbolId::new(3), FileId::new(1), SymbolType::Declaration),
+        Occurrence::new_nolines(SymbolId::new(4), FileId::new(1), SymbolType::Declaration),
+        Occurrence::new_nolines(SymbolId::new(5), FileId::new(1), SymbolType::Declaration),
+    ];
+    for (i, o) in occurrences.iter().enumerate() {
+        assert_eq!(*o, expected_occurrences[i]);
+    }
+    assert_eq!(occurrences.len(), expected_occurrences.len());
 
     let refs = state.get_index().all_refs().await.unwrap();
     log::debug!("{:#?}", refs);

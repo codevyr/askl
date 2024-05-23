@@ -87,8 +87,8 @@ impl Occurrence {
     }
 }
 
-impl From<db::Symbol> for Occurrence {
-    fn from(symbol: db::Symbol) -> Self {
+impl From<db::Occurrence> for Occurrence {
+    fn from(symbol: db::Occurrence) -> Self {
         Occurrence {
             line_start: symbol.line_start as i32,
             line_end: symbol.line_end as i32,
@@ -321,16 +321,18 @@ impl SymbolMap {
     }
 
     pub async fn from_index(index: Index) -> Result<Self> {
-        let symbols = index.all_symbols().await?;
+        let symbols = index.all_occurrences().await?;
+        unimplemented!("XXX");
         let mut symbols_map = HashMap::new();
         for symbol in symbols {
             symbols_map.insert(
-                symbol.id,
+                symbol.symbol,
                 Symbol {
-                    id: symbol.id,
+                    id: symbol.symbol,
                     children: SymbolRefs::new(),
                     parents: SymbolRefs::new(),
-                    name: symbol.name.clone(),
+                    // name: symbol.name.clone(),
+                    name: String::from(""),
                     occurrence: symbol.into(),
                 },
             );

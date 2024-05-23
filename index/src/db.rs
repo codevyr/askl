@@ -7,32 +7,53 @@ use sqlx::{
     Pool, Sqlite,
 };
 
-use crate::symbols::{FileId, Occurrence, SymbolId, SymbolType, SymbolScope};
+use crate::symbols::{FileId, SymbolId, SymbolScope, SymbolType};
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
 pub struct Symbol {
     pub id: SymbolId,
-    #[sqlx(default)]
-    pub parent_id: Option<SymbolId>,
     pub name: String,
+    pub module_id: Option<FileId>,
+    pub symbol_scope: SymbolScope,
+}
+
+impl Symbol {
+    pub fn new(
+        id: SymbolId,
+        name: &str,
+        module_id: Option<FileId>,
+        symbol_scope: SymbolScope,
+    ) -> Self {
+        Self {
+            id,
+            name: name.to_string(),
+            module_id,
+            symbol_scope,
+        }
+    }
+}
+
+#[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
+pub struct Occurrence {
+    pub symbol: SymbolId,
     pub file_id: FileId,
     pub symbol_type: SymbolType,
-    pub symbol_scope: SymbolScope,
     pub line_start: i64,
     pub col_start: i64,
     pub line_end: i64,
     pub col_end: i64,
 }
 
-impl Symbol {
-    pub fn new_nolines(id: SymbolId, name: &str, file_id: FileId, symbol_type: SymbolType, symbol_scope: SymbolScope) -> Self {
+impl Occurrence {
+    pub fn new_nolines(
+        symbol: SymbolId,
+        file_id: FileId,
+        symbol_type: SymbolType,
+    ) -> Self {
         Self {
-            id,
-            parent_id: None,
-            name: name.to_string(),
+            symbol,
             file_id,
             symbol_type,
-            symbol_scope,
             line_start: 1,
             col_start: 1,
             line_end: 1,
@@ -84,8 +105,8 @@ impl Index {
 
     async fn create_tables(pool: &Pool<Sqlite>) -> Result<()> {
         sqlx::query_file!("../sql/create_tables.sql")
-        .execute(pool)
-        .await?;
+            .execute(pool)
+            .await?;
 
         Ok(())
     }
@@ -150,94 +171,149 @@ impl Index {
         Ok(file_id.into())
     }
 
-    pub async fn create_symbol(&self, new_symbol: Symbol) -> Result<SymbolId> {
-        let id = sqlx::query!(
-                r#"
-                INSERT INTO symbols (name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                "#,
-                new_symbol.name,
-                new_symbol.file_id,
-                new_symbol.symbol_type,
-                new_symbol.symbol_scope,
-                new_symbol.line_start,
-                new_symbol.col_start,
-                new_symbol.line_end,
-                new_symbol.col_end
-            )
-            .execute(&self.pool)
-            .await?
-            .last_insert_rowid();
+    // pub async fn create_symbol(&self, new_symbol: Symbol) -> Result<SymbolId> {
+    //     let id = sqlx::query!(
+    //             r#"
+    //             INSERT INTO symbol_occ (file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end)
+    //             VALUES (?, ?, ?, ?, ?, ?, ?)
+    //             "#,
+    //             new_symbol.file_id,
+    //             new_symbol.symbol_type,
+    //             new_symbol.symbol_scope,
+    //             new_symbol.line_start,
+    //             new_symbol.col_start,
+    //             new_symbol.line_end,
+    //             new_symbol.col_end
+    //         )
+    //         .execute(&self.pool)
+    //         .await?
+    //         .last_insert_rowid();
 
-        Ok(id.into())
-    }
+    //     Ok(id.into())
+    // }
 
-    pub async fn create_or_get_symbol(
+    pub async fn get_symbol(
         &self,
         name: &str,
-        symbol_type: SymbolType,
-        symbol_scope: SymbolScope,
-        occurrence: Occurrence,
+        module: Option<FileId>,
+        scope: SymbolScope,
     ) -> Result<Symbol> {
-        let rec = sqlx::query_as!(
-            Symbol,
-            r#"
-            SELECT id, parent_id AS "parent_id?: SymbolId", name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end
-            FROM symbols
-            WHERE name = ?1 AND file_id = ?2 AND symbol_type = ?3
-            "#,
-            name,
-            occurrence.file,
-            symbol_type
-        )
-        .fetch_optional(&self.pool)
-        .await?;
+        let rec = if let Some(module_id) = module {
+            sqlx::query_as!(
+                Symbol,
+                r#"
+                SELECT id, name, module_id AS "module_id?: FileId", symbol_scope
+                FROM symbols
+                WHERE name = ? AND module_id = ? AND symbol_scope = ?
+                "#,
+                name,
+                module_id,
+                scope
+            )
+            .fetch_optional(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as!(
+                Symbol,
+                r#"
+                SELECT id, name, module_id AS "module_id?: FileId", symbol_scope
+                FROM symbols
+                WHERE name = ? AND symbol_scope = ?
+                "#,
+                name,
+                scope
+            )
+            .fetch_optional(&self.pool)
+            .await?
+        };
 
-        if let Some(rec) = rec {
-            return Ok(rec.into());
+        if let Some(symbol) = rec {
+            return Ok(symbol);
         }
 
-        let symbol = sqlx::query_as!(
-            Symbol,
+        let rec = sqlx::query!(
             r#"
-            INSERT INTO symbols (name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-            RETURNING id, parent_id AS "parent_id?: SymbolId", name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end
+            INSERT INTO symbols(name, module_id, symbol_scope)
+            VALUES (?1, ?2, ?3)
+            RETURNING id
             "#,
             name,
-            occurrence.file,
-            symbol_type,
-            symbol_scope,
-            occurrence.line_start,
-            occurrence.column_start,
-            occurrence.line_end,
-            occurrence.column_end
+            module,
+            scope
         )
         .fetch_one(&self.pool)
         .await?;
 
-        Ok(symbol.into())
+        let id: SymbolId = rec.id.into();
+        let new_symbol = Symbol::new(id, name, module, scope);
+        println!("NEW SYMBOL {:?}", new_symbol);
+        return Ok(new_symbol);
     }
 
-    pub async fn find_symbols(&self, name: &str) -> Result<Vec<Symbol>> {
-        let symbols: Vec<Symbol> = sqlx::query_as!(
-            Symbol,
-            r#"
-            SELECT id, parent_id AS "parent_id?: SymbolId", name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end
-            FROM symbols
-            WHERE name = ?1
-            "#,
-            name
-        )
-        .fetch_all(&self.pool)
-        .await?;
+    // pub async fn create_or_get_symbol(
+    //     &self,
+    //     name: &str,
+    //     symbol_type: SymbolType,
+    //     symbol_scope: SymbolScope,
+    //     occurrence: Occurrence,
+    // ) -> Result<Symbol> {
+    //     let rec = sqlx::query_as!(
+    //         Symbol,
+    //         r#"
+    //         SELECT id, name, module_id
+    //         FROM symbols
+    //         WHERE name = ?1
+    //         "#,
+    //         name,
+    //     )
+    //     .fetch_optional(&self.pool)
+    //     .await?;
 
-        if symbols.len() == 0 {
-            bail!("Symbol not found")
-        }
+    //     if let Some(rec) = rec {
+    //         return Ok(rec.into());
+    //     }
 
-        Ok(symbols)
-    }
+    //     let symbol = sqlx::query_as!(
+    //         Symbol,
+    //         r#"
+    //         INSERT INTO symbols (name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end)
+    //         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+    //         RETURNING id, name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end
+    //         "#,
+    //         name,
+    //         occurrence.file,
+    //         symbol_type,
+    //         symbol_scope,
+    //         occurrence.line_start,
+    //         occurrence.column_start,
+    //         occurrence.line_end,
+    //         occurrence.column_end
+    //     )
+    //     .fetch_one(&self.pool)
+    //     .await?;
+
+    //     Ok(symbol.into())
+    // }
+
+    // pub async fn find_symbols(&self, name: &str) -> Result<Vec<Symbol>> {
+    //     let symbols: Vec<Symbol> = sqlx::query_as!(
+    //         Symbol,
+    //         r#"
+    //         SELECT id, name, module_id
+    //         FROM symbols
+    //         WHERE name = ?1
+    //         "#,
+    //         name
+    //     )
+    //     .fetch_all(&self.pool)
+    //     .await?;
+
+    //     if symbols.len() == 0 {
+    //         bail!("Symbol not found")
+    //     }
+
+    //     Ok(symbols)
+    // }
 
     pub async fn add_reference(
         &self,
@@ -253,8 +329,8 @@ impl Index {
             from_symbol,
             to_symbol,
             occurrence.line_start,
-            occurrence.column_start,
-            occurrence.column_end
+            occurrence.col_start,
+            occurrence.col_end
         )
         .execute(&self.pool)
         .await;
@@ -277,7 +353,7 @@ impl Index {
         let symbols: Vec<Symbol> = sqlx::query_as!(
             Symbol,
             r#"
-            SELECT id, parent_id AS "parent_id?: SymbolId", name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end
+            SELECT id, name, module_id AS "module_id?: FileId" , symbol_scope
             FROM symbols
             "#
         )
@@ -285,6 +361,20 @@ impl Index {
         .await?;
 
         Ok(symbols)
+    }
+
+    pub async fn all_occurrences(&self) -> Result<Vec<Occurrence>> {
+        let occurrences: Vec<Occurrence> = sqlx::query_as!(
+            Occurrence,
+            r#"
+            SELECT symbol, file_id, symbol_type, line_start, col_start, line_end, col_end
+            FROM occurrences
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(occurrences)
     }
 
     pub async fn all_files(&self) -> Result<Vec<File>> {

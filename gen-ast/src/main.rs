@@ -80,12 +80,11 @@ async fn main() -> anyhow::Result<()> {
     let nodes = outputs
         .into_iter()
         .filter(|r| r.is_ok())
-        .map(|r| r.unwrap())
-        .map(|(_, node)| node);
+        .map(|r| r.unwrap());
 
     let mut state = GlobalVisitorState::new(index);
-    for node in nodes {
-        state.extract_symbol_map_root(node).await?;
+    for (module, node) in nodes {
+        state.extract_symbol_map_root(&module, node).await?;
     }
 
     state.resolve_global_symbols().await?;

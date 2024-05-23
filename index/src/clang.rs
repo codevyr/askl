@@ -58,7 +58,7 @@ impl TranslationUnitDecl {
     async fn visit(
         &self,
         state: &mut GlobalVisitorState,
-        unit_state: &mut UnitVisitorState,
+        unit_state: &mut ModuleVisitorState,
         inner: &Vec<Node>,
     ) -> Result<()> {
         for child in inner.iter() {
@@ -136,35 +136,14 @@ impl FunctionDecl {
             .flatten()
     }
 
-    async fn visit(
+    async fn extract_refs(
         &self,
         state: &mut GlobalVisitorState,
-        unit_state: &mut UnitVisitorState,
+        unit_state: &mut ModuleVisitorState,
         id: Id,
         inner: &Vec<Node>,
     ) -> Result<()> {
-        let clang_range = self.range.clone();
-        let file_id = state.extract_file_from_range(&clang_range).await.unwrap();
-
-        let occurrence = Occurrence::new(&clang_range, file_id).unwrap();
-        let name = self.name.as_ref().unwrap();
-
-        let symbol_type = self.get_symbol_state(inner);
-        let symbol_scope = self.get_symbol_scope();
-
-        println!(
-            "{:?} {:?} {:?}",
-            self.name, self.storage_class, self.previous_decl
-        );
-
-        let parent_id = unit_state.get_parent_id(id, self.previous_decl);
-
-        let symbols_id =
-            state.get_symbol(id, parent_id, name, symbol_type, symbol_scope, occurrence.clone()).await;
-
-        let new_symbol =
-            UnitSymbol::new(id, parent_id, name, symbol_type, symbol_scope, occurrence);
-        unit_state.add_symbol(new_symbol.clone());
+        return Ok(());
 
         for node in self.extract_call_refs(inner) {
             match &node.kind {
@@ -182,7 +161,7 @@ impl FunctionDecl {
                             // also an implicit symbol declaration
                             let root_symbol_id = if !unit_state.contains_symbol(&referenced_decl.id)
                             {
-                                let new_symbol = UnitSymbol::new(
+                                let new_symbol = ModuleSymbol::new(
                                     referenced_decl.id,
                                     referenced_decl.id,
                                     f.name.as_ref().unwrap(),
@@ -198,7 +177,7 @@ impl FunctionDecl {
                             };
 
                             unit_state.add_reference(UnresolvedChild {
-                                from: new_symbol.id,
+                                from: id,
                                 to: root_symbol_id,
                                 occurrence,
                             })
@@ -214,6 +193,63 @@ impl FunctionDecl {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    async fn visit(
+        &self,
+        state: &mut GlobalVisitorState,
+        unit_state: &mut ModuleVisitorState,
+        id: Id,
+        inner: &Vec<Node>,
+    ) -> Result<()> {
+        let clang_range = self.range.clone();
+        let file_id = state.extract_file_from_range(&clang_range).await.unwrap();
+
+        let occurrence = Occurrence::new(&clang_range, file_id).unwrap();
+        let name = self.name.as_ref().unwrap();
+
+        let symbol_type = self.get_symbol_state(inner);
+        let symbol_scope = self.get_symbol_scope();
+
+        let module_id = if let SymbolScope::Local = symbol_scope {
+            Some(unit_state.module_id)
+        } else {
+            None
+        };
+
+        println!(
+            "{:?} {:?} {:?}",
+            self.name, self.storage_class, self.previous_decl
+        );
+
+        let symbol = state
+            .index
+            .get_symbol(name, module_id, symbol_scope)
+            .await?;
+
+        return Ok(());
+
+        let parent_id = unit_state.get_parent_id(id, self.previous_decl);
+
+        // let symbols_id = state
+        //     .get_symbol(
+        //         id,
+        //         parent_id,
+        //         name,
+        //         symbol_type,
+        //         symbol_scope,
+        //         occurrence.clone(),
+        //     )
+        //     .await;
+
+        let new_symbol =
+            ModuleSymbol::new(id, parent_id, name, symbol_type, symbol_scope, occurrence);
+        unit_state.add_symbol(new_symbol.clone());
+
+        self.extract_refs(state, unit_state, new_symbol.id, inner)
+            .await?;
 
         Ok(())
     }
@@ -325,7 +361,7 @@ pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<(St
     let node: Node = serde_json::from_str(&json)?;
     // std::fs::write("node", format!("{:#?}", node))?;
 
-    Ok((ast_file, node))
+    Ok((c.file, node))
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
@@ -378,32 +414,44 @@ impl GlobalVisitorState {
     pub async fn resolve_global_symbols(&self) -> Result<()> {
         for (child_id, unresolved) in self.unresolved_children.iter() {
             let child_name = "asdf";
-            let resolved_children = self.index.find_symbols(&child_name).await?;
-            for resolved_child in resolved_children {
-                for u in unresolved.iter() {
-                    // let res = self
-                    //     .index
-                    //     .add_reference(u.parent_id, resolved_child.id, &u.occurrence)
-                    //     .await;
-                    // if res.is_err() {
-                    //     log::error!("{:#?}", unresolved);
-                    // }
-                    // res?;
-                }
-            }
+            unimplemented!("Unimplemented");
+            // let resolved_children = self.index.find_symbols(&child_name).await?;
+            // for resolved_child in resolved_children {
+            //     for u in unresolved.iter() {
+            //         // let res = self
+            //         //     .index
+            //         //     .add_reference(u.parent_id, resolved_child.id, &u.occurrence)
+            //         //     .await;
+            //         // if res.is_err() {
+            //         //     log::error!("{:#?}", unresolved);
+            //         // }
+            //         // res?;
+            //     }
+            // }
         }
 
         Ok(())
     }
 
-    pub async fn extract_symbol_map_root(&mut self, root: Node) -> Result<()> {
-        let mut unit_state = UnitVisitorState::new();
-        match root.kind {
-            Clang::TranslationUnitDecl(node) => {
-                node.visit(self, &mut unit_state, &root.inner).await?
-            }
-            _ => bail!("Not implemented"),
+    pub async fn extract_symbol_map_root(&mut self, module: &str, root: Node) -> Result<()> {
+        let node = if let Clang::TranslationUnitDecl(node) = root.kind {
+            node
+        } else {
+            bail!("Not implemented");
         };
+
+        println!(
+            "{:?} {:?}",
+            node.loc.clone().unwrap(),
+            node.range.clone().unwrap()
+        );
+        let module_id = self
+            .index
+            .create_or_get_fileid(&module, &self.project, &self.language)
+            .await?;
+
+        let mut unit_state = ModuleVisitorState::new(module_id);
+        node.visit(self, &mut unit_state, &root.inner).await?;
 
         unit_state.resolve_local_symbols(&self.index).await?;
         // let parent_id = state
@@ -427,12 +475,16 @@ impl GlobalVisitorState {
         symbol_scope: SymbolScope,
         occurrence: Occurrence,
     ) -> Symbol {
-        self.index.create_or_get_symbol(name, symbol_type, symbol_scope, occurrence).await.unwrap()
+        unimplemented!("Unimplemented")
+        // self.index
+        //     .create_or_get_symbol(name, symbol_type, symbol_scope, occurrence)
+        //     .await
+        //     .unwrap()
     }
 }
 
 #[derive(Debug, Clone)]
-struct UnitSymbol {
+struct ModuleSymbol {
     id: Id,
     parent: Id,
     name: String,
@@ -441,7 +493,7 @@ struct UnitSymbol {
     occurrence: Occurrence,
 }
 
-impl UnitSymbol {
+impl ModuleSymbol {
     fn new(
         id: Id,
         parent: Id,
@@ -461,26 +513,26 @@ impl UnitSymbol {
     }
 }
 
-impl Into<crate::db::Symbol> for UnitSymbol {
-    fn into(self) -> crate::db::Symbol {
-        crate::db::Symbol {
-            id: self.id.into(),
-            parent_id: None,
-            name: self.name,
-            file_id: self.occurrence.file,
-            symbol_type: self.symbol_type,
-            symbol_scope: self.symbol_scope,
-            line_start: self.occurrence.line_start as i64,
-            col_start: self.occurrence.column_start as i64,
-            line_end: self.occurrence.line_end as i64,
-            col_end: self.occurrence.column_end as i64,
-        }
-    }
-}
+// impl Into<crate::db::Symbol> for UnitSymbol {
+//     fn into(self) -> crate::db::Symbol {
+//         crate::db::Symbol {
+//             id: self.id.into(),
+//             name: self.name,
+//             file_id: self.occurrence.file,
+//             symbol_type: self.symbol_type,
+//             symbol_scope: self.symbol_scope,
+//             line_start: self.occurrence.line_start as i64,
+//             col_start: self.occurrence.column_start as i64,
+//             line_end: self.occurrence.line_end as i64,
+//             col_end: self.occurrence.column_end as i64,
+//         }
+//     }
+// }
 
-struct UnitVisitorState {
+struct ModuleVisitorState {
+    module_id: FileId,
     references: Vec<UnresolvedChild>,
-    symbols: Vec<UnitSymbol>,
+    symbols: Vec<ModuleSymbol>,
     /// A map of registered symbols with the list of related symbols. Related
     /// symbols are the one which point to each other using [`previous_decl`]
     symbol_ids: HashMap<Id, Vec<Id>>,
@@ -488,9 +540,10 @@ struct UnitVisitorState {
     known_symbols: HashMap<Id, SymbolId>,
 }
 
-impl UnitVisitorState {
-    fn new() -> Self {
+impl ModuleVisitorState {
+    fn new(module_id: FileId) -> Self {
         Self {
+            module_id,
             references: Vec::new(),
             symbols: Vec::new(),
             symbol_ids: HashMap::new(),
@@ -499,7 +552,7 @@ impl UnitVisitorState {
         }
     }
 
-    fn add_symbol(&mut self, new_symbol: UnitSymbol) {
+    fn add_symbol(&mut self, new_symbol: ModuleSymbol) {
         self.symbol_ids.insert(new_symbol.id, Vec::new());
         self.symbols.push(new_symbol);
     }
@@ -523,13 +576,13 @@ impl UnitVisitorState {
     }
 
     async fn resolve_local_symbols(&mut self, index: &Index) -> Result<()> {
-        let mut ids = Vec::new();
-        ids.reserve(self.symbol_ids.len());
+        // let mut ids = Vec::new();
+        // ids.reserve(self.symbol_ids.len());
 
-        for symbol in self.symbols.iter() {
-            let id = index.create_symbol(symbol.clone().into()).await?;
-            ids.push(id)
-        }
+        // for symbol in self.symbols.iter() {
+        //     let id = index.create_symbol(symbol.clone().into()).await?;
+        //     ids.push(id)
+        // }
 
         println!("{:#?}", self.references);
 

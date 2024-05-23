@@ -35,9 +35,11 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = SqlitePool::connect_with(options).await?;
 
-    sqlx::query_file!("../sql/create_tables.sql")
+    let res = sqlx::query_file!("../sql/create_tables.sql")
         .execute(&pool)
         .await?;
+
+    println!("Finished {:?}", res);
 
     Ok(())
 }
