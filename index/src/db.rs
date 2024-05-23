@@ -262,7 +262,7 @@ impl Index {
     pub async fn add_declaration(&self, declaration: &Declaration) -> Result<()> {
         sqlx::query!(
                 r#"
-                INSERT INTO declarations (symbol, file_id, symbol_type, line_start, col_start, line_end, col_end)
+                INSERT OR IGNORE INTO declarations (symbol, file_id, symbol_type, line_start, col_start, line_end, col_end)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 "#,
                 declaration.symbol,
@@ -352,7 +352,7 @@ impl Index {
     ) -> Result<()> {
         let res = sqlx::query!(
             r#"
-            INSERT INTO symbol_refs (from_symbol, to_symbol, from_line, from_col_start, from_col_end)
+            INSERT OR IGNORE INTO symbol_refs (from_symbol, to_symbol, from_line, from_col_start, from_col_end)
             VALUES (?, ?, ?, ?, ?)
             "#,
             from_symbol,
