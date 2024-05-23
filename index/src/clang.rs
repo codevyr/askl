@@ -235,11 +235,6 @@ impl FunctionDecl {
             None
         };
 
-        println!(
-            "{:?} {:?} {:?}",
-            self.name, self.storage_class, self.previous_decl
-        );
-
         let symbol = state
             .index
             .insert_symbol(name, module_id, symbol_scope)
@@ -461,11 +456,6 @@ impl GlobalVisitorState {
             bail!("Not implemented");
         };
 
-        println!(
-            "{:?} {:?}",
-            node.loc.clone().unwrap(),
-            node.range.clone().unwrap()
-        );
         let module_id = self
             .index
             .create_or_get_fileid(&module, &self.project, &self.language)
