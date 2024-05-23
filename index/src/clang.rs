@@ -116,6 +116,7 @@ impl FunctionDecl {
     fn get_symbol_scope(&self) -> SymbolScope {
         match self.storage_class.as_deref() {
             Some("static") => SymbolScope::Local,
+            Some("extern") => SymbolScope::Global,
             None => SymbolScope::Global,
             _ => panic!("Unknown symbol scope {:?}", self.storage_class),
         }
