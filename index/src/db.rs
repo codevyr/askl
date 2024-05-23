@@ -45,11 +45,7 @@ pub struct Occurrence {
 }
 
 impl Occurrence {
-    pub fn new_nolines(
-        symbol: SymbolId,
-        file_id: FileId,
-        symbol_type: SymbolType,
-    ) -> Self {
+    pub fn new_nolines(symbol: SymbolId, file_id: FileId, symbol_type: SymbolType) -> Self {
         Self {
             symbol,
             file_id,
@@ -59,6 +55,41 @@ impl Occurrence {
             line_end: 1,
             col_end: 1,
         }
+    }
+
+    pub fn new(
+        symbol: SymbolId,
+        file_id: FileId,
+        symbol_type: SymbolType,
+        range: &Option<clang_ast::SourceRange>,
+    ) -> Result<Self> {
+        let range = if let Some(range) = range {
+            range
+        } else {
+            bail!("Range does not exist");
+        };
+
+        let begin = if let Some(begin) = &range.begin.expansion_loc {
+            begin
+        } else {
+            bail!("Begin does not exist");
+        };
+
+        let end = if let Some(end) = &range.end.expansion_loc {
+            end
+        } else {
+            bail!("End does not exist");
+        };
+
+        Ok(Self {
+            symbol,
+            file_id,
+            symbol_type,
+            line_start: begin.line as i64,
+            col_start: begin.col as i64,
+            line_end: end.line as i64,
+            col_end: end.col as i64,
+        })
     }
 }
 
@@ -171,28 +202,7 @@ impl Index {
         Ok(file_id.into())
     }
 
-    // pub async fn create_symbol(&self, new_symbol: Symbol) -> Result<SymbolId> {
-    //     let id = sqlx::query!(
-    //             r#"
-    //             INSERT INTO symbol_occ (file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end)
-    //             VALUES (?, ?, ?, ?, ?, ?, ?)
-    //             "#,
-    //             new_symbol.file_id,
-    //             new_symbol.symbol_type,
-    //             new_symbol.symbol_scope,
-    //             new_symbol.line_start,
-    //             new_symbol.col_start,
-    //             new_symbol.line_end,
-    //             new_symbol.col_end
-    //         )
-    //         .execute(&self.pool)
-    //         .await?
-    //         .last_insert_rowid();
-
-    //     Ok(id.into())
-    // }
-
-    pub async fn get_symbol(
+    pub async fn insert_symbol(
         &self,
         name: &str,
         module: Option<FileId>,
@@ -248,6 +258,26 @@ impl Index {
         let new_symbol = Symbol::new(id, name, module, scope);
         println!("NEW SYMBOL {:?}", new_symbol);
         return Ok(new_symbol);
+    }
+
+    pub async fn add_occurrence(&self, occurrence: &Occurrence) -> Result<()> {
+        sqlx::query!(
+                r#"
+                INSERT INTO occurrences (symbol, file_id, symbol_type, line_start, col_start, line_end, col_end)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                "#,
+                occurrence.symbol,
+                occurrence.file_id,
+                occurrence.symbol_type,
+                occurrence.line_start,
+                occurrence.col_start,
+                occurrence.line_end,
+                occurrence.col_end
+            )
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
     }
 
     // pub async fn create_or_get_symbol(

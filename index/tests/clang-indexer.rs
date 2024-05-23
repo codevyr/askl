@@ -48,7 +48,7 @@ async fn index_files(files: Vec<&str>) -> GlobalVisitorState {
 }
 
 /// We do not need all fields for comparison
-fn mask_symbol(symbol: &Occurrence) -> Occurrence {
+fn mask_occurrence(symbol: &Occurrence) -> Occurrence {
     Occurrence {
         symbol: symbol.symbol,
         // name: symbol.name.clone(),
@@ -129,14 +129,18 @@ async fn create_state() {
     }
 
     let expected_occurrences = [
-        Occurrence::new_nolines(SymbolId::new(1), FileId::new(1), SymbolType::Declaration),
-        Occurrence::new_nolines(SymbolId::new(2), FileId::new(1), SymbolType::Declaration),
-        Occurrence::new_nolines(SymbolId::new(3), FileId::new(1), SymbolType::Declaration),
-        Occurrence::new_nolines(SymbolId::new(4), FileId::new(1), SymbolType::Declaration),
-        Occurrence::new_nolines(SymbolId::new(5), FileId::new(1), SymbolType::Declaration),
+        Occurrence::new_nolines(SymbolId::new(1), FileId::new(1), SymbolType::Declaration), // foo
+        Occurrence::new_nolines(SymbolId::new(1), FileId::new(1), SymbolType::Definition),  // foo
+        Occurrence::new_nolines(SymbolId::new(2), FileId::new(1), SymbolType::Definition),  // bar
+        Occurrence::new_nolines(SymbolId::new(3), FileId::new(1), SymbolType::Declaration), // zar
+        Occurrence::new_nolines(SymbolId::new(4), FileId::new(1), SymbolType::Definition),  // main
+        Occurrence::new_nolines(SymbolId::new(5), FileId::new(1), SymbolType::Declaration), // tar
+        Occurrence::new_nolines(SymbolId::new(5), FileId::new(1), SymbolType::Declaration), // tar
+        Occurrence::new_nolines(SymbolId::new(5), FileId::new(1), SymbolType::Definition), // tar
+        Occurrence::new_nolines(SymbolId::new(3), FileId::new(1), SymbolType::Definition), // zar
     ];
     for (i, o) in occurrences.iter().enumerate() {
-        assert_eq!(*o, expected_occurrences[i]);
+        assert_eq!(mask_occurrence(o), expected_occurrences[i]);
     }
     assert_eq!(occurrences.len(), expected_occurrences.len());
 

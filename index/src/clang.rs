@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    db::{Index, Symbol},
-    symbols::{FileId, Occurrence, SymbolId, SymbolScope, SymbolType},
+    db::{Index, Occurrence, Symbol},
+    symbols::{self, FileId, SymbolId, SymbolScope, SymbolType},
 };
 use anyhow::{anyhow, bail, Result};
 use clang_ast::Id;
@@ -136,15 +136,13 @@ impl FunctionDecl {
             .flatten()
     }
 
-    async fn extract_refs(
+    async fn visit_references(
         &self,
         state: &mut GlobalVisitorState,
         unit_state: &mut ModuleVisitorState,
-        id: Id,
+        from_id: SymbolId,
         inner: &Vec<Node>,
     ) -> Result<()> {
-        return Ok(());
-
         for node in self.extract_call_refs(inner) {
             match &node.kind {
                 Clang::DeclRefExpr(ref_expr) => {
@@ -153,34 +151,47 @@ impl FunctionDecl {
                         .extract_file_from_range(&ref_expr.range)
                         .await
                         .unwrap();
-                    let occurrence = Occurrence::new(&ref_expr.range, file_id).unwrap();
+                    let occurrence = symbols::Occurrence::new(&ref_expr.range, file_id).unwrap();
 
                     match &referenced_decl.kind {
                         Clang::FunctionDecl(f) => {
                             // If the reference id is unknown, then the reference is
                             // also an implicit symbol declaration
-                            let root_symbol_id = if !unit_state.contains_symbol(&referenced_decl.id)
+                            let to_id = if let Some(symbol_id) =
+                                unit_state.get_symbol(&referenced_decl.id)
                             {
-                                let new_symbol = ModuleSymbol::new(
-                                    referenced_decl.id,
-                                    referenced_decl.id,
-                                    f.name.as_ref().unwrap(),
-                                    SymbolType::Declaration,
-                                    SymbolScope::Global,
-                                    occurrence.clone(),
-                                );
-                                unit_state.add_symbol(new_symbol);
-                                unit_state.get_parent_id(referenced_decl.id, None)
+                                *symbol_id
                             } else {
-                                unit_state
-                                    .get_parent_id(referenced_decl.id, Some(referenced_decl.id))
+                                let name = f.name.as_ref().unwrap();
+                                let symbol_scope = SymbolScope::Global;
+                                // None, because this symbol is global
+                                let module_id = None;
+                                // Implicit symbol declaration
+                                let symbol_type = SymbolType::Declaration;
+
+                                let symbol = state
+                                    .index
+                                    .insert_symbol(name, module_id, symbol_scope)
+                                    .await?;
+                                unit_state.add_symbol(referenced_decl.id, symbol.id);
+
+                                let occurrence = Occurrence::new(
+                                    symbol.id,
+                                    file_id,
+                                    symbol_type,
+                                    &ref_expr.range,
+                                )
+                                .unwrap();
+                                state.index.add_occurrence(&occurrence).await?;
+                                
+                                symbol.id
                             };
 
-                            unit_state.add_reference(UnresolvedChild {
-                                from: id,
-                                to: root_symbol_id,
-                                occurrence,
-                            })
+                            // unit_state.add_reference(UnresolvedChild {
+                            //     from: from_id,
+                            //     to: to_id,
+                            //     occurrence,
+                            // })
                         }
                         Clang::ParmVarDecl | Clang::EnumConstantDecl(_) | Clang::VarDecl(_) => {}
                         _ => {
@@ -207,7 +218,6 @@ impl FunctionDecl {
         let clang_range = self.range.clone();
         let file_id = state.extract_file_from_range(&clang_range).await.unwrap();
 
-        let occurrence = Occurrence::new(&clang_range, file_id).unwrap();
         let name = self.name.as_ref().unwrap();
 
         let symbol_type = self.get_symbol_state(inner);
@@ -226,7 +236,14 @@ impl FunctionDecl {
 
         let symbol = state
             .index
-            .get_symbol(name, module_id, symbol_scope)
+            .insert_symbol(name, module_id, symbol_scope)
+            .await?;
+
+        let occurrence = Occurrence::new(symbol.id, file_id, symbol_type, &clang_range).unwrap();
+        state.index.add_occurrence(&occurrence).await?;
+        unit_state.add_symbol(id, symbol.id);
+
+        self.visit_references(state, unit_state, symbol.id, inner)
             .await?;
 
         return Ok(());
@@ -244,12 +261,9 @@ impl FunctionDecl {
         //     )
         //     .await;
 
-        let new_symbol =
-            ModuleSymbol::new(id, parent_id, name, symbol_type, symbol_scope, occurrence);
-        unit_state.add_symbol(new_symbol.clone());
-
-        self.extract_refs(state, unit_state, new_symbol.id, inner)
-            .await?;
+        // let new_symbol =
+        //     ModuleSymbol::new(id, parent_id, name, symbol_type, symbol_scope, occurrence);
+        // unit_state.add_symbol(new_symbol.clone());
 
         Ok(())
     }
@@ -364,11 +378,11 @@ pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<(St
     Ok((c.file, node))
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Deserialize, Clone, Eq, PartialEq, Hash)]
 struct UnresolvedChild {
-    from: Id,
-    to: Id,
-    occurrence: Occurrence,
+    from: SymbolId,
+    to: SymbolId,
+    occurrence: symbols::Occurrence,
 }
 
 pub struct GlobalVisitorState {
@@ -388,22 +402,23 @@ impl GlobalVisitorState {
         }
     }
 
-    fn add_unresolved_children(&mut self, children: Vec<UnresolvedChild>) {
-        for child in children {
-            self.unresolved_children
-                .entry(child.to)
-                .and_modify(|v| {
-                    v.insert(child.clone());
-                })
-                .or_insert_with(|| HashSet::from([child]));
-        }
-    }
+    // fn add_unresolved_children(&mut self, children: Vec<UnresolvedChild>) {
+    //     for child in children {
+    //         self.unresolved_children
+    //             .entry(child.to)
+    //             .and_modify(|v| {
+    //                 v.insert(child.clone());
+    //             })
+    //             .or_insert_with(|| HashSet::from([child]));
+    //     }
+    // }
 
     async fn extract_file_from_range(
         &self,
         range: &Option<clang_ast::SourceRange>,
     ) -> Result<FileId> {
-        let file = Occurrence::get_file(range).ok_or(anyhow!("Range does not provide file"))?;
+        let file =
+            symbols::Occurrence::get_file(range).ok_or(anyhow!("Range does not provide file"))?;
         let file_string = file.into_os_string().into_string().unwrap();
 
         self.index
@@ -490,7 +505,7 @@ struct ModuleSymbol {
     name: String,
     symbol_type: SymbolType,
     symbol_scope: SymbolScope,
-    occurrence: Occurrence,
+    occurrence: symbols::Occurrence,
 }
 
 impl ModuleSymbol {
@@ -500,7 +515,7 @@ impl ModuleSymbol {
         name: &str,
         symbol_type: SymbolType,
         symbol_scope: SymbolScope,
-        occurrence: Occurrence,
+        occurrence: symbols::Occurrence,
     ) -> Self {
         Self {
             id,
@@ -535,7 +550,7 @@ struct ModuleVisitorState {
     symbols: Vec<ModuleSymbol>,
     /// A map of registered symbols with the list of related symbols. Related
     /// symbols are the one which point to each other using [`previous_decl`]
-    symbol_ids: HashMap<Id, Vec<Id>>,
+    symbol_ids: HashMap<Id, SymbolId>,
     parent_ids: HashMap<Id, Id>,
     known_symbols: HashMap<Id, SymbolId>,
 }
@@ -552,13 +567,16 @@ impl ModuleVisitorState {
         }
     }
 
-    fn add_symbol(&mut self, new_symbol: ModuleSymbol) {
-        self.symbol_ids.insert(new_symbol.id, Vec::new());
-        self.symbols.push(new_symbol);
+    fn add_symbol(&mut self, clang_id: Id, symbol_id: SymbolId) {
+        self.symbol_ids.insert(clang_id, symbol_id);
     }
 
     fn contains_symbol(&self, id: &Id) -> bool {
         self.symbol_ids.contains_key(id)
+    }
+
+    fn get_symbol(&self, id: &Id) -> Option<&SymbolId> {
+        self.symbol_ids.get(id)
     }
 
     fn get_parent_id(&mut self, symbol_id: Id, previous_decl: Option<Id>) -> Id {
