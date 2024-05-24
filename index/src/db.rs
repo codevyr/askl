@@ -94,6 +94,12 @@ impl Declaration {
             col_end: end.col as i64,
         })
     }
+
+    pub fn with_id(self, id: DeclarationId) -> Self {
+        let mut res = self;
+        res.id = id;
+        res
+    }
 }
 
 #[derive(Debug, sqlx::FromRow, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -117,7 +123,7 @@ impl File {
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
 pub struct Reference {
-    pub from_symbol: SymbolId,
+    pub from_decl: DeclarationId,
     pub to_symbol: SymbolId,
     pub from_line: i64,
     pub from_col_start: i64,
@@ -262,11 +268,33 @@ impl Index {
         return Ok(new_symbol);
     }
 
-    pub async fn add_declaration(&self, declaration: &Declaration) -> Result<()> {
-        sqlx::query!(
+    pub async fn add_declaration(&self, declaration: Declaration) -> Result<Declaration> {
+        let rec = sqlx::query_as!(
+                Declaration,
                 r#"
-                INSERT OR IGNORE INTO declarations (symbol, file_id, symbol_type, line_start, col_start, line_end, col_end)
+                SELECT *
+                FROM declarations
+                WHERE symbol = ? AND file_id = ? AND line_start = ? AND col_start = ? AND line_end = ? AND col_end = ?
+                "#,
+                declaration.symbol,
+                declaration.file_id,
+                declaration.line_start,
+                declaration.col_start,
+                declaration.line_end,
+                declaration.col_end                
+            )
+            .fetch_optional(&self.pool)
+            .await?;
+
+        if let Some(declaration) = rec {
+            return Ok(declaration);
+        }
+
+        let rec = sqlx::query!(
+                r#"
+                INSERT INTO declarations (symbol, file_id, symbol_type, line_start, col_start, line_end, col_end)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
                 "#,
                 declaration.symbol,
                 declaration.file_id,
@@ -276,10 +304,12 @@ impl Index {
                 declaration.line_end,
                 declaration.col_end
             )
-            .execute(&self.pool)
+            .fetch_one(&self.pool)
             .await?;
 
-        Ok(())
+        let id: DeclarationId = rec.id.into();
+    
+        Ok(declaration.with_id(id))
     }
 
     // pub async fn create_or_get_symbol(
@@ -349,16 +379,16 @@ impl Index {
 
     pub async fn add_reference(
         &self,
-        from_symbol: SymbolId,
+        from_decl: DeclarationId,
         to_symbol: SymbolId,
         occurrence: &Occurrence,
     ) -> Result<()> {
         let res = sqlx::query!(
             r#"
-            INSERT OR IGNORE INTO symbol_refs (from_symbol, to_symbol, from_line, from_col_start, from_col_end)
+            INSERT OR IGNORE INTO symbol_refs (from_decl, to_symbol, from_line, from_col_start, from_col_end)
             VALUES (?, ?, ?, ?, ?)
             "#,
-            from_symbol,
+            from_decl,
             to_symbol,
             occurrence.line_start,
             occurrence.column_start,
@@ -371,7 +401,7 @@ impl Index {
             log::error!(
                 "Failed to add reference {} {}->{} {:?}",
                 err,
-                from_symbol,
+                from_decl,
                 to_symbol,
                 occurrence
             );
@@ -427,7 +457,7 @@ impl Index {
         let references: Vec<Reference> = sqlx::query_as!(
             Reference,
             r#"
-            SELECT *
+            SELECT from_decl, to_symbol, from_line, from_col_start, from_col_end
             FROM symbol_refs
             "#
         )

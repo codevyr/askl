@@ -263,7 +263,6 @@ impl serde::Serialize for FileId {
 #[derive(
     Debug,
     Default,
-    Serialize,
     Deserialize,
     Copy,
     Clone,
@@ -280,13 +279,44 @@ pub struct DeclarationId(i32);
 
 impl DeclarationId {
     pub fn invalid() -> Self {
-        Self(0)
+        Self(-1)
+    }
+
+    pub fn new(id: i32) -> Self {
+        Self(id)
     }
 }
 
 impl From<i64> for DeclarationId {
     fn from(value: i64) -> Self {
         Self(value as i32)
+    }
+}
+
+impl From<Option<i64>> for DeclarationId {
+    fn from(value: Option<i64>) -> Self {
+        Self(value.unwrap() as i32)
+    }
+}
+
+impl fmt::Display for DeclarationId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<i32> for DeclarationId {
+    fn from(value: i32) -> Self {
+        Self(value)
+    }
+}
+
+impl serde::Serialize for DeclarationId {
+    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        s.serialize_str(&format!("{}", self.0))
     }
 }
 
@@ -353,47 +383,47 @@ impl SymbolMap {
     pub async fn from_index(index: Index) -> Result<Self> {
         let symbols = index.all_declarations().await?;
         unimplemented!("XXX");
-        let mut symbols_map = HashMap::new();
-        for symbol in symbols {
-            symbols_map.insert(
-                symbol.symbol,
-                Symbol {
-                    id: symbol.symbol,
-                    children: SymbolRefs::new(),
-                    parents: SymbolRefs::new(),
-                    // name: symbol.name.clone(),
-                    name: String::from(""),
-                    occurrence: symbol.into(),
-                },
-            );
-        }
+        // let mut symbols_map = HashMap::new();
+        // for symbol in symbols {
+        //     symbols_map.insert(
+        //         symbol.symbol,
+        //         Symbol {
+        //             id: symbol.symbol,
+        //             children: SymbolRefs::new(),
+        //             parents: SymbolRefs::new(),
+        //             // name: symbol.name.clone(),
+        //             name: String::from(""),
+        //             occurrence: symbol.into(),
+        //         },
+        //     );
+        // }
 
-        let files = index.all_files().await?;
-        let mut files_map = HashMap::new();
-        for file in files {
-            files_map.insert(file.id, file);
-        }
+        // let files = index.all_files().await?;
+        // let mut files_map = HashMap::new();
+        // for file in files {
+        //     files_map.insert(file.id, file);
+        // }
 
-        let references = index.all_refs().await?;
-        for reference in references {
-            let from_symbol = symbols_map.get_mut(&reference.from_symbol).unwrap();
-            let occurrence = Occurrence {
-                file: from_symbol.occurrence.file,
-                line_start: reference.from_line as i32,
-                line_end: reference.from_line as i32,
-                column_start: reference.from_col_start as i32,
-                column_end: reference.from_col_end as i32,
-            };
-            from_symbol.add_child(reference.to_symbol, occurrence.clone());
+        // let references = index.all_refs().await?;
+        // for reference in references {
+        //     let from_symbol = symbols_map.get_mut(&reference.from_decl).unwrap();
+        //     let occurrence = Occurrence {
+        //         file: from_symbol.occurrence.file,
+        //         line_start: reference.from_line as i32,
+        //         line_end: reference.from_line as i32,
+        //         column_start: reference.from_col_start as i32,
+        //         column_end: reference.from_col_end as i32,
+        //     };
+        //     from_symbol.add_child(reference.to_symbol, occurrence.clone());
 
-            let to_symbol = symbols_map.get_mut(&reference.to_symbol).unwrap();
-            to_symbol.add_parent(reference.from_symbol, occurrence);
-        }
+        //     let to_symbol = symbols_map.get_mut(&reference.to_symbol).unwrap();
+        //     to_symbol.add_parent(reference.from_decl, occurrence);
+        // }
 
-        Ok(Self {
-            symbols: symbols_map,
-            files: files_map,
-        })
+        // Ok(Self {
+        //     symbols: symbols_map,
+        //     files: files_map,
+        // })
     }
 
     pub fn merge(mut self, other: SymbolMap) -> Self {

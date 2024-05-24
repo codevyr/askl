@@ -89,7 +89,7 @@ fn new_symbol(
 
 fn mask_ref(reference: &Reference) -> Reference {
     Reference {
-        from_symbol: reference.from_symbol,
+        from_decl: reference.from_decl,
         to_symbol: reference.to_symbol,
         from_line: 1,
         from_col_start: 1,
@@ -97,9 +97,9 @@ fn mask_ref(reference: &Reference) -> Reference {
     }
 }
 
-fn new_ref(from_symbol: i32, to_symbol: i32) -> Reference {
+fn new_ref(from_decl: i32, to_symbol: i32) -> Reference {
     Reference {
-        from_symbol: SymbolId(from_symbol),
+        from_decl: DeclarationId::new(from_decl),
         to_symbol: SymbolId(to_symbol),
         from_line: 1,
         from_col_start: 1,
@@ -163,10 +163,10 @@ async fn create_state() {
         println!("Reference: {:?}", reference);
     }
     let expected_refs = [
-        new_ref(4, 3), // main to zar
-        new_ref(4, 1), // main to foo
-        new_ref(4, 5), // main to tar
-        new_ref(4, 2), // main to bar
+        new_ref(5, 3), // main to zar
+        new_ref(5, 1), // main to foo
+        new_ref(5, 5), // main to tar
+        new_ref(5, 2), // main to bar
     ];
     for (i, s) in refs.iter().enumerate() {
         assert_eq!(mask_ref(&s), expected_refs[i]);

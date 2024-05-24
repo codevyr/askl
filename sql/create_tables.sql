@@ -34,12 +34,12 @@ CREATE TABLE IF NOT EXISTS declarations
 
 CREATE TABLE IF NOT EXISTS symbol_refs
 (
-    from_symbol INTEGER NOT NULL,
+    from_decl INTEGER NOT NULL,
     to_symbol INTEGER NOT NULL,
     from_line INTEGER NOT NULL,
     from_col_start INTEGER NOT NULL,
     from_col_end INTEGER NOT NULL,
-    FOREIGN KEY (from_symbol) REFERENCES symbols(id),
+    FOREIGN KEY (from_decl) REFERENCES declarations(id),
     FOREIGN KEY (to_symbol) REFERENCES symbols(id),
-    UNIQUE (from_symbol, to_symbol, from_line, from_col_start, from_col_end)
+    UNIQUE (from_decl, to_symbol, from_line, from_col_start, from_col_end)
 );

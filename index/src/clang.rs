@@ -147,7 +147,7 @@ impl FunctionDecl {
         &self,
         state: &mut GlobalVisitorState,
         unit_state: &mut ModuleVisitorState,
-        from_id: SymbolId,
+        declaration: &Declaration,
         inner: &Vec<Node>,
     ) -> Result<()> {
         for node in self.extract_call_refs(inner) {
@@ -182,21 +182,22 @@ impl FunctionDecl {
                                     .await?;
                                 unit_state.add_symbol(referenced_decl.id, symbol.id);
 
-                                let occurrence = Declaration::new(
+                                let declaration = Declaration::new(
                                     symbol.id,
                                     file_id,
                                     symbol_type,
                                     &ref_expr.range,
                                 )
                                 .unwrap();
-                                state.index.add_declaration(&occurrence).await?;
+                                state.index.add_declaration(declaration).await?;
 
                                 symbol.id
                             };
 
+                            println!("ADD REF {:?} -> {:?}", declaration, to_id);
                             state
                                 .get_index()
-                                .add_reference(from_id, to_id, &occurrence)
+                                .add_reference(declaration.id, to_id, &occurrence)
                                 .await?;
                         }
                         Clang::ParmVarDecl | Clang::EnumConstantDecl(_) | Clang::VarDecl(_) => {}
@@ -241,10 +242,10 @@ impl FunctionDecl {
             .await?;
 
         let declaration = Declaration::new(symbol.id, file_id, symbol_type, &clang_range).unwrap();
-        state.index.add_declaration(&declaration).await?;
+        let declaration = state.index.add_declaration(declaration).await?;
         unit_state.add_symbol(id, symbol.id);
 
-        self.visit_references(state, unit_state, symbol.id, inner)
+        self.visit_references(state, unit_state, &declaration, inner)
             .await?;
 
         return Ok(());
