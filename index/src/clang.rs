@@ -495,6 +495,12 @@ impl GlobalVisitorState {
     }
 }
 
+impl Into<Index> for GlobalVisitorState {
+    fn into(self) -> Index {
+        self.index
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ModuleSymbol {
     id: Id,

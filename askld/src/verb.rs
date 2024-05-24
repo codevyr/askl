@@ -1,9 +1,9 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
 use crate::parser::{Identifier, NamedArgument, ParserContext, PositionalArgument, Rule};
-use index::symbols::{Reference, SymbolId, SymbolRefs};
 use anyhow::{anyhow, bail, Result};
 use core::fmt::Debug;
+use index::symbols::{DeclarationRefs, Reference, SymbolId, SymbolRefs};
 use log::debug;
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
@@ -188,7 +188,8 @@ pub trait Deriver: Debug {
         cfg: &ControlFlowGraph,
         symbol: SymbolRefs,
     ) -> HashSet<Reference>;
-    fn derive_parents(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs>;
+    fn derive_parents(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId)
+        -> Option<DeclarationRefs>;
 }
 
 pub trait Marker: Debug {
@@ -311,8 +312,8 @@ impl Deriver for ForcedVerb {
         references
     }
 
-    fn derive_parents(&self, _cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
-        Some(SymbolRefs::from([(symbol, HashSet::new())]))
+    fn derive_parents(&self, _cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<DeclarationRefs> {
+        None
     }
 }
 
@@ -386,7 +387,11 @@ impl Deriver for UnitVerb {
         HashSet::new()
     }
 
-    fn derive_parents(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs> {
+    fn derive_parents(
+        &self,
+        _cfg: &ControlFlowGraph,
+        _symbol: SymbolId,
+    ) -> Option<DeclarationRefs> {
         None
     }
 }
@@ -433,7 +438,7 @@ impl Deriver for ChildrenVerb {
         references
     }
 
-    fn derive_parents(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
+    fn derive_parents(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<DeclarationRefs> {
         Some(cfg.symbols.get_parents(symbol).clone())
     }
 }
@@ -509,8 +514,15 @@ impl Filter for ProjectFilter {
             .into_iter()
             .filter(|(symbol_id, _)| {
                 let symbol = cfg.get_symbol(*symbol_id).unwrap();
-                let file = cfg.get_file(symbol.occurrence.file).unwrap();
-                self.project == file.project
+                for declaration_id in symbol.declarations {
+                    let declaration = cfg.get_declaration(declaration_id).unwrap();
+                    let file = cfg.get_file(declaration.file_id).unwrap();
+                    if self.project == file.project {
+                        return true;
+                    }
+                }
+
+                return false;
             })
             .collect()
     }
@@ -555,7 +567,11 @@ impl Deriver for IsolatedScope {
         HashSet::new()
     }
 
-    fn derive_parents(&self, _cfg: &ControlFlowGraph, _symbol: SymbolId) -> Option<SymbolRefs> {
+    fn derive_parents(
+        &self,
+        _cfg: &ControlFlowGraph,
+        _symbol: SymbolId,
+    ) -> Option<DeclarationRefs> {
         None
     }
 }
@@ -676,8 +692,8 @@ impl Deriver for UserVerb {
         references
     }
 
-    fn derive_parents(&self, _cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
-        Some(SymbolRefs::from([(symbol, HashSet::new())]))
+    fn derive_parents(&self, _cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<DeclarationRefs> {
+        None
     }
 }
 

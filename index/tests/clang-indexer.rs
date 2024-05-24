@@ -3,7 +3,7 @@ use std::env;
 
 use index::{
     db::Symbol,
-    symbols::{DeclarationId, FileId, SymbolId, SymbolScope, SymbolType},
+    symbols::{DeclarationId, FileId, SymbolId, SymbolScope, SymbolType, SymbolMap},
 };
 
 use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState};
@@ -172,4 +172,7 @@ async fn create_state() {
         assert_eq!(mask_ref(&s), expected_refs[i]);
     }
     assert_eq!(refs.len(), expected_refs.len());
+
+    let index: Index = state.into();
+    let symbols = SymbolMap::from_index(index).await.unwrap();
 }

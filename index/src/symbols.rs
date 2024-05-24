@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::{collections::HashMap, hash, hash::Hasher};
 
-use crate::db::{self, File, Index};
+use crate::db::{self, Declaration, File, Index};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Copy, Clone, Serialize, Deserialize)]
 pub struct FileHash(u64);
@@ -125,14 +125,15 @@ impl Reference {
 }
 
 pub type SymbolRefs = HashMap<SymbolId, HashSet<Occurrence>>;
+pub type DeclarationRefs = HashMap<DeclarationId, HashSet<Occurrence>>;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Symbol {
     pub id: SymbolId,
     pub name: String,
-    pub occurrence: Occurrence,
+    pub declarations: HashSet<DeclarationId>,
     pub children: SymbolRefs,
-    pub parents: SymbolRefs,
+    pub parents: DeclarationRefs,
 }
 
 impl Symbol {
@@ -145,7 +146,7 @@ impl Symbol {
             .or_insert(HashSet::from([occurrence]));
     }
 
-    pub fn add_parent(&mut self, id: SymbolId, occurrence: Occurrence) {
+    pub fn add_parent(&mut self, id: DeclarationId, occurrence: Occurrence) {
         self.parents
             .entry(id)
             .and_modify(|occurences| {
@@ -155,7 +156,7 @@ impl Symbol {
     }
 }
 
-pub trait Symbols: ToString {
+pub trait Symbols {
     fn into_vec(&self) -> Vec<SymbolId>;
 }
 
@@ -320,7 +321,7 @@ impl serde::Serialize for DeclarationId {
     }
 }
 
-#[derive(sqlx::Type, Debug, PartialEq, Eq, Copy, Clone)]
+#[derive(sqlx::Type, Debug, PartialEq, Eq, Copy, Clone, Deserialize)]
 #[repr(i32)]
 pub enum SymbolType {
     Definition = 1,
@@ -366,9 +367,10 @@ impl From<i64> for SymbolScope {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct SymbolMap {
     pub symbols: HashMap<SymbolId, Symbol>,
+    pub declarations: HashMap<DeclarationId, Declaration>,
     pub files: HashMap<FileId, File>,
 }
 
@@ -376,54 +378,61 @@ impl SymbolMap {
     pub fn new() -> Self {
         Self {
             symbols: HashMap::new(),
+            declarations: HashMap::new(),
             files: HashMap::new(),
         }
     }
 
     pub async fn from_index(index: Index) -> Result<Self> {
-        let symbols = index.all_declarations().await?;
-        unimplemented!("XXX");
-        // let mut symbols_map = HashMap::new();
-        // for symbol in symbols {
-        //     symbols_map.insert(
-        //         symbol.symbol,
-        //         Symbol {
-        //             id: symbol.symbol,
-        //             children: SymbolRefs::new(),
-        //             parents: SymbolRefs::new(),
-        //             // name: symbol.name.clone(),
-        //             name: String::from(""),
-        //             occurrence: symbol.into(),
-        //         },
-        //     );
-        // }
+        let symbols = index.all_symbols().await?;
+        let mut symbols_map = HashMap::new();
+        for symbol in symbols {
+            symbols_map.insert(
+                symbol.id,
+                Symbol {
+                    id: symbol.id,
+                    children: SymbolRefs::new(),
+                    parents: DeclarationRefs::new(),
+                    name: symbol.name.clone(),
+                    declarations: HashSet::new(),
+                },
+            );
+        }
 
-        // let files = index.all_files().await?;
-        // let mut files_map = HashMap::new();
-        // for file in files {
-        //     files_map.insert(file.id, file);
-        // }
+        let declarations = index.all_declarations().await?;
+        let mut declaration_map = HashMap::new();
+        for declaration in declarations {
+            declaration_map.insert(declaration.id, declaration);
+        }
 
-        // let references = index.all_refs().await?;
-        // for reference in references {
-        //     let from_symbol = symbols_map.get_mut(&reference.from_decl).unwrap();
-        //     let occurrence = Occurrence {
-        //         file: from_symbol.occurrence.file,
-        //         line_start: reference.from_line as i32,
-        //         line_end: reference.from_line as i32,
-        //         column_start: reference.from_col_start as i32,
-        //         column_end: reference.from_col_end as i32,
-        //     };
-        //     from_symbol.add_child(reference.to_symbol, occurrence.clone());
+        let files = index.all_files().await?;
+        let mut files_map = HashMap::new();
+        for file in files {
+            files_map.insert(file.id, file);
+        }
 
-        //     let to_symbol = symbols_map.get_mut(&reference.to_symbol).unwrap();
-        //     to_symbol.add_parent(reference.from_decl, occurrence);
-        // }
+        let references = index.all_refs().await?;
+        for reference in references {
+            let from_declaration = declaration_map.get(&reference.from_decl).unwrap();
+            let from_symbol = symbols_map.get_mut(&from_declaration.symbol).unwrap();
+            let occurrence = Occurrence {
+                file: from_declaration.file_id,
+                line_start: reference.from_line as i32,
+                line_end: reference.from_line as i32,
+                column_start: reference.from_col_start as i32,
+                column_end: reference.from_col_end as i32,
+            };
+            from_symbol.add_child(reference.to_symbol, occurrence.clone());
 
-        // Ok(Self {
-        //     symbols: symbols_map,
-        //     files: files_map,
-        // })
+            let to_symbol = symbols_map.get_mut(&reference.to_symbol).unwrap();
+            to_symbol.add_parent(from_declaration.id, occurrence);
+        }
+
+        Ok(Self {
+            symbols: symbols_map,
+            declarations: declaration_map,
+            files: files_map,
+        })
     }
 
     pub fn merge(mut self, other: SymbolMap) -> Self {
@@ -450,7 +459,7 @@ impl SymbolMap {
         &symbol.children
     }
 
-    pub fn get_parents(&self, symbol_id: SymbolId) -> &SymbolRefs {
+    pub fn get_parents(&self, symbol_id: SymbolId) -> &DeclarationRefs {
         let symbol = if let Some(symbol) = self.symbols.get(&symbol_id) {
             symbol
         } else {
@@ -496,9 +505,9 @@ impl Symbols for SymbolMap {
     }
 }
 
-impl ToString for SymbolMap {
-    fn to_string(&self) -> String {
-        serde_json::to_string_pretty(&self.symbols.clone().into_values().collect::<Vec<Symbol>>())
-            .unwrap()
-    }
-}
+// impl ToString for SymbolMap {
+//     fn to_string(&self) -> String {
+//         serde_json::to_string_pretty(&self.symbols.clone().into_values().collect::<Vec<Symbol>>())
+//             .unwrap()
+//     }
+// }

@@ -1,6 +1,7 @@
 use std::{collections::HashSet, iter::Iterator};
 
-use index::db::File;
+use index::db::{File, Declaration};
+use index::symbols::DeclarationId;
 use index::{
     symbols::{FileId, Occurrence, Symbol, SymbolId, SymbolMap, Reference},
 };
@@ -76,5 +77,9 @@ impl ControlFlowGraph {
 
     pub fn get_file(&self, id: FileId) -> Option<&File> {
         self.symbols.files.get(&id)
+    }
+
+    pub fn get_declaration(&self, id: DeclarationId) -> Option<&Declaration> {
+        self.symbols.declarations.get(&id)
     }
 }

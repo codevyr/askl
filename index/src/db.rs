@@ -33,7 +33,7 @@ impl Symbol {
     }
 }
 
-#[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
+#[derive(Debug, sqlx::FromRow, PartialEq, Eq, Clone, Deserialize)]
 pub struct Declaration {
     pub id: DeclarationId,
     pub symbol: SymbolId,
@@ -272,7 +272,7 @@ impl Index {
         let rec = sqlx::query_as!(
                 Declaration,
                 r#"
-                SELECT *
+                SELECT id, symbol, file_id, symbol_type, line_start, col_start, line_end, col_end
                 FROM declarations
                 WHERE symbol = ? AND file_id = ? AND line_start = ? AND col_start = ? AND line_end = ? AND col_end = ?
                 "#,
