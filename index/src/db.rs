@@ -312,71 +312,6 @@ impl Index {
         Ok(declaration.with_id(id))
     }
 
-    // pub async fn create_or_get_symbol(
-    //     &self,
-    //     name: &str,
-    //     symbol_type: SymbolType,
-    //     symbol_scope: SymbolScope,
-    //     declaration: Declaration,
-    // ) -> Result<Symbol> {
-    //     let rec = sqlx::query_as!(
-    //         Symbol,
-    //         r#"
-    //         SELECT id, name, module_id
-    //         FROM symbols
-    //         WHERE name = ?1
-    //         "#,
-    //         name,
-    //     )
-    //     .fetch_optional(&self.pool)
-    //     .await?;
-
-    //     if let Some(rec) = rec {
-    //         return Ok(rec.into());
-    //     }
-
-    //     let symbol = sqlx::query_as!(
-    //         Symbol,
-    //         r#"
-    //         INSERT INTO symbols (name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end)
-    //         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-    //         RETURNING id, name, file_id, symbol_type, symbol_scope, line_start, col_start, line_end, col_end
-    //         "#,
-    //         name,
-    //         declaration.file,
-    //         symbol_type,
-    //         symbol_scope,
-    //         declaration.line_start,
-    //         declaration.column_start,
-    //         declaration.line_end,
-    //         declaration.column_end
-    //     )
-    //     .fetch_one(&self.pool)
-    //     .await?;
-
-    //     Ok(symbol.into())
-    // }
-
-    // pub async fn find_symbols(&self, name: &str) -> Result<Vec<Symbol>> {
-    //     let symbols: Vec<Symbol> = sqlx::query_as!(
-    //         Symbol,
-    //         r#"
-    //         SELECT id, name, module_id
-    //         FROM symbols
-    //         WHERE name = ?1
-    //         "#,
-    //         name
-    //     )
-    //     .fetch_all(&self.pool)
-    //     .await?;
-
-    //     if symbols.len() == 0 {
-    //         bail!("Symbol not found")
-    //     }
-
-    //     Ok(symbols)
-    // }
-
     pub async fn add_reference(
         &self,
         from_decl: DeclarationId,
@@ -439,6 +374,22 @@ impl Index {
         Ok(declarations)
     }
 
+    pub async fn symbol_declarations(&self, symbol_id: SymbolId) -> Result<Vec<Declaration>> {
+        let declarations: Vec<Declaration> = sqlx::query_as!(
+            Declaration,
+            r#"
+            SELECT id, symbol, file_id, symbol_type, line_start, col_start, line_end, col_end
+            FROM declarations
+            WHERE symbol = ?
+            "#,
+            symbol_id
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(declarations)
+    }
+
     pub async fn all_files(&self) -> Result<Vec<File>> {
         let files: Vec<File> = sqlx::query_as!(
             File,
@@ -465,5 +416,39 @@ impl Index {
         .await?;
 
         Ok(references)
+    }
+
+    pub async fn get_parents(&self, child_declaration: DeclarationId) -> Result<Vec<Declaration>> {
+        let declarations: Vec<Declaration> = sqlx::query_as!(
+            Declaration,
+            r#"
+            SELECT declarations.*
+            FROM declarations
+            INNER JOIN symbol_refs
+            ON declarations.symbol = symbol_refs.to_symbol
+            WHERE declarations.id = ?
+            "#,
+            child_declaration
+        ).fetch_all(&self.pool)
+        .await?;
+
+        Ok(declarations)
+    }
+
+    pub async fn get_children(&self, parent_declaration: DeclarationId) -> Result<Vec<Reference>> {
+        let declarations: Vec<Reference> = sqlx::query_as!(
+            Reference,
+            r#"
+            SELECT symbol_refs.*
+            FROM symbol_refs
+            INNER JOIN declarations
+            ON declarations.symbol = symbol_refs.to_symbol
+            WHERE symbol_refs.from_decl = ?;
+            "#,
+            parent_declaration
+        ).fetch_all(&self.pool)
+        .await?;
+
+        Ok(declarations)
     }
 }

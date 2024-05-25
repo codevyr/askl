@@ -2,7 +2,8 @@ use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::execution_context::ExecutionContext;
 use crate::parser::{ParserContext, Rule};
 use crate::statement::{build_empty_statement, build_statement, Statement};
-use index::symbols::{SymbolRefs, SymbolId};
+use async_trait::async_trait;
+use index::symbols::{SymbolRefs, SymbolId, DeclarationId, DeclarationRefs};
 use core::fmt::Debug;
 use pest::error::Error;
 use std::collections::HashSet;
@@ -44,18 +45,19 @@ type StatementIter<'a> = Box<dyn Iterator<Item = &'a Box<dyn Statement + 'a>> + 
 /// Scope executes statements. One of the algorithmic difficulties is that each
 /// statement must be executed exactly once. Therefore, the statement must be
 /// able to accept multiple symbols at once.
+#[async_trait(?Send)]
 pub trait Scope: Debug {
     fn statements(&self) -> StatementIter;
 
-    fn run(
+    async fn run(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        symbols: Option<SymbolRefs>,
-    ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
+        symbols: Option<DeclarationRefs>,
+    ) -> Option<(DeclarationRefs, NodeList, EdgeList)> {
         let mut res_nodes = NodeList::new();
         let mut res_edges = EdgeList::new();
-        let mut res_symbols = SymbolRefs::new();
+        let mut res_symbols = DeclarationRefs::new();
 
         let mut ignored_ids = HashSet::new();
 
@@ -63,7 +65,7 @@ pub trait Scope: Debug {
             // Iterate through all the statements in the scope or subscope of
             // the query
             if let Some((resolved_symbols, scope_nodes, scope_edges)) =
-                statement.execute(ctx, cfg, symbols.clone(), &ignored_ids)
+                statement.execute(ctx, cfg, symbols.clone(), &ignored_ids).await
             {
                 ignored_ids.extend(resolved_symbols.iter().map(|(id, _)| *id));
                 // res_nodes.0.push(symbol.clone());
@@ -76,12 +78,12 @@ pub trait Scope: Debug {
         Some((res_symbols, res_nodes, res_edges))
     }
 
-    fn run_symbols(
+    async fn run_symbols(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        symbols: HashSet<SymbolId>,
-    ) -> Option<(HashSet<SymbolId>, NodeList, EdgeList)> {
+        symbols: HashSet<DeclarationId>,
+    ) -> Option<(HashSet<DeclarationId>, NodeList, EdgeList)> {
         let mut res_nodes = NodeList::new();
         let mut res_edges = EdgeList::new();
         let mut res_symbols = HashSet::new();
@@ -97,7 +99,7 @@ pub trait Scope: Debug {
                 .collect();
 
             if let Some((resolved_symbols, scope_nodes, scope_edges)) =
-                statement.execute(ctx, cfg, Some(statement_refs), &ignored_ids)
+                statement.execute(ctx, cfg, Some(statement_refs), &ignored_ids).await
             {
                 res_symbols.extend(
                     symbols
@@ -139,17 +141,18 @@ impl GlobalScope {
     }
 }
 
+#[async_trait(?Send)]
 impl Scope for GlobalScope {
     fn statements(&self) -> StatementIter {
         Box::new(self.0.iter())
     }
 
-    fn run(
+    async fn run(
         &self,
         _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
-        _symbols: Option<SymbolRefs>,
-    ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
+        _symbols: Option<DeclarationRefs>,
+    ) -> Option<(DeclarationRefs, NodeList, EdgeList)> {
         None
     }
 }
@@ -163,17 +166,18 @@ impl EmptyScope {
     }
 }
 
+#[async_trait(?Send)]
 impl Scope for EmptyScope {
     fn statements(&self) -> StatementIter {
         Box::new(std::iter::empty::<_>())
     }
 
-    fn run(
+    async fn run(
         &self,
         _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
-        _symbols: Option<SymbolRefs>,
-    ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
-        Some((SymbolRefs::new(), NodeList::new(), EdgeList::new()))
+        _symbols: Option<DeclarationRefs>,
+    ) -> Option<(DeclarationRefs, NodeList, EdgeList)> {
+        Some((DeclarationRefs::new(), NodeList::new(), EdgeList::new()))
     }
 }

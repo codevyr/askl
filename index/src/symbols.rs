@@ -101,13 +101,13 @@ impl From<db::Declaration> for Occurrence {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct Reference {
-    pub from: SymbolId,
+    pub from: DeclarationId,
     pub to: SymbolId,
     pub occurrence: Option<Occurrence>,
 }
 
 impl Reference {
-    pub fn new(from: SymbolId, to: SymbolId) -> Self {
+    pub fn new(from: DeclarationId, to: SymbolId) -> Self {
         Self {
             from,
             to,
@@ -115,7 +115,7 @@ impl Reference {
         }
     }
 
-    pub fn new_occurrence(from: SymbolId, to: SymbolId, occurrence: Occurrence) -> Self {
+    pub fn new_occurrence(from: DeclarationId, to: SymbolId, occurrence: Occurrence) -> Self {
         Self {
             from,
             to,
@@ -383,7 +383,7 @@ impl SymbolMap {
         }
     }
 
-    pub async fn from_index(index: Index) -> Result<Self> {
+    pub async fn from_index(index: &Index) -> Result<Self> {
         let symbols = index.all_symbols().await?;
         let mut symbols_map = HashMap::new();
         for symbol in symbols {
@@ -447,16 +447,6 @@ impl SymbolMap {
 
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = (&SymbolId, &Symbol)> + 'a {
         self.symbols.iter()
-    }
-
-    pub fn get_children(&self, symbol_id: SymbolId) -> &SymbolRefs {
-        let symbol = if let Some(symbol) = self.symbols.get(&symbol_id) {
-            symbol
-        } else {
-            panic!("Unknown symbol");
-        };
-
-        &symbol.children
     }
 
     pub fn get_parents(&self, symbol_id: SymbolId) -> &DeclarationRefs {

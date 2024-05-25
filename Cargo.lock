@@ -251,6 +251,7 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "anyhow",
+ "async-trait",
  "clang-ast",
  "clap",
  "console",
@@ -271,6 +272,17 @@ dependencies = [
  "sqlx",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "async-trait"
+version = "0.1.80"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6fa2087f2753a7da8cc1c0dbfcf89579dd57458e36769de5ac750b4671737ca"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.60",
 ]
 
 [[package]]
@@ -1037,6 +1049,7 @@ name = "index"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clang-ast",
  "clap",
  "console",

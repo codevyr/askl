@@ -1,6 +1,7 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
-use index::symbols::{Reference, SymbolId, SymbolRefs};
+use index::db::Declaration;
+use index::symbols::{Reference, SymbolId, SymbolRefs, DeclarationRefs, DeclarationId};
 use crate::verb::{DeriveMethod, Deriver, Filter, Marker, Selector, UnitVerb, Verb};
 use anyhow::Result;
 use core::fmt::Debug;
@@ -51,7 +52,7 @@ impl Command {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_marker().ok()))
     }
 
-    pub fn filter(&self, cfg: &ControlFlowGraph, symbols: SymbolRefs) -> Option<SymbolRefs> {
+    pub fn filter(&self, cfg: &ControlFlowGraph, symbols: DeclarationRefs) -> Option<DeclarationRefs> {
         Some(
             self.filters()
                 .fold(symbols, |symbols, verb| verb.filter(cfg, symbols)),
@@ -62,8 +63,8 @@ impl Command {
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        symbols: Option<SymbolRefs>,
-    ) -> Option<SymbolRefs> {
+        symbols: Option<DeclarationRefs>,
+    ) -> Option<DeclarationRefs> {
         let selectors: Vec<_> = self.selectors().collect();
 
         // Nothing to do
@@ -71,12 +72,12 @@ impl Command {
             return symbols;
         }
 
-        let selector: Box<dyn FnMut(&dyn Selector) -> Option<SymbolRefs>> = match symbols {
+        let selector: Box<dyn FnMut(&dyn Selector) -> Option<DeclarationRefs>> = match symbols {
             Some(symbols) => Box::new(move |v: &dyn Selector| v.select(ctx, cfg, symbols.clone())),
             None => Box::new(|v: &dyn Selector| v.select_from_all(ctx, cfg)),
         };
 
-        let symbols: SymbolRefs = selectors
+        let symbols: DeclarationRefs = selectors
             .into_iter()
             .filter_map(selector)
             .flatten()
@@ -89,27 +90,27 @@ impl Command {
         Some(symbols)
     }
 
-    pub fn derive_children(
+    pub async fn derive_children(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        symbols: SymbolRefs,
+        declarations: HashSet<DeclarationId>,
     ) -> HashSet<Reference> {
         self.derivers()
             .last()
             .unwrap()
-            .derive_children(ctx, cfg, symbols)
+            .derive_children(ctx, cfg, declarations).await
     }
 
-    pub fn derive_parents(&self, cfg: &ControlFlowGraph, symbol: SymbolId) -> Option<SymbolRefs> {
-        self.derivers().last().unwrap().derive_parents(cfg, symbol)
+    pub async fn derive_parents(&self, cfg: &ControlFlowGraph, symbol: DeclarationId) -> Option<DeclarationRefs> {
+        self.derivers().last().unwrap().derive_parents(cfg, symbol).await
     }
 
     pub fn mark(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        symbols: &SymbolRefs,
+        symbols: &DeclarationRefs,
     ) -> Result<()> {
         self.markers().try_for_each(|m| m.mark(ctx, cfg, symbols))
     }

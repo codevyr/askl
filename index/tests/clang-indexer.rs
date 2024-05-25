@@ -174,5 +174,5 @@ async fn create_state() {
     assert_eq!(refs.len(), expected_refs.len());
 
     let index: Index = state.into();
-    let symbols = SymbolMap::from_index(index).await.unwrap();
+    let symbols = SymbolMap::from_index(&index).await.unwrap();
 }

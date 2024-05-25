@@ -3,9 +3,10 @@ use crate::command::Command;
 use crate::execution_context::ExecutionContext;
 use crate::parser::{ParserContext, Rule};
 use crate::scope::{build_scope, EmptyScope, Scope};
-use index::symbols::{Reference, SymbolId, SymbolRefs};
 use crate::verb::build_verb;
+use async_trait::async_trait;
 use core::fmt::Debug;
+use index::symbols::{DeclarationId, DeclarationRefs, Reference, SymbolId, SymbolRefs};
 use pest::error::Error;
 use std::collections::{HashMap, HashSet};
 
@@ -59,8 +60,9 @@ pub fn build_empty_statement<'a>(ctx: &ParserContext) -> Box<dyn Statement> {
     DefaultStatement::new(verb.into(), scope)
 }
 
+#[async_trait(?Send)]
 pub trait Statement: Debug {
-    fn update_edges(&self, cfg: &ControlFlowGraph, nodes: &NodeList) -> EdgeList {
+    async fn update_edges(&self, cfg: &ControlFlowGraph, nodes: &NodeList) -> EdgeList {
         let mut edges = EdgeList::new();
         for node_i in nodes.0.iter() {
             for node_j in nodes.0.iter() {
@@ -70,30 +72,32 @@ pub trait Statement: Debug {
                 let derived = self
                     .command()
                     .derive_parents(cfg, *node_i)
-                    .or(Some(SymbolRefs::new()))
+                    .await
+                    .or(Some(DeclarationRefs::new()))
                     .unwrap();
 
-                derived.into_iter().for_each(|(s, occurences)| {
-                    if s == *node_j {
-                        for occ in occurences.into_iter() {
-                            let reference = Reference::new_occurrence(s, *node_i, occ);
-                            edges.add_reference(reference)
+                derived
+                    .into_iter()
+                    .for_each(|(declaration_id, occurences)| {
+                        if declaration_id == *node_j {
+                            for occ in occurences.into_iter() {
+                                edges.add_reference(declaration_id, *node_i, Some(occ))
+                            }
                         }
-                    }
-                })
+                    })
             }
         }
 
         edges
     }
 
-    fn execute(
+    async fn execute(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        symbols: Option<SymbolRefs>,
-        ignored_symbols: &HashSet<SymbolId>,
-    ) -> Option<(SymbolRefs, NodeList, EdgeList)>;
+        symbols: Option<DeclarationRefs>,
+        ignored_symbols: &HashSet<DeclarationId>,
+    ) -> Option<(DeclarationRefs, NodeList, EdgeList)>;
     fn command(&self) -> &Command;
     fn scope(&self) -> &dyn Scope;
 }
@@ -112,71 +116,88 @@ impl DefaultStatement {
         })
     }
 
-    fn execute_for_all(
+    async fn execute_for_all(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-    ) -> (SymbolRefs, NodeList, EdgeList) {
+    ) -> (DeclarationRefs, NodeList, EdgeList) {
         let mut res_edges = EdgeList::new();
         let mut res_nodes = NodeList::new();
-        let mut res_symbols = HashMap::new();
+        let mut res_declarations = DeclarationRefs::new();
 
-        if let Some((resolved_symbols, nodes, edges)) = self.scope().run(ctx, cfg, None) {
+        if let Some((resolved_declarations, nodes, edges)) = self.scope().run(ctx, cfg, None).await
+        {
             res_nodes.0.extend(nodes.0.into_iter());
             res_edges.0.extend(edges.0.into_iter());
             res_nodes
                 .0
-                .extend(resolved_symbols.iter().map(|(s, _)| s.clone()));
-            for (resolved_symbol, _) in resolved_symbols {
-                let derived_symbols = self.command().derive_parents(cfg, resolved_symbol);
+                .extend(resolved_declarations.iter().map(|(s, _)| s.clone()));
+            for (resolved_declaration_id, _) in resolved_declarations {
+                let resolved_declaration = cfg
+                    .symbols
+                    .declarations
+                    .get(&resolved_declaration_id)
+                    .unwrap();
+                let derived_declarations = self
+                    .command()
+                    .derive_parents(cfg, resolved_declaration_id)
+                    .await;
 
-                let derived_symbols = if let Some(symbols) = derived_symbols {
-                    symbols
+                let derived_declarations = if let Some(declarations) = derived_declarations {
+                    declarations
                 } else {
                     continue;
                 };
 
-                let filtered_symbols = self.command().filter(cfg, derived_symbols);
-                let selected_symbols = self.command().select(ctx, cfg, filtered_symbols);
+                let filtered_declarations = self.command().filter(cfg, derived_declarations);
+                let selected_declarations = self.command().select(ctx, cfg, filtered_declarations);
 
-                if let Some(selected_symbols) = selected_symbols {
-                    for (selected_symbol, occurrences) in selected_symbols {
-                        res_nodes.add(selected_symbol);
-                        res_symbols.insert(selected_symbol.clone(), occurrences.clone());
+                if let Some(selected_declarations) = selected_declarations {
+                    for (selected_declaration_id, occurrences) in selected_declarations {
+                        res_nodes.add(selected_declaration_id);
+                        res_declarations.insert(selected_declaration_id, occurrences.clone());
                         for occurrence in occurrences {
-                            let reference = Reference::new_occurrence(
-                                selected_symbol,
-                                resolved_symbol,
-                                occurrence,
+                            res_edges.add_reference(
+                                selected_declaration_id,
+                                resolved_declaration.id,
+                                Some(occurrence),
                             );
-                            res_edges.add_reference(reference);
                         }
                     }
                 }
             }
         }
 
-        return (res_symbols, res_nodes, res_edges);
+        return (res_declarations, res_nodes, res_edges);
     }
 }
 
+#[async_trait(?Send)]
 impl Statement for DefaultStatement {
-    fn execute(
+    async fn execute(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        parent_symbols: Option<SymbolRefs>,
-        ignored_symbols: &HashSet<SymbolId>,
-    ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
+        parent_declarations: Option<DeclarationRefs>,
+        ignored_symbols: &HashSet<DeclarationId>,
+    ) -> Option<(DeclarationRefs, NodeList, EdgeList)> {
         let mut res_edges = EdgeList::new();
         let mut res_nodes = NodeList::new();
-        let mut res_symbols = HashMap::new();
+        let mut res_symbols = DeclarationRefs::new();
 
-        let filtered_symbols = if let Some(parent_symbols) = parent_symbols {
-            let derived_references = self.command().derive_children(ctx, cfg, parent_symbols.clone());
-            let mut derived_ids = SymbolRefs::new();
+        let filtered_symbols = if let Some(parent_declarations) = parent_declarations {
+            let parent_declaration_ids: HashSet<_> =
+                parent_declarations.into_iter().map(|(d, _)| d).collect();
+            let derived_references = self
+                .command()
+                .derive_children(ctx, cfg, parent_declaration_ids)
+                .await;
+            let mut derived_ids = DeclarationRefs::new();
             for d in derived_references.iter() {
-                derived_ids.insert(d.to, HashSet::new());
+                let declarations = cfg.index.symbol_declarations(d.to).await.unwrap();
+                for declaration in declarations {
+                    derived_ids.insert(declaration.id, HashSet::new());
+                }
             }
 
             let selected_symbols =
@@ -187,13 +208,25 @@ impl Statement for DefaultStatement {
                 };
 
             let filtered_symbols = self.command().filter(cfg, selected_symbols).unwrap();
-            let filtered_symbols: SymbolRefs = filtered_symbols
+            let filtered_symbols: DeclarationRefs = filtered_symbols
                 .into_iter()
                 .filter(|(id, _)| !ignored_symbols.contains(id))
                 .collect();
             for reference in derived_references {
-                if filtered_symbols.contains_key(&reference.to) {
-                    res_edges.add_reference(reference);
+                let declarations = cfg.index.symbol_declarations(reference.to).await.unwrap();
+                for declaration in declarations {
+                    if filtered_symbols.contains_key(&declaration.id) {
+                        let declarations_to =
+                            cfg.index.symbol_declarations(reference.to).await.unwrap();
+                        for declaration_to in declarations_to {
+                            res_edges.add_reference(
+                                reference.from,
+                                declaration_to.id,
+                                reference.occurrence.clone(),
+                            );
+                            break;
+                        }
+                    }
                 }
             }
             filtered_symbols
@@ -201,14 +234,14 @@ impl Statement for DefaultStatement {
             if let Some(selected) = self.command().select(ctx, cfg, None) {
                 self.command().filter(cfg, selected).unwrap()
             } else {
-                return Some(self.execute_for_all(ctx, cfg));
+                return Some(self.execute_for_all(ctx, cfg).await);
             }
         };
 
         let filtered_ids = filtered_symbols.iter().map(|(id, _)| *id).collect();
 
         if let Some((resolved_symbols, nodes, edges)) =
-            self.scope().run_symbols(ctx, cfg, filtered_ids)
+            self.scope().run_symbols(ctx, cfg, filtered_ids).await
         {
             res_nodes.0.extend(nodes.0.into_iter());
             res_edges.0.extend(edges.0.into_iter());
@@ -223,7 +256,7 @@ impl Statement for DefaultStatement {
 
         res_edges
             .0
-            .extend(self.update_edges(cfg, &res_nodes).0.into_iter());
+            .extend(self.update_edges(cfg, &res_nodes).await.0.into_iter());
 
         self.command().mark(ctx, cfg, &res_symbols).unwrap();
         return Some((res_symbols, res_nodes, res_edges));
@@ -253,25 +286,26 @@ impl GlobalStatement {
     }
 }
 
+#[async_trait(?Send)]
 impl Statement for GlobalStatement {
-    fn execute(
+    async fn execute(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        symbols: Option<SymbolRefs>,
-        _ignored_symbols: &HashSet<SymbolId>,
-    ) -> Option<(SymbolRefs, NodeList, EdgeList)> {
+        symbols: Option<DeclarationRefs>,
+        _ignored_symbols: &HashSet<DeclarationId>,
+    ) -> Option<(DeclarationRefs, NodeList, EdgeList)> {
         let mut res_edges = EdgeList::new();
         let mut res_nodes = NodeList::new();
-        if let Some((_, nodes, edges)) = self.scope().run(ctx, cfg, symbols.clone()) {
+        if let Some((_, nodes, edges)) = self.scope().run(ctx, cfg, symbols.clone()).await {
             res_nodes.0.extend(nodes.0.into_iter());
             res_edges.0.extend(edges.0.into_iter());
         }
 
         res_edges
             .0
-            .extend(self.update_edges(cfg, &res_nodes).0.into_iter());
-        return Some((SymbolRefs::new(), res_nodes, res_edges));
+            .extend(self.update_edges(cfg, &res_nodes).await.0.into_iter());
+        return Some((DeclarationRefs::new(), res_nodes, res_edges));
     }
 
     fn command(&self) -> &Command {

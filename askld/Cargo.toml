@@ -30,3 +30,4 @@ actix-web = {workspace = true}
 rand = {workspace = true}
 sqlx = {workspace = true}
 index = { path = "../index" }
+async-trait = "0.1.80"

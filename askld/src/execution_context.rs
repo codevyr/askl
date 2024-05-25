@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use index::symbols::SymbolId;
+use index::symbols::DeclarationId;
 
 pub struct ExecutionContext {
-    pub saved_labels: HashMap<String, HashSet<SymbolId>>,
+    pub saved_labels: HashMap<String, HashSet<DeclarationId>>,
 }
 
 impl ExecutionContext {

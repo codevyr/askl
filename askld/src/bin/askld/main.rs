@@ -117,7 +117,9 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     debug!("Global scope: {:#?}", ast);
 
     let mut ctx = ExecutionContext::new();
-    let res = ast.execute(&mut ctx, &data.cfg, None, &HashSet::new());
+    let res = ast
+        .execute(&mut ctx, &data.cfg, None, &HashSet::new())
+        .await;
     if res.is_none() {
         return HttpResponse::NotFound().body("Did not resolve any symbols");
     }
@@ -130,21 +132,29 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
 
     let mut all_symbols = HashSet::new();
     for (from, to, loc) in res_edges.0 {
-        all_symbols.insert(from.clone());
-        all_symbols.insert(to.clone());
-        result_graph.add_edge(Edge::new(from, to, loc));
+        let from_declaration = data.cfg.symbols.declarations.get(&from).unwrap();
+        let to_declaration = data.cfg.symbols.declarations.get(&to).unwrap();
+        all_symbols.insert(from_declaration.symbol);
+        all_symbols.insert(to_declaration.symbol);
+        result_graph.add_edge(Edge::new(
+            from_declaration.symbol,
+            to_declaration.symbol,
+            loc,
+        ));
     }
 
-    for s in res_nodes.as_vec() {
-        all_symbols.insert(s.clone());
+    for declaration_id in res_nodes.as_vec() {
+        let declaration = data.cfg.symbols.declarations.get(&declaration_id).unwrap();
+        all_symbols.insert(declaration.symbol);
     }
 
     for symbol_id in all_symbols {
-        let sym = data.cfg.get_symbol(symbol_id).unwrap();
-        let file_id = sym.occurrence.file.clone();
-        let line = sym.occurrence.line_start;
-        debug!("filename {}", file_id);
-        result_graph.add_node(Node::new(symbol_id, sym.name.clone(), file_id, line));
+        // let sym = data.cfg.get_symbol(symbol_id).unwrap();
+        // let file_id = sym.occurrence.file.clone();
+        // let line = sym.occurrence.line_start;
+        // debug!("filename {}", file_id);
+        // result_graph.add_node(Node::new(symbol_id, sym.name.clone(), file_id, line));
+        unimplemented!("Unimplemented");
     }
 
     let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();
@@ -168,15 +178,10 @@ async fn file(data: web::Data<AsklData>, file_id: web::Path<FileId>) -> impl Res
 
 async fn read_data(args: &Args) -> Result<AsklData> {
     match args.format.as_str() {
-        "askl" => {
-            let symbols: SymbolMap = serde_json::from_slice(&std::fs::read(&args.index)?)?;
-            let cfg = ControlFlowGraph::from_symbols(symbols);
-            Ok(AsklData { cfg })
-        }
         "sqlite" => {
             let index = Index::connect(&args.index).await?;
-            let symbols = SymbolMap::from_index(index).await?;
-            let cfg = ControlFlowGraph::from_symbols(symbols);
+            let symbols = SymbolMap::from_index(&index).await?;
+            let cfg = ControlFlowGraph::from_symbols(symbols, index);
             Ok(AsklData { cfg: cfg })
         }
         _ => Err(anyhow!("Unsupported index format: {}", args.format)),
@@ -206,6 +211,8 @@ async fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use askld::cfg::{EdgeList, NodeList};
+    use index::symbols::DeclarationId;
+    use tokio::{runtime::Runtime, task};
 
     use super::*;
 
@@ -516,16 +523,28 @@ mod tests {
         );
     }
 
-    fn run_query(askl_input: &str, askl_query: &str) -> (NodeList, EdgeList) {
+    async fn run_query_async(askl_input: &str, askl_query: &str) -> (NodeList, EdgeList) {
         let symbols: SymbolMap = serde_json::from_slice(askl_input.as_bytes()).unwrap();
-        let cfg = ControlFlowGraph::from_symbols(symbols);
+        let index = Index::new_in_memory().await.unwrap();
+        let cfg = ControlFlowGraph::from_symbols(symbols, index);
 
         let ast = parse(askl_query).unwrap();
         println!("{:#?}", ast);
 
         let mut ctx = ExecutionContext::new();
-        let (_, nodes, edges) = ast.execute(&mut ctx, &cfg, None, &HashSet::new()).unwrap();
+        let (_, nodes, edges) = ast
+            .execute(&mut ctx, &cfg, None, &HashSet::new())
+            .await
+            .unwrap();
         (nodes, edges)
+    }
+
+    fn run_query(askl_input: &str, askl_query: &str) -> (NodeList, EdgeList) {
+        let mut rt = Runtime::new().unwrap();
+        let local = task::LocalSet::new();
+        local.block_on(&mut rt, async {
+            run_query_async(askl_input, askl_query).await
+        })
     }
 
     #[test]
@@ -537,7 +556,7 @@ mod tests {
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(1)]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1)]);
         assert_eq!(res_edges.0.len(), 0);
     }
 
@@ -548,7 +567,7 @@ mod tests {
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(1), SymbolId::new(2)]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1), DeclarationId::new(2)]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2"]);
     }
@@ -562,7 +581,7 @@ mod tests {
         println!("{:#?}", res_edges);
         assert_eq!(
             res_nodes.as_vec(),
-            vec![SymbolId::new(1), SymbolId::new(42)]
+            vec![DeclarationId::new(1), DeclarationId::new(42)]
         );
         assert_eq!(res_edges.0.len(), 1);
     }
@@ -576,7 +595,7 @@ mod tests {
         println!("{:#?}", res_edges);
         assert_eq!(
             res_nodes.as_vec(),
-            vec![SymbolId::new(1), SymbolId::new(2), SymbolId::new(42)]
+            vec![DeclarationId::new(1), DeclarationId::new(2), DeclarationId::new(42)]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2", "42-1", "42-2"]);
@@ -589,7 +608,7 @@ mod tests {
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(1), SymbolId::new(2)]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1), DeclarationId::new(2)]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2"]);
     }
@@ -602,7 +621,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(1)]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1)]);
         assert_eq!(res_edges.0.len(), 0);
     }
 
@@ -614,7 +633,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(1), SymbolId::new(2)]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1), DeclarationId::new(2)]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2", "2-1"]);
     }
@@ -627,7 +646,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(2), SymbolId::new(3)]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(2), DeclarationId::new(3)]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["2-3"]);
     }
@@ -644,7 +663,7 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![SymbolId::new(3), SymbolId::new(42)]
+            vec![DeclarationId::new(3), DeclarationId::new(42)]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["42-3"]);
@@ -658,7 +677,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(1), SymbolId::new(7)]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1), DeclarationId::new(7)]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-7"]);
     }
@@ -675,7 +694,7 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![SymbolId::new(3), SymbolId::new(42)]
+            vec![DeclarationId::new(3), DeclarationId::new(42)]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["42-3"]);
@@ -691,7 +710,7 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![SymbolId::new(1), SymbolId::new(2),]
+            vec![DeclarationId::new(1), DeclarationId::new(2),]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2"]);
@@ -707,7 +726,7 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![SymbolId::new(1), SymbolId::new(2),]
+            vec![DeclarationId::new(1), DeclarationId::new(2),]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2"]);
@@ -723,7 +742,7 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![SymbolId::new(1), SymbolId::new(2),]
+            vec![DeclarationId::new(1), DeclarationId::new(2),]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2"]);
@@ -740,7 +759,7 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![SymbolId::new(1), SymbolId::new(2),]
+            vec![DeclarationId::new(1), DeclarationId::new(2),]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2"]);
@@ -754,7 +773,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(1),]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1),]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, Vec::<String>::new());
     }
@@ -767,7 +786,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(1),]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1),]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, Vec::<String>::new());
     }
@@ -782,7 +801,7 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![SymbolId::new(4), SymbolId::new(5), SymbolId::new(6),]
+            vec![DeclarationId::new(4), DeclarationId::new(5), DeclarationId::new(6),]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["4-5", "4-6"]);
@@ -798,7 +817,7 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![SymbolId::new(4), SymbolId::new(6),]
+            vec![DeclarationId::new(4), DeclarationId::new(6),]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["4-6"]);
@@ -811,7 +830,7 @@ mod tests {
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(4), SymbolId::new(5)]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(4), DeclarationId::new(5)]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["4-5"]);
     }
@@ -823,7 +842,7 @@ mod tests {
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(4), SymbolId::new(5)]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(4), DeclarationId::new(5)]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["4-5"]);
     }
@@ -835,7 +854,7 @@ mod tests {
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.as_vec(), vec![SymbolId::new(1), SymbolId::new(2)]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1), DeclarationId::new(2)]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, Vec::<String>::new());
     }
@@ -849,7 +868,7 @@ mod tests {
         println!("{:#?}", res_edges);
         assert_eq!(
             res_nodes.as_vec(),
-            vec![SymbolId::new(1), SymbolId::new(2), SymbolId::new(42)]
+            vec![DeclarationId::new(1), DeclarationId::new(2), DeclarationId::new(42)]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2", "42-1", "42-2"]);
@@ -865,7 +884,7 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![SymbolId::new(1), SymbolId::new(2),]
+            vec![DeclarationId::new(1), DeclarationId::new(2),]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2"]);
@@ -881,7 +900,7 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![SymbolId::new(1), SymbolId::new(2), SymbolId::new(42)]
+            vec![DeclarationId::new(1), DeclarationId::new(2), DeclarationId::new(42)]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2", "2-42", "42-1", "42-2"]);
