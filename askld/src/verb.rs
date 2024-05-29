@@ -5,7 +5,7 @@ use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use core::fmt::Debug;
 use index::db::Declaration;
-use index::symbols::{DeclarationId, DeclarationRefs, Reference, SymbolId, SymbolRefs, Occurrence};
+use index::symbols::{DeclarationId, DeclarationRefs, Occurrence, Reference, SymbolId, SymbolRefs};
 use log::debug;
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
@@ -430,7 +430,11 @@ impl Deriver for ChildrenVerb {
     ) -> HashSet<Reference> {
         let mut references = HashSet::new();
         for parent_declaration_id in declarations {
-            let parent_declaration = cfg.symbols.declarations.get(&parent_declaration_id).unwrap();
+            let parent_declaration = cfg
+                .symbols
+                .declarations
+                .get(&parent_declaration_id)
+                .unwrap();
             for reference in cfg.index.get_children(parent_declaration_id).await.unwrap() {
                 references.insert(Reference::new_occurrence(
                     parent_declaration_id,
@@ -452,15 +456,27 @@ impl Deriver for ChildrenVerb {
     async fn derive_parents(
         &self,
         cfg: &ControlFlowGraph,
-        declaration: DeclarationId,
+        child_declaration_id: DeclarationId,
     ) -> Option<DeclarationRefs> {
-        let parents: Vec<Declaration> = cfg.index.get_parents(declaration).await.unwrap();
-        Some(
-            parents
-                .into_iter()
-                .map(|d| (d.id, HashSet::new()))
-                .collect(),
-        )
+        let mut references = DeclarationRefs::new();
+        let child_declaration = cfg.symbols.declarations.get(&child_declaration_id).unwrap();
+        for reference in cfg.index.get_parents(child_declaration_id).await.unwrap() {
+            let occ = Occurrence {
+                line_start: reference.from_line as i32,
+                line_end: reference.from_line as i32,
+                column_start: reference.from_col_start as i32,
+                column_end: reference.from_col_end as i32,
+                file: child_declaration.file_id,
+            };
+            references
+                .entry(reference.from_decl)
+                .and_modify(|s| {
+                    s.insert(occ.clone());
+                })
+                .or_insert_with(|| HashSet::from([occ]));
+        }
+
+        Some(references)
     }
 }
 
@@ -704,8 +720,12 @@ impl Deriver for UserVerb {
         let mut references = HashSet::new();
         for parent_declaration_id in declarations {
             for child_declaration_id in ctx.saved_labels.get(&self.label).unwrap() {
-                let child_declaration = cfg.symbols.declarations.get(&child_declaration_id).unwrap();
-                references.insert(Reference::new(parent_declaration_id, child_declaration.symbol));
+                let child_declaration =
+                    cfg.symbols.declarations.get(&child_declaration_id).unwrap();
+                references.insert(Reference::new(
+                    parent_declaration_id,
+                    child_declaration.symbol,
+                ));
             }
         }
 

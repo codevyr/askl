@@ -432,25 +432,23 @@ impl Index {
         Ok(references)
     }
 
-    pub async fn get_parents(&self, child_declaration: DeclarationId) -> Result<Vec<Declaration>> {
-        let declarations: Vec<Declaration> = sqlx::query_as!(
-            Declaration,
+    pub async fn get_parents(&self, child_declaration: DeclarationId) -> Result<Vec<Reference>> {
+        let references: Vec<Reference> = sqlx::query_as!(
+            Reference,
             r#"
-            SELECT declarations.*
-            FROM declarations
-            INNER JOIN symbol_refs
-            ON declarations.symbol = symbol_refs.to_symbol
-            WHERE declarations.id = ?
+            SELECT symbol_refs.*
+            FROM symbol_refs
+            WHERE symbol_refs.to_symbol = ?
             "#,
             child_declaration
         ).fetch_all(&self.pool)
         .await?;
 
-        Ok(declarations)
+        Ok(references)
     }
 
     pub async fn get_children(&self, parent_declaration: DeclarationId) -> Result<Vec<Reference>> {
-        let declarations: Vec<Reference> = sqlx::query_as!(
+        let references: Vec<Reference> = sqlx::query_as!(
             Reference,
             r#"
             SELECT symbol_refs.*
@@ -463,6 +461,6 @@ impl Index {
         ).fetch_all(&self.pool)
         .await?;
 
-        Ok(declarations)
+        Ok(references)
     }
 }

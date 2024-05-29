@@ -334,7 +334,8 @@ mod tests {
             res_nodes.as_vec(),
             vec![DeclarationId::new(1), DeclarationId::new(42)]
         );
-        assert_eq!(res_edges.0.len(), 1);
+        let edges = format_edges(res_edges);
+        assert_eq!(edges, vec!["42-1"]);
     }
 
     #[test]
