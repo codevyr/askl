@@ -367,7 +367,7 @@ impl From<i64> for SymbolScope {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct SymbolMap {
     pub symbols: HashMap<SymbolId, Symbol>,
     pub declarations: HashMap<DeclarationId, Declaration>,

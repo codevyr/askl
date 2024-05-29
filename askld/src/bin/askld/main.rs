@@ -227,11 +227,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_askl() {
-        let _symbols: SymbolMap = serde_json::from_slice(TEST_INPUT_A.as_bytes()).unwrap();
-    }
-
-    #[test]
     fn parse_query() {
         const QUERY: &str = r#""a""#;
         let ast = parse(QUERY).unwrap();
