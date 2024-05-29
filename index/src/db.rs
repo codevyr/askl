@@ -173,6 +173,20 @@ impl Index {
         Ok(Self { pool })
     }
 
+    pub const TEST_INPUT_A: &'static str = "test_input_a.sql";
+
+    pub async fn load_test_input(&self, input_path: &str) -> Result<()> {
+        match input_path {
+            "test_input_a.sql" => sqlx::query_file!("../sql/test_input_a.sql")
+            .execute(&self.pool)
+            .await?,
+            _ => panic!("Impossible input file"),
+        };
+        
+
+        Ok(())
+    }
+
     pub async fn create_or_get_fileid(
         &self,
         file_string: &str,

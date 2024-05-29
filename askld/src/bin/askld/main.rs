@@ -213,259 +213,11 @@ mod tests {
     use askld::cfg::{EdgeList, NodeList};
     use index::symbols::DeclarationId;
     use tokio::{runtime::Runtime, task};
-
+    
     use super::*;
 
-    const INPUT_A: &str = r#"
-    {
-        "files": {
-            "1": {
-                "id": 1,
-                "path": "main.c",
-                "project": "test",
-                "filetype": "c"
-            }
-        },
-        "symbols": {
-            "2": {
-                "id": 2,
-                "name": "b",
-                "occurrence": {
-                    "line_start": 1,
-                    "line_end": 3,
-                    "column_start": 1,
-                    "column_end": 1,
-                    "file": 1
-                },
-                "parents": {
-                    "1": [
-                        {
-                            "line_start": 7,
-                            "line_end": 7,
-                            "column_start": 16,
-                            "column_end": 16,
-                            "file": 1
-                        },
-                        {
-                            "line_start": 7,
-                            "line_end": 7,
-                            "column_start": 22,
-                            "column_end": 22,
-                            "file": 1
-                        }
-                    ],
-                    "42": [
-                        {
-                            "line_start": 11,
-                            "line_end": 11,
-                            "column_start": 22,
-                            "column_end": 22,
-                            "file": 1
-                        }
-                    ]
-                },
-                "children": {}
-            },
-            "1": {
-                "id": 1,
-                "name": "a",
-                "occurrence": {
-                    "line_start": 5,
-                    "line_end": 7,
-                    "column_start": 1,
-                    "column_end": 1,
-                    "file": 1
-                },
-                "parents": {
-                    "42": [
-                        {
-                            "line_start": 11,
-                            "line_end": 11,
-                            "column_start": 16,
-                            "column_end": 16,
-                            "file": 1
-                        }
-                    ]                    
-                },
-                "children": {
-                    "2": [
-                        {
-                            "line_start": 7,
-                            "line_end": 7,
-                            "column_start": 16,
-                            "column_end": 16,
-                            "file": 1
-                        },
-                        {
-                            "line_start": 7,
-                            "line_end": 7,
-                            "column_start": 22,
-                            "column_end": 22,
-                            "file": 1
-                        }
-                    ]
-                }
-            },
-            "42": {
-                "id": 42,
-                "name": "main",
-                "occurrence": {
-                    "line_start": 9,
-                    "line_end": 11,
-                    "column_start": 1,
-                    "column_end": 1,
-                    "file": 1
-                },
-                "parents": {},
-                "children": {
-                    "1": [
-                        {
-                            "line_start": 11,
-                            "line_end": 11,
-                            "column_start": 16,
-                            "column_end": 16,
-                            "file": 1
-                        }
-                    ],
-                    "2": [
-                        {
-                            "line_start": 11,
-                            "line_end": 11,
-                            "column_start": 22,
-                            "column_end": 22,
-                            "file": 1
-                        }
-                    ]
-                }
-            },
-            "3": {
-                "id": 3,
-                "name": "c",
-                "occurrence": {
-                    "line_start": 13,
-                    "line_end": 14,
-                    "column_start": 1,
-                    "column_end": 1,
-                    "file": 1
-                },
-                "parents": {},
-                "children": {}
-            },
-            "5": {
-                "id": 5,
-                "name": "e",
-                "occurrence": {
-                    "line_start": 13,
-                    "line_end": 14,
-                    "column_start": 1,
-                    "column_end": 1,
-                    "file": 1
-                },
-                "parents": {
-                    "4": [
-                        {
-                            "line_start": 11,
-                            "line_end": 11,
-                            "column_start": 16,
-                            "column_end": 16,
-                            "file": 1
-                        }
-                    ]                    
-                },
-                "children": {}
-            },
-            "6": {
-                "id": 6,
-                "name": "f",
-                "occurrence": {
-                    "line_start": 13,
-                    "line_end": 14,
-                    "column_start": 1,
-                    "column_end": 1,
-                    "file": 1
-                },
-                "parents": {
-                    "4": [
-                        {
-                            "line_start": 11,
-                            "line_end": 11,
-                            "column_start": 22,
-                            "column_end": 22,
-                            "file": 1
-                        }
-                    ]                    
-                },
-                "children": {
-                    "7": [
-                        {
-                            "line_start": 11,
-                            "line_end": 11,
-                            "column_start": 16,
-                            "column_end": 16,
-                            "file": 1
-                        }
-                    ]
-                }
-            },
-            "7": {
-                "id": 7,
-                "name": "g",
-                "occurrence": {
-                    "line_start": 13,
-                    "line_end": 14,
-                    "column_start": 1,
-                    "column_end": 1,
-                    "file": 1
-                },
-                "parents": {
-                    "6": [
-                        {
-                            "line_start": 11,
-                            "line_end": 11,
-                            "column_start": 16,
-                            "column_end": 16,
-                            "file": 1
-                        }
-                    ]                    
-                },
-                "children": {}
-            },
-            "4": {
-                "id": 4,
-                "name": "d",
-                "occurrence": {
-                    "line_start": 13,
-                    "line_end": 14,
-                    "column_start": 1,
-                    "column_end": 1,
-                    "file": 1
-                },
-                "parents": {},
-                "children": {
-                    "5": [
-                        {
-                            "line_start": 11,
-                            "line_end": 11,
-                            "column_start": 16,
-                            "column_end": 16,
-                            "file": 1
-                        }
-                    ],
-                    "6": [
-                        {
-                            "line_start": 11,
-                            "line_end": 11,
-                            "column_start": 22,
-                            "column_end": 22,
-                            "file": 1
-                        }
-                    ]
-                }
-            }
-        }
-    }
-    "#;
-
+    const TEST_INPUT_A: &'static str = index::db::Index::TEST_INPUT_A;
+    
     fn format_edges(edges: EdgeList) -> Vec<String> {
         edges
             .as_vec()
@@ -476,7 +228,7 @@ mod tests {
 
     #[test]
     fn parse_askl() {
-        let _symbols: SymbolMap = serde_json::from_slice(INPUT_A.as_bytes()).unwrap();
+        let _symbols: SymbolMap = serde_json::from_slice(TEST_INPUT_A.as_bytes()).unwrap();
     }
 
     #[test]
@@ -524,8 +276,9 @@ mod tests {
     }
 
     async fn run_query_async(askl_input: &str, askl_query: &str) -> (NodeList, EdgeList) {
-        let symbols: SymbolMap = serde_json::from_slice(askl_input.as_bytes()).unwrap();
         let index = Index::new_in_memory().await.unwrap();
+        index.load_test_input(askl_input).await.unwrap();
+        let symbols: SymbolMap = SymbolMap::from_index(&index).await.unwrap();
         let cfg = ControlFlowGraph::from_symbols(symbols, index);
 
         let ast = parse(askl_query).unwrap();
@@ -552,7 +305,7 @@ mod tests {
         env_logger::init();
 
         const QUERY: &str = r#""a""#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -563,11 +316,14 @@ mod tests {
     #[test]
     fn single_child_query() {
         const QUERY: &str = r#""a"{}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1), DeclarationId::new(2)]);
+        assert_eq!(
+            res_nodes.as_vec(),
+            vec![DeclarationId::new(1), DeclarationId::new(2)]
+        );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2"]);
     }
@@ -575,7 +331,7 @@ mod tests {
     #[test]
     fn single_parent_query() {
         const QUERY: &str = r#"{"a"}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -589,13 +345,17 @@ mod tests {
     #[test]
     fn double_parent_query() {
         const QUERY: &str = r#"{{"b"}}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(1), DeclarationId::new(2), DeclarationId::new(42)]
+            vec![
+                DeclarationId::new(1),
+                DeclarationId::new(2),
+                DeclarationId::new(42)
+            ]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2", "42-1", "42-2"]);
@@ -604,11 +364,14 @@ mod tests {
     #[test]
     fn missing_child_query() {
         const QUERY: &str = r#""a"{{}}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1), DeclarationId::new(2)]);
+        assert_eq!(
+            res_nodes.as_vec(),
+            vec![DeclarationId::new(1), DeclarationId::new(2)]
+        );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2"]);
     }
@@ -616,7 +379,7 @@ mod tests {
     #[test]
     fn forced_query() {
         const QUERY: &str = r#"!"a""#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -628,12 +391,15 @@ mod tests {
     #[test]
     fn forced_child_query_1() {
         const QUERY: &str = r#""b"{!"a"}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1), DeclarationId::new(2)]);
+        assert_eq!(
+            res_nodes.as_vec(),
+            vec![DeclarationId::new(1), DeclarationId::new(2)]
+        );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2", "2-1"]);
     }
@@ -641,12 +407,15 @@ mod tests {
     #[test]
     fn forced_child_query_2() {
         const QUERY: &str = r#""b"{!"c"}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(2), DeclarationId::new(3)]);
+        assert_eq!(
+            res_nodes.as_vec(),
+            vec![DeclarationId::new(2), DeclarationId::new(3)]
+        );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["2-3"]);
     }
@@ -656,7 +425,7 @@ mod tests {
         const QUERY: &str = r#""main" {
             !"c"
         }"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -672,12 +441,15 @@ mod tests {
     #[test]
     fn forced_child_query_4() {
         const QUERY: &str = r#""a"{!"g"}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1), DeclarationId::new(7)]);
+        assert_eq!(
+            res_nodes.as_vec(),
+            vec![DeclarationId::new(1), DeclarationId::new(7)]
+        );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-7"]);
     }
@@ -687,7 +459,7 @@ mod tests {
         const QUERY: &str = r#""main" {
             @forced(name="c")
         }"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -703,7 +475,7 @@ mod tests {
     #[test]
     fn two_selectors() {
         const QUERY: &str = r#""b" "a""#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -719,7 +491,7 @@ mod tests {
     #[test]
     fn two_selectors_children() {
         const QUERY: &str = r#""b" "a" {}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -735,7 +507,7 @@ mod tests {
     #[test]
     fn statement_after_scope() {
         const QUERY: &str = r#""a" {}; "a""#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -752,7 +524,7 @@ mod tests {
     fn statement_after_scope_newline() {
         const QUERY: &str = r#""a" {}
         "a""#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -768,7 +540,7 @@ mod tests {
     #[test]
     fn ignore_node() {
         const QUERY: &str = r#""a" {@ignore("b")}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -781,7 +553,7 @@ mod tests {
     #[test]
     fn ignore_node_recurse() {
         const QUERY: &str = r#""a" @ignore("b") {}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -794,14 +566,18 @@ mod tests {
     #[test]
     fn unselect_children() {
         const QUERY: &str = r#""d" {"f"; {}}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(4), DeclarationId::new(5), DeclarationId::new(6),]
+            vec![
+                DeclarationId::new(4),
+                DeclarationId::new(5),
+                DeclarationId::new(6),
+            ]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["4-5", "4-6"]);
@@ -810,7 +586,7 @@ mod tests {
     #[test]
     fn statement_semicolon() {
         const QUERY: &str = r#""d" {"f";}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -826,11 +602,14 @@ mod tests {
     #[test]
     fn single_isolated_scope() {
         const QUERY: &str = r#"@scope{{"e"}}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(4), DeclarationId::new(5)]);
+        assert_eq!(
+            res_nodes.as_vec(),
+            vec![DeclarationId::new(4), DeclarationId::new(5)]
+        );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["4-5"]);
     }
@@ -838,11 +617,14 @@ mod tests {
     #[test]
     fn double_isolated_scope() {
         const QUERY: &str = r#"@scope{@scope{{"e"}}}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(4), DeclarationId::new(5)]);
+        assert_eq!(
+            res_nodes.as_vec(),
+            vec![DeclarationId::new(4), DeclarationId::new(5)]
+        );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["4-5"]);
     }
@@ -850,11 +632,14 @@ mod tests {
     #[test]
     fn global_scope() {
         const QUERY: &str = r#""a"; "b""#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1), DeclarationId::new(2)]);
+        assert_eq!(
+            res_nodes.as_vec(),
+            vec![DeclarationId::new(1), DeclarationId::new(2)]
+        );
         let edges = format_edges(res_edges);
         assert_eq!(edges, Vec::<String>::new());
     }
@@ -862,13 +647,17 @@ mod tests {
     #[test]
     fn project_double_parent_query() {
         const QUERY: &str = r#"@project("test") {{"b"}}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(1), DeclarationId::new(2), DeclarationId::new(42)]
+            vec![
+                DeclarationId::new(1),
+                DeclarationId::new(2),
+                DeclarationId::new(42)
+            ]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2", "42-1", "42-2"]);
@@ -877,7 +666,7 @@ mod tests {
     #[test]
     fn label_use_syntax_check() {
         const QUERY: &str = r#""b" "a" {@label("foo")}; @use("foo")"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
@@ -893,14 +682,18 @@ mod tests {
     #[test]
     fn label_use_forced() {
         const QUERY: &str = r#""main" @label("foo") {}; "b" {@use("foo", forced="true")}"#;
-        let (res_nodes, res_edges) = run_query(INPUT_A, QUERY);
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(1), DeclarationId::new(2), DeclarationId::new(42)]
+            vec![
+                DeclarationId::new(1),
+                DeclarationId::new(2),
+                DeclarationId::new(42)
+            ]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["1-2", "1-2", "2-42", "42-1", "42-2"]);
