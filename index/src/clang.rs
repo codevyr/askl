@@ -194,7 +194,6 @@ impl FunctionDecl {
                                 symbol.id
                             };
 
-                            println!("ADD REF {:?} -> {:?}", declaration, to_id);
                             state
                                 .get_index()
                                 .add_reference(declaration.id, to_id, &occurrence)

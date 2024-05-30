@@ -164,7 +164,10 @@ impl Index {
     pub async fn new_or_connect(database: &str) -> Result<Self> {
         let options = SqliteConnectOptions::new()
             .filename(database)
-            .create_if_missing(true);
+            .create_if_missing(true)
+            .pragma("journal_mode", "OFF")
+            .pragma("temp_store", "MEMORY")
+            .pragma("synchronous", "0");
 
         let pool = SqlitePool::connect_with(options).await?;
 
