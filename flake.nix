@@ -21,6 +21,7 @@
           packages = [
             clang-tools
             clang
+            sqlite-web
           ];
 
           nativeBuildInputs = [
