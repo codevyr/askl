@@ -1,7 +1,7 @@
-use std::{collections::{HashMap, HashSet}, fmt, io::Write};
+use std::collections::HashMap;
 
 use crate::{
-    db::{Declaration, Index, Symbol},
+    db::{Declaration, Index},
     symbols::{self, FileId, SymbolId, SymbolScope, SymbolType},
 };
 use anyhow::{anyhow, bail, Result};
@@ -247,25 +247,6 @@ impl FunctionDecl {
         self.visit_references(state, unit_state, &declaration, inner)
             .await?;
 
-        return Ok(());
-
-        let parent_id = unit_state.get_parent_id(id, self.previous_decl);
-
-        // let symbols_id = state
-        //     .get_symbol(
-        //         id,
-        //         parent_id,
-        //         name,
-        //         symbol_type,
-        //         symbol_scope,
-        //         occurrence.clone(),
-        //     )
-        //     .await;
-
-        // let new_symbol =
-        //     ModuleSymbol::new(id, parent_id, name, symbol_type, symbol_scope, occurrence);
-        // unit_state.add_symbol(new_symbol.clone());
-
         Ok(())
     }
 }
@@ -387,7 +368,6 @@ struct UnresolvedChild {
 }
 
 pub struct GlobalVisitorState {
-    unresolved_children: HashMap<Id, HashSet<UnresolvedChild>>,
     index: Index,
     project: String,
     language: String,
@@ -396,23 +376,11 @@ pub struct GlobalVisitorState {
 impl GlobalVisitorState {
     pub fn new(index: Index) -> Self {
         GlobalVisitorState {
-            unresolved_children: HashMap::new(),
             index: index,
             project: "test".to_string(),
             language: "cxx".to_string(),
         }
     }
-
-    // fn add_unresolved_children(&mut self, children: Vec<UnresolvedChild>) {
-    //     for child in children {
-    //         self.unresolved_children
-    //             .entry(child.to)
-    //             .and_modify(|v| {
-    //                 v.insert(child.clone());
-    //             })
-    //             .or_insert_with(|| HashSet::from([child]));
-    //     }
-    // }
 
     async fn extract_file_from_range(
         &self,
@@ -425,28 +393,6 @@ impl GlobalVisitorState {
         self.index
             .create_or_get_fileid(&file_string, &self.project, &self.language)
             .await
-    }
-
-    pub async fn resolve_global_symbols(&self) -> Result<()> {
-        for (child_id, unresolved) in self.unresolved_children.iter() {
-            let child_name = "asdf";
-            unimplemented!("Unimplemented");
-            // let resolved_children = self.index.find_symbols(&child_name).await?;
-            // for resolved_child in resolved_children {
-            //     for u in unresolved.iter() {
-            //         // let res = self
-            //         //     .index
-            //         //     .add_reference(u.parent_id, resolved_child.id, &u.occurrence)
-            //         //     .await;
-            //         // if res.is_err() {
-            //         //     log::error!("{:#?}", unresolved);
-            //         // }
-            //         // res?;
-            //     }
-            // }
-        }
-
-        Ok(())
     }
 
     pub async fn extract_symbol_map_root(&mut self, module: &str, root: Node) -> Result<()> {
@@ -464,33 +410,11 @@ impl GlobalVisitorState {
         let mut unit_state = ModuleVisitorState::new(module_id);
         node.visit(self, &mut unit_state, &root.inner).await?;
 
-        unit_state.resolve_local_symbols(&self.index).await?;
-        // let parent_id = state
-        // .index
-        // .create_or_get_symbolid(&name, symbol_type, range)
-        // .await?;
-
         Ok(())
     }
 
     pub fn get_index(&self) -> &Index {
         &self.index
-    }
-
-    async fn get_symbol(
-        &mut self,
-        id: Id,
-        parent: Id,
-        name: &str,
-        symbol_type: SymbolType,
-        symbol_scope: SymbolScope,
-        occurrence: Declaration,
-    ) -> Symbol {
-        unimplemented!("Unimplemented")
-        // self.index
-        //     .create_or_get_symbol(name, symbol_type, symbol_scope, occurrence)
-        //     .await
-        //     .unwrap()
     }
 }
 
@@ -500,72 +424,18 @@ impl Into<Index> for GlobalVisitorState {
     }
 }
 
-#[derive(Debug, Clone)]
-struct ModuleSymbol {
-    id: Id,
-    parent: Id,
-    name: String,
-    symbol_type: SymbolType,
-    symbol_scope: SymbolScope,
-    occurrence: symbols::Occurrence,
-}
-
-impl ModuleSymbol {
-    fn new(
-        id: Id,
-        parent: Id,
-        name: &str,
-        symbol_type: SymbolType,
-        symbol_scope: SymbolScope,
-        occurrence: symbols::Occurrence,
-    ) -> Self {
-        Self {
-            id,
-            parent,
-            name: name.to_string(),
-            symbol_type,
-            symbol_scope,
-            occurrence,
-        }
-    }
-}
-
-// impl Into<crate::db::Symbol> for UnitSymbol {
-//     fn into(self) -> crate::db::Symbol {
-//         crate::db::Symbol {
-//             id: self.id.into(),
-//             name: self.name,
-//             file_id: self.occurrence.file,
-//             symbol_type: self.symbol_type,
-//             symbol_scope: self.symbol_scope,
-//             line_start: self.occurrence.line_start as i64,
-//             col_start: self.occurrence.column_start as i64,
-//             line_end: self.occurrence.line_end as i64,
-//             col_end: self.occurrence.column_end as i64,
-//         }
-//     }
-// }
-
 struct ModuleVisitorState {
     module_id: FileId,
-    references: Vec<UnresolvedChild>,
-    symbols: Vec<ModuleSymbol>,
     /// A map of registered symbols with the list of related symbols. Related
     /// symbols are the one which point to each other using [`previous_decl`]
     symbol_ids: HashMap<Id, SymbolId>,
-    parent_ids: HashMap<Id, Id>,
-    known_symbols: HashMap<Id, SymbolId>,
 }
 
 impl ModuleVisitorState {
     fn new(module_id: FileId) -> Self {
         Self {
             module_id,
-            references: Vec::new(),
-            symbols: Vec::new(),
             symbol_ids: HashMap::new(),
-            parent_ids: HashMap::new(),
-            known_symbols: HashMap::new(),
         }
     }
 
@@ -573,43 +443,7 @@ impl ModuleVisitorState {
         self.symbol_ids.insert(clang_id, symbol_id);
     }
 
-    fn contains_symbol(&self, id: &Id) -> bool {
-        self.symbol_ids.contains_key(id)
-    }
-
     fn get_symbol(&self, id: &Id) -> Option<&SymbolId> {
         self.symbol_ids.get(id)
-    }
-
-    fn get_parent_id(&mut self, symbol_id: Id, previous_decl: Option<Id>) -> Id {
-        println!("Get parent ID {:?} {:?}", symbol_id, previous_decl);
-        if let Some(parent_id) = previous_decl {
-            let root_parent_id = self.parent_ids.get(&parent_id).expect(
-                "If a symbol has previous_decl, then the parent symbol should have been registered",
-            );
-            self.parent_ids.insert(symbol_id, *root_parent_id);
-            return parent_id;
-        }
-
-        self.parent_ids.insert(symbol_id, symbol_id);
-        symbol_id
-    }
-
-    async fn resolve_local_symbols(&mut self, index: &Index) -> Result<()> {
-        // let mut ids = Vec::new();
-        // ids.reserve(self.symbol_ids.len());
-
-        // for symbol in self.symbols.iter() {
-        //     let id = index.create_symbol(symbol.clone().into()).await?;
-        //     ids.push(id)
-        // }
-
-        println!("{:#?}", self.references);
-
-        Ok(())
-    }
-
-    fn add_reference(&mut self, child: UnresolvedChild) {
-        self.references.push(child);
     }
 }
