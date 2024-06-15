@@ -421,6 +421,22 @@ impl Index {
         Ok(files)
     }
 
+    pub async fn get_file(&self, file_id: FileId) -> Result<File> {
+        let files: File = sqlx::query_as!(
+            File,
+            r#"
+            SELECT *
+            FROM files
+            WHERE id = ?
+            "#,
+            file_id
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(files)
+    }
+
     pub async fn all_refs(&self) -> Result<Vec<Reference>> {
         let references: Vec<Reference> = sqlx::query_as!(
             Reference,

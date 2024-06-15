@@ -1,11 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::{anyhow, Result};
 use askld::execution_context::ExecutionContext;
 use askld::{cfg::ControlFlowGraph, parser::parse};
 use clap::Parser;
-use index::db::{Index, Declaration};
+use index::db::{Declaration, Index};
 use index::symbols::{FileId, Occurrence};
 use index::symbols::{SymbolId, SymbolMap};
 use log::{debug, info};
@@ -48,7 +48,7 @@ impl Node {
         Self {
             id,
             label,
-            declarations
+            declarations,
         }
     }
 }
@@ -85,6 +85,7 @@ impl Edge {
 struct Graph {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
+    files: Vec<(FileId, String)>,
 }
 
 impl Graph {
@@ -92,6 +93,7 @@ impl Graph {
         Self {
             nodes: vec![],
             edges: vec![],
+            files: vec![],
         }
     }
 
@@ -146,16 +148,26 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
         all_symbols.insert(declaration.symbol);
     }
 
+    let mut result_files = HashMap::new();
     for symbol_id in all_symbols {
         let sym = data.cfg.get_symbol(symbol_id).unwrap();
-        let declarations = if let Ok(declarations) = data.cfg.index.symbol_declarations(symbol_id).await {
-            declarations
-        } else {
-            return HttpResponse::BadRequest().body("SymbolId not found");
-        };
+        let declarations =
+            if let Ok(declarations) = data.cfg.index.symbol_declarations(symbol_id).await {
+                declarations
+            } else {
+                return HttpResponse::BadRequest().body("SymbolId not found");
+            };
 
+        for declaration in declarations.iter() {
+            if !result_files.contains_key(&declaration.file_id) {
+                let f = data.cfg.index.get_file(declaration.file_id).await.unwrap();
+                result_files.insert(declaration.file_id, f.path);
+            }
+        }
         result_graph.add_node(Node::new(symbol_id, sym.name.clone(), declarations));
     }
+
+    result_graph.files = result_files.into_iter().collect();
 
     let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();
     HttpResponse::Ok().body(json_graph)
@@ -213,11 +225,11 @@ mod tests {
     use askld::cfg::{EdgeList, NodeList};
     use index::symbols::DeclarationId;
     use tokio::{runtime::Runtime, task};
-    
+
     use super::*;
 
     const TEST_INPUT_A: &'static str = index::db::Index::TEST_INPUT_A;
-    
+
     fn format_edges(edges: EdgeList) -> Vec<String> {
         edges
             .as_vec()
