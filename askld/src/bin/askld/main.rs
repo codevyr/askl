@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use askld::execution_context::ExecutionContext;
 use askld::{cfg::ControlFlowGraph, parser::parse};
 use clap::Parser;
-use index::db::Index;
+use index::db::{Index, Declaration};
 use index::symbols::{FileId, Occurrence};
 use index::symbols::{SymbolId, SymbolMap};
 use log::{debug, info};
@@ -40,17 +40,15 @@ struct Node {
     #[serde(serialize_with = "symbolid_as_string")]
     id: SymbolId,
     label: String,
-    file_id: FileId,
-    line: i32,
+    declarations: Vec<Declaration>,
 }
 
 impl Node {
-    fn new(id: SymbolId, label: String, file_id: FileId, line: i32) -> Self {
+    fn new(id: SymbolId, label: String, declarations: Vec<Declaration>) -> Self {
         Self {
             id,
             label,
-            file_id,
-            line,
+            declarations
         }
     }
 }
@@ -149,12 +147,14 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     }
 
     for symbol_id in all_symbols {
-        // let sym = data.cfg.get_symbol(symbol_id).unwrap();
-        // let file_id = sym.occurrence.file.clone();
-        // let line = sym.occurrence.line_start;
-        // debug!("filename {}", file_id);
-        // result_graph.add_node(Node::new(symbol_id, sym.name.clone(), file_id, line));
-        unimplemented!("Unimplemented");
+        let sym = data.cfg.get_symbol(symbol_id).unwrap();
+        let declarations = if let Ok(declarations) = data.cfg.index.symbol_declarations(symbol_id).await {
+            declarations
+        } else {
+            return HttpResponse::BadRequest().body("SymbolId not found");
+        };
+
+        result_graph.add_node(Node::new(symbol_id, sym.name.clone(), declarations));
     }
 
     let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();

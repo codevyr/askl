@@ -33,7 +33,7 @@ impl Symbol {
     }
 }
 
-#[derive(Debug, sqlx::FromRow, PartialEq, Eq, Clone, Deserialize)]
+#[derive(Debug, sqlx::FromRow, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct Declaration {
     pub id: DeclarationId,
     pub symbol: SymbolId,

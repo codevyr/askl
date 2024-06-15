@@ -321,7 +321,7 @@ impl serde::Serialize for DeclarationId {
     }
 }
 
-#[derive(sqlx::Type, Debug, PartialEq, Eq, Copy, Clone, Deserialize)]
+#[derive(sqlx::Type, Debug, PartialEq, Eq, Copy, Clone, Serialize, Deserialize)]
 #[repr(i32)]
 pub enum SymbolType {
     Definition = 1,
