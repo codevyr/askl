@@ -457,7 +457,9 @@ impl Index {
             r#"
             SELECT symbol_refs.*
             FROM symbol_refs
-            WHERE symbol_refs.to_symbol = ?
+            INNER JOIN declarations
+            ON declarations.symbol = symbol_refs.to_symbol
+            WHERE declarations.id = ?;
             "#,
             child_declaration
         ).fetch_all(&self.pool)

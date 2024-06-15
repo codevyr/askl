@@ -316,7 +316,7 @@ mod tests {
 
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
-        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1)]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(91)]);
         assert_eq!(res_edges.0.len(), 0);
     }
 
@@ -329,10 +329,10 @@ mod tests {
         println!("{:#?}", res_edges);
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(1), DeclarationId::new(2)]
+            vec![DeclarationId::new(91), DeclarationId::new(92)]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["1-2", "1-2"]);
+        assert_eq!(edges, vec!["91-92", "91-92"]);
     }
 
     #[test]
@@ -344,10 +344,10 @@ mod tests {
         println!("{:#?}", res_edges);
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(1), DeclarationId::new(42)]
+            vec![DeclarationId::new(91), DeclarationId::new(942)]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["42-1"]);
+        assert_eq!(edges, vec!["942-91"]);
     }
 
     #[test]
@@ -360,13 +360,13 @@ mod tests {
         assert_eq!(
             res_nodes.as_vec(),
             vec![
-                DeclarationId::new(1),
-                DeclarationId::new(2),
-                DeclarationId::new(42)
+                DeclarationId::new(91),
+                DeclarationId::new(92),
+                DeclarationId::new(942)
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["1-2", "1-2", "42-1", "42-2"]);
+        assert_eq!(edges, vec!["91-92", "91-92", "942-91", "942-92"]);
     }
 
     #[test]
@@ -378,10 +378,10 @@ mod tests {
         println!("{:#?}", res_edges);
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(1), DeclarationId::new(2)]
+            vec![DeclarationId::new(91), DeclarationId::new(92)]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["1-2", "1-2"]);
+        assert_eq!(edges, vec!["91-92", "91-92"]);
     }
 
     #[test]
@@ -392,7 +392,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1)]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(91)]);
         assert_eq!(res_edges.0.len(), 0);
     }
 
@@ -406,10 +406,10 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(1), DeclarationId::new(2)]
+            vec![DeclarationId::new(91), DeclarationId::new(92)]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["1-2", "1-2", "2-1"]);
+        assert_eq!(edges, vec!["91-92", "91-92", "92-91"]);
     }
 
     #[test]
@@ -422,10 +422,10 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(2), DeclarationId::new(3)]
+            vec![DeclarationId::new(92), DeclarationId::new(93)]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["2-3"]);
+        assert_eq!(edges, vec!["92-93"]);
     }
 
     #[test]
@@ -440,10 +440,10 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(3), DeclarationId::new(42)]
+            vec![DeclarationId::new(93), DeclarationId::new(942)]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["42-3"]);
+        assert_eq!(edges, vec!["942-93"]);
     }
 
     #[test]
@@ -456,10 +456,10 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(1), DeclarationId::new(7)]
+            vec![DeclarationId::new(91), DeclarationId::new(97)]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["1-7"]);
+        assert_eq!(edges, vec!["91-97"]);
     }
 
     #[test]
@@ -474,10 +474,10 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(3), DeclarationId::new(42)]
+            vec![DeclarationId::new(93), DeclarationId::new(942)]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["42-3"]);
+        assert_eq!(edges, vec!["942-93"]);
     }
 
     #[test]
@@ -490,10 +490,10 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(1), DeclarationId::new(2),]
+            vec![DeclarationId::new(91), DeclarationId::new(92),]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["1-2", "1-2"]);
+        assert_eq!(edges, vec!["91-92", "91-92"]);
     }
 
     #[test]
@@ -506,10 +506,10 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(1), DeclarationId::new(2),]
+            vec![DeclarationId::new(91), DeclarationId::new(92),]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["1-2", "1-2"]);
+        assert_eq!(edges, vec!["91-92", "91-92"]);
     }
 
     #[test]
@@ -522,10 +522,10 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(1), DeclarationId::new(2),]
+            vec![DeclarationId::new(91), DeclarationId::new(92),]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["1-2", "1-2"]);
+        assert_eq!(edges, vec!["91-92", "91-92"]);
     }
 
     #[test]
@@ -539,10 +539,10 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(1), DeclarationId::new(2),]
+            vec![DeclarationId::new(91), DeclarationId::new(92),]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["1-2", "1-2"]);
+        assert_eq!(edges, vec!["91-92", "91-92"]);
     }
 
     #[test]
@@ -553,7 +553,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1),]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(91),]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, Vec::<String>::new());
     }
@@ -566,7 +566,7 @@ mod tests {
         println!("{:#?}", res_nodes);
         println!("{:#?}", res_edges);
 
-        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(1),]);
+        assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(91),]);
         let edges = format_edges(res_edges);
         assert_eq!(edges, Vec::<String>::new());
     }
@@ -582,13 +582,13 @@ mod tests {
         assert_eq!(
             res_nodes.as_vec(),
             vec![
-                DeclarationId::new(4),
-                DeclarationId::new(5),
-                DeclarationId::new(6),
+                DeclarationId::new(94),
+                DeclarationId::new(95),
+                DeclarationId::new(96),
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["4-5", "4-6"]);
+        assert_eq!(edges, vec!["94-95", "94-96"]);
     }
 
     #[test]
@@ -601,10 +601,10 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(4), DeclarationId::new(6),]
+            vec![DeclarationId::new(94), DeclarationId::new(96),]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["4-6"]);
+        assert_eq!(edges, vec!["94-96"]);
     }
 
     #[test]
@@ -616,10 +616,10 @@ mod tests {
         println!("{:#?}", res_edges);
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(4), DeclarationId::new(5)]
+            vec![DeclarationId::new(94), DeclarationId::new(95)]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["4-5"]);
+        assert_eq!(edges, vec!["94-95"]);
     }
 
     #[test]
@@ -631,10 +631,10 @@ mod tests {
         println!("{:#?}", res_edges);
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(4), DeclarationId::new(5)]
+            vec![DeclarationId::new(94), DeclarationId::new(95)]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["4-5"]);
+        assert_eq!(edges, vec!["94-95"]);
     }
 
     #[test]
@@ -646,7 +646,7 @@ mod tests {
         println!("{:#?}", res_edges);
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(1), DeclarationId::new(2)]
+            vec![DeclarationId::new(91), DeclarationId::new(92)]
         );
         let edges = format_edges(res_edges);
         assert_eq!(edges, Vec::<String>::new());
@@ -662,13 +662,13 @@ mod tests {
         assert_eq!(
             res_nodes.as_vec(),
             vec![
-                DeclarationId::new(1),
-                DeclarationId::new(2),
-                DeclarationId::new(42)
+                DeclarationId::new(91),
+                DeclarationId::new(92),
+                DeclarationId::new(942)
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["1-2", "1-2", "42-1", "42-2"]);
+        assert_eq!(edges, vec!["91-92", "91-92", "942-91", "942-92"]);
     }
 
     #[test]
@@ -681,10 +681,10 @@ mod tests {
 
         assert_eq!(
             res_nodes.as_vec(),
-            vec![DeclarationId::new(1), DeclarationId::new(2),]
+            vec![DeclarationId::new(91), DeclarationId::new(92),]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["1-2", "1-2"]);
+        assert_eq!(edges, vec!["91-92", "91-92"]);
     }
 
     #[test]
@@ -698,12 +698,12 @@ mod tests {
         assert_eq!(
             res_nodes.as_vec(),
             vec![
-                DeclarationId::new(1),
-                DeclarationId::new(2),
-                DeclarationId::new(42)
+                DeclarationId::new(91),
+                DeclarationId::new(92),
+                DeclarationId::new(942)
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["1-2", "1-2", "2-42", "42-1", "42-2"]);
+        assert_eq!(edges, vec!["91-92", "91-92", "92-942", "942-91", "942-92"]);
     }
 }
