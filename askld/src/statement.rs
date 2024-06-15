@@ -6,9 +6,9 @@ use crate::scope::{build_scope, EmptyScope, Scope};
 use crate::verb::build_verb;
 use async_trait::async_trait;
 use core::fmt::Debug;
-use index::symbols::{DeclarationId, DeclarationRefs, Reference, SymbolId, SymbolRefs};
+use index::symbols::{DeclarationId, DeclarationRefs};
 use pest::error::Error;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 pub fn build_statement<'a>(
     ctx: &ParserContext,

@@ -1,7 +1,6 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
-use index::db::Declaration;
-use index::symbols::{Reference, SymbolId, SymbolRefs, DeclarationRefs, DeclarationId};
+use index::symbols::{Reference, DeclarationRefs, DeclarationId};
 use crate::verb::{DeriveMethod, Deriver, Filter, Marker, Selector, UnitVerb, Verb};
 use anyhow::Result;
 use core::fmt::Debug;

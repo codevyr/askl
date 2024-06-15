@@ -2,7 +2,7 @@ use std::{collections::HashSet, iter::Iterator};
 
 use index::db::{Declaration, File, Index};
 use index::symbols::{DeclarationId, DeclarationRefs};
-use index::symbols::{FileId, Occurrence, Reference, Symbol, SymbolId, SymbolMap};
+use index::symbols::{FileId, Occurrence, Symbol, SymbolId, SymbolMap};
 
 pub struct ControlFlowGraph {
     pub symbols: SymbolMap,

@@ -4,8 +4,7 @@ use crate::parser::{Identifier, NamedArgument, ParserContext, PositionalArgument
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use core::fmt::Debug;
-use index::db::Declaration;
-use index::symbols::{DeclarationId, DeclarationRefs, Occurrence, Reference, SymbolId, SymbolRefs};
+use index::symbols::{DeclarationId, DeclarationRefs, Occurrence, Reference};
 use log::debug;
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
@@ -320,7 +319,7 @@ impl Deriver for ForcedVerb {
     async fn derive_parents(
         &self,
         _cfg: &ControlFlowGraph,
-        symbol: DeclarationId,
+        _symbol: DeclarationId,
     ) -> Option<DeclarationRefs> {
         None
     }
@@ -596,7 +595,7 @@ impl Deriver for IsolatedScope {
         &self,
         _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
-        declarations: HashSet<DeclarationId>,
+        _declarations: HashSet<DeclarationId>,
     ) -> HashSet<Reference> {
         HashSet::new()
     }
