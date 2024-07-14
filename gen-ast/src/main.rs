@@ -87,7 +87,5 @@ async fn main() -> anyhow::Result<()> {
         state.extract_symbol_map_root(&module, node).await?;
     }
 
-    state.resolve_global_symbols().await?;
-
     Ok(())
 }
