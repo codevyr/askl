@@ -336,7 +336,8 @@ pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<(St
             .filter(|arg| arg != "-Werror")
             .filter(|arg| arg != "-c")
             .filter(|arg| arg != "-g")
-            .filter(|arg| !arg.starts_with("-f")),
+            .filter(|arg| !arg.starts_with("-f"))
+            .filter(|arg| !arg.starts_with("-m")),
     )
     .collect();
 
