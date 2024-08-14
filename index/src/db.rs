@@ -177,10 +177,14 @@ impl Index {
     }
 
     pub const TEST_INPUT_A: &'static str = "test_input_a.sql";
+    pub const TEST_INPUT_B: &'static str = "test_input_b.sql";
 
     pub async fn load_test_input(&self, input_path: &str) -> Result<()> {
         match input_path {
             "test_input_a.sql" => sqlx::query_file!("../sql/test_input_a.sql")
+            .execute(&self.pool)
+            .await?,
+            "test_input_b.sql" => sqlx::query_file!("../sql/test_input_b.sql")
             .execute(&self.pool)
             .await?,
             _ => panic!("Impossible input file"),

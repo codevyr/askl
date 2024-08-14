@@ -706,4 +706,26 @@ mod tests {
         let edges = format_edges(res_edges);
         assert_eq!(edges, vec!["91-92", "91-92", "92-942", "942-91", "942-92"]);
     }
+
+    const TEST_INPUT_B: &'static str = index::db::Index::TEST_INPUT_B;
+
+    #[test]
+    fn implicit_edge() {
+        const QUERY: &str = r#""d" {}"#;
+        let (res_nodes, res_edges) = run_query(TEST_INPUT_B, QUERY);
+
+        println!("{:#?}", res_nodes);
+        println!("{:#?}", res_edges);
+
+        assert_eq!(
+            res_nodes.as_vec(),
+            vec![
+                DeclarationId::new(94),
+                DeclarationId::new(95),
+                DeclarationId::new(96)
+            ]
+        );
+        let edges = format_edges(res_edges);
+        assert_eq!(edges, vec!["94-95", "94-96", "95-96"]);
+    }
 }
