@@ -28,3 +28,4 @@ rand = {workspace = true}
 sqlx = {workspace = true}
 dotenv = "0.15.0"
 async-trait = "0.1.80"
+serde_stacker.workspace = true

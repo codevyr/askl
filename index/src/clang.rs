@@ -355,7 +355,10 @@ pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<(St
     }
 
     std::fs::write("ast.json", json.clone())?;
-    let node: Node = serde_json::from_str(&json)?;
+    let mut deserializer = serde_json::Deserializer::from_str(&json);
+    deserializer.disable_recursion_limit();
+    let deserializer = serde_stacker::Deserializer::new(&mut deserializer);
+    let node = Node::deserialize(deserializer).unwrap();
     // std::fs::write("node", format!("{:#?}", node))?;
 
     Ok((c.file, node))
