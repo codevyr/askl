@@ -296,9 +296,72 @@ pub struct Other {
     pub range: Option<clang_ast::SourceRange>,
 }
 
+#[derive(PartialEq)]
+enum Language {
+    C,
+    Cxx,
+    Asm
+}
+
+impl Language {
+    fn parse_path(path: &str) -> Option<Language> {
+        let lower_path = path.to_string().to_lowercase();
+
+        if lower_path.ends_with(".c") {
+            Some(Language::C)
+        } else if lower_path.ends_with(".cxx") {
+            Some(Language::Cxx)
+        } else if lower_path.ends_with(".cc") {
+            Some(Language::Cxx)
+        } else if lower_path.ends_with(".c++") {
+            Some(Language::Cxx)
+        } else if lower_path.ends_with(".s") {
+            Some(Language::Asm)
+        } else {
+            None
+        }
+    }
+}
+
+fn preprocess(arguments: Vec<String>) -> anyhow::Result<Vec<String>> {
+    let mut res_arguments = Vec::new();
+    let mut skip_next = false;
+    for arg in arguments.into_iter().skip(1) {
+        if skip_next == true {
+            skip_next = false;
+            continue
+        } else if arg.starts_with("-W") {
+            continue
+        } else if arg.starts_with("-f") {
+            continue
+        } else if arg.starts_with("-m") {
+            continue
+        } else if arg == "-g" {
+            continue
+        } else if arg == "-c" {
+            continue
+        } else if arg == "-o" {
+            skip_next = true;
+            continue;
+        }
+
+        res_arguments.push(arg);
+    }
+
+    Ok(res_arguments)
+}
+
 /// Run Clang with parameters for generating the AST, where [`clang`] is the
 /// path to the clang binary.
 pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<(String, Node)> {
+    let language = Language::parse_path(&c.file);
+
+    let language = match language {
+        Some(Language::C) => Language::C,
+        Some(_) => return Err(anyhow!("Only C files are supported for now")),
+        None => return Err(anyhow!("Failed to parse language")),
+    };
+
     let mut arguments = if let Some(ref command) = c.command {
         shell_words::split(command).expect("Failed to parse command")
     } else if let Some(arguments) = c.arguments {
@@ -324,21 +387,15 @@ pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<(St
         // arguments.push(format!("-o{}", output));
     }
 
+    let filtered_args = preprocess(arguments)?;
+
     arguments = vec![
         "-Xclang".to_string(),
         "-ast-dump=json".to_string(),
         "-fsyntax-only".to_string(),
     ]
     .into_iter()
-    .chain(
-        arguments
-            .drain(1..) // Remove path to the compiler
-            .filter(|arg| arg != "-Werror")
-            .filter(|arg| arg != "-c")
-            .filter(|arg| arg != "-g")
-            .filter(|arg| !arg.starts_with("-f"))
-            .filter(|arg| !arg.starts_with("-m")),
-    )
+    .chain(filtered_args)
     .collect();
 
     let output = Command::new(clang)
