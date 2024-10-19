@@ -43,11 +43,11 @@ async fn parse_all(
         let pb = pb.clone();
         let clang = args.clang.clone();
         tasks.push(tokio::spawn(async move {
-            pb.inc(1);
             let res = run_clang_ast(&clang, c.clone()).await;
             if let Err(err) = &res {
                 println!("Run AST {} in {:?}", err, c);
             }
+            pb.inc(1);
             drop(permit);
             res
         }));
