@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{path::Path, str::FromStr};
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -105,18 +105,20 @@ impl Declaration {
 #[derive(Debug, sqlx::FromRow, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct File {
     pub id: FileId,
-    pub path: String,
     pub project: String,
+    pub root_dir: String,
+    pub path: String,
     pub filetype: String,
 }
 
 impl File {
-    pub fn new(id: FileId, path: &str, project: &str, filetype: &str) -> Self {
+    pub fn new(id: FileId, project: &str, root_dir: &str, path: &str, filetype: &str) -> Self {
         Self {
             id,
+            project: project.to_string(),
+            root_dir: root_dir.to_string(),
             path: path.to_string(),
             filetype: filetype.to_string(),
-            project: project.to_string(),
         }
     }
 }
@@ -196,10 +198,19 @@ impl Index {
 
     pub async fn create_or_get_fileid(
         &self,
-        file_string: &str,
         project: &str,
+        root_dir: &str,
+        file_string: &str,
         file_type: &str,
     ) -> Result<FileId> {
+        let path_in_root = Path::new(root_dir).join(file_string);
+
+        let file_string = if !file_string.starts_with("/") {
+            path_in_root.as_os_str().to_str().unwrap()
+        } else {
+            file_string
+        };
+
         let rec = sqlx::query!(
             r#"
             SELECT id
@@ -218,11 +229,12 @@ impl Index {
 
         let file_id = sqlx::query!(
             r#"
-            INSERT INTO files (path, project, filetype)
-            VALUES (?1, ?2, ?3)
+            INSERT INTO files (project, root_dir, path, filetype)
+            VALUES (?1, ?2, ?3, ?4)
             "#,
-            file_string,
             project,
+            root_dir,
+            file_string,
             file_type,
         )
         .execute(&self.pool)

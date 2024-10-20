@@ -155,7 +155,7 @@ impl FunctionDecl {
                 Clang::DeclRefExpr(ref_expr) => {
                     let referenced_decl = ref_expr.referenced_decl.as_ref().unwrap();
                     let file_id = state
-                        .extract_file_from_range(&ref_expr.range)
+                        .extract_file_from_range(unit_state, &ref_expr.range)
                         .await
                         .unwrap();
                     let occurrence = symbols::Occurrence::new(&ref_expr.range, file_id).unwrap();
@@ -222,7 +222,7 @@ impl FunctionDecl {
         inner: &Vec<Node>,
     ) -> Result<()> {
         let clang_range = self.range.clone();
-        let file_id = state.extract_file_from_range(&clang_range).await.unwrap();
+        let file_id = state.extract_file_from_range(unit_state, &clang_range).await.unwrap();
 
         let name = self.name.as_ref().unwrap();
 
@@ -351,9 +351,27 @@ fn preprocess(arguments: Vec<String>) -> anyhow::Result<Vec<String>> {
     Ok(res_arguments)
 }
 
+#[derive(Debug)]
+pub struct ParsedNode {
+    pub module: String,
+    pub root: String,
+    pub node: Node,
+}
+
+impl ParsedNode {
+    fn new(c: CompileCommand, node: Node) -> Self {
+        ParsedNode {
+            module: c.file,
+            root: c.directory,
+            node: node,
+        }
+    }
+}
+
 /// Run Clang with parameters for generating the AST, where [`clang`] is the
 /// path to the clang binary.
-pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<(String, Node)> {
+pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<ParsedNode> {
+    // println!("{:#?}", c);
     let language = Language::parse_path(&c.file);
 
     let language = match language {
@@ -364,7 +382,7 @@ pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<(St
 
     let mut arguments = if let Some(ref command) = c.command {
         shell_words::split(command).expect("Failed to parse command")
-    } else if let Some(arguments) = c.arguments {
+    } else if let Some(arguments) = c.arguments.clone() {
         arguments
     } else {
         return Err(anyhow!(
@@ -399,7 +417,7 @@ pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<(St
     .collect();
 
     let output = Command::new(clang)
-        .current_dir(c.directory)
+        .current_dir(&c.directory)
         .args(arguments)
         .output()
         .await?;
@@ -418,7 +436,7 @@ pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<(St
     let node = Node::deserialize(deserializer).unwrap();
     // std::fs::write("node", format!("{:#?}", node))?;
 
-    Ok((c.file, node))
+    Ok(ParsedNode::new(c, node))
 }
 
 #[derive(Debug, Deserialize, Clone, Eq, PartialEq, Hash)]
@@ -445,6 +463,7 @@ impl GlobalVisitorState {
 
     async fn extract_file_from_range(
         &self,
+        unit_state: &mut ModuleVisitorState,
         range: &Option<clang_ast::SourceRange>,
     ) -> Result<FileId> {
         let file =
@@ -452,12 +471,12 @@ impl GlobalVisitorState {
         let file_string = file.into_os_string().into_string().unwrap();
 
         self.index
-            .create_or_get_fileid(&file_string, &self.project, &self.language)
+            .create_or_get_fileid(&self.project, &unit_state.root_dir, &file_string,  &self.language)
             .await
     }
 
-    pub async fn extract_symbol_map_root(&mut self, module: &str, root: Node) -> Result<()> {
-        let node = if let Clang::TranslationUnitDecl(node) = root.kind {
+    pub async fn extract_symbol_map_root(&mut self, root_node: ParsedNode) -> Result<()> {
+        let node = if let Clang::TranslationUnitDecl(node) = root_node.node.kind {
             node
         } else {
             bail!("Not implemented");
@@ -465,11 +484,11 @@ impl GlobalVisitorState {
 
         let module_id = self
             .index
-            .create_or_get_fileid(&module, &self.project, &self.language)
+            .create_or_get_fileid(&self.project, &root_node.root,&root_node.module, &self.language)
             .await?;
 
-        let mut unit_state = ModuleVisitorState::new(module_id);
-        node.visit(self, &mut unit_state, &root.inner).await?;
+        let mut unit_state = ModuleVisitorState::new(module_id, root_node.root);
+        node.visit(self, &mut unit_state, &root_node.node.inner).await?;
 
         Ok(())
     }
@@ -487,15 +506,18 @@ impl Into<Index> for GlobalVisitorState {
 
 struct ModuleVisitorState {
     module_id: FileId,
+    root_dir: String,
+
     /// A map of registered symbols with the list of related symbols. Related
     /// symbols are the one which point to each other using [`previous_decl`]
     symbol_ids: HashMap<Id, SymbolId>,
 }
 
 impl ModuleVisitorState {
-    fn new(module_id: FileId) -> Self {
+    fn new(module_id: FileId, root_dir: String) -> Self {
         Self {
             module_id,
+            root_dir,
             symbol_ids: HashMap::new(),
         }
     }

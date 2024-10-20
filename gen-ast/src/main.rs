@@ -2,8 +2,9 @@ use std::{fs::File, sync::Arc};
 
 use clap::Parser;
 use index::db::Index;
-use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState, Node};
+use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState, Node, ParsedNode};
 use indicatif::ProgressBar;
+use log::debug;
 use tokio::sync::Semaphore;
 
 /// Indexer for askl
@@ -34,7 +35,7 @@ struct Args {
 async fn parse_all(
     args: &Args,
     compile_commands: Vec<CompileCommand>,
-) -> Vec<anyhow::Result<(String, Node)>> {
+) -> Vec<anyhow::Result<ParsedNode>> {
     let sem = Arc::new(Semaphore::new(args.parallelism));
     let mut tasks = Vec::with_capacity(compile_commands.len());
     let pb = ProgressBar::new(compile_commands.len() as u64);
@@ -45,7 +46,7 @@ async fn parse_all(
         tasks.push(tokio::spawn(async move {
             let res = run_clang_ast(&clang, c.clone()).await;
             if let Err(err) = &res {
-                println!("Run AST {} in {:?}", err, c);
+                debug!("Run AST {} in {:?}", err, c);
             }
             pb.inc(1);
             drop(permit);
@@ -53,7 +54,7 @@ async fn parse_all(
         }));
     }
 
-    let mut outputs = Vec::<anyhow::Result<(String, Node)>>::with_capacity(tasks.len());
+    let mut outputs = Vec::<anyhow::Result<ParsedNode>>::with_capacity(tasks.len());
     for task in tasks {
         outputs.push(task.await.unwrap());
     }
@@ -83,8 +84,8 @@ async fn main() -> anyhow::Result<()> {
         .map(|r| r.unwrap());
 
     let mut state = GlobalVisitorState::new(index);
-    for (module, node) in nodes {
-        state.extract_symbol_map_root(&module, node).await?;
+    for node in nodes {
+        state.extract_symbol_map_root(node).await?;
     }
 
     Ok(())

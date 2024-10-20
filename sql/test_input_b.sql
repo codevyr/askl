@@ -1,7 +1,7 @@
 INSERT INTO files
 VALUES
-    (1, "main.c", "test", "cc"),
-    (2, "bar.c", "test", "cc");
+    (1, "test", "/", "main.c", "cc"),
+    (2, "test", "/", "bar.c", "cc");
 
 
 INSERT INTO symbols

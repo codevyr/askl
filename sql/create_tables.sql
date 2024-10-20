@@ -1,8 +1,9 @@
 CREATE TABLE IF NOT EXISTS files
 (
     id INTEGER PRIMARY KEY,
-    path TEXT NOT NULL,
     project TEXT NOT NULL,
+    root_dir TEXT NOT NULL,
+    path TEXT NOT NULL,
     filetype TEXT NOT NULL,
     UNIQUE (path, project)
 );
