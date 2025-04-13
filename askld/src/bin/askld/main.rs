@@ -720,12 +720,13 @@ mod tests {
         assert_eq!(
             res_nodes.as_vec(),
             vec![
+                DeclarationId::new(86),
                 DeclarationId::new(94),
                 DeclarationId::new(95),
                 DeclarationId::new(96)
             ]
         );
         let edges = format_edges(res_edges);
-        assert_eq!(edges, vec!["94-95", "94-96", "95-96"]);
+        assert_eq!(edges, vec!["94-86", "94-95", "94-96", "95-86", "95-96"]);
     }
 }
