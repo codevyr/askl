@@ -5,7 +5,13 @@
   env.GREET = "devenv";
 
   # https://devenv.sh/packages/
-  packages = [ pkgs.git ];
+  packages = [
+    pkgs.git
+    pkgs.git
+    pkgs.sqlite-web
+    pkgs.llvmPackages_12.stdenv
+    pkgs.llvmPackages_12.clang-unwrapped
+  ];
 
   # https://devenv.sh/languages/
   # languages.rust.enable = true;
