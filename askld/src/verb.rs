@@ -208,14 +208,17 @@ pub trait Marker: Debug {
 }
 
 #[derive(Debug)]
-struct NameSelector {
-    name: String,
+pub struct NameSelector {
+    pub name: String,
 }
 
 impl NameSelector {
     const NAME: &'static str = "select";
 
-    fn new(_positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
+    pub fn new(
+        _positional: &Vec<String>,
+        named: &HashMap<String, String>,
+    ) -> Result<Arc<dyn Verb>> {
         if let Some(name) = named.get("name") {
             Ok(Arc::new(Self { name: name.clone() }))
         } else {
@@ -242,7 +245,7 @@ impl Selector for NameSelector {
             .filter_map(|(id, refs)| {
                 let d = cfg.get_declaration(id).unwrap();
                 let s = cfg.get_symbol(d.symbol).unwrap();
-                if self.name == s.name {
+                if s.name.contains(&self.name) {
                     Some((id, refs.clone()))
                 } else {
                     None

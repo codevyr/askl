@@ -7,7 +7,7 @@ use sqlx::{
     Pool, Sqlite,
 };
 
-use crate::symbols::{FileId, SymbolId, SymbolScope, SymbolType, Occurrence, DeclarationId};
+use crate::symbols::{DeclarationId, FileId, Occurrence, SymbolId, SymbolScope, SymbolType};
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
 pub struct Symbol {
@@ -46,7 +46,12 @@ pub struct Declaration {
 }
 
 impl Declaration {
-    pub fn new_nolines(id: DeclarationId, symbol: SymbolId, file_id: FileId, symbol_type: SymbolType) -> Self {
+    pub fn new_nolines(
+        id: DeclarationId,
+        symbol: SymbolId,
+        file_id: FileId,
+        symbol_type: SymbolType,
+    ) -> Self {
         Self {
             id,
             symbol,
@@ -112,7 +117,13 @@ pub struct File {
 }
 
 impl File {
-    pub fn new(id: FileId, module: &str, module_path: &str, filesystem_path: &str, filetype: &str) -> Self {
+    pub fn new(
+        id: FileId,
+        module: &str,
+        module_path: &str,
+        filesystem_path: &str,
+        filetype: &str,
+    ) -> Self {
         Self {
             id,
             module: module.to_string(),
@@ -183,15 +194,23 @@ impl Index {
 
     pub async fn load_test_input(&self, input_path: &str) -> Result<()> {
         match input_path {
-            "test_input_a.sql" => sqlx::query_file!("../sql/test_input_a.sql")
-            .execute(&self.pool)
-            .await?,
-            "test_input_b.sql" => sqlx::query_file!("../sql/test_input_b.sql")
-            .execute(&self.pool)
-            .await?,
+            "test_input_a.sql" => {
+                sqlx::query_file!("../sql/test_input_a.sql")
+                    .execute(&self.pool)
+                    .await?
+            }
+            "test_input_b.sql" => {
+                sqlx::query_file!("../sql/test_input_b.sql")
+                    .execute(&self.pool)
+                    .await?
+            }
+            "verb_test.sql" => {
+                sqlx::query_file!("../sql/verb_test.sql")
+                    .execute(&self.pool)
+                    .await?
+            }
             _ => panic!("Impossible input file"),
         };
-        
 
         Ok(())
     }
@@ -242,7 +261,10 @@ impl Index {
         .last_insert_rowid();
 
         if file_id == 2 {
-            println!("NEW FILE: {} mp {} fs {}", module, module_relative_path, file_string);
+            println!(
+                "NEW FILE: {} mp {} fs {}",
+                module, module_relative_path, file_string
+            );
             panic!("JJJ");
         }
         Ok(file_id.into())
@@ -318,7 +340,7 @@ impl Index {
                 declaration.line_start,
                 declaration.col_start,
                 declaration.line_end,
-                declaration.col_end                
+                declaration.col_end
             )
             .fetch_optional(&self.pool)
             .await?;
@@ -345,7 +367,7 @@ impl Index {
             .await?;
 
         let id: DeclarationId = rec.id.into();
-    
+
         Ok(declaration.with_id(id))
     }
 
@@ -482,7 +504,8 @@ impl Index {
             WHERE declarations.id = ?;
             "#,
             child_declaration
-        ).fetch_all(&self.pool)
+        )
+        .fetch_all(&self.pool)
         .await?;
 
         Ok(references)
@@ -499,7 +522,8 @@ impl Index {
             WHERE symbol_refs.from_decl = ?;
             "#,
             parent_declaration
-        ).fetch_all(&self.pool)
+        )
+        .fetch_all(&self.pool)
         .await?;
 
         Ok(references)
