@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 
 use crate::{
     db::{Declaration, Index},
@@ -222,7 +222,10 @@ impl FunctionDecl {
         inner: &Vec<Node>,
     ) -> Result<()> {
         let clang_range = self.range.clone();
-        let file_id = state.extract_file_from_range(unit_state, &clang_range).await.unwrap();
+        let file_id = state
+            .extract_file_from_range(unit_state, &clang_range)
+            .await
+            .unwrap();
 
         let name = self.name.as_ref().unwrap();
 
@@ -300,7 +303,7 @@ pub struct Other {
 enum Language {
     C,
     Cxx,
-    Asm
+    Asm,
 }
 
 impl Language {
@@ -329,17 +332,20 @@ fn preprocess(arguments: Vec<String>) -> anyhow::Result<Vec<String>> {
     for arg in arguments.into_iter().skip(1) {
         if skip_next == true {
             skip_next = false;
-            continue
+            continue;
+        } else if arg.starts_with("-Wno-") {
+            // We keep warning relaxations
         } else if arg.starts_with("-W") {
-            continue
+            // We skip extra warnings
+            continue;
         } else if arg.starts_with("-f") {
-            continue
+            continue;
         } else if arg.starts_with("-m") {
-            continue
+            continue;
         } else if arg == "-g" {
-            continue
+            continue;
         } else if arg == "-c" {
-            continue
+            continue;
         } else if arg == "-o" {
             skip_next = true;
             continue;
@@ -359,11 +365,21 @@ pub struct ParsedNode {
 }
 
 impl ParsedNode {
-    fn new(c: CompileCommand, node: Node) -> Self {
-        ParsedNode {
-            module: c.file,
-            root: c.directory,
-            node: node,
+    fn new(c: CompileCommand, node: Node) -> Result<Self> {
+        let file = Path::new(&c.file);
+        let dir = Path::new(&c.directory);
+        if let Ok(module_path) = file.strip_prefix(dir) {
+            Ok(ParsedNode {
+                module: c.file.clone(),
+                root: module_path.to_str().unwrap().to_string(),
+                node: node,
+            })
+        } else {
+            Err(anyhow!(
+                "File {} should reside within the module directory {}",
+                c.file,
+                c.directory
+            ))
         }
     }
 }
@@ -436,7 +452,7 @@ pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<Par
     let node = Node::deserialize(deserializer).unwrap();
     // std::fs::write("node", format!("{:#?}", node))?;
 
-    Ok(ParsedNode::new(c, node))
+    ParsedNode::new(c, node)
 }
 
 #[derive(Debug, Deserialize, Clone, Eq, PartialEq, Hash)]
@@ -448,15 +464,15 @@ struct UnresolvedChild {
 
 pub struct GlobalVisitorState {
     index: Index,
-    project: String,
+    module: String,
     language: String,
 }
 
 impl GlobalVisitorState {
-    pub fn new(index: Index) -> Self {
+    pub fn new(index: Index, module: &str) -> Self {
         GlobalVisitorState {
             index: index,
-            project: "test".to_string(),
+            module: module.to_string(),
             language: "cxx".to_string(),
         }
     }
@@ -468,14 +484,23 @@ impl GlobalVisitorState {
     ) -> Result<FileId> {
         let file =
             symbols::Occurrence::get_file(range).ok_or(anyhow!("Range does not provide file"))?;
-        let file_string = file.into_os_string().into_string().unwrap();
+        let file_string = file.clone().into_os_string().into_string().unwrap();
+        let module_path = file.as_path().strip_prefix(Path::new(&unit_state.root_dir))?;
 
         self.index
-            .create_or_get_fileid(&self.project, &unit_state.root_dir, &file_string,  &self.language)
+            .create_or_get_fileid(&self.module, module_path.to_str().unwrap(), &file_string, &self.language)
             .await
     }
 
     pub async fn extract_symbol_map_root(&mut self, root_node: ParsedNode) -> Result<()> {
+        let root_dir = root_node
+            .module
+            .strip_suffix(&root_node.root)
+            .ok_or(anyhow!(
+                "Expected {} to be suffix of {}",
+                root_node.root,
+                root_node.module
+            ))?;
         let node = if let Clang::TranslationUnitDecl(node) = root_node.node.kind {
             node
         } else {
@@ -484,11 +509,17 @@ impl GlobalVisitorState {
 
         let module_id = self
             .index
-            .create_or_get_fileid(&self.project, &root_node.root,&root_node.module, &self.language)
+            .create_or_get_fileid(
+                &self.module,
+                &root_node.root,
+                &root_node.module,
+                &self.language,
+            )
             .await?;
 
-        let mut unit_state = ModuleVisitorState::new(module_id, root_node.root);
-        node.visit(self, &mut unit_state, &root_node.node.inner).await?;
+        let mut unit_state = ModuleVisitorState::new(module_id, root_dir);
+        node.visit(self, &mut unit_state, &root_node.node.inner)
+            .await?;
 
         Ok(())
     }
@@ -514,10 +545,10 @@ struct ModuleVisitorState {
 }
 
 impl ModuleVisitorState {
-    fn new(module_id: FileId, root_dir: String) -> Self {
+    fn new(module_id: FileId, root_dir: &str) -> Self {
         Self {
             module_id,
-            root_dir,
+            root_dir: root_dir.to_string(),
             symbol_ids: HashMap::new(),
         }
     }

@@ -13,7 +13,7 @@ use crate::symbols::{FileId, SymbolId, SymbolScope, SymbolType, Occurrence, Decl
 pub struct Symbol {
     pub id: SymbolId,
     pub name: String,
-    pub module_id: Option<FileId>,
+    pub file_id: Option<FileId>,
     pub symbol_scope: SymbolScope,
 }
 
@@ -21,13 +21,13 @@ impl Symbol {
     pub fn new(
         id: SymbolId,
         name: &str,
-        module_id: Option<FileId>,
+        file_id: Option<FileId>,
         symbol_scope: SymbolScope,
     ) -> Self {
         Self {
             id,
             name: name.to_string(),
-            module_id,
+            file_id,
             symbol_scope,
         }
     }
@@ -105,19 +105,19 @@ impl Declaration {
 #[derive(Debug, sqlx::FromRow, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct File {
     pub id: FileId,
-    pub project: String,
-    pub root_dir: String,
-    pub path: String,
+    pub module: String,
+    pub module_path: String,
+    pub filesystem_path: String,
     pub filetype: String,
 }
 
 impl File {
-    pub fn new(id: FileId, project: &str, root_dir: &str, path: &str, filetype: &str) -> Self {
+    pub fn new(id: FileId, module: &str, module_path: &str, filesystem_path: &str, filetype: &str) -> Self {
         Self {
             id,
-            project: project.to_string(),
-            root_dir: root_dir.to_string(),
-            path: path.to_string(),
+            module: module.to_string(),
+            module_path: module_path.to_string(),
+            filesystem_path: filesystem_path.to_string(),
             filetype: filetype.to_string(),
         }
     }
@@ -198,14 +198,14 @@ impl Index {
 
     pub async fn create_or_get_fileid(
         &self,
-        project: &str,
-        root_dir: &str,
+        module: &str,
+        module_relative_path: &str,
         file_string: &str,
         file_type: &str,
     ) -> Result<FileId> {
-        let path_in_root = Path::new(root_dir).join(file_string);
+        let path_in_root = Path::new(module_relative_path).join(file_string);
 
-        let file_string = if !file_string.starts_with("/") {
+        let filesystem_path = if !file_string.starts_with("/") {
             path_in_root.as_os_str().to_str().unwrap()
         } else {
             file_string
@@ -215,10 +215,10 @@ impl Index {
             r#"
             SELECT id
             FROM files
-            WHERE path = ?1 AND project = ?2
+            WHERE module = ?1 AND module_path = ?2
             "#,
-            file_string,
-            project
+            module,
+            module_relative_path
         )
         .fetch_optional(&self.pool)
         .await?;
@@ -229,37 +229,41 @@ impl Index {
 
         let file_id = sqlx::query!(
             r#"
-            INSERT INTO files (project, root_dir, path, filetype)
+            INSERT INTO files (module, module_path, filesystem_path, filetype)
             VALUES (?1, ?2, ?3, ?4)
             "#,
-            project,
-            root_dir,
-            file_string,
+            module,
+            module_relative_path,
+            filesystem_path,
             file_type,
         )
         .execute(&self.pool)
         .await?
         .last_insert_rowid();
 
+        if file_id == 2 {
+            println!("NEW FILE: {} mp {} fs {}", module, module_relative_path, file_string);
+            panic!("JJJ");
+        }
         Ok(file_id.into())
     }
 
     pub async fn insert_symbol(
         &self,
         name: &str,
-        module: Option<FileId>,
+        file_id: Option<FileId>,
         scope: SymbolScope,
     ) -> Result<Symbol> {
-        let rec = if let Some(module_id) = module {
+        let rec = if let Some(file_id) = file_id {
             sqlx::query_as!(
                 Symbol,
                 r#"
-                SELECT id, name, module_id AS "module_id?: FileId", symbol_scope
+                SELECT id, name, file_id AS "file_id?: FileId", symbol_scope
                 FROM symbols
-                WHERE name = ? AND module_id = ? AND symbol_scope = ?
+                WHERE name = ? AND file_id = ? AND symbol_scope = ?
                 "#,
                 name,
-                module_id,
+                file_id,
                 scope
             )
             .fetch_optional(&self.pool)
@@ -268,7 +272,7 @@ impl Index {
             sqlx::query_as!(
                 Symbol,
                 r#"
-                SELECT id, name, module_id AS "module_id?: FileId", symbol_scope
+                SELECT id, name, file_id AS "file_id?: FileId", symbol_scope
                 FROM symbols
                 WHERE name = ? AND symbol_scope = ?
                 "#,
@@ -285,19 +289,19 @@ impl Index {
 
         let rec = sqlx::query!(
             r#"
-            INSERT INTO symbols(name, module_id, symbol_scope)
+            INSERT INTO symbols(name, file_id, symbol_scope)
             VALUES (?1, ?2, ?3)
             RETURNING id
             "#,
             name,
-            module,
+            file_id,
             scope
         )
         .fetch_one(&self.pool)
         .await?;
 
         let id: SymbolId = rec.id.into();
-        let new_symbol = Symbol::new(id, name, module, scope);
+        let new_symbol = Symbol::new(id, name, file_id, scope);
         return Ok(new_symbol);
     }
 
@@ -383,7 +387,7 @@ impl Index {
         let symbols: Vec<Symbol> = sqlx::query_as!(
             Symbol,
             r#"
-            SELECT id, name, module_id AS "module_id?: FileId" , symbol_scope
+            SELECT id, name, file_id AS "file_id?: FileId" , symbol_scope
             FROM symbols
             "#
         )

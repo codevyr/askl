@@ -1,5 +1,5 @@
 INSERT INTO files
-VALUES (1, "test", "/", "main.c", "cc");
+VALUES (1, "test", "main.c", "/main.c", "cc");
 
 
 INSERT INTO symbols

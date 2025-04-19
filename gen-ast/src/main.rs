@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
         .filter(|r| r.is_ok())
         .map(|r| r.unwrap());
 
-    let mut state = GlobalVisitorState::new(index);
+    let mut state = GlobalVisitorState::new(index, "main");
     for node in nodes {
         state.extract_symbol_map_root(node).await?;
     }

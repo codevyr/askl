@@ -161,7 +161,7 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
         for declaration in declarations.iter() {
             if !result_files.contains_key(&declaration.file_id) {
                 let f = data.cfg.index.get_file(declaration.file_id).await.unwrap();
-                result_files.insert(declaration.file_id, f.path);
+                result_files.insert(declaration.file_id, f.filesystem_path);
             }
         }
         result_graph.add_node(Node::new(symbol_id, sym.name.clone(), declarations));
@@ -176,7 +176,7 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
 #[get["/source/{file_id}"]]
 async fn file(data: web::Data<AsklData>, file_id: web::Path<FileId>) -> impl Responder {
     let path = if let Some(file) = data.cfg.symbols.files.get(&file_id) {
-        &file.path
+        &file.filesystem_path
     } else {
         return HttpResponse::NotFound().body("File not found");
     };
@@ -654,7 +654,7 @@ mod tests {
 
     #[test]
     fn project_double_parent_query() {
-        const QUERY: &str = r#"@project("test") {{"b"}}"#;
+        const QUERY: &str = r#"@module("test") {{"b"}}"#;
         let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
         println!("{:#?}", res_nodes);

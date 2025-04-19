@@ -1,5 +1,5 @@
 use dotenv::dotenv;
-use std::env;
+use std::{env, path::Path};
 
 use index::{
     db::Symbol,
@@ -9,12 +9,12 @@ use index::{
 use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState};
 use index::db::{Declaration, File, Index, Reference};
 
-async fn index_files(files: Vec<&str>) -> GlobalVisitorState {
+async fn index_files(files: Vec<&str>, module: &str) -> GlobalVisitorState {
     dotenv().ok();
     env_logger::init();
 
     let index = Index::new_in_memory().await.unwrap();
-    let mut state = GlobalVisitorState::new(index);
+    let mut state = GlobalVisitorState::new(index, module);
 
     let symbols = state.get_index().all_symbols().await.unwrap();
     assert!(symbols.is_empty());
@@ -28,7 +28,6 @@ async fn index_files(files: Vec<&str>) -> GlobalVisitorState {
         .or(Some("tests/clang-indexer-code".to_string()))
         .unwrap();
     let mut test_directory = env::current_dir().unwrap();
-    println!("{}", test_directory.display());
     test_directory.push(test_directory_rel);
     for test_file in files {
         let command = CompileCommand {
@@ -43,14 +42,10 @@ async fn index_files(files: Vec<&str>) -> GlobalVisitorState {
             output: Some("/dev/null".to_string()),
         };
 
-        log::debug!("{:?}", command);
-
-        let (ast_file, node) = run_clang_ast(&clang, command).await.unwrap();
-
-        log::debug!("{}", ast_file);
+        let node = run_clang_ast(&clang, command).await.unwrap();
 
         state
-            .extract_symbol_map_root(test_file, node)
+            .extract_symbol_map_root(node)
             .await
             .unwrap();
     }
@@ -109,14 +104,25 @@ fn new_ref(from_decl: i32, to_symbol: i32) -> Reference {
 
 #[tokio::test]
 async fn create_state() {
-    let state = index_files(vec!["test1.c"]).await;
+    let current_dir = env::current_dir().unwrap();
+    let filesystem_path = current_dir.as_path().join("tests/clang-indexer-code/test1.c");
+    let state = index_files(vec![filesystem_path.to_str().unwrap()], "test").await;
 
     let files = state.get_index().all_files().await.unwrap();
     log::debug!("{:?}", files);
-    assert_eq!(
-        files[0],
-        File::new(FileId::new(1), "test1.c", "test", "cxx")
-    );
+    let file = &files[0];
+
+    assert_eq!(file.id, FileId::new(1));
+    assert_eq!(file.module, "test");
+    assert_eq!(file.module_path, "test1.c");
+    assert_eq!(Path::new(&file.filesystem_path), filesystem_path);
+    assert_eq!(file.filetype, "cxx");
+
+    let files = state.get_index().all_files().await.unwrap();
+    for file in files.iter() {
+        println!("File: {:?}", file);
+    }
+    assert_eq!(files.len(), 1);
 
     let symbols = state.get_index().all_symbols().await.unwrap();
     for symbol in symbols.iter() {

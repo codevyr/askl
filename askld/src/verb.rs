@@ -56,7 +56,7 @@ fn build_generic_verb(
     let res = match Identifier::build(ident)?.0.as_str() {
         NameSelector::NAME => NameSelector::new(&positional, &named),
         IgnoreVerb::NAME => IgnoreVerb::new(&positional, &named),
-        ProjectFilter::NAME => ProjectFilter::new(&positional, &named),
+        ModuleFilter::NAME => ModuleFilter::new(&positional, &named),
         ForcedVerb::NAME => ForcedVerb::new(&positional, &named),
         IsolatedScope::NAME => IsolatedScope::new(&positional, &named),
         LabellerVerb::NAME => LabellerVerb::new(&positional, &named),
@@ -519,17 +519,17 @@ impl Filter for IgnoreVerb {
 }
 
 #[derive(Debug)]
-struct ProjectFilter {
-    project: String,
+struct ModuleFilter {
+    module: String,
 }
 
-impl ProjectFilter {
-    const NAME: &'static str = "project";
+impl ModuleFilter {
+    const NAME: &'static str = "module";
 
     fn new(positional: &Vec<String>, _named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
-        if let Some(project) = positional.iter().next() {
+        if let Some(module) = positional.iter().next() {
             Ok(Arc::new(Self {
-                project: project.clone(),
+                module: module.clone(),
             }))
         } else {
             bail!("Expected a positional argument");
@@ -537,7 +537,7 @@ impl ProjectFilter {
     }
 }
 
-impl Verb for ProjectFilter {
+impl Verb for ModuleFilter {
     fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
         Ok(self)
     }
@@ -547,14 +547,14 @@ impl Verb for ProjectFilter {
     }
 }
 
-impl Filter for ProjectFilter {
+impl Filter for ModuleFilter {
     fn filter(&self, cfg: &ControlFlowGraph, declarations: DeclarationRefs) -> DeclarationRefs {
         declarations
             .into_iter()
             .filter(|(declaration_id, _)| {
                 let declaration = cfg.get_declaration(*declaration_id).unwrap();
                 let file = cfg.get_file(declaration.file_id).unwrap();
-                self.project == file.project
+                self.module == file.module
             })
             .collect()
     }

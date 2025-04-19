@@ -478,7 +478,7 @@ impl SymbolMap {
     pub fn get_file_id(&self, file: String) -> Option<FileId> {
         self.files
             .iter()
-            .find_map(|(id, f)| if f.path == file { Some(*id) } else { None })
+            .find_map(|(id, f)| if f.filesystem_path == file { Some(*id) } else { None })
     }
 
     pub fn set_file_id(&mut self, id: FileId, file: File) {
