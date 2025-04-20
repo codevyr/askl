@@ -127,7 +127,7 @@ impl Reference {
 pub type SymbolRefs = HashMap<SymbolId, HashSet<Occurrence>>;
 pub type DeclarationRefs = HashMap<DeclarationId, HashSet<Occurrence>>;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct Symbol {
     pub id: SymbolId,
     pub name: String,
@@ -380,14 +380,93 @@ pub fn exact_name_match<'a>(name: &'a str) -> SymbolMatcher<'a> {
     Box::new(|(_, s): (&'a SymbolId, &'a Symbol)| if s.name == *name { Some(s) } else { None })
 }
 
+/// Removes specified characters from a string, splits it at periods,
+/// and filters out empty strings.
+///
+/// # Arguments
+///
+/// * `input` - The input string to process
+///
+/// # Returns
+///
+/// A vector of strings, split at periods with unwanted characters removed
+fn clean_and_split_string(input: &str) -> Vec<String> {
+    // Characters to remove: */[]{}:,@- and space
+    let chars_to_remove = ['*', '[', ']', '{', '}', ',', '@', '-', ' ', '(', ')'];
+
+    // Remove unwanted characters
+    let cleaned = input
+        .chars()
+        .filter(|&c| !chars_to_remove.contains(&c))
+        .collect::<String>();
+
+    // Split at periods and filter out empty strings
+    cleaned
+        .split(['.', '/', ':'])
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Checks if `subset` is an ordered subset of `superset`.
+///
+/// An ordered subset means that the elements in `subset` appear in the same order
+/// in `superset`, though not necessarily consecutively.
+///
+/// # Arguments
+///
+/// * `superset` - The sequence that might contain the subset
+/// * `subset` - The sequence that might be an ordered subset
+///
+/// # Returns
+///
+/// `true` if `subset` is an ordered subset of `superset`, `false` otherwise
+fn is_ordered_subset<T: PartialEq>(superset: &[T], subset: &[T]) -> bool {
+    // Empty subset is always an ordered subset
+    if subset.is_empty() {
+        return true;
+    }
+
+    // Cannot be a subset if longer than the superset
+    if subset.len() > superset.len() {
+        return false;
+    }
+
+    let mut subset_idx = 0;
+    let mut superset_idx = 0;
+
+    // Traverse both sequences
+    while subset_idx < subset.len() && superset_idx < superset.len() {
+        if subset[subset_idx] == superset[superset_idx] {
+            // Found a match, move to the next element in subset
+            subset_idx += 1;
+        }
+        // Always move to the next element in superset
+        superset_idx += 1;
+    }
+
+    // If we've gone through all elements in subset, it's an ordered subset
+    subset_idx == subset.len()
+}
+
+/// Checks if a symbol partially matches the searched pattern
+///
+/// The symbol and the pattern can consist of multiple parts separated by '.' or
+/// '/'. We consider the symbol matches the pattern of components of the pattern
+/// are an ordered subset of the components of the symbol
+///
+/// # Arguments
+///
+/// * `name` - Search pattern
+///
+/// # Returns
+///
+/// Symbol matcher that checks if a symbol matches the pattern
 pub fn partial_name_match<'a>(name: &'a str) -> SymbolMatcher<'a> {
-    let special_characters = ['-', ' ', '[', ']', ':', '.', '{', '}', '@', '*'];
+    let search_pattern = clean_and_split_string(name);
     Box::new(move |(_, s): (&'a SymbolId, &'a Symbol)| {
-        if let Some(_) = s
-            .name
-            .split(&special_characters[..])
-            .find(|part| **part == *name)
-        {
+        let current_split = clean_and_split_string(&s.name);
+        if is_ordered_subset(&current_split, &search_pattern) {
             Some(s)
         } else {
             None
