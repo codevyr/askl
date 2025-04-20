@@ -465,6 +465,13 @@ impl SymbolMap {
             .find_map(|(_, s)| if s.name == symbol_name { Some(s) } else { None })
     }
 
+    pub fn find_all(&self, symbol_name: &str) -> Vec<&Symbol> {
+        self.symbols
+            .iter()
+            .filter_map(|(_, s)| if s.name == symbol_name { Some(s) } else { None })
+            .collect()
+    }
+
     pub fn find_mut(&mut self, symbol_name: &str) -> Option<&mut Symbol> {
         self.symbols
             .iter_mut()
@@ -476,9 +483,13 @@ impl SymbolMap {
     }
 
     pub fn get_file_id(&self, file: String) -> Option<FileId> {
-        self.files
-            .iter()
-            .find_map(|(id, f)| if f.filesystem_path == file { Some(*id) } else { None })
+        self.files.iter().find_map(|(id, f)| {
+            if f.filesystem_path == file {
+                Some(*id)
+            } else {
+                None
+            }
+        })
     }
 
     pub fn set_file_id(&mut self, id: FileId, file: File) {

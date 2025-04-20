@@ -264,7 +264,7 @@ impl Selector for NameSelector {
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
     ) -> Option<DeclarationRefs> {
-        let symbols = cfg.get_symbol_by_name(&self.name);
+        let symbols = cfg.symbols.find_all(&self.name);
         if symbols.len() == 0 {
             return None;
         }
@@ -309,7 +309,7 @@ impl Deriver for ForcedVerb {
         declarations: HashSet<DeclarationId>,
     ) -> HashSet<Reference> {
         let mut references = HashSet::new();
-        let symbols = cfg.get_symbol_by_name(&self.name);
+        let symbols = cfg.symbols.find_all(&self.name);
         for parent_declaration_id in declarations {
             for (child_declaration_id, _) in cfg.get_declarations_from_symbols(&symbols) {
                 let child_symbol = cfg.symbols.declarations.get(&child_declaration_id).unwrap();
@@ -336,7 +336,7 @@ impl Selector for ForcedVerb {
         cfg: &ControlFlowGraph,
         _declarations: DeclarationRefs,
     ) -> Option<DeclarationRefs> {
-        let symbols = cfg.get_symbol_by_name(&self.name);
+        let symbols = cfg.symbols.find_all(&self.name);
         let sym_refs: DeclarationRefs = cfg.get_declarations_from_symbols(&symbols).iter().fold(
             DeclarationRefs::new(),
             |mut acc, refs| {
@@ -356,7 +356,7 @@ impl Selector for ForcedVerb {
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
     ) -> Option<DeclarationRefs> {
-        let symbols = cfg.get_symbol_by_name(&self.name);
+        let symbols = cfg.symbols.find_all(&self.name);
         Some(cfg.get_declarations_from_symbols(&symbols))
     }
 }

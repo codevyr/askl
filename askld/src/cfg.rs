@@ -71,14 +71,6 @@ impl ControlFlowGraph {
         self.symbols.symbols.get(&id)
     }
 
-    pub fn get_symbol_by_name(&self, name: &str) -> Vec<&Symbol> {
-        self.symbols
-            .symbols
-            .iter()
-            .filter_map(|(_, v)| if v.name == *name { Some(v) } else { None })
-            .collect()
-    }
-
     pub fn get_file(&self, id: FileId) -> Option<&File> {
         self.symbols.files.get(&id)
     }
