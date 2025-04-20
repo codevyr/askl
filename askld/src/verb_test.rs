@@ -20,42 +20,36 @@ async fn test_select_matching_name() {
         declaration_refs.insert(d.id, HashSet::new());
     });
 
-    let named_args = HashMap::from([("name".to_string(), "foo".to_string())]);
-    let selector = NameSelector::new(&vec![], &named_args).unwrap();
+    let test_cases = vec![
+        ("foo", vec![91, 92]),
+        ("bar", vec![92]),
+        // ("foo.bar", vec![92]),
+    ];
+
     let mut ctx = ExecutionContext::new(); // Assuming there's a default constructor
 
-    let result = selector
-        .as_selector()
-        .unwrap()
-        .select(&mut ctx, &cfg, declaration_refs.clone())
-        .unwrap();
+    for (name, expected_ids) in test_cases {
+        let named_args = HashMap::from([("name".to_string(), name.to_string())]);
+        let selector = NameSelector::new(&vec![], &named_args).unwrap();
 
-    let mut got_declarations: Vec<DeclarationId> = result.into_keys().collect();
-    got_declarations.sort();
+        let result = selector
+            .as_selector()
+            .unwrap()
+            .select(&mut ctx, &cfg, declaration_refs.clone())
+            .unwrap();
 
-    let expected_declarations: Vec<DeclarationId> = vec![91, 92]
-        .into_iter()
-        .map(|i| DeclarationId::new(i))
-        .collect();
+        let mut got_declarations: Vec<DeclarationId> = result.into_keys().collect();
+        got_declarations.sort();
 
-    assert_eq!(got_declarations, expected_declarations);
+        let expected_declarations: Vec<DeclarationId> = expected_ids
+            .into_iter()
+            .map(|i| DeclarationId::new(i))
+            .collect();
 
-    let named_args = HashMap::from([("name".to_string(), "bar".to_string())]);
-    let selector = NameSelector::new(&vec![], &named_args).unwrap();
-
-    let result = selector
-        .as_selector()
-        .unwrap()
-        .select(&mut ctx, &cfg, declaration_refs)
-        .unwrap();
-
-    let mut got_declarations: Vec<DeclarationId> = result.into_keys().collect();
-    got_declarations.sort();
-
-    let expected_declarations: Vec<DeclarationId> = vec![92]
-        .into_iter()
-        .map(|i| DeclarationId::new(i))
-        .collect();
-
-    assert_eq!(got_declarations, expected_declarations);
+        assert_eq!(
+            got_declarations, expected_declarations,
+            "Failed for name: {}",
+            name
+        );
+    }
 }
