@@ -1,8 +1,8 @@
 use std::{fs::File, sync::Arc};
 
 use clap::Parser;
+use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState, ParsedNode};
 use index::db::Index;
-use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState, Node, ParsedNode};
 use indicatif::ProgressBar;
 use log::debug;
 use tokio::sync::Semaphore;

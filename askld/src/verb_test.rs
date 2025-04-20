@@ -1,36 +1,14 @@
-use clang_ast::SourceRange;
 use index::{
     db::Index,
-    symbols::{self, DeclarationId, DeclarationRefs, FileId, Occurrence, SymbolMap},
+    symbols::{DeclarationId, DeclarationRefs, SymbolMap},
 };
 
 use crate::{cfg::ControlFlowGraph, execution_context::ExecutionContext, verb::*};
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::collections::{HashMap, HashSet};
 
 #[tokio::test]
 async fn test_select_matching_name() {
-    let location = clang_ast::SourceLocation {
-        spelling_loc: None,
-        expansion_loc: Some(clang_ast::BareSourceLocation {
-            line: 1,
-            col: 2,
-            offset: 0,
-            file: Arc::from(String::from("main")),
-            presumed_file: None,
-            presumed_line: None,
-            tok_len: 1,
-            included_from: None,
-            is_macro_arg_expansion: false,
-        }),
-    };
-    let source_range = SourceRange {
-        begin: location.clone(),
-        end: location,
-    };
     let index = Index::new_in_memory().await.unwrap();
     index.load_test_input("verb_test.sql").await.unwrap();
     let symbols = SymbolMap::from_index(&index).await.unwrap();

@@ -390,7 +390,7 @@ pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<Par
     // println!("{:#?}", c);
     let language = Language::parse_path(&c.file);
 
-    let language = match language {
+    match language {
         Some(Language::C) => Language::C,
         Some(_) => return Err(anyhow!("Only C files are supported for now")),
         None => return Err(anyhow!("Failed to parse language")),
@@ -407,19 +407,19 @@ pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<Par
         ));
     };
 
-    let ast_file;
-    if let Some(i) = arguments.iter().position(|opt| *opt == "-o") {
-        // Replace option of type "-o outfile"
-        ast_file = format!("{}/{}.ast", c.directory, arguments[i + 1]);
-        // arguments[i + 1] = output;
-    } else if let Some(i) = arguments.iter().position(|opt| opt.starts_with("-o")) {
-        // Replace option of type "-ooutfile"
-        ast_file = format!("{}/{}.ast", c.directory, &arguments[i + 1][2..]);
-        // arguments[i] = format!("-o{}", output);
-    } else {
-        ast_file = format!("{}/{}.ast", c.directory, c.file);
-        // arguments.push(format!("-o{}", output));
-    }
+    // let ast_file;
+    // if let Some(i) = arguments.iter().position(|opt| *opt == "-o") {
+    //     // Replace option of type "-o outfile"
+    //     ast_file = format!("{}/{}.ast", c.directory, arguments[i + 1]);
+    //     // arguments[i + 1] = output;
+    // } else if let Some(i) = arguments.iter().position(|opt| opt.starts_with("-o")) {
+    //     // Replace option of type "-ooutfile"
+    //     ast_file = format!("{}/{}.ast", c.directory, &arguments[i + 1][2..]);
+    //     // arguments[i] = format!("-o{}", output);
+    // } else {
+    //     ast_file = format!("{}/{}.ast", c.directory, c.file);
+    //     // arguments.push(format!("-o{}", output));
+    // }
 
     let filtered_args = preprocess(arguments)?;
 
@@ -485,10 +485,17 @@ impl GlobalVisitorState {
         let file =
             symbols::Occurrence::get_file(range).ok_or(anyhow!("Range does not provide file"))?;
         let file_string = file.clone().into_os_string().into_string().unwrap();
-        let module_path = file.as_path().strip_prefix(Path::new(&unit_state.root_dir))?;
+        let module_path = file
+            .as_path()
+            .strip_prefix(Path::new(&unit_state.root_dir))?;
 
         self.index
-            .create_or_get_fileid(&self.module, module_path.to_str().unwrap(), &file_string, &self.language)
+            .create_or_get_fileid(
+                &self.module,
+                module_path.to_str().unwrap(),
+                &file_string,
+                &self.language,
+            )
             .await
     }
 

@@ -3,11 +3,11 @@ use std::{env, path::Path};
 
 use index::{
     db::Symbol,
-    symbols::{DeclarationId, FileId, SymbolId, SymbolScope, SymbolType, SymbolMap},
+    symbols::{DeclarationId, FileId, SymbolId, SymbolMap, SymbolScope, SymbolType},
 };
 
 use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState};
-use index::db::{Declaration, File, Index, Reference};
+use index::db::{Declaration, Index, Reference};
 
 async fn index_files(files: Vec<&str>, module: &str) -> GlobalVisitorState {
     dotenv().ok();
@@ -44,10 +44,7 @@ async fn index_files(files: Vec<&str>, module: &str) -> GlobalVisitorState {
 
         let node = run_clang_ast(&clang, command).await.unwrap();
 
-        state
-            .extract_symbol_map_root(node)
-            .await
-            .unwrap();
+        state.extract_symbol_map_root(node).await.unwrap();
     }
 
     state
@@ -105,7 +102,9 @@ fn new_ref(from_decl: i32, to_symbol: i32) -> Reference {
 #[tokio::test]
 async fn create_state() {
     let current_dir = env::current_dir().unwrap();
-    let filesystem_path = current_dir.as_path().join("tests/clang-indexer-code/test1.c");
+    let filesystem_path = current_dir
+        .as_path()
+        .join("tests/clang-indexer-code/test1.c");
     let state = index_files(vec![filesystem_path.to_str().unwrap()], "test").await;
 
     let files = state.get_index().all_files().await.unwrap();
