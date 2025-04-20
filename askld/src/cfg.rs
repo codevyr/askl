@@ -37,9 +37,13 @@ impl EdgeList {
         Self(HashSet::new())
     }
 
-    pub fn add_reference(&mut self, from: DeclarationId, to: DeclarationId, occurrence: Option<Occurrence>) {
-        self.0
-            .insert((from, to, occurrence));
+    pub fn add_reference(
+        &mut self,
+        from: DeclarationId,
+        to: DeclarationId,
+        occurrence: Option<Occurrence>,
+    ) {
+        self.0.insert((from, to, occurrence));
     }
 
     pub fn as_vec(&self) -> Vec<(DeclarationId, DeclarationId, Option<Occurrence>)> {
@@ -83,9 +87,8 @@ impl ControlFlowGraph {
         self.symbols.declarations.get(&id)
     }
 
-    pub fn get_declarations_by_name(&self, name: &str) -> DeclarationRefs {
+    pub fn get_declarations_from_symbols(&self, symbols: &Vec<&Symbol>) -> DeclarationRefs {
         let mut res = DeclarationRefs::new();
-        let symbols = self.get_symbol_by_name(name);
         if symbols.len() == 0 {
             return res;
         }
