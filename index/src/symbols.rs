@@ -374,6 +374,27 @@ pub struct SymbolMap {
     pub files: HashMap<FileId, File>,
 }
 
+type SymbolMatcher<'a> = Box<dyn Fn((&'a SymbolId, &'a Symbol)) -> Option<&'a Symbol> + 'a>;
+
+pub fn exact_name_match<'a>(name: &'a str) -> SymbolMatcher<'a> {
+    Box::new(|(_, s): (&'a SymbolId, &'a Symbol)| if s.name == *name { Some(s) } else { None })
+}
+
+pub fn partial_name_match<'a>(name: &'a str) -> SymbolMatcher<'a> {
+    let special_characters = ['-', ' ', '[', ']', ':', '.', '{', '}', '@', '*'];
+    Box::new(move |(_, s): (&'a SymbolId, &'a Symbol)| {
+        if let Some(_) = s
+            .name
+            .split(&special_characters[..])
+            .find(|part| **part == *name)
+        {
+            Some(s)
+        } else {
+            None
+        }
+    })
+}
+
 impl SymbolMap {
     pub fn new() -> Self {
         Self {
@@ -465,11 +486,8 @@ impl SymbolMap {
             .find_map(|(_, s)| if s.name == symbol_name { Some(s) } else { None })
     }
 
-    pub fn find_all(&self, symbol_name: &str) -> Vec<&Symbol> {
-        self.symbols
-            .iter()
-            .filter_map(|(_, s)| if s.name == symbol_name { Some(s) } else { None })
-            .collect()
+    pub fn find_all<'a>(&'a self, symbol_matcher: SymbolMatcher<'a>) -> Vec<&'a Symbol> {
+        self.symbols.iter().filter_map(symbol_matcher).collect()
     }
 
     pub fn find_mut(&mut self, symbol_name: &str) -> Option<&mut Symbol> {

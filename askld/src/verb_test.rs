@@ -27,16 +27,35 @@ async fn test_select_matching_name() {
     let result = selector
         .as_selector()
         .unwrap()
+        .select(&mut ctx, &cfg, declaration_refs.clone())
+        .unwrap();
+
+    let mut got_declarations: Vec<DeclarationId> = result.into_keys().collect();
+    got_declarations.sort();
+
+    let expected_declarations: Vec<DeclarationId> = vec![91, 92]
+        .into_iter()
+        .map(|i| DeclarationId::new(i))
+        .collect();
+
+    assert_eq!(got_declarations, expected_declarations);
+
+    let named_args = HashMap::from([("name".to_string(), "bar".to_string())]);
+    let selector = NameSelector::new(&vec![], &named_args).unwrap();
+
+    let result = selector
+        .as_selector()
+        .unwrap()
         .select(&mut ctx, &cfg, declaration_refs)
         .unwrap();
 
     let mut got_declarations: Vec<DeclarationId> = result.into_keys().collect();
     got_declarations.sort();
 
-    let expected_declarations: Vec<DeclarationId> = vec![91, 92, 93]
+    let expected_declarations: Vec<DeclarationId> = vec![92]
         .into_iter()
         .map(|i| DeclarationId::new(i))
         .collect();
 
-    assert_eq!(got_declarations, expected_declarations)
+    assert_eq!(got_declarations, expected_declarations);
 }

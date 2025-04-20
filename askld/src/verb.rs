@@ -4,7 +4,9 @@ use crate::parser::{Identifier, NamedArgument, ParserContext, PositionalArgument
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use core::fmt::Debug;
-use index::symbols::{DeclarationId, DeclarationRefs, Occurrence, Reference};
+use index::symbols::{
+    exact_name_match, partial_name_match, DeclarationId, DeclarationRefs, Occurrence, Reference,
+};
 use log::debug;
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
@@ -245,7 +247,7 @@ impl Selector for NameSelector {
             .filter_map(|(id, refs)| {
                 let d = cfg.get_declaration(id).unwrap();
                 let s = cfg.get_symbol(d.symbol).unwrap();
-                if s.name.contains(&self.name) {
+                if let Some(_) = partial_name_match(&self.name)((&d.symbol, &s)) {
                     Some((id, refs.clone()))
                 } else {
                     None
@@ -264,7 +266,7 @@ impl Selector for NameSelector {
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
     ) -> Option<DeclarationRefs> {
-        let symbols = cfg.symbols.find_all(&self.name);
+        let symbols = cfg.symbols.find_all(partial_name_match(&self.name));
         if symbols.len() == 0 {
             return None;
         }
@@ -309,7 +311,7 @@ impl Deriver for ForcedVerb {
         declarations: HashSet<DeclarationId>,
     ) -> HashSet<Reference> {
         let mut references = HashSet::new();
-        let symbols = cfg.symbols.find_all(&self.name);
+        let symbols = cfg.symbols.find_all(exact_name_match(&self.name));
         for parent_declaration_id in declarations {
             for (child_declaration_id, _) in cfg.get_declarations_from_symbols(&symbols) {
                 let child_symbol = cfg.symbols.declarations.get(&child_declaration_id).unwrap();
@@ -336,7 +338,7 @@ impl Selector for ForcedVerb {
         cfg: &ControlFlowGraph,
         _declarations: DeclarationRefs,
     ) -> Option<DeclarationRefs> {
-        let symbols = cfg.symbols.find_all(&self.name);
+        let symbols = cfg.symbols.find_all(exact_name_match(&self.name));
         let sym_refs: DeclarationRefs = cfg.get_declarations_from_symbols(&symbols).iter().fold(
             DeclarationRefs::new(),
             |mut acc, refs| {
@@ -356,7 +358,7 @@ impl Selector for ForcedVerb {
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
     ) -> Option<DeclarationRefs> {
-        let symbols = cfg.symbols.find_all(&self.name);
+        let symbols = cfg.symbols.find_all(exact_name_match(&self.name));
         Some(cfg.get_declarations_from_symbols(&symbols))
     }
 }
