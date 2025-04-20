@@ -194,9 +194,9 @@ impl Statement for DefaultStatement {
                 .await;
             let mut derived_ids = DeclarationRefs::new();
             for d in derived_references.iter() {
-                let declarations = cfg.index.symbol_declarations(d.to).await.unwrap();
+                let declarations = cfg.get_declarations_from_symbols(&vec![d.to]);
                 for declaration in declarations {
-                    derived_ids.insert(declaration.id, HashSet::new());
+                    derived_ids.insert(declaration.0, HashSet::new());
                 }
             }
 

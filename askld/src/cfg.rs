@@ -79,7 +79,7 @@ impl ControlFlowGraph {
         self.symbols.declarations.get(&id)
     }
 
-    pub fn get_declarations_from_symbols(&self, symbols: &Vec<&Symbol>) -> DeclarationRefs {
+    pub fn get_declarations_from_symbols(&self, symbols: &Vec<SymbolId>) -> DeclarationRefs {
         let mut res = DeclarationRefs::new();
         if symbols.len() == 0 {
             return res;
@@ -87,7 +87,7 @@ impl ControlFlowGraph {
 
         for symbol in symbols {
             for (declaration_id, declaration) in self.symbols.declarations.iter() {
-                if declaration.symbol == symbol.id {
+                if declaration.symbol == *symbol {
                     res.insert(*declaration_id, HashSet::new());
                 }
             }
