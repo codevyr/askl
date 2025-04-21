@@ -1,7 +1,7 @@
 use std::{collections::HashSet, iter::Iterator};
 
-use index::db::{Declaration, File, Index};
-use index::symbols::{DeclarationId, DeclarationRefs};
+use index::db::{Declaration, File, Index, Module};
+use index::symbols::{DeclarationId, DeclarationRefs, ModuleId};
 use index::symbols::{FileId, Occurrence, Symbol, SymbolId, SymbolMap};
 
 pub struct ControlFlowGraph {
@@ -73,6 +73,20 @@ impl ControlFlowGraph {
 
     pub fn get_file(&self, id: FileId) -> Option<&File> {
         self.symbols.files.get(&id)
+    }
+
+    pub fn get_module(&self, id: ModuleId) -> Option<&Module> {
+        self.symbols.modules.get(&id)
+    }
+
+    pub fn find_module(&self, name: &str) -> Option<&Module> {
+        for (_, module) in self.symbols.modules.iter() {
+            if module.module_name == name {
+                return Some(&module);
+            }
+        }
+
+        None
     }
 
     pub fn get_declaration(&self, id: DeclarationId) -> Option<&Declaration> {

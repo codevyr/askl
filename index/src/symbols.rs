@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::{collections::HashMap, hash, hash::Hasher};
 
-use crate::db::{self, Declaration, File, Index};
+use crate::db::{self, Declaration, File, Index, Module};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Copy, Clone, Serialize, Deserialize)]
 pub struct FileHash(u64);
@@ -226,6 +226,43 @@ impl From<i64> for SymbolId {
 
 #[derive(Debug, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, sqlx::Type)]
 #[sqlx(transparent)]
+pub struct ModuleId(i32);
+
+impl ModuleId {
+    pub fn new(id: i32) -> Self {
+        Self(id)
+    }
+}
+
+impl From<i32> for ModuleId {
+    fn from(value: i32) -> Self {
+        Self(value)
+    }
+}
+
+impl From<i64> for ModuleId {
+    fn from(value: i64) -> Self {
+        Self(value as i32)
+    }
+}
+
+impl fmt::Display for ModuleId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl serde::Serialize for ModuleId {
+    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        s.serialize_str(&format!("{}", self.0))
+    }
+}
+
+#[derive(Debug, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, sqlx::Type)]
+#[sqlx(transparent)]
 pub struct FileId(i32);
 
 impl FileId {
@@ -372,6 +409,7 @@ pub struct SymbolMap {
     pub symbols: HashMap<SymbolId, Symbol>,
     pub declarations: HashMap<DeclarationId, Declaration>,
     pub files: HashMap<FileId, File>,
+    pub modules: HashMap<ModuleId, Module>,
 }
 
 type SymbolMatcher<'a> = Box<dyn Fn((&'a SymbolId, &'a Symbol)) -> Option<&'a Symbol> + 'a>;
@@ -480,6 +518,7 @@ impl SymbolMap {
             symbols: HashMap::new(),
             declarations: HashMap::new(),
             files: HashMap::new(),
+            modules: HashMap::new(),
         }
     }
 
@@ -511,6 +550,12 @@ impl SymbolMap {
             files_map.insert(file.id, file);
         }
 
+        let modules = index.all_modules().await?;
+        let mut modules_map = HashMap::new();
+        for module in modules {
+            modules_map.insert(module.id, module);
+        }
+
         let references = index.all_refs().await?;
         for reference in references {
             let from_declaration = declaration_map.get(&reference.from_decl).unwrap();
@@ -532,6 +577,7 @@ impl SymbolMap {
             symbols: symbols_map,
             declarations: declaration_map,
             files: files_map,
+            modules: modules_map,
         })
     }
 

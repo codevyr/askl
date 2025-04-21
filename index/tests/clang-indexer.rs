@@ -2,19 +2,30 @@ use dotenv::dotenv;
 use std::{env, path::Path};
 
 use index::{
-    db::Symbol,
-    symbols::{DeclarationId, FileId, SymbolId, SymbolMap, SymbolScope, SymbolType},
+    db::{Module, Symbol},
+    symbols::{DeclarationId, FileId, ModuleId, SymbolId, SymbolMap, SymbolScope, SymbolType},
 };
 
 use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState};
 use index::db::{Declaration, Index, Reference};
 
-async fn index_files(files: Vec<&str>, module: &str) -> GlobalVisitorState {
+async fn index_files(files: Vec<&str>, module: &Module) -> GlobalVisitorState {
     dotenv().ok();
     env_logger::init();
 
     let index = Index::new_in_memory().await.unwrap();
-    let mut state = GlobalVisitorState::new(index, module);
+
+    let module_res = index
+        .create_or_get_module(&module.module_name)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        module_res, module.id,
+        "Expected newly created module to have id {}, found {}",
+        module.id, module_res
+    );
+    let mut state = GlobalVisitorState::new(index, module.id);
 
     let symbols = state.get_index().all_symbols().await.unwrap();
     assert!(symbols.is_empty());
@@ -65,20 +76,6 @@ fn mask_declaration(symbol: &Declaration) -> Declaration {
     }
 }
 
-fn new_symbol(
-    sym_id: i32,
-    name: &str,
-    module_id: Option<i32>,
-    symbol_scope: SymbolScope,
-) -> Symbol {
-    let module_id = if let Some(module_id) = module_id {
-        Some(FileId::new(module_id))
-    } else {
-        None
-    };
-    Symbol::new(SymbolId(sym_id), name, module_id, symbol_scope)
-}
-
 fn mask_ref(reference: &Reference) -> Reference {
     Reference {
         from_decl: reference.from_decl,
@@ -105,14 +102,15 @@ async fn create_state() {
     let filesystem_path = current_dir
         .as_path()
         .join("tests/clang-indexer-code/test1.c");
-    let state = index_files(vec![filesystem_path.to_str().unwrap()], "test").await;
+    let module = Module::new(ModuleId::new(1), "test");
+    let state = index_files(vec![filesystem_path.to_str().unwrap()], &module).await;
 
     let files = state.get_index().all_files().await.unwrap();
     log::debug!("{:?}", files);
     let file = &files[0];
 
     assert_eq!(file.id, FileId::new(1));
-    assert_eq!(file.module, "test");
+    assert_eq!(file.module, module.id);
     assert_eq!(file.module_path, "test1.c");
     assert_eq!(Path::new(&file.filesystem_path), filesystem_path);
     assert_eq!(file.filetype, "cxx");
@@ -129,11 +127,11 @@ async fn create_state() {
     }
 
     let expected_symbols = [
-        new_symbol(1, "foo", None, SymbolScope::Global),
-        new_symbol(2, "bar", Some(1), SymbolScope::Local),
-        new_symbol(3, "zar", Some(1), SymbolScope::Local),
-        new_symbol(4, "main", None, SymbolScope::Global),
-        new_symbol(5, "tar", None, SymbolScope::Global),
+        Symbol::new(1.into(), "foo", module.id, SymbolScope::Global),
+        Symbol::new(2.into(), "bar", module.id, SymbolScope::Local),
+        Symbol::new(3.into(), "zar", module.id, SymbolScope::Local),
+        Symbol::new(4.into(), "main", module.id, SymbolScope::Global),
+        Symbol::new(5.into(), "tar", module.id, SymbolScope::Global),
     ];
     for (i, s) in symbols.iter().enumerate() {
         assert_eq!(*s, expected_symbols[i]);

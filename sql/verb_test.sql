@@ -1,7 +1,12 @@
 INSERT INTO
+    modules
+VALUES
+    (1, "test");
+
+INSERT INTO
     files
 VALUES
-    (1, "test", "main.c", "/main.c", "cc");
+    (1, 1, "main.c", "/main.c", "cc");
 
 INSERT INTO
     symbols

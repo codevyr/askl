@@ -5,7 +5,8 @@ use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use core::fmt::Debug;
 use index::symbols::{
-    exact_name_match, partial_name_match, DeclarationId, DeclarationRefs, Occurrence, Reference,
+    exact_name_match, partial_name_match, DeclarationId, DeclarationRefs, FileId, Occurrence,
+    Reference,
 };
 use log::debug;
 use pest::error::Error;
@@ -567,12 +568,18 @@ impl Verb for ModuleFilter {
 
 impl Filter for ModuleFilter {
     fn filter(&self, cfg: &ControlFlowGraph, declarations: DeclarationRefs) -> DeclarationRefs {
+        let module = if let Some(module) = cfg.find_module(&self.module) {
+            module
+        } else {
+            return DeclarationRefs::new();
+        };
+
         declarations
             .into_iter()
             .filter(|(declaration_id, _)| {
                 let declaration = cfg.get_declaration(*declaration_id).unwrap();
                 let file = cfg.get_file(declaration.file_id).unwrap();
-                self.module == file.module
+                module.id == file.module
             })
             .collect()
     }

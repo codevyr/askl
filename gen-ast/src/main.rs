@@ -2,7 +2,8 @@ use std::{fs::File, sync::Arc};
 
 use clap::Parser;
 use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState, ParsedNode};
-use index::db::Index;
+use index::db::{Index, Module};
+use index::symbols::ModuleId;
 use indicatif::ProgressBar;
 use log::debug;
 use tokio::sync::Semaphore;
@@ -83,7 +84,8 @@ async fn main() -> anyhow::Result<()> {
         .filter(|r| r.is_ok())
         .map(|r| r.unwrap());
 
-    let mut state = GlobalVisitorState::new(index, "main");
+    let module = Module::new(ModuleId::new(1), "main");
+    let mut state = GlobalVisitorState::new(index, module.id);
     for node in nodes {
         state.extract_symbol_map_root(node).await?;
     }

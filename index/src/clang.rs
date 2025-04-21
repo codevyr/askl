@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::Path};
 
 use crate::{
     db::{Declaration, Index},
-    symbols::{self, FileId, SymbolId, SymbolScope, SymbolType},
+    symbols::{self, FileId, ModuleId, SymbolId, SymbolScope, SymbolType},
 };
 use anyhow::{anyhow, bail, Result};
 use clang_ast::Id;
@@ -171,14 +171,12 @@ impl FunctionDecl {
                             } else {
                                 let name = f.name.as_ref().unwrap();
                                 let symbol_scope = SymbolScope::Global;
-                                // None, because this symbol is global
-                                let module_id = None;
                                 // Implicit symbol declaration
                                 let symbol_type = SymbolType::Declaration;
 
                                 let symbol = state
                                     .index
-                                    .insert_symbol(name, module_id, symbol_scope)
+                                    .insert_symbol(name, unit_state.module_id, symbol_scope)
                                     .await?;
                                 unit_state.add_symbol(referenced_decl.id, symbol.id);
 
@@ -232,15 +230,9 @@ impl FunctionDecl {
         let symbol_type = self.get_symbol_state(inner);
         let symbol_scope = self.get_symbol_scope();
 
-        let module_id = if let SymbolScope::Local = symbol_scope {
-            Some(unit_state.module_id)
-        } else {
-            None
-        };
-
         let symbol = state
             .index
-            .insert_symbol(name, module_id, symbol_scope)
+            .insert_symbol(name, unit_state.module_id, symbol_scope)
             .await?;
 
         let declaration = Declaration::new(symbol.id, file_id, symbol_type, &clang_range).unwrap();
@@ -464,15 +456,15 @@ struct UnresolvedChild {
 
 pub struct GlobalVisitorState {
     index: Index,
-    module: String,
+    module: ModuleId,
     language: String,
 }
 
 impl GlobalVisitorState {
-    pub fn new(index: Index, module: &str) -> Self {
+    pub fn new(index: Index, module: ModuleId) -> Self {
         GlobalVisitorState {
-            index: index,
-            module: module.to_string(),
+            index,
+            module,
             language: "cxx".to_string(),
         }
     }
@@ -491,7 +483,7 @@ impl GlobalVisitorState {
 
         self.index
             .create_or_get_fileid(
-                &self.module,
+                self.module,
                 module_path.to_str().unwrap(),
                 &file_string,
                 &self.language,
@@ -514,17 +506,7 @@ impl GlobalVisitorState {
             bail!("Not implemented");
         };
 
-        let module_id = self
-            .index
-            .create_or_get_fileid(
-                &self.module,
-                &root_node.root,
-                &root_node.module,
-                &self.language,
-            )
-            .await?;
-
-        let mut unit_state = ModuleVisitorState::new(module_id, root_dir);
+        let mut unit_state = ModuleVisitorState::new(self.module, root_dir);
         node.visit(self, &mut unit_state, &root_node.node.inner)
             .await?;
 
@@ -543,7 +525,7 @@ impl Into<Index> for GlobalVisitorState {
 }
 
 struct ModuleVisitorState {
-    module_id: FileId,
+    module_id: ModuleId,
     root_dir: String,
 
     /// A map of registered symbols with the list of related symbols. Related
@@ -552,7 +534,7 @@ struct ModuleVisitorState {
 }
 
 impl ModuleVisitorState {
-    fn new(module_id: FileId, root_dir: &str) -> Self {
+    fn new(module_id: ModuleId, root_dir: &str) -> Self {
         Self {
             module_id,
             root_dir: root_dir.to_string(),

@@ -1,21 +1,28 @@
+CREATE TABLE IF NOT EXISTS modules
+(
+    id INTEGER PRIMARY KEY,
+    module_name TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS files
 (
     id INTEGER PRIMARY KEY,
-    module TEXT NOT NULL,
+    module INTEGER NOT NULL,
     module_path TEXT NOT NULL,
     filesystem_path TEXT NOT NULL,
     filetype TEXT NOT NULL,
-    UNIQUE (module, module_path)
+    UNIQUE (filesystem_path)
+    FOREIGN KEY (module) REFERENCES modules(id)
 );
 
 CREATE TABLE IF NOT EXISTS symbols
 (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
-    file_id INTEGER,
+    module INTEGER NOT NULL,
     symbol_scope INTEGER NOT NULL,
-    FOREIGN KEY (file_id) REFERENCES files(id),
-    UNIQUE (name, file_id, symbol_scope)
+    FOREIGN KEY (module) REFERENCES modules(id),
+    UNIQUE (name, module)
 );
 
 CREATE TABLE IF NOT EXISTS declarations
