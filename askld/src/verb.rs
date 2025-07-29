@@ -5,8 +5,7 @@ use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use core::fmt::Debug;
 use index::symbols::{
-    exact_name_match, partial_name_match, DeclarationId, DeclarationRefs, FileId, Occurrence,
-    Reference,
+    exact_name_match, partial_name_match, DeclarationId, DeclarationRefs, Occurrence, Reference,
 };
 use log::debug;
 use pest::error::Error;
