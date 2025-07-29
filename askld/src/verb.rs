@@ -477,15 +477,16 @@ impl Deriver for ChildrenVerb {
         child_declaration_id: DeclarationId,
     ) -> Option<DeclarationRefs> {
         let mut references = DeclarationRefs::new();
-        let child_declaration = cfg.symbols.declarations.get(&child_declaration_id).unwrap();
         for reference in cfg.index.get_parents(child_declaration_id).await.unwrap() {
+            let parent_declaration = cfg.symbols.declarations.get(&reference.from_decl).unwrap();
             let occ = Occurrence {
                 line_start: reference.from_line as i32,
                 line_end: reference.from_line as i32,
                 column_start: reference.from_col_start as i32,
                 column_end: reference.from_col_end as i32,
-                file: child_declaration.file_id,
+                file: parent_declaration.file_id,
             };
+
             references
                 .entry(reference.from_decl)
                 .and_modify(|s| {

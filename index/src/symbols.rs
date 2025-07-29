@@ -376,7 +376,7 @@ impl From<i64> for SymbolType {
         match value {
             x if x == SymbolType::Definition as i64 => SymbolType::Definition,
             x if x == SymbolType::Declaration as i64 => SymbolType::Declaration,
-            _ => panic!("Invalid symbol type value"),
+            _ => panic!("Invalid symbol type value {}", value),
         }
     }
 }
