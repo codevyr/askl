@@ -1,52 +1,58 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::execution_context::ExecutionContext;
-use crate::parser::{ParserContext, Rule};
+use crate::hierarchy::Hierarchy;
+use crate::parser::Rule;
+use crate::parser_context::ParserContext;
 use crate::statement::{build_empty_statement, build_statement, Statement};
 use async_trait::async_trait;
-use index::symbols::{DeclarationId, DeclarationRefs};
 use core::fmt::Debug;
+use index::symbols::{DeclarationId, DeclarationRefs};
 use pest::error::Error;
+use std::cell::RefCell;
 use std::collections::HashSet;
+use std::rc::{Rc, Weak};
 
 pub fn build_scope(
-    ctx: &ParserContext,
+    ctx: Rc<ParserContext>,
     pair: pest::iterators::Pair<Rule>,
-) -> Result<Box<dyn Scope>, Error<Rule>> {
-    let statements: Result<Vec<Box<dyn Statement>>, _> =
-        pair.into_inner().map(|p| build_statement(ctx, p)).collect();
+) -> Result<Rc<dyn Scope>, Error<Rule>> {
+    let statements: Result<Vec<Rc<Statement>>, _> = pair
+        .into_inner()
+        .map(|p| build_statement(ctx.clone(), p))
+        .collect();
 
     let statements = statements?;
-    let statements = if statements.len() == 0 {
-        vec![build_empty_statement(ctx)]
+    let statements = if statements.is_empty() {
+        vec![build_empty_statement(ctx.clone())]
     } else {
         statements
     };
+    let scope = ctx.new_scope(statements);
 
-    Ok(ctx.new_scope(statements))
+    Ok(scope)
 }
 
-#[derive(Debug)]
-pub enum ScopeFactory {
-    Children,
-    Empty,
-}
-
-impl ScopeFactory {
-    pub fn create(&self, statements: Vec<Box<dyn Statement>>) -> Box<dyn Scope> {
-        match self {
-            Self::Children => DefaultScope::new(statements),
-            _ => panic!("Impossible: {:?}", self),
+/// Visit every statement included in the scope recursively
+pub fn visit<'a, 'b, F>(scope: Rc<dyn Scope>, func: &'b mut F) -> Result<(), Error<Rule>>
+where
+    F: FnMut(Rc<Statement>) -> bool,
+{
+    for statement in scope.statements() {
+        if !func(statement.clone()) {
+            return Ok(());
         }
+        visit(statement.scope(), func)?;
     }
+    Ok(())
 }
 
-type StatementIter<'a> = Box<dyn Iterator<Item = &'a Box<dyn Statement + 'a>> + 'a>;
+pub type StatementIter = Box<dyn Iterator<Item = Rc<Statement>>>;
 
 /// Scope executes statements. One of the algorithmic difficulties is that each
 /// statement must be executed exactly once. Therefore, the statement must be
 /// able to accept multiple symbols at once.
 #[async_trait(?Send)]
-pub trait Scope: Debug {
+pub trait Scope: Debug + Hierarchy {
     fn statements(&self) -> StatementIter;
 
     async fn run(
@@ -64,8 +70,9 @@ pub trait Scope: Debug {
         for statement in self.statements() {
             // Iterate through all the statements in the scope or subscope of
             // the query
-            if let Some((resolved_symbols, scope_nodes, scope_edges)) =
-                statement.execute(ctx, cfg, symbols.clone(), &ignored_ids).await
+            if let Some((resolved_symbols, scope_nodes, scope_edges)) = statement
+                .execute(ctx, cfg, symbols.clone(), &ignored_ids)
+                .await
             {
                 ignored_ids.extend(resolved_symbols.iter().map(|(id, _)| *id));
                 // res_nodes.0.push(symbol.clone());
@@ -93,13 +100,11 @@ pub trait Scope: Debug {
             // Iterate through all the statements in the scope or subscope of
             // the query
 
-            let statement_refs = symbols
-                .iter()
-                .map(|id| (*id, HashSet::new()))
-                .collect();
+            let statement_refs = symbols.iter().map(|id| (*id, HashSet::new())).collect();
 
-            if let Some((resolved_symbols, scope_nodes, scope_edges)) =
-                statement.execute(ctx, cfg, Some(statement_refs), &ignored_ids).await
+            if let Some((resolved_symbols, scope_nodes, scope_edges)) = statement
+                .execute(ctx, cfg, Some(statement_refs), &ignored_ids)
+                .await
             {
                 res_symbols.extend(
                     symbols
@@ -118,58 +123,57 @@ pub trait Scope: Debug {
 }
 
 #[derive(Debug)]
-pub struct DefaultScope(Vec<Box<dyn Statement>>);
+pub struct DefaultScope {
+    parent: RefCell<Option<Weak<Statement>>>,
+    children: Vec<Rc<Statement>>,
+}
 
 impl DefaultScope {
-    pub fn new(statements: Vec<Box<dyn Statement>>) -> Box<dyn Scope> {
-        Box::new(Self(statements))
+    pub fn new(statements: Vec<Rc<Statement>>) -> Rc<dyn Scope> {
+        Rc::new(Self {
+            parent: RefCell::new(None),
+            children: statements,
+        })
     }
 }
 
 impl Scope for DefaultScope {
     fn statements(&self) -> StatementIter {
-        Box::new(self.0.iter())
+        Box::new(self.children.clone().into_iter())
+    }
+}
+
+impl Hierarchy for DefaultScope {
+    fn parent(&self) -> Option<Weak<Statement>> {
+        self.parent.borrow().clone()
+    }
+
+    fn set_parent(&self, parent: Weak<Statement>) {
+        *self.parent.borrow_mut() = Some(parent);
+    }
+
+    fn children(&self) -> StatementIter {
+        self.statements()
     }
 }
 
 #[derive(Debug)]
-pub struct GlobalScope(Vec<Box<dyn Statement>>);
-
-impl GlobalScope {
-    pub fn new(statements: Vec<Box<dyn Statement>>) -> Box<dyn Scope> {
-        Box::new(Self(statements))
-    }
+pub struct EmptyScope {
+    parent: RefCell<Option<Weak<Statement>>>,
 }
-
-#[async_trait(?Send)]
-impl Scope for GlobalScope {
-    fn statements(&self) -> StatementIter {
-        Box::new(self.0.iter())
-    }
-
-    async fn run(
-        &self,
-        _ctx: &mut ExecutionContext,
-        _cfg: &ControlFlowGraph,
-        _symbols: Option<DeclarationRefs>,
-    ) -> Option<(DeclarationRefs, NodeList, EdgeList)> {
-        None
-    }
-}
-
-#[derive(Debug)]
-pub struct EmptyScope;
 
 impl EmptyScope {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            parent: RefCell::new(None),
+        }
     }
 }
 
 #[async_trait(?Send)]
 impl Scope for EmptyScope {
     fn statements(&self) -> StatementIter {
-        Box::new(std::iter::empty::<_>())
+        Box::new(std::iter::empty())
     }
 
     async fn run(
@@ -179,5 +183,19 @@ impl Scope for EmptyScope {
         _symbols: Option<DeclarationRefs>,
     ) -> Option<(DeclarationRefs, NodeList, EdgeList)> {
         Some((DeclarationRefs::new(), NodeList::new(), EdgeList::new()))
+    }
+}
+
+impl Hierarchy for EmptyScope {
+    fn parent(&self) -> Option<Weak<Statement>> {
+        self.parent.borrow().clone()
+    }
+
+    fn set_parent(&self, parent: Weak<Statement>) {
+        *self.parent.borrow_mut() = Some(parent);
+    }
+
+    fn children(&self) -> StatementIter {
+        self.statements()
     }
 }

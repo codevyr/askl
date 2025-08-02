@@ -1,13 +1,14 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
-use index::symbols::{Reference, DeclarationRefs, DeclarationId};
+use crate::statement::Statement;
 use crate::verb::{DeriveMethod, Deriver, Filter, Marker, Selector, UnitVerb, Verb};
 use anyhow::Result;
 use core::fmt::Debug;
+use index::symbols::{DeclarationId, DeclarationRefs, Reference};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Command {
     verbs: Vec<Arc<dyn Verb>>,
 }
@@ -28,7 +29,7 @@ impl Command {
             }
         }
 
-        Self { verbs }
+        Self { verbs: verbs }
     }
 
     pub fn extend(&mut self, other: Arc<dyn Verb>) {
@@ -51,11 +52,60 @@ impl Command {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_marker().ok()))
     }
 
-    pub fn filter(&self, cfg: &ControlFlowGraph, symbols: DeclarationRefs) -> Option<DeclarationRefs> {
+    pub fn filter(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbols: DeclarationRefs,
+    ) -> Option<DeclarationRefs> {
         Some(
             self.filters()
                 .fold(symbols, |symbols, verb| verb.filter(cfg, symbols)),
         )
+    }
+
+    pub fn filter_nodes(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbols: HashSet<DeclarationId>,
+    ) -> HashSet<DeclarationId> {
+        self.filters()
+            .fold(symbols, |symbols, verb| verb.filter_nodes(cfg, symbols))
+    }
+
+    /// Computes the selected symbols based on the selectors defined in the
+    /// command. This method returns an `Option<DeclarationRefs>`, which will be
+    /// `None` if no symbols are selected. It returns
+    /// `Some(DeclarationRefs::new())` if no symbols match the selectors.
+    pub fn compute_selected(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+    ) -> Option<DeclarationRefs> {
+        let selectors: Vec<_> = self.selectors().collect();
+
+        // Nothing to do
+        if selectors.len() == 0 {
+            return None;
+        }
+
+        let symbols = selectors
+            .into_iter()
+            .filter_map(|v: &dyn Selector| v.select_from_all(ctx, cfg))
+            .collect::<Vec<_>>();
+
+        if symbols.iter().all(|s| s.is_empty()) {
+            return None;
+        }
+
+        let symbols: DeclarationRefs = symbols.into_iter().flatten().collect();
+
+        let filterd_symbols = self.filter(cfg, symbols);
+        let symbols = match filterd_symbols {
+            Some(symbols) => symbols,
+            None => return Some(DeclarationRefs::new()),
+        };
+
+        Some(symbols)
     }
 
     pub fn select(
@@ -91,6 +141,7 @@ impl Command {
 
     pub async fn derive_children(
         &self,
+        statement: &Statement,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         declarations: HashSet<DeclarationId>,
@@ -98,11 +149,22 @@ impl Command {
         self.derivers()
             .last()
             .unwrap()
-            .derive_children(ctx, cfg, declarations).await
+            .derive_children(statement, ctx, cfg, declarations)
+            .await
     }
 
-    pub async fn derive_parents(&self, cfg: &ControlFlowGraph, symbol: DeclarationId) -> Option<DeclarationRefs> {
-        self.derivers().last().unwrap().derive_parents(cfg, symbol).await
+    pub async fn derive_parents(
+        &self,
+        ctx: &mut ExecutionContext,
+        statement: &Statement,
+        cfg: &ControlFlowGraph,
+        symbol: DeclarationId,
+    ) -> Option<DeclarationRefs> {
+        self.derivers()
+            .last()
+            .unwrap()
+            .derive_parents(ctx, statement, cfg, symbol)
+            .await
     }
 
     pub fn mark(

@@ -5,12 +5,14 @@
   env.GREET = "devenv";
 
   # https://devenv.sh/packages/
-  packages = [
-    pkgs.git
-    pkgs.git
-    pkgs.sqlite-web
-    pkgs.llvmPackages_12.stdenv
-    pkgs.llvmPackages_12.clang-unwrapped
+  packages = with pkgs ; [
+    git
+    git
+    sqlite-web
+    llvmPackages_12.stdenv
+    llvmPackages_12.clang-unwrapped
+
+    lldb
   ];
 
   # https://devenv.sh/languages/

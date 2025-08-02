@@ -1,6 +1,9 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
-use crate::parser::{Identifier, NamedArgument, ParserContext, PositionalArgument, Rule};
+use crate::hierarchy::Hierarchy;
+use crate::parser::{Identifier, NamedArgument, PositionalArgument, Rule};
+use crate::parser_context::ParserContext;
+use crate::statement::Statement;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use core::fmt::Debug;
@@ -11,10 +14,12 @@ use log::debug;
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
+use std::vec;
 
 fn build_generic_verb(
-    _ctx: &ParserContext,
+    _ctx: Rc<ParserContext>,
     pair: pest::iterators::Pair<Rule>,
 ) -> Result<Arc<dyn Verb>, Error<Rule>> {
     let mut pair = pair.into_inner();
@@ -63,6 +68,7 @@ fn build_generic_verb(
         IsolatedScope::NAME => IsolatedScope::new(&positional, &named),
         LabellerVerb::NAME => LabellerVerb::new(&positional, &named),
         UserVerb::NAME => UserVerb::new(&positional, &named),
+        PreambleVerb::NAME => PreambleVerb::new(&positional, &named),
         unknown => Err(anyhow!("unknown verb : {}", unknown)),
     };
 
@@ -78,9 +84,9 @@ fn build_generic_verb(
 }
 
 pub fn build_verb(
-    ctx: &ParserContext,
+    ctx: Rc<ParserContext>,
     pair: pest::iterators::Pair<Rule>,
-) -> Result<Arc<dyn Verb>, Error<Rule>> {
+) -> Result<(), Error<Rule>> {
     let span = pair.as_span();
     debug!("Build verb {:#?}", pair);
     let verb = if let Some(verb) = pair.into_inner().next() {
@@ -94,35 +100,50 @@ pub fn build_verb(
         ));
     };
 
-    if let Rule::generic_verb = verb.as_rule() {
-        return build_generic_verb(ctx, verb);
-    }
+    let verb = if let Rule::generic_verb = verb.as_rule() {
+        build_generic_verb(ctx.clone(), verb)?
+    } else {
+        match verb.as_rule() {
+            Rule::plain_filter => {
+                let ident = verb.into_inner().next().unwrap();
+                let positional = vec![];
+                let mut named = HashMap::new();
+                named.insert("name".into(), ident.as_str().into());
+                NameSelector::new(&positional, &named)
+            }
+            Rule::forced_verb => {
+                let ident = verb.into_inner().next().unwrap();
+                let positional = vec![];
+                let mut named = HashMap::new();
+                named.insert("name".into(), ident.as_str().into());
+                ForcedVerb::new(&positional, &named)
+            }
+            _ => unreachable!("Unknown rule: {:#?}", verb.as_rule()),
+        }
+        .map_err(|e| {
+            Error::new_from_span(
+                pest::error::ErrorVariant::CustomError {
+                    message: format!("Failed to create filter: {}", e),
+                },
+                span,
+            )
+        })?
+    };
 
-    match verb.as_rule() {
-        Rule::plain_filter => {
-            let ident = verb.into_inner().next().unwrap();
-            let positional = vec![];
-            let mut named = HashMap::new();
-            named.insert("name".into(), ident.as_str().into());
-            NameSelector::new(&positional, &named)
-        }
-        Rule::forced_verb => {
-            let ident = verb.into_inner().next().unwrap();
-            let positional = vec![];
-            let mut named = HashMap::new();
-            named.insert("name".into(), ident.as_str().into());
-            ForcedVerb::new(&positional, &named)
-        }
-        _ => unreachable!("Unknown rule: {:#?}", verb.as_rule()),
-    }
-    .map_err(|e| {
+    let verb = ctx.consume(verb).map_err(|e| {
         Error::new_from_span(
             pest::error::ErrorVariant::CustomError {
-                message: format!("Failed to create filter: {}", e),
+                message: format!("Failed to consume verb: {}", e),
             },
             span,
         )
-    })
+    })?;
+
+    if let Some(verb) = verb {
+        ctx.extend_verb(verb)
+    };
+
+    Ok(())
 }
 
 pub fn derive_verb(verb: &Arc<dyn Verb>) -> Option<Arc<dyn Verb>> {
@@ -142,8 +163,8 @@ pub trait Verb: Debug + Sync {
         DeriveMethod::Skip
     }
 
-    fn update_context(&self, _ctx: &mut ParserContext) -> bool {
-        false
+    fn update_context(&self, _ctx: &ParserContext) -> Result<bool> {
+        Ok(false)
     }
 
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
@@ -167,6 +188,14 @@ pub trait Filter: Debug {
     fn filter(&self, _cfg: &ControlFlowGraph, symbols: DeclarationRefs) -> DeclarationRefs {
         symbols
     }
+
+    fn filter_nodes(
+        &self,
+        _cfg: &ControlFlowGraph,
+        symbols: HashSet<DeclarationId>,
+    ) -> HashSet<DeclarationId> {
+        symbols
+    }
 }
 
 pub trait Selector: Debug {
@@ -184,10 +213,11 @@ pub trait Selector: Debug {
     ) -> Option<DeclarationRefs>;
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 pub trait Deriver: Debug {
     async fn derive_children(
         &self,
+        statement: &Statement,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         declarations: HashSet<DeclarationId>,
@@ -195,6 +225,8 @@ pub trait Deriver: Debug {
 
     async fn derive_parents(
         &self,
+        ctx: &mut ExecutionContext,
+        statement: &Statement,
         cfg: &ControlFlowGraph,
         declaration: DeclarationId,
     ) -> Option<DeclarationRefs>;
@@ -300,12 +332,17 @@ impl Verb for ForcedVerb {
     fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
         Ok(self)
     }
+
+    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
+        Ok(self)
+    }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl Deriver for ForcedVerb {
     async fn derive_children(
         &self,
+        _statement: &Statement,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         declarations: HashSet<DeclarationId>,
@@ -329,10 +366,43 @@ impl Deriver for ForcedVerb {
 
     async fn derive_parents(
         &self,
-        _cfg: &ControlFlowGraph,
+        _ctx: &mut ExecutionContext,
+        statement: &Statement,
+        cfg: &ControlFlowGraph,
         _symbol: DeclarationId,
     ) -> Option<DeclarationRefs> {
-        None
+        let parents = if let Some(parent) = statement.parent() {
+            parent
+                .upgrade()
+                .unwrap()
+                .get_state()
+                .current
+                .clone()
+                .unwrap()
+        } else {
+            return None;
+        };
+
+        let declaration_refs = parents
+            .iter()
+            .filter_map(|id| {
+                let declaration = cfg.get_declaration(*id).unwrap();
+
+                Some((
+                    *id,
+                    vec![Occurrence {
+                        line_start: declaration.line_start as i32,
+                        line_end: declaration.line_end as i32,
+                        column_start: declaration.col_start as i32,
+                        column_end: declaration.col_end as i32,
+                        file: declaration.file_id,
+                    }]
+                    .into_iter()
+                    .collect::<HashSet<_>>(),
+                ))
+            })
+            .collect::<DeclarationRefs>();
+        Some(declaration_refs)
     }
 }
 
@@ -378,6 +448,38 @@ impl Selector for ForcedVerb {
     }
 }
 
+impl Filter for ForcedVerb {
+    fn filter(&self, _cfg: &ControlFlowGraph, declarations: DeclarationRefs) -> DeclarationRefs {
+        println!("Filtering by forced verb: {} {:?}", self.name, declarations);
+        declarations
+    }
+
+    fn filter_nodes(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbols: HashSet<DeclarationId>,
+    ) -> HashSet<DeclarationId> {
+        let forced_symbols = cfg
+            .symbols
+            .find_all(exact_name_match(&self.name))
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        let forced = cfg
+            .get_declarations_from_symbols(&forced_symbols)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<HashSet<_>>();
+
+        println!(
+            "Filtering nodes by forced verb: {} {:?} /// forced: {:?}",
+            self.name, symbols, forced
+        );
+
+        forced
+    }
+}
+
 /// Returns the same symbols as it have received
 #[derive(Debug)]
 pub struct UnitVerb {}
@@ -398,10 +500,11 @@ impl Verb for UnitVerb {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl Deriver for UnitVerb {
     async fn derive_children(
         &self,
+        _statement: &Statement,
         _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
         _declarations: HashSet<DeclarationId>,
@@ -411,6 +514,8 @@ impl Deriver for UnitVerb {
 
     async fn derive_parents(
         &self,
+        _ctx: &mut ExecutionContext,
+        _statement: &Statement,
         _cfg: &ControlFlowGraph,
         _symbol: DeclarationId,
     ) -> Option<DeclarationRefs> {
@@ -437,10 +542,11 @@ impl Verb for ChildrenVerb {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl Deriver for ChildrenVerb {
     async fn derive_children(
         &self,
+        _statement: &Statement,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         declarations: HashSet<DeclarationId>,
@@ -472,6 +578,8 @@ impl Deriver for ChildrenVerb {
 
     async fn derive_parents(
         &self,
+        _ctx: &mut ExecutionContext,
+        _statement: &Statement,
         cfg: &ControlFlowGraph,
         child_declaration_id: DeclarationId,
     ) -> Option<DeclarationRefs> {
@@ -527,10 +635,25 @@ impl Verb for IgnoreVerb {
 
 impl Filter for IgnoreVerb {
     fn filter(&self, cfg: &ControlFlowGraph, declarations: DeclarationRefs) -> DeclarationRefs {
+        println!("Filtering by forced verb: {} {:?}", self.name, declarations);
         declarations
             .into_iter()
             .filter(|(declaration_id, _)| {
                 let declaration = cfg.get_declaration(*declaration_id).unwrap();
+                self.name != cfg.get_symbol(declaration.symbol).unwrap().name
+            })
+            .collect()
+    }
+
+    fn filter_nodes(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbols: HashSet<DeclarationId>,
+    ) -> HashSet<DeclarationId> {
+        symbols
+            .into_iter()
+            .filter(|id| {
+                let declaration = cfg.get_declaration(*id).unwrap();
                 self.name != cfg.get_symbol(declaration.symbol).unwrap().name
             })
             .collect()
@@ -583,10 +706,33 @@ impl Filter for ModuleFilter {
             })
             .collect()
     }
+
+    fn filter_nodes(
+        &self,
+        cfg: &ControlFlowGraph,
+        symbols: HashSet<DeclarationId>,
+    ) -> HashSet<DeclarationId> {
+        let module = if let Some(module) = cfg.find_module(&self.module) {
+            module
+        } else {
+            return HashSet::new();
+        };
+
+        symbols
+            .into_iter()
+            .filter(|id| {
+                let declaration = cfg.get_declaration(*id).unwrap();
+                let file = cfg.get_file(declaration.file_id).unwrap();
+                module.id == file.module
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug)]
-struct IsolatedScope {}
+struct IsolatedScope {
+    _isolated: bool,
+}
 
 impl IsolatedScope {
     const NAME: &'static str = "scope";
@@ -596,11 +742,22 @@ impl IsolatedScope {
             bail!("Unexpected positional arguments");
         }
 
-        if named.len() > 0 {
-            bail!("Unexpected named arguments");
-        }
+        let isolated = if let Some(isolated_str) = named.get("isolated") {
+            if isolated_str == "true" {
+                true
+            } else if isolated_str == "false" {
+                false
+            } else {
+                bail!("Unexpected value for isolated parameter: {}", isolated_str);
+            }
+        } else {
+            // Default to false if not specified
+            false
+        };
 
-        Ok(Arc::new(Self {}))
+        Ok(Arc::new(Self {
+            _isolated: isolated,
+        }))
     }
 }
 
@@ -614,10 +771,11 @@ impl Verb for IsolatedScope {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl Deriver for IsolatedScope {
     async fn derive_children(
         &self,
+        _statement: &Statement,
         _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
         _declarations: HashSet<DeclarationId>,
@@ -627,6 +785,8 @@ impl Deriver for IsolatedScope {
 
     async fn derive_parents(
         &self,
+        _ctx: &mut ExecutionContext,
+        _statement: &Statement,
         _cfg: &ControlFlowGraph,
         _declaration: DeclarationId,
     ) -> Option<DeclarationRefs> {
@@ -733,10 +893,11 @@ impl Verb for UserVerb {
     }
 }
 
-#[async_trait]
+#[async_trait(?Send)]
 impl Deriver for UserVerb {
     async fn derive_children(
         &self,
+        _statement: &Statement,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         declarations: HashSet<DeclarationId>,
@@ -758,10 +919,43 @@ impl Deriver for UserVerb {
 
     async fn derive_parents(
         &self,
-        _cfg: &ControlFlowGraph,
+        _ctx: &mut ExecutionContext,
+        statement: &Statement,
+        cfg: &ControlFlowGraph,
         _declaration: DeclarationId,
     ) -> Option<DeclarationRefs> {
-        None
+        let parents = if let Some(parent) = statement.parent() {
+            parent
+                .upgrade()
+                .unwrap()
+                .get_state()
+                .current
+                .clone()
+                .unwrap()
+        } else {
+            return None;
+        };
+
+        let declaration_refs = parents
+            .iter()
+            .filter_map(|id| {
+                let declaration = cfg.get_declaration(*id).unwrap();
+
+                Some((
+                    *id,
+                    vec![Occurrence {
+                        line_start: declaration.line_start as i32,
+                        line_end: declaration.line_end as i32,
+                        column_start: declaration.col_start as i32,
+                        column_end: declaration.col_end as i32,
+                        file: declaration.file_id,
+                    }]
+                    .into_iter()
+                    .collect::<HashSet<_>>(),
+                ))
+            })
+            .collect::<DeclarationRefs>();
+        Some(declaration_refs)
     }
 }
 
@@ -801,5 +995,45 @@ impl Selector for UserVerb {
                 .filter(|(id, _)| saved_ids.contains(id))
                 .collect(),
         )
+    }
+}
+
+#[derive(Debug)]
+struct PreambleVerb {}
+
+impl PreambleVerb {
+    const NAME: &'static str = "preamble";
+
+    fn new(positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
+        if positional.len() > 0 {
+            bail!("Unexpected positional arguments");
+        };
+
+        if named.len() > 0 {
+            bail!("Unexpected named arguments");
+        };
+
+        Ok(Arc::new(Self {}))
+    }
+}
+
+impl Verb for PreambleVerb {
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Skip
+    }
+
+    fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
+        if ctx.get_prev().is_none() {
+            panic!("Expected to have global context");
+        }
+
+        let prev = ctx.get_prev().unwrap();
+        if let Some(_) = prev.upgrade().unwrap().get_prev() {
+            bail!("Preamble verb can only be used as the first verb statement in the askl code");
+        }
+
+        ctx.set_alternative_context(prev);
+
+        Ok(true)
     }
 }
