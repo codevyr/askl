@@ -131,12 +131,24 @@ pub type DeclarationRefs = HashMap<DeclarationId, HashSet<Occurrence>>;
 pub struct Symbol {
     pub id: SymbolId,
     pub name: String,
+    pub name_split: Vec<String>,
     pub declarations: HashSet<DeclarationId>,
     pub children: SymbolRefs,
     pub parents: DeclarationRefs,
 }
 
 impl Symbol {
+    pub fn new(id: SymbolId, name: String) -> Self {
+        Self {
+            id,
+            name_split: clean_and_split_string(&name),
+            name,
+            declarations: HashSet::new(),
+            children: SymbolRefs::new(),
+            parents: DeclarationRefs::new(),
+        }
+    }
+
     pub fn add_child(&mut self, id: SymbolId, occurrence: Occurrence) {
         self.children
             .entry(id)
@@ -503,8 +515,7 @@ fn is_ordered_subset<T: PartialEq>(superset: &[T], subset: &[T]) -> bool {
 pub fn partial_name_match<'a>(name: &'a str) -> SymbolMatcher<'a> {
     let search_pattern = clean_and_split_string(name);
     Box::new(move |(_, s): (&'a SymbolId, &'a Symbol)| {
-        let current_split = clean_and_split_string(&s.name);
-        if is_ordered_subset(&current_split, &search_pattern) {
+        if is_ordered_subset(&s.name_split, &search_pattern) {
             Some(s)
         } else {
             None
@@ -528,13 +539,7 @@ impl SymbolMap {
         for symbol in symbols {
             symbols_map.insert(
                 symbol.id,
-                Symbol {
-                    id: symbol.id,
-                    children: SymbolRefs::new(),
-                    parents: DeclarationRefs::new(),
-                    name: symbol.name.clone(),
-                    declarations: HashSet::new(),
-                },
+                Symbol::new(SymbolId::from(symbol.id), symbol.name.clone()),
             );
         }
 

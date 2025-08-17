@@ -19,11 +19,7 @@ fn test_partial_name_matcher() {
 
     for (symbol_name, search_term, expected_match) in test_cases {
         let id = SymbolId::new(1);
-        let symbol = Symbol {
-            id,
-            name: symbol_name.to_string(),
-            ..Default::default()
-        };
+        let symbol = Symbol::new(id, symbol_name.to_string());
 
         let matcher = partial_name_match(search_term);
         let matched_symbol = matcher((&id, &symbol));
