@@ -29,3 +29,5 @@ sqlx = {workspace = true}
 dotenv = "0.15.0"
 async-trait = "0.1.80"
 serde_stacker.workspace = true
+diesel = { workspace = true, features = ["returning_clauses_for_sqlite_3_35", "sqlite", "r2d2"] }
+tempfile = "3.21.0"

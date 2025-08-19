@@ -122,7 +122,10 @@ impl FunctionDecl {
         }
     }
 
-    fn extract_call_refs<'a>(&'a self, nodes: &'a Vec<Node>) -> impl Iterator<Item = &Node> + 'a {
+    fn extract_call_refs<'a>(
+        &'a self,
+        nodes: &'a Vec<Node>,
+    ) -> impl Iterator<Item = &'a Node> + 'a {
         nodes
             .iter()
             // XXX: Normally I would like to save only the references, which are

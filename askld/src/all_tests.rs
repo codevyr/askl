@@ -90,13 +90,14 @@ fn no_selectors() {
 
 #[test]
 fn forced_query() {
+    // Forcing a node without any selectors should return no results
     const QUERY: &str = r#"!"a""#;
     let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
     println!("{:#?}", res_nodes);
     println!("{:#?}", res_edges);
 
-    assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(91)]);
+    assert_eq!(res_nodes.as_vec(), vec![]);
     assert_eq!(res_edges.0.len(), 0);
 }
 
@@ -164,6 +165,50 @@ fn forced_child_query_4() {
     );
     let edges = format_edges(res_edges);
     assert_eq!(edges, vec!["91-97"]);
+}
+
+#[test]
+fn forced_child_query_5() {
+    const QUERY: &str = r#""main"{{!"g"}}"#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(
+        res_nodes.as_vec(),
+        vec![
+            DeclarationId::new(91),
+            DeclarationId::new(92),
+            DeclarationId::new(97),
+            DeclarationId::new(942),
+        ]
+    );
+    let edges = format_edges(res_edges);
+    assert_eq!(
+        edges,
+        vec!["91-92", "91-92", "91-97", "92-97", "942-91", "942-92"]
+    );
+}
+
+#[test]
+fn forced_child_query_6() {
+    const QUERY: &str = r#""a" "b"{{!"g"}}"#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(
+        res_nodes.as_vec(),
+        vec![
+            DeclarationId::new(91),
+            DeclarationId::new(92),
+            DeclarationId::new(97),
+        ]
+    );
+    let edges = format_edges(res_edges);
+    assert_eq!(edges, vec!["91-92", "91-92", "92-97"]);
 }
 
 #[test]

@@ -2,13 +2,14 @@
 
 {
   # https://devenv.sh/basics/
-  env.GREET = "devenv";
+  env.DATABASE_URL = "./test.db";
 
   # https://devenv.sh/packages/
   packages = with pkgs ; [
     git
     git
     sqlite-web
+    diesel-cli
     llvmPackages_12.stdenv
     llvmPackages_12.clang-unwrapped
 
@@ -50,5 +51,9 @@
   # pre-commit.hooks.shellcheck.enable = true;
 
   # See full reference at https://devenv.sh/reference/options/
-  languages.rust.enable = true;
+  languages.rust = {
+    enable = true;
+    channel = "nightly";
+    components = [ "rustc" "cargo" "clippy" "rustfmt" "rust-analyzer" "miri" ];
+  };
 }

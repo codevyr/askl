@@ -349,6 +349,12 @@ impl From<Option<i64>> for DeclarationId {
     }
 }
 
+impl Into<i32> for DeclarationId {
+    fn into(self) -> i32 {
+        self.0
+    }
+}
+
 impl fmt::Display for DeclarationId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -393,6 +399,16 @@ impl From<i64> for SymbolType {
     }
 }
 
+impl From<i32> for SymbolType {
+    fn from(value: i32) -> Self {
+        match value {
+            x if x == SymbolType::Definition as i32 => SymbolType::Definition,
+            x if x == SymbolType::Declaration as i32 => SymbolType::Declaration,
+            _ => panic!("Invalid symbol type value {}", value),
+        }
+    }
+}
+
 #[derive(sqlx::Type, Debug, PartialEq, Eq, Copy, Clone)]
 #[repr(i32)]
 pub enum SymbolScope {
@@ -411,6 +427,16 @@ impl From<i64> for SymbolScope {
         match value {
             x if x == SymbolScope::Local as i64 => SymbolScope::Local,
             x if x == SymbolScope::Global as i64 => SymbolScope::Global,
+            _ => panic!("Invalid symbol scope value"),
+        }
+    }
+}
+
+impl From<i32> for SymbolScope {
+    fn from(value: i32) -> Self {
+        match value {
+            x if x == SymbolScope::Local as i32 => SymbolScope::Local,
+            x if x == SymbolScope::Global as i32 => SymbolScope::Global,
             _ => panic!("Invalid symbol scope value"),
         }
     }
@@ -440,7 +466,7 @@ pub fn exact_name_match<'a>(name: &'a str) -> SymbolMatcher<'a> {
 /// # Returns
 ///
 /// A vector of strings, split at periods with unwanted characters removed
-fn clean_and_split_string(input: &str) -> Vec<String> {
+pub fn clean_and_split_string(input: &str) -> Vec<String> {
     // Characters to remove: */[]{}:,@- and space
     let chars_to_remove = ['*', '[', ']', '{', '}', ',', '@', '-', ' ', '(', ')'];
 
@@ -596,7 +622,7 @@ impl SymbolMap {
         self
     }
 
-    pub fn iter<'a>(&'a self) -> impl Iterator<Item = (&SymbolId, &Symbol)> + 'a {
+    pub fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a SymbolId, &'a Symbol)> + 'a {
         self.symbols.iter()
     }
 

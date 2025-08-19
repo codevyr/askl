@@ -4,8 +4,8 @@ use crate::statement::Statement;
 use crate::verb::{DeriveMethod, Deriver, Filter, Marker, Selector, UnitVerb, Verb};
 use anyhow::Result;
 use core::fmt::Debug;
-use index::symbols::{DeclarationId, DeclarationRefs, Reference};
-use std::collections::HashSet;
+use index::db_diesel::{ChildReference, ParentReference, Selection};
+use index::symbols::DeclarationRefs;
 use std::sync::Arc;
 
 #[derive(Debug, Default)]
@@ -52,35 +52,46 @@ impl Command {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_marker().ok()))
     }
 
-    pub fn filter(
-        &self,
-        cfg: &ControlFlowGraph,
-        symbols: DeclarationRefs,
-    ) -> Option<DeclarationRefs> {
-        Some(
-            self.filters()
-                .fold(symbols, |symbols, verb| verb.filter(cfg, symbols)),
-        )
+    pub fn filter(&self, cfg: &ControlFlowGraph, selection: &mut Selection) {
+        for verb in self.filters() {
+            verb.filter(cfg, selection);
+        }
     }
 
-    pub fn filter_nodes(
+    pub fn constrain_references(&self, cfg: &ControlFlowGraph, selection: &mut Selection) {
+        self.derivers()
+            .for_each(|verb| verb.constrain_references(cfg, selection))
+    }
+
+    pub fn constrain_by_parents(
         &self,
         cfg: &ControlFlowGraph,
-        symbols: HashSet<DeclarationId>,
-    ) -> HashSet<DeclarationId> {
-        self.filters()
-            .fold(symbols, |symbols, verb| verb.filter_nodes(cfg, symbols))
+        selection: &mut Selection,
+        parent_refs: &Vec<ChildReference>,
+    ) {
+        self.derivers()
+            .for_each(|verb| verb.constrain_by_parents(cfg, selection, parent_refs))
+    }
+
+    pub fn constrain_by_children(
+        &self,
+        cfg: &ControlFlowGraph,
+        selection: &mut Selection,
+        child_refs: &Vec<ParentReference>,
+    ) {
+        self.derivers()
+            .for_each(|verb| verb.constrain_by_children(cfg, selection, child_refs))
     }
 
     /// Computes the selected symbols based on the selectors defined in the
     /// command. This method returns an `Option<DeclarationRefs>`, which will be
     /// `None` if no symbols are selected. It returns
     /// `Some(DeclarationRefs::new())` if no symbols match the selectors.
-    pub fn compute_selected(
+    pub async fn compute_selected(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-    ) -> Option<DeclarationRefs> {
+    ) -> Option<Selection> {
         let selectors: Vec<_> = self.selectors().collect();
 
         // Nothing to do
@@ -88,55 +99,19 @@ impl Command {
             return None;
         }
 
-        let symbols = selectors
-            .into_iter()
-            .filter_map(|v: &dyn Selector| v.select_from_all(ctx, cfg))
-            .collect::<Vec<_>>();
+        let mut selection = Selection::new();
+        for selector in selectors.iter() {
+            let current_selection = selector.select_from_all(ctx, cfg).await.unwrap();
+            selection.extend(current_selection);
+        }
 
-        if symbols.iter().all(|s| s.is_empty()) {
+        if selection.is_empty() {
             return None;
         }
 
-        let symbols: DeclarationRefs = symbols.into_iter().flatten().collect();
+        self.filter(cfg, &mut selection);
 
-        let filterd_symbols = self.filter(cfg, symbols);
-        let symbols = match filterd_symbols {
-            Some(symbols) => symbols,
-            None => return Some(DeclarationRefs::new()),
-        };
-
-        Some(symbols)
-    }
-
-    pub fn select(
-        &self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        symbols: Option<DeclarationRefs>,
-    ) -> Option<DeclarationRefs> {
-        let selectors: Vec<_> = self.selectors().collect();
-
-        // Nothing to do
-        if selectors.len() == 0 {
-            return symbols;
-        }
-
-        let selector: Box<dyn FnMut(&dyn Selector) -> Option<DeclarationRefs>> = match symbols {
-            Some(symbols) => Box::new(move |v: &dyn Selector| v.select(ctx, cfg, symbols.clone())),
-            None => Box::new(|v: &dyn Selector| v.select_from_all(ctx, cfg)),
-        };
-
-        let symbols: DeclarationRefs = selectors
-            .into_iter()
-            .filter_map(selector)
-            .flatten()
-            .collect();
-
-        if symbols.len() == 0 {
-            return None;
-        }
-
-        Some(symbols)
+        Some(selection)
     }
 
     pub async fn derive_children(
@@ -144,12 +119,12 @@ impl Command {
         statement: &Statement,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        declarations: HashSet<DeclarationId>,
-    ) -> HashSet<Reference> {
+        children_refs: &Vec<ChildReference>,
+    ) -> Option<Selection> {
         self.derivers()
             .last()
             .unwrap()
-            .derive_children(statement, ctx, cfg, declarations)
+            .derive_children(statement, ctx, cfg, children_refs)
             .await
     }
 
@@ -158,12 +133,12 @@ impl Command {
         ctx: &mut ExecutionContext,
         statement: &Statement,
         cfg: &ControlFlowGraph,
-        symbol: DeclarationId,
-    ) -> Option<DeclarationRefs> {
+        parents_refs: &Vec<ParentReference>,
+    ) -> Option<Selection> {
         self.derivers()
             .last()
             .unwrap()
-            .derive_parents(ctx, statement, cfg, symbol)
+            .derive_parents(ctx, statement, cfg, parents_refs)
             .await
     }
 

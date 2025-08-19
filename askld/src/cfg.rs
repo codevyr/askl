@@ -1,7 +1,9 @@
 use std::{collections::HashSet, iter::Iterator};
 
-use index::db::{Declaration, File, Index, Module};
-use index::symbols::{DeclarationId, DeclarationRefs, ModuleId};
+use anyhow::Result;
+use index::db::{File, Module};
+use index::db_diesel::{Index, Selection, SelectionNode};
+use index::symbols::{clean_and_split_string, DeclarationId, DeclarationRefs, ModuleId};
 use index::symbols::{FileId, Occurrence, Symbol, SymbolId, SymbolMap};
 
 pub struct ControlFlowGraph {
@@ -11,19 +13,23 @@ pub struct ControlFlowGraph {
 }
 
 #[derive(Debug, Clone)]
-pub struct NodeList(pub HashSet<DeclarationId>);
+pub struct NodeList(pub HashSet<SelectionNode>);
 
 impl NodeList {
     pub fn new() -> Self {
         Self(HashSet::new())
     }
 
-    pub fn add(&mut self, node: DeclarationId) {
+    pub fn add(&mut self, node: SelectionNode) {
         self.0.insert(node);
     }
 
     pub fn as_vec(&self) -> Vec<DeclarationId> {
-        let mut res: Vec<_> = self.0.clone().into_iter().collect();
+        let mut res: Vec<_> = self
+            .0
+            .iter()
+            .map(|n| DeclarationId::new(n.declaration.id))
+            .collect();
         res.sort();
         res
     }
@@ -54,11 +60,11 @@ impl EdgeList {
 }
 
 impl ControlFlowGraph {
-    pub fn from_symbols(symbols: SymbolMap, index: Index) -> Self {
+    pub fn from_symbols(symbols: SymbolMap, index_diesel: Index) -> Self {
         let nodes: HashSet<SymbolId> = symbols.iter().map(|(id, _)| id.clone()).collect();
         Self {
             symbols,
-            index,
+            index: index_diesel,
             nodes,
         }
     }
@@ -89,10 +95,6 @@ impl ControlFlowGraph {
         None
     }
 
-    pub fn get_declaration(&self, id: DeclarationId) -> Option<&Declaration> {
-        self.symbols.declarations.get(&id)
-    }
-
     pub fn get_declarations_from_symbols(&self, symbols: &Vec<SymbolId>) -> DeclarationRefs {
         let mut res = DeclarationRefs::new();
         if symbols.len() == 0 {
@@ -108,5 +110,14 @@ impl ControlFlowGraph {
         }
 
         res
+    }
+
+    pub async fn find_symbol_by_name(&self, name: &str) -> Result<Selection> {
+        let name = clean_and_split_string(name);
+        let name_slice: Vec<_> = name.iter().map(String::as_str).collect();
+        self.index
+            .find_symbol_by_name(&name_slice)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to find symbol by name: {}", e))
     }
 }

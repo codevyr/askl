@@ -7,9 +7,9 @@ use crate::statement::Statement;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use core::fmt::Debug;
-use index::symbols::{
-    exact_name_match, partial_name_match, DeclarationId, DeclarationRefs, Occurrence, Reference,
-};
+use index::db_diesel::{ChildReference, ParentReference, Selection};
+use index::models_diesel::SymbolRef;
+use index::symbols::{DeclarationId, DeclarationRefs};
 use log::debug;
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
@@ -185,32 +185,16 @@ pub trait Verb: Debug + Sync {
 }
 
 pub trait Filter: Debug {
-    fn filter(&self, _cfg: &ControlFlowGraph, symbols: DeclarationRefs) -> DeclarationRefs {
-        symbols
-    }
-
-    fn filter_nodes(
-        &self,
-        _cfg: &ControlFlowGraph,
-        symbols: HashSet<DeclarationId>,
-    ) -> HashSet<DeclarationId> {
-        symbols
-    }
+    fn filter(&self, cfg: &ControlFlowGraph, selection: &mut Selection);
 }
 
+#[async_trait(?Send)]
 pub trait Selector: Debug {
-    fn select(
+    async fn select_from_all(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        symbols: DeclarationRefs,
-    ) -> Option<DeclarationRefs>;
-
-    fn select_from_all(
-        &self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-    ) -> Option<DeclarationRefs>;
+    ) -> Result<Selection>;
 }
 
 #[async_trait(?Send)]
@@ -220,16 +204,60 @@ pub trait Deriver: Debug {
         statement: &Statement,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        declarations: HashSet<DeclarationId>,
-    ) -> HashSet<Reference>;
+        children: &Vec<ChildReference>,
+    ) -> Option<Selection>;
 
     async fn derive_parents(
         &self,
         ctx: &mut ExecutionContext,
         statement: &Statement,
         cfg: &ControlFlowGraph,
-        declaration: DeclarationId,
-    ) -> Option<DeclarationRefs>;
+        parents: &Vec<ParentReference>,
+    ) -> Option<Selection>;
+
+    fn constrain_references(&self, _cfg: &ControlFlowGraph, selection: &mut Selection) {
+        let node_declaration_ids: HashSet<_> = selection
+            .nodes
+            .iter()
+            .map(|s| DeclarationId::new(s.declaration.id))
+            .collect();
+        selection
+            .parents
+            .retain(|c| node_declaration_ids.contains(&DeclarationId::new(c.to_declaration.id)));
+        selection
+            .children
+            .retain(|c| node_declaration_ids.contains(&DeclarationId::new(c.symbol_ref.from_decl)));
+    }
+
+    fn constrain_by_parents(
+        &self,
+        cfg: &ControlFlowGraph,
+        selection: &mut Selection,
+        references: &Vec<ChildReference>,
+    ) {
+        selection.nodes.retain(|s| {
+            references
+                .iter()
+                .any(|r| r.declaration.id == s.declaration.id)
+        });
+
+        self.constrain_references(cfg, selection);
+    }
+
+    fn constrain_by_children(
+        &self,
+        cfg: &ControlFlowGraph,
+        selection: &mut Selection,
+        references: &Vec<ParentReference>,
+    ) {
+        selection.nodes.retain(|s| {
+            references
+                .iter()
+                .any(|r| r.from_declaration.id == s.declaration.id)
+        });
+
+        self.constrain_references(cfg, selection);
+    }
 }
 
 pub trait Marker: Debug {
@@ -267,43 +295,16 @@ impl Verb for NameSelector {
     }
 }
 
+#[async_trait(?Send)]
 impl Selector for NameSelector {
-    fn select(
+    async fn select_from_all(
         &self,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        declarations: DeclarationRefs,
-    ) -> Option<DeclarationRefs> {
-        let res: DeclarationRefs = declarations
-            .into_iter()
-            .filter_map(|(id, refs)| {
-                let d = cfg.get_declaration(id).unwrap();
-                let s = cfg.get_symbol(d.symbol).unwrap();
-                if let Some(_) = partial_name_match(&self.name)((&d.symbol, &s)) {
-                    Some((id, refs.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+    ) -> Result<Selection> {
+        let symbols = cfg.find_symbol_by_name(self.name.as_str()).await;
 
-        if res.len() == 0 {
-            return None;
-        }
-        Some(res)
-    }
-
-    fn select_from_all(
-        &self,
-        _ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-    ) -> Option<DeclarationRefs> {
-        let symbols = cfg.symbols.find_all(partial_name_match(&self.name));
-        if symbols.len() == 0 {
-            return None;
-        }
-
-        Some(cfg.get_declarations_from_symbols(&symbols.into_iter().map(|s| s.id).collect()))
+        symbols
     }
 }
 
@@ -325,10 +326,6 @@ impl ForcedVerb {
 }
 
 impl Verb for ForcedVerb {
-    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
-        Ok(self)
-    }
-
     fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
         Ok(self)
     }
@@ -342,142 +339,92 @@ impl Verb for ForcedVerb {
 impl Deriver for ForcedVerb {
     async fn derive_children(
         &self,
-        _statement: &Statement,
+        statement: &Statement,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        declarations: HashSet<DeclarationId>,
-    ) -> HashSet<Reference> {
-        let mut references = HashSet::new();
-        let symbols = cfg
-            .symbols
-            .find_all(exact_name_match(&self.name))
-            .into_iter()
-            .map(|s| s.id)
-            .collect();
-        for parent_declaration_id in declarations {
-            for (child_declaration_id, _) in cfg.get_declarations_from_symbols(&symbols) {
-                let child_symbol = cfg.symbols.declarations.get(&child_declaration_id).unwrap();
-                references.insert(Reference::new(parent_declaration_id, child_symbol.symbol));
+        _children: &Vec<ChildReference>,
+    ) -> Option<Selection> {
+        let parent_statement = statement.parent();
+        if parent_statement.is_none() {
+            return None;
+        }
+        let parent_statement = parent_statement.unwrap();
+        let parent_statement = parent_statement.upgrade().unwrap();
+        let parent_state = parent_statement.get_state();
+        let parent_selection = parent_state.current.as_ref().unwrap();
+
+        let normal_selection = cfg.find_symbol_by_name(self.name.as_str()).await;
+        if normal_selection.is_err() {
+            println!(
+                "ForcedVerb: No symbols found with name {}",
+                self.name.as_str()
+            );
+            return None;
+        }
+        let mut normal_selection = normal_selection.unwrap();
+
+        let mut fake_parent_references = Vec::<ParentReference>::new();
+        for parent_node in parent_selection.nodes.iter() {
+            for child_node in normal_selection.nodes.iter() {
+                let reference = ParentReference {
+                    from_file: parent_node.file.clone(),
+                    from_symbol: parent_node.symbol.clone(),
+                    from_declaration: parent_node.declaration.clone(),
+                    to_symbol: child_node.symbol.clone(),
+                    to_declaration: child_node.declaration.clone(),
+                    symbol_ref: SymbolRef {
+                        rowid: 0,
+                        from_decl: parent_node.declaration.id,
+                        to_symbol: child_node.symbol.id,
+                        from_line: parent_node.declaration.line_start as i32,
+                        from_col_start: parent_node.declaration.col_start as i32,
+                        from_col_end: parent_node.declaration.col_end as i32,
+                    },
+                };
+                fake_parent_references.push(reference);
             }
         }
 
-        references
+        normal_selection.parents = fake_parent_references;
+
+        Some(normal_selection)
     }
 
     async fn derive_parents(
         &self,
         _ctx: &mut ExecutionContext,
-        statement: &Statement,
-        cfg: &ControlFlowGraph,
-        _symbol: DeclarationId,
-    ) -> Option<DeclarationRefs> {
-        let parents = if let Some(parent) = statement.parent() {
-            parent
-                .upgrade()
-                .unwrap()
-                .get_state()
-                .current
-                .clone()
-                .unwrap()
-        } else {
-            return None;
-        };
+        _statement: &Statement,
+        _cfg: &ControlFlowGraph,
+        _parents: &Vec<ParentReference>,
+    ) -> Option<Selection> {
+        unimplemented!("ForcedVerb does not support derive_parents");
+        // let decl_ids = parents
+        //     .iter()
+        //     .map(|p| DeclarationId::new(p.declaration.id))
+        //     .collect::<Vec<_>>();
+        // let parent_selection = cfg
+        //     .index_diesel
+        //     .find_symbol_by_declid(&decl_ids)
+        //     .await
+        //     .ok()?;
 
-        let declaration_refs = parents
-            .iter()
-            .filter_map(|id| {
-                let declaration = cfg.get_declaration(*id).unwrap();
-
-                Some((
-                    *id,
-                    vec![Occurrence {
-                        line_start: declaration.line_start as i32,
-                        line_end: declaration.line_end as i32,
-                        column_start: declaration.col_start as i32,
-                        column_end: declaration.col_end as i32,
-                        file: declaration.file_id,
-                    }]
-                    .into_iter()
-                    .collect::<HashSet<_>>(),
-                ))
-            })
-            .collect::<DeclarationRefs>();
-        Some(declaration_refs)
-    }
-}
-
-impl Selector for ForcedVerb {
-    fn select(
-        &self,
-        _ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        _declarations: DeclarationRefs,
-    ) -> Option<DeclarationRefs> {
-        let symbols = cfg
-            .symbols
-            .find_all(exact_name_match(&self.name))
-            .into_iter()
-            .map(|s| s.id)
-            .collect();
-        let sym_refs: DeclarationRefs = cfg.get_declarations_from_symbols(&symbols).iter().fold(
-            DeclarationRefs::new(),
-            |mut acc, refs| {
-                acc.insert(*refs.0, HashSet::new());
-                acc
-            },
-        );
-        if sym_refs.is_empty() {
-            return None;
-        }
-
-        Some(sym_refs)
+        // Some(parent_selection)
     }
 
-    fn select_from_all(
+    fn constrain_by_parents(
         &self,
-        _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-    ) -> Option<DeclarationRefs> {
-        let symbols = cfg
-            .symbols
-            .find_all(exact_name_match(&self.name))
-            .into_iter()
-            .map(|s| s.id)
-            .collect();
-        Some(cfg.get_declarations_from_symbols(&symbols))
+        selection: &mut Selection,
+        _references: &Vec<ChildReference>,
+    ) {
+        selection.nodes.retain(|s| self.name == s.symbol.name);
+
+        self.constrain_references(cfg, selection);
     }
 }
 
 impl Filter for ForcedVerb {
-    fn filter(&self, _cfg: &ControlFlowGraph, declarations: DeclarationRefs) -> DeclarationRefs {
-        println!("Filtering by forced verb: {} {:?}", self.name, declarations);
-        declarations
-    }
-
-    fn filter_nodes(
-        &self,
-        cfg: &ControlFlowGraph,
-        symbols: HashSet<DeclarationId>,
-    ) -> HashSet<DeclarationId> {
-        let forced_symbols = cfg
-            .symbols
-            .find_all(exact_name_match(&self.name))
-            .into_iter()
-            .map(|s| s.id)
-            .collect();
-        let forced = cfg
-            .get_declarations_from_symbols(&forced_symbols)
-            .iter()
-            .map(|(id, _)| *id)
-            .collect::<HashSet<_>>();
-
-        println!(
-            "Filtering nodes by forced verb: {} {:?} /// forced: {:?}",
-            self.name, symbols, forced
-        );
-
-        forced
-    }
+    fn filter(&self, _cfg: &ControlFlowGraph, _selection: &mut Selection) {}
 }
 
 /// Returns the same symbols as it have received
@@ -507,9 +454,9 @@ impl Deriver for UnitVerb {
         _statement: &Statement,
         _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
-        _declarations: HashSet<DeclarationId>,
-    ) -> HashSet<Reference> {
-        HashSet::new()
+        _children: &Vec<ChildReference>,
+    ) -> Option<Selection> {
+        None
     }
 
     async fn derive_parents(
@@ -517,8 +464,8 @@ impl Deriver for UnitVerb {
         _ctx: &mut ExecutionContext,
         _statement: &Statement,
         _cfg: &ControlFlowGraph,
-        _symbol: DeclarationId,
-    ) -> Option<DeclarationRefs> {
+        _parents: &Vec<ParentReference>,
+    ) -> Option<Selection> {
         None
     }
 }
@@ -549,31 +496,16 @@ impl Deriver for ChildrenVerb {
         _statement: &Statement,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        declarations: HashSet<DeclarationId>,
-    ) -> HashSet<Reference> {
-        let mut references = HashSet::new();
-        for parent_declaration_id in declarations {
-            let parent_declaration = cfg
-                .symbols
-                .declarations
-                .get(&parent_declaration_id)
-                .unwrap();
-            for reference in cfg.index.get_children(parent_declaration_id).await.unwrap() {
-                references.insert(Reference::new_occurrence(
-                    parent_declaration_id,
-                    reference.to_symbol,
-                    Occurrence {
-                        line_start: reference.from_line as i32,
-                        line_end: reference.from_line as i32,
-                        column_start: reference.from_col_start as i32,
-                        column_end: reference.from_col_end as i32,
-                        file: parent_declaration.file_id,
-                    },
-                ));
-            }
-        }
+        children: &Vec<ChildReference>,
+    ) -> Option<Selection> {
+        let decl_ids = children
+            .iter()
+            .map(|p| DeclarationId::new(p.declaration.id))
+            .collect::<Vec<_>>();
 
-        references
+        let children_selection = cfg.index.find_symbol_by_declid(&decl_ids).await.ok()?;
+
+        Some(children_selection)
     }
 
     async fn derive_parents(
@@ -581,28 +513,15 @@ impl Deriver for ChildrenVerb {
         _ctx: &mut ExecutionContext,
         _statement: &Statement,
         cfg: &ControlFlowGraph,
-        child_declaration_id: DeclarationId,
-    ) -> Option<DeclarationRefs> {
-        let mut references = DeclarationRefs::new();
-        for reference in cfg.index.get_parents(child_declaration_id).await.unwrap() {
-            let parent_declaration = cfg.symbols.declarations.get(&reference.from_decl).unwrap();
-            let occ = Occurrence {
-                line_start: reference.from_line as i32,
-                line_end: reference.from_line as i32,
-                column_start: reference.from_col_start as i32,
-                column_end: reference.from_col_end as i32,
-                file: parent_declaration.file_id,
-            };
+        parents: &Vec<ParentReference>,
+    ) -> Option<Selection> {
+        let decl_ids = parents
+            .iter()
+            .map(|p| DeclarationId::new(p.from_declaration.id))
+            .collect::<Vec<_>>();
+        let parent_selection = cfg.index.find_symbol_by_declid(&decl_ids).await.ok()?;
 
-            references
-                .entry(reference.from_decl)
-                .and_modify(|s| {
-                    s.insert(occ.clone());
-                })
-                .or_insert_with(|| HashSet::from([occ]));
-        }
-
-        Some(references)
+        Some(parent_selection)
     }
 }
 
@@ -634,29 +553,8 @@ impl Verb for IgnoreVerb {
 }
 
 impl Filter for IgnoreVerb {
-    fn filter(&self, cfg: &ControlFlowGraph, declarations: DeclarationRefs) -> DeclarationRefs {
-        println!("Filtering by forced verb: {} {:?}", self.name, declarations);
-        declarations
-            .into_iter()
-            .filter(|(declaration_id, _)| {
-                let declaration = cfg.get_declaration(*declaration_id).unwrap();
-                self.name != cfg.get_symbol(declaration.symbol).unwrap().name
-            })
-            .collect()
-    }
-
-    fn filter_nodes(
-        &self,
-        cfg: &ControlFlowGraph,
-        symbols: HashSet<DeclarationId>,
-    ) -> HashSet<DeclarationId> {
-        symbols
-            .into_iter()
-            .filter(|id| {
-                let declaration = cfg.get_declaration(*id).unwrap();
-                self.name != cfg.get_symbol(declaration.symbol).unwrap().name
-            })
-            .collect()
+    fn filter(&self, _cfg: &ControlFlowGraph, selection: &mut Selection) {
+        selection.nodes.retain(|s| self.name != s.symbol.name);
     }
 }
 
@@ -690,42 +588,10 @@ impl Verb for ModuleFilter {
 }
 
 impl Filter for ModuleFilter {
-    fn filter(&self, cfg: &ControlFlowGraph, declarations: DeclarationRefs) -> DeclarationRefs {
-        let module = if let Some(module) = cfg.find_module(&self.module) {
-            module
-        } else {
-            return DeclarationRefs::new();
-        };
-
-        declarations
-            .into_iter()
-            .filter(|(declaration_id, _)| {
-                let declaration = cfg.get_declaration(*declaration_id).unwrap();
-                let file = cfg.get_file(declaration.file_id).unwrap();
-                module.id == file.module
-            })
-            .collect()
-    }
-
-    fn filter_nodes(
-        &self,
-        cfg: &ControlFlowGraph,
-        symbols: HashSet<DeclarationId>,
-    ) -> HashSet<DeclarationId> {
-        let module = if let Some(module) = cfg.find_module(&self.module) {
-            module
-        } else {
-            return HashSet::new();
-        };
-
-        symbols
-            .into_iter()
-            .filter(|id| {
-                let declaration = cfg.get_declaration(*id).unwrap();
-                let file = cfg.get_file(declaration.file_id).unwrap();
-                module.id == file.module
-            })
-            .collect()
+    fn filter(&self, _cfg: &ControlFlowGraph, selection: &mut Selection) {
+        selection
+            .nodes
+            .retain(|s| self.module == s.module.module_name);
     }
 }
 
@@ -778,9 +644,9 @@ impl Deriver for IsolatedScope {
         _statement: &Statement,
         _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
-        _declarations: HashSet<DeclarationId>,
-    ) -> HashSet<Reference> {
-        HashSet::new()
+        _children: &Vec<ChildReference>,
+    ) -> Option<Selection> {
+        None
     }
 
     async fn derive_parents(
@@ -788,8 +654,8 @@ impl Deriver for IsolatedScope {
         _ctx: &mut ExecutionContext,
         _statement: &Statement,
         _cfg: &ControlFlowGraph,
-        _declaration: DeclarationId,
-    ) -> Option<DeclarationRefs> {
+        _parents: &Vec<ParentReference>,
+    ) -> Option<Selection> {
         None
     }
 }
@@ -898,103 +764,79 @@ impl Deriver for UserVerb {
     async fn derive_children(
         &self,
         _statement: &Statement,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        declarations: HashSet<DeclarationId>,
-    ) -> HashSet<Reference> {
-        let mut references = HashSet::new();
-        for parent_declaration_id in declarations {
-            for child_declaration_id in ctx.saved_labels.get(&self.label).unwrap() {
-                let child_declaration =
-                    cfg.symbols.declarations.get(&child_declaration_id).unwrap();
-                references.insert(Reference::new(
-                    parent_declaration_id,
-                    child_declaration.symbol,
-                ));
-            }
-        }
+        _ctx: &mut ExecutionContext,
+        _cfg: &ControlFlowGraph,
+        _children: &Vec<ChildReference>,
+    ) -> Option<Selection> {
+        unimplemented!("UserVerb does not support derive_children");
+        // let mut references = HashSet::new();
+        // for parent_declaration_id in declarations {
+        //     for child_declaration_id in ctx.saved_labels.get(&self.label).unwrap() {
+        //         let child_declaration =
+        //             cfg.symbols.declarations.get(&child_declaration_id).unwrap();
+        //         references.insert(Reference::new(
+        //             parent_declaration_id,
+        //             child_declaration.symbol,
+        //         ));
+        //     }
+        // }
 
-        references
+        // references
     }
 
     async fn derive_parents(
         &self,
         _ctx: &mut ExecutionContext,
-        statement: &Statement,
-        cfg: &ControlFlowGraph,
-        _declaration: DeclarationId,
-    ) -> Option<DeclarationRefs> {
-        let parents = if let Some(parent) = statement.parent() {
-            parent
-                .upgrade()
-                .unwrap()
-                .get_state()
-                .current
-                .clone()
-                .unwrap()
-        } else {
-            return None;
-        };
+        _statement: &Statement,
+        _cfg: &ControlFlowGraph,
+        _parents: &Vec<ParentReference>,
+    ) -> Option<Selection> {
+        unimplemented!("UserVerb does not support derive_parents");
+        // let parents = if let Some(parent) = statement.parent() {
+        //     parent
+        //         .upgrade()
+        //         .unwrap()
+        //         .get_state_mut()
+        //         .current
+        //         .clone()
+        //         .unwrap()
+        // } else {
+        //     return None;
+        // };
 
-        let declaration_refs = parents
-            .iter()
-            .filter_map(|id| {
-                let declaration = cfg.get_declaration(*id).unwrap();
+        // let declaration_refs = parents
+        //     .parents
+        //     .iter()
+        //     .filter_map(|decl_res| {
+        //         let decl_id = DeclarationId::new(decl_res.declaration.id);
+        //         let declaration = cfg.get_declaration(decl_id).unwrap();
 
-                Some((
-                    *id,
-                    vec![Occurrence {
-                        line_start: declaration.line_start as i32,
-                        line_end: declaration.line_end as i32,
-                        column_start: declaration.col_start as i32,
-                        column_end: declaration.col_end as i32,
-                        file: declaration.file_id,
-                    }]
-                    .into_iter()
-                    .collect::<HashSet<_>>(),
-                ))
-            })
-            .collect::<DeclarationRefs>();
-        Some(declaration_refs)
+        //         Some((
+        //             decl_id,
+        //             vec![Occurrence {
+        //                 line_start: declaration.line_start as i32,
+        //                 line_end: declaration.line_end as i32,
+        //                 column_start: declaration.col_start as i32,
+        //                 column_end: declaration.col_end as i32,
+        //                 file: declaration.file_id,
+        //             }]
+        //             .into_iter()
+        //             .collect::<HashSet<_>>(),
+        //         ))
+        //     })
+        //     .collect::<DeclarationRefs>();
+        // Some(declaration_refs);
     }
 }
 
+#[async_trait(?Send)]
 impl Selector for UserVerb {
-    fn select_from_all(
+    async fn select_from_all(
         &self,
-        ctx: &mut ExecutionContext,
+        _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
-    ) -> Option<DeclarationRefs> {
-        if let Some(ids) = ctx.saved_labels.get(&self.label) {
-            Some(ids.into_iter().map(|id| (*id, HashSet::new())).collect())
-        } else {
-            // bail!("Label {} does not exist", self.label);
-            None
-        }
-    }
-
-    fn select(
-        &self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        declarations: DeclarationRefs,
-    ) -> Option<DeclarationRefs> {
-        if self.forced {
-            return self.select_from_all(ctx, cfg);
-        }
-
-        let saved_ids = if let Some(saved) = ctx.saved_labels.get(&self.label) {
-            saved
-        } else {
-            return None;
-        };
-
-        Some(
-            declarations
-                .into_iter()
-                .filter(|(id, _)| saved_ids.contains(id))
-                .collect(),
-        )
+    ) -> Result<Selection> {
+        unimplemented!("UserVerb does not support select_from_all");
     }
 }
 

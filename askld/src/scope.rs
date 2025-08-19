@@ -1,15 +1,11 @@
-use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
-use crate::execution_context::ExecutionContext;
 use crate::hierarchy::Hierarchy;
 use crate::parser::Rule;
 use crate::parser_context::ParserContext;
 use crate::statement::{build_empty_statement, build_statement, Statement};
 use async_trait::async_trait;
 use core::fmt::Debug;
-use index::symbols::{DeclarationId, DeclarationRefs};
 use pest::error::Error;
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::rc::{Rc, Weak};
 
 pub fn build_scope(
@@ -54,72 +50,6 @@ pub type StatementIter = Box<dyn Iterator<Item = Rc<Statement>>>;
 #[async_trait(?Send)]
 pub trait Scope: Debug + Hierarchy {
     fn statements(&self) -> StatementIter;
-
-    async fn run(
-        &self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        symbols: Option<DeclarationRefs>,
-    ) -> Option<(DeclarationRefs, NodeList, EdgeList)> {
-        let mut res_nodes = NodeList::new();
-        let mut res_edges = EdgeList::new();
-        let mut res_symbols = DeclarationRefs::new();
-
-        let mut ignored_ids = HashSet::new();
-
-        for statement in self.statements() {
-            // Iterate through all the statements in the scope or subscope of
-            // the query
-            if let Some((resolved_symbols, scope_nodes, scope_edges)) = statement
-                .execute(ctx, cfg, symbols.clone(), &ignored_ids)
-                .await
-            {
-                ignored_ids.extend(resolved_symbols.iter().map(|(id, _)| *id));
-                // res_nodes.0.push(symbol.clone());
-                res_nodes.0.extend(scope_nodes.0.into_iter());
-                res_edges.0.extend(scope_edges.0.into_iter());
-                res_symbols.extend(resolved_symbols.into_iter());
-            }
-        }
-
-        Some((res_symbols, res_nodes, res_edges))
-    }
-
-    async fn run_symbols(
-        &self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        symbols: HashSet<DeclarationId>,
-    ) -> Option<(HashSet<DeclarationId>, NodeList, EdgeList)> {
-        let mut res_nodes = NodeList::new();
-        let mut res_edges = EdgeList::new();
-        let mut res_symbols = HashSet::new();
-
-        let mut ignored_ids = HashSet::new();
-        for statement in self.statements() {
-            // Iterate through all the statements in the scope or subscope of
-            // the query
-
-            let statement_refs = symbols.iter().map(|id| (*id, HashSet::new())).collect();
-
-            if let Some((resolved_symbols, scope_nodes, scope_edges)) = statement
-                .execute(ctx, cfg, Some(statement_refs), &ignored_ids)
-                .await
-            {
-                res_symbols.extend(
-                    symbols
-                        .iter()
-                        .filter(|r| resolved_symbols.contains_key(r))
-                        .map(|r| r.clone()),
-                );
-                ignored_ids.extend(resolved_symbols.iter().map(|(id, _)| *id));
-                res_nodes.0.extend(scope_nodes.0.into_iter());
-                res_edges.0.extend(scope_edges.0.into_iter());
-            }
-        }
-
-        Some((res_symbols, res_nodes, res_edges))
-    }
 }
 
 #[derive(Debug)]
@@ -174,15 +104,6 @@ impl EmptyScope {
 impl Scope for EmptyScope {
     fn statements(&self) -> StatementIter {
         Box::new(std::iter::empty())
-    }
-
-    async fn run(
-        &self,
-        _ctx: &mut ExecutionContext,
-        _cfg: &ControlFlowGraph,
-        _symbols: Option<DeclarationRefs>,
-    ) -> Option<(DeclarationRefs, NodeList, EdgeList)> {
-        Some((DeclarationRefs::new(), NodeList::new(), EdgeList::new()))
     }
 }
 

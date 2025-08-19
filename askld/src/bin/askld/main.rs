@@ -5,8 +5,8 @@ use anyhow::{anyhow, Result};
 use askld::execution_context::ExecutionContext;
 use askld::{cfg::ControlFlowGraph, parser::parse};
 use clap::Parser;
-use index::db::{Declaration, Index};
-use index::symbols::{FileId, Occurrence};
+use index::db::{self, Index};
+use index::symbols::{DeclarationId, FileId, Occurrence, SymbolType};
 use index::symbols::{SymbolId, SymbolMap};
 use log::{debug, info};
 use serde::{Deserialize, Serialize, Serializer};
@@ -40,11 +40,11 @@ struct Node {
     #[serde(serialize_with = "symbolid_as_string")]
     id: SymbolId,
     label: String,
-    declarations: Vec<Declaration>,
+    declarations: Vec<db::Declaration>,
 }
 
 impl Node {
-    fn new(id: SymbolId, label: String, declarations: Vec<Declaration>) -> Self {
+    fn new(id: SymbolId, label: String, declarations: Vec<db::Declaration>) -> Self {
         Self {
             id,
             label,
@@ -143,27 +143,43 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
         ));
     }
 
-    for declaration_id in res_nodes.as_vec() {
-        let declaration = data.cfg.symbols.declarations.get(&declaration_id).unwrap();
-        all_symbols.insert(declaration.symbol);
+    for declaration in res_nodes.0.iter() {
+        all_symbols.insert(SymbolId(declaration.symbol.id));
     }
 
     let mut result_files = HashMap::new();
     for symbol_id in all_symbols {
         let sym = data.cfg.get_symbol(symbol_id).unwrap();
-        let declarations =
-            if let Ok(declarations) = data.cfg.index.symbol_declarations(symbol_id).await {
-                declarations
-            } else {
-                return HttpResponse::BadRequest().body("SymbolId not found");
-            };
 
-        for declaration in declarations.iter() {
-            if !result_files.contains_key(&declaration.file_id) {
-                let f = data.cfg.index.get_file(declaration.file_id).await.unwrap();
-                result_files.insert(declaration.file_id, f.filesystem_path);
+        for declaration in res_nodes.0.iter() {
+            if !result_files.contains_key(&FileId::new(declaration.file.id)) {
+                result_files.insert(
+                    FileId::new(declaration.file.id),
+                    declaration.file.filesystem_path.clone(),
+                );
             }
         }
+
+        let declarations: Vec<db::Declaration> = res_nodes
+            .0
+            .iter()
+            .filter(|d| d.declaration.symbol == symbol_id.0)
+            .map(|d| db::Declaration {
+                id: DeclarationId::new(d.declaration.id),
+                symbol: SymbolId(d.declaration.symbol),
+                file_id: FileId::new(d.file.id),
+                symbol_type: SymbolType::from(d.declaration.symbol_type),
+                line_start: d.declaration.line_start as i64,
+                line_end: d.declaration.line_end as i64,
+                col_start: d.declaration.col_start as i64,
+                col_end: d.declaration.col_end as i64,
+            })
+            .collect();
+
+        println!(
+            "Declarations for symbol {}: {:?}",
+            symbol_id.0, declarations
+        );
         result_graph.add_node(Node::new(symbol_id, sym.name.clone(), declarations));
     }
 
@@ -191,9 +207,10 @@ async fn file(data: web::Data<AsklData>, file_id: web::Path<FileId>) -> impl Res
 async fn read_data(args: &Args) -> Result<AsklData> {
     match args.format.as_str() {
         "sqlite" => {
+            let index_diesel = index::db_diesel::Index::connect(&args.index).await?;
             let index = Index::connect(&args.index).await?;
             let symbols = SymbolMap::from_index(&index).await?;
-            let cfg = ControlFlowGraph::from_symbols(symbols, index);
+            let cfg = ControlFlowGraph::from_symbols(symbols, index_diesel);
             Ok(AsklData { cfg: cfg })
         }
         _ => Err(anyhow!("Unsupported index format: {}", args.format)),

@@ -4,7 +4,8 @@ use crate::cfg::{EdgeList, NodeList};
 use crate::execution_context::ExecutionContext;
 use crate::{cfg::ControlFlowGraph, parser::parse};
 use anyhow::{anyhow, Result};
-use index::db::Index;
+use index::db;
+use index::db_diesel::Index;
 use index::symbols::SymbolMap;
 use tokio::{runtime::Runtime, task};
 
@@ -23,10 +24,12 @@ pub async fn run_query_async_err(
     askl_input: &str,
     askl_query: &str,
 ) -> Result<(NodeList, EdgeList)> {
-    let index = Index::new_in_memory().await.unwrap();
+    let index_diesel = Index::new_in_memory().await.unwrap();
+    let index = db::Index::new_in_memory().await.unwrap();
     index.load_test_input(askl_input).await.unwrap();
+    index_diesel.load_test_input(askl_input).await.unwrap();
     let symbols: SymbolMap = SymbolMap::from_index(&index).await.unwrap();
-    let cfg = ControlFlowGraph::from_symbols(symbols, index);
+    let cfg = ControlFlowGraph::from_symbols(symbols, index_diesel);
 
     let ast = parse(askl_query)?;
     println!("{:#?}", ast);

@@ -1,4 +1,4 @@
-use crate::cfg::{self, ControlFlowGraph, EdgeList, NodeList};
+use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
 use crate::command::Command;
 use crate::execution_context::ExecutionContext;
 use crate::execution_state::ExecutionState;
@@ -7,13 +7,13 @@ use crate::parser::Rule;
 use crate::parser_context::ParserContext;
 use crate::scope::{build_scope, EmptyScope, Scope, StatementIter};
 use crate::verb::build_verb;
+use anyhow::Result;
 use core::fmt::Debug;
 use core::panic;
-use index::symbols::{DeclarationId, DeclarationRefs};
+use index::symbols::{DeclarationId, DeclarationRefs, FileId, Occurrence};
 use pest::error::Error;
-use std::cell::{RefCell, RefMut};
+use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashSet;
-use std::ptr;
 use std::rc::{Rc, Weak};
 
 pub fn build_statement<'a>(
@@ -84,10 +84,6 @@ impl Statement {
         })
     }
 
-    fn id(&self) -> usize {
-        ptr::addr_of!(self) as usize
-    }
-
     pub fn command(&self) -> &Command {
         &self.command
     }
@@ -96,55 +92,127 @@ impl Statement {
         self.scope.clone()
     }
 
-    pub fn get_state(&self) -> RefMut<ExecutionState> {
+    pub fn get_state_mut(&self) -> RefMut<'_, ExecutionState> {
         self.execution_state.borrow_mut()
     }
 
-    pub async fn update_edges(
-        &self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        nodes: &NodeList,
-    ) -> EdgeList {
-        let mut edges = EdgeList::new();
-        for node_i in nodes.0.iter() {
-            for node_j in nodes.0.iter() {
-                if node_i == node_j {
-                    continue;
-                };
-                let derived = self
-                    .command()
-                    .derive_parents(ctx, self, cfg, *node_i)
-                    .await
-                    .or(Some(DeclarationRefs::new()))
-                    .unwrap();
+    pub fn get_state(&self) -> Ref<'_, ExecutionState> {
+        self.execution_state.borrow()
+    }
 
-                derived
-                    .into_iter()
-                    .for_each(|(declaration_id, occurences)| {
-                        if declaration_id == *node_j {
-                            for occ in occurences.into_iter() {
-                                edges.add_reference(declaration_id, *node_i, Some(occ))
-                            }
-                        }
-                    })
+    async fn update_parents(&self, ctx: &mut ExecutionContext, cfg: &ControlFlowGraph) {
+        if let Some(parent) = self.parent() {
+            let parent = parent.upgrade().unwrap();
+            let has_current = {
+                let state = parent.get_state();
+                state.current.is_some()
+            }; // Drop the immutable borrow here
+
+            if has_current {
+                let current_declarations = {
+                    let current_state = self.get_state();
+                    current_state.current.as_ref().unwrap().parents.clone()
+                }; // Drop the borrow here
+
+                let mut state = parent.get_state_mut();
+                let parent_selection = state.current.as_mut().unwrap();
+
+                let old_decl_ids = parent_selection.get_decl_ids();
+                // If the parent already has a current selection, filter it by the
+                // current declarations.
+
+                parent.command().constrain_by_children(
+                    cfg,
+                    parent_selection,
+                    &current_declarations,
+                );
+
+                if old_decl_ids != parent_selection.get_decl_ids() {
+                    state.completed = false
+                }
+            } else {
+                // If the parent does not have a current selection, derive it from
+                // the current declarations.
+                let current_declarations = {
+                    let current_state = self.get_state();
+                    current_state.current.as_ref().unwrap().parents.clone()
+                }; // Drop the borrow here
+
+                let parents_selection = parent
+                    .command()
+                    .derive_parents(ctx, &parent, cfg, &current_declarations)
+                    .await;
+
+                if parents_selection.is_none() {
+                    return;
+                }
+                let mut parents_selection = parents_selection.unwrap();
+
+                parent.command().filter(cfg, &mut parents_selection);
+                let mut state = parent.get_state_mut();
+                state.current = Some(parents_selection);
             }
         }
+    }
 
-        edges
+    async fn update_children(&self, ctx: &mut ExecutionContext, cfg: &ControlFlowGraph) {
+        for child in self.children() {
+            let has_current = {
+                let state = child.get_state();
+                state.current.is_some()
+            }; // Drop the immutable borrow here
+
+            if has_current {
+                let current_declarations = {
+                    let current_state = self.get_state();
+                    current_state.current.as_ref().unwrap().children.clone()
+                }; // Drop the borrow here
+
+                let mut state = child.get_state_mut();
+                let child_selection = state.current.as_mut().unwrap();
+
+                let old_decl_ids = child_selection.get_decl_ids();
+
+                child
+                    .command()
+                    .constrain_by_parents(cfg, child_selection, &current_declarations);
+                if old_decl_ids != child_selection.get_decl_ids() {
+                    state.completed = false
+                }
+            } else {
+                let child: &Statement = child.as_ref();
+                let current_declarations = {
+                    let current_state = self.get_state();
+                    current_state.current.as_ref().unwrap().children.clone()
+                }; // Drop the borrow here
+
+                let children_selection = child
+                    .command()
+                    .derive_children(child, ctx, cfg, &current_declarations)
+                    .await;
+
+                if children_selection.is_none() {
+                    continue;
+                }
+                let mut children_selection = children_selection.unwrap();
+
+                child.command().filter(cfg, &mut children_selection);
+                let mut state = child.get_state_mut();
+                state.current = Some(children_selection);
+            }
+        }
     }
 
     async fn compute_nodes(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-    ) -> Option<HashSet<DeclarationId>> {
+    ) -> Result<Vec<Rc<Statement>>> {
         let mut statements = vec![];
         crate::scope::visit(self.scope(), &mut |statement| {
             statements.push(statement);
             true
-        })
-        .ok()?;
+        })?;
 
         println!(
             "Executing global statement with {} statements",
@@ -152,11 +220,12 @@ impl Statement {
         );
 
         // First, execute all selectors
-        statements.iter_mut().for_each(|statement| {
+        for statement in statements.iter_mut() {
             statement
-                .get_state()
-                .select_nodes(ctx, cfg, statement.as_ref());
-        });
+                .get_state_mut()
+                .select_nodes(ctx, cfg, statement.as_ref())
+                .await;
+        }
 
         while !statements.iter().all(|s| s.get_state().completed) {
             // Find an uncompleted statement with the least number of nodes. If
@@ -165,18 +234,7 @@ impl Statement {
                 s.get_state()
                     .current
                     .as_ref()
-                    .map_or(usize::MAX, |refs| refs.len())
-            });
-
-            println!("All statements:");
-            statements.iter().for_each(|s| {
-                let ss = s.get_state();
-                println!(
-                    "Statement: {:?}, completed: {}, current: {:?}",
-                    s.command(),
-                    ss.completed,
-                    ss.current
-                );
+                    .map_or(usize::MAX, |refs| refs.nodes.len())
             });
 
             let mut uncompleted_statements: Vec<_> = statements
@@ -187,40 +245,22 @@ impl Statement {
                 panic!("No uncompleted statements found, this should not happen");
             }
 
-            let current_node = &mut uncompleted_statements[0];
+            let current_node = &mut *uncompleted_statements[0];
 
-            if let Some(current_state) = current_node.get_state().current.as_ref() {
-                let current_declarations = current_state
-                    .iter()
-                    .map(|id| *id)
-                    .collect::<HashSet<DeclarationId>>();
+            if let Some(selection) = &mut current_node.get_state_mut().current {
+                current_node.command().filter(cfg, selection);
+                current_node.command().constrain_references(cfg, selection);
+            }
 
-                current_node
-                    .update_parents(ctx, cfg, &current_declarations)
-                    .await;
-
-                current_node
-                    .update_children(ctx, cfg, &current_declarations)
-                    .await;
+            if current_node.get_state().current.as_ref().is_some() {
+                current_node.update_parents(ctx, cfg).await;
+                current_node.update_children(ctx, cfg).await;
             };
 
-            current_node.get_state().completed = true;
+            current_node.get_state_mut().completed = true;
         }
 
-        statements.iter_mut().for_each(|statement| {
-            println!(
-                "Final state for statement {:?}: {:?}",
-                statement.command(),
-                statement.get_state().current
-            );
-        });
-
-        let mut all_nodes = HashSet::new();
-        for statement in &statements {
-            all_nodes.extend(statement.get_state().nodes_iter().copied());
-        }
-
-        Some(all_nodes)
+        Ok(statements)
     }
 
     pub async fn execute(
@@ -230,273 +270,78 @@ impl Statement {
         _symbols: Option<DeclarationRefs>,
         _ignored_symbols: &HashSet<DeclarationId>,
     ) -> Option<(DeclarationRefs, NodeList, EdgeList)> {
-        let all_nodes = self.compute_nodes(ctx, cfg).await?;
-        println!("All nodes: {:?}", all_nodes);
+        let statements = self.compute_nodes(ctx, cfg).await.ok()?;
 
-        let mut statements = vec![];
-        crate::scope::visit(self.scope(), &mut |statement| {
-            statements.push(statement);
-            true
-        })
-        .ok()?;
+        let mut all_nodes = Vec::new();
+        for statement in &statements {
+            all_nodes.extend(statement.get_state_mut().nodes_iter().cloned());
+        }
+
+        let complete_selection = all_nodes.clone();
+
+        let all_nodes = HashSet::<DeclarationId>::from_iter(
+            all_nodes
+                .iter()
+                .map(|node| DeclarationId::new(node.declaration.id)),
+        );
 
         let mut all_references = EdgeList::new();
-        for statement in statements.iter() {
-            for node in statement.get_state().nodes_iter() {
-                let parent_references = statement
-                    .command()
-                    .derive_parents(ctx, statement.as_ref(), cfg, *node)
-                    .await;
-                println!(
-                    "Node: {:?}, parent references: {:?}",
-                    node, parent_references
-                );
-                if parent_references.is_none() {
+        for statement in &statements {
+            let state = statement.get_state_mut();
+
+            let current = if let Some(current) = state.current.as_ref() {
+                current
+            } else {
+                continue;
+            };
+            for child in &current.children {
+                if !all_nodes.contains(&DeclarationId::new(child.symbol_ref.from_decl))
+                    || !all_nodes.contains(&DeclarationId::new(child.declaration.id))
+                {
                     continue;
                 }
 
-                let parent_references = parent_references.unwrap();
-                for (parent_id, occurrences) in parent_references {
-                    if !all_nodes.contains(&parent_id) {
-                        continue;
-                    }
-                    for occurrence in occurrences.iter() {
-                        all_references.add_reference(parent_id, *node, Some(occurrence.clone()));
-                    }
-                }
+                let occurrence = Occurrence {
+                    file: FileId::new(child.from_file.id),
+                    line_start: child.symbol_ref.from_line,
+                    column_start: child.symbol_ref.from_col_start,
+                    line_end: child.symbol_ref.from_line,
+                    column_end: child.symbol_ref.from_col_end,
+                };
+                all_references.add_reference(
+                    DeclarationId::new(child.symbol_ref.from_decl),
+                    DeclarationId::new(child.declaration.id),
+                    Some(occurrence),
+                );
             }
-        }
 
-        for (from, to, occurrences) in all_references.as_vec().iter() {
-            println!(
-                "All references: {:?} -> {:?} @ {:?}",
-                from,
-                to,
-                occurrences.iter().collect::<Vec<_>>()
-            );
+            for parent in &current.parents {
+                if !all_nodes.contains(&DeclarationId::new(parent.symbol_ref.from_decl))
+                    || !all_nodes.contains(&DeclarationId::new(parent.to_declaration.id))
+                {
+                    continue;
+                }
+
+                let occurrence = Occurrence {
+                    file: FileId::new(parent.from_file.id),
+                    line_start: parent.symbol_ref.from_line,
+                    column_start: parent.symbol_ref.from_col_start,
+                    line_end: parent.symbol_ref.from_line,
+                    column_end: parent.symbol_ref.from_col_end,
+                };
+                all_references.add_reference(
+                    DeclarationId::new(parent.symbol_ref.from_decl),
+                    DeclarationId::new(parent.to_declaration.id),
+                    Some(occurrence),
+                );
+            }
         }
 
         return Some((
             DeclarationRefs::new(),
-            cfg::NodeList(all_nodes),
+            NodeList(complete_selection.into_iter().collect()),
             all_references,
         ));
-    }
-
-    async fn update_parents(
-        &self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        current_declarations: &HashSet<DeclarationId>,
-    ) {
-        let mut all_parent_references = HashSet::new();
-        for current in current_declarations.iter() {
-            let parent_references = self
-                .command()
-                .derive_parents(ctx, self, cfg, *current)
-                .await;
-            println!(
-                "Current node: {:?}, parent references: {:?}",
-                current, parent_references
-            );
-            if let Some(parent_references) = parent_references {
-                for (parent_id, _) in parent_references {
-                    all_parent_references.insert(parent_id);
-                }
-            }
-        }
-
-        if let Some(parent) = self.parent() {
-            let filtered_declarations = parent
-                .upgrade()
-                .unwrap()
-                .command()
-                .filter_nodes(cfg, all_parent_references);
-            println!(
-                "Retaining state for parent: {:?} with references: {:?}",
-                parent, filtered_declarations
-            );
-            parent
-                .upgrade()
-                .unwrap()
-                .get_state()
-                .retain(ctx, &filtered_declarations);
-        }
-    }
-
-    async fn update_children(
-        &self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        current_declarations: &HashSet<DeclarationId>,
-    ) {
-        let children_references = self
-            .command()
-            .derive_children(self, ctx, cfg, current_declarations.clone())
-            .await;
-        let mut children_ids = HashSet::new();
-        for d in children_references.iter() {
-            let declarations = cfg.get_declarations_from_symbols(&vec![d.to]);
-            for declaration in declarations {
-                children_ids.insert(declaration.0);
-            }
-        }
-
-        for child in self.children() {
-            println!(
-                "Current node: {:?}, child references: {:?}",
-                child, children_ids
-            );
-            let filtered_ids = child.command().filter_nodes(cfg, children_ids.clone());
-            println!(
-                "Retaining state for child: {:?} with references: {:?}",
-                child, filtered_ids
-            );
-            child.get_state().retain(ctx, &filtered_ids);
-        }
-    }
-
-    async fn execute_for_all(
-        &self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-    ) -> (DeclarationRefs, NodeList, EdgeList) {
-        let mut res_edges = EdgeList::new();
-        let mut res_nodes = NodeList::new();
-        let mut res_declarations = DeclarationRefs::new();
-
-        if let Some((resolved_declarations, nodes, edges)) = self.scope().run(ctx, cfg, None).await
-        {
-            res_nodes.0.extend(nodes.0.into_iter());
-            res_edges.0.extend(edges.0.into_iter());
-            res_nodes
-                .0
-                .extend(resolved_declarations.iter().map(|(s, _)| s.clone()));
-            for (resolved_declaration_id, _) in resolved_declarations {
-                let resolved_declaration = cfg
-                    .symbols
-                    .declarations
-                    .get(&resolved_declaration_id)
-                    .unwrap();
-                let derived_declarations = self
-                    .command()
-                    .derive_parents(ctx, self, cfg, resolved_declaration_id)
-                    .await;
-
-                let derived_declarations = if let Some(declarations) = derived_declarations {
-                    declarations
-                } else {
-                    continue;
-                };
-
-                let filtered_declarations = self.command().filter(cfg, derived_declarations);
-                let selected_declarations = self.command().select(ctx, cfg, filtered_declarations);
-
-                if let Some(selected_declarations) = selected_declarations {
-                    for (selected_declaration_id, occurrences) in selected_declarations {
-                        res_nodes.add(selected_declaration_id);
-                        res_declarations.insert(selected_declaration_id, occurrences.clone());
-                        for occurrence in occurrences {
-                            res_edges.add_reference(
-                                selected_declaration_id,
-                                resolved_declaration.id,
-                                Some(occurrence),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        return (res_declarations, res_nodes, res_edges);
-    }
-
-    async fn execute_old(
-        &self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        parent_declarations: Option<DeclarationRefs>,
-        ignored_symbols: &HashSet<DeclarationId>,
-    ) -> Option<(DeclarationRefs, NodeList, EdgeList)> {
-        let mut res_edges = EdgeList::new();
-        let mut res_nodes = NodeList::new();
-        let mut res_symbols = DeclarationRefs::new();
-
-        let filtered_symbols = if let Some(parent_declarations) = parent_declarations {
-            let parent_declaration_ids: HashSet<_> =
-                parent_declarations.into_iter().map(|(d, _)| d).collect();
-            let derived_references = self
-                .command()
-                .derive_children(self, ctx, cfg, parent_declaration_ids)
-                .await;
-            let mut derived_ids = DeclarationRefs::new();
-            for d in derived_references.iter() {
-                let declarations = cfg.get_declarations_from_symbols(&vec![d.to]);
-                for declaration in declarations {
-                    derived_ids.insert(declaration.0, HashSet::new());
-                }
-            }
-
-            let selected_symbols =
-                if let Some(selected) = self.command().select(ctx, cfg, Some(derived_ids)) {
-                    selected
-                } else {
-                    return Some((res_symbols, res_nodes, res_edges));
-                };
-
-            let filtered_symbols = self.command().filter(cfg, selected_symbols).unwrap();
-            let filtered_symbols: DeclarationRefs = filtered_symbols
-                .into_iter()
-                .filter(|(id, _)| !ignored_symbols.contains(id))
-                .collect();
-            for reference in derived_references {
-                let declarations = cfg.index.symbol_declarations(reference.to).await.unwrap();
-                for declaration in declarations {
-                    if filtered_symbols.contains_key(&declaration.id) {
-                        let declarations_to =
-                            cfg.index.symbol_declarations(reference.to).await.unwrap();
-                        for declaration_to in declarations_to {
-                            res_edges.add_reference(
-                                reference.from,
-                                declaration_to.id,
-                                reference.occurrence.clone(),
-                            );
-                            break;
-                        }
-                    }
-                }
-            }
-            filtered_symbols
-        } else {
-            if let Some(selected) = self.command().select(ctx, cfg, None) {
-                self.command().filter(cfg, selected).unwrap()
-            } else {
-                return Some(self.execute_for_all(ctx, cfg).await);
-            }
-        };
-
-        let filtered_ids = filtered_symbols.iter().map(|(id, _)| *id).collect();
-
-        if let Some((resolved_symbols, nodes, edges)) =
-            self.scope().run_symbols(ctx, cfg, filtered_ids).await
-        {
-            res_nodes.0.extend(nodes.0.into_iter());
-            res_edges.0.extend(edges.0.into_iter());
-            res_nodes.0.extend(resolved_symbols.clone());
-            // res_symbols.insert(selected_symbol.clone(), occurrences);
-        }
-
-        res_nodes
-            .0
-            .extend(filtered_symbols.iter().map(|(id, _)| *id));
-        res_symbols.extend(filtered_symbols.into_iter());
-
-        res_edges
-            .0
-            .extend(self.update_edges(ctx, cfg, &res_nodes).await.0.into_iter());
-
-        self.command().mark(ctx, cfg, &res_symbols).unwrap();
-        return Some((res_symbols, res_nodes, res_edges));
     }
 }
 

@@ -155,6 +155,42 @@ pub struct Reference {
     pub from_col_end: i64,
 }
 
+#[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
+pub struct ModuleFull {
+    pub id: ModuleId,
+    pub module_name: String,
+}
+
+#[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
+pub struct FileFull {
+    pub id: FileId,
+    pub module: ModuleFull,
+    pub module_path: String,
+    pub filesystem_path: String,
+    pub filetype: String,
+}
+
+#[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
+pub struct ReferenceFull {
+    pub from_decl: DeclarationId,
+    pub to_symbol: SymbolId,
+    pub occurrence: Occurrence,
+}
+
+#[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
+pub struct DeclarationFull {
+    pub id: DeclarationId,
+    pub symbol: SymbolId,
+    pub name: String,
+    pub symbol_scope: SymbolScope,
+    pub file: FileFull,
+    pub symbol_type: SymbolType,
+    pub occurrence: Occurrence,
+
+    pub children: Vec<ReferenceFull>,
+    pub parents: Vec<ReferenceFull>,
+}
+
 pub struct Index {
     pool: SqlitePool,
 }
