@@ -9,7 +9,10 @@ use async_trait::async_trait;
 use core::fmt::Debug;
 use index::db_diesel::{ChildReference, ParentReference, Selection};
 use index::models_diesel::SymbolRef;
-use index::symbols::{DeclarationId, DeclarationRefs};
+use index::symbols::{
+    clean_and_split_string, partial_name_match, DeclarationId, DeclarationRefs, SymbolId,
+};
+use index::{db, symbols};
 use log::debug;
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
@@ -554,7 +557,20 @@ impl Verb for IgnoreVerb {
 
 impl Filter for IgnoreVerb {
     fn filter(&self, _cfg: &ControlFlowGraph, selection: &mut Selection) {
-        selection.nodes.retain(|s| self.name != s.symbol.name);
+        selection.nodes.retain(|s| {
+            let index_symbol: symbols::Symbol = symbols::Symbol {
+                id: SymbolId(s.symbol.id.clone()),
+                name: s.symbol.name.clone(),
+                name_split: clean_and_split_string(&s.symbol.name),
+                ..Default::default()
+            };
+
+            let id = &index_symbol.id;
+            let matcher = partial_name_match(&self.name);
+            let matched_symbol = matcher((id, &index_symbol));
+            let mismatch = matched_symbol.is_none();
+            mismatch
+        });
     }
 }
 

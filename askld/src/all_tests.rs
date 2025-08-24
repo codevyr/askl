@@ -367,6 +367,20 @@ fn ignore_node_recurse() {
 }
 
 #[test]
+fn ignore_another_statement() {
+    // Ignore applies to all children, so this should return no results
+    const QUERY: &str = r#"@preamble @ignore("b") ; "a" {}; "a" {}"#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(res_nodes.as_vec(), vec![]);
+    let edges = format_edges(res_edges);
+    assert_eq!(edges, Vec::<String>::new());
+}
+
+#[test]
 fn two_sub_statements() {
     // TODO: The original intention of this request was to select "f" first and
     // then select all other children of "d" together with all grandchildren of
