@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT *\n            FROM files\n            WHERE id = ?\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "module",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "module_path",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "filesystem_path",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "filetype",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "1ddaee1070ec66f5f15c6c9b202597b3bf7543c9bae4cbdc538ad0ca34d94ca0"
+}

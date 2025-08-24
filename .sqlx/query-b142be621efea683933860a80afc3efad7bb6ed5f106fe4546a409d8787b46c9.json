@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO files (module, module_path, filesystem_path, filetype)\n            VALUES (?1, ?2, ?3, ?4)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "b142be621efea683933860a80afc3efad7bb6ed5f106fe4546a409d8787b46c9"
+}

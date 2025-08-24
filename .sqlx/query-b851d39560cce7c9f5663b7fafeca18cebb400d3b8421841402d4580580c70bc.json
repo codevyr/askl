@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT id AS \"module_id?: ModuleId\"\n            FROM modules\n            WHERE module_name = ?1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "module_id?: ModuleId",
+        "ordinal": 0,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b851d39560cce7c9f5663b7fafeca18cebb400d3b8421841402d4580580c70bc"
+}

@@ -22,6 +22,14 @@ struct Args {
     // Format of the index file
     #[clap(short, long, default_value = "askl")]
     format: String,
+
+    /// Port to listen on
+    #[clap(short, long, default_value = "80")]
+    port: u16,
+
+    /// Host to bind to
+    #[clap(short, long, default_value = "127.0.0.1")]
+    host: String,
 }
 
 struct AsklData {
@@ -224,7 +232,8 @@ async fn main() -> std::io::Result<()> {
 
     let askl_data: AsklData = read_data(&args).await.expect("Failed to read data");
     let askl_data = web::Data::new(askl_data);
-    info!("Starting server...");
+
+    info!("Starting server on {}:{}...", args.host, args.port);
 
     HttpServer::new(move || {
         App::new()
@@ -232,7 +241,7 @@ async fn main() -> std::io::Result<()> {
             .service(query)
             .service(file)
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind((args.host, args.port))?
     .run()
     .await
 }

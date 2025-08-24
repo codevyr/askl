@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT symbol_refs.*\n            FROM symbol_refs\n            INNER JOIN declarations\n            ON declarations.symbol = symbol_refs.to_symbol\n            WHERE declarations.id = ?;\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "from_decl",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "to_symbol",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "from_line",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "from_col_start",
+        "ordinal": 3,
+        "type_info": "Int64"
+      },
+      {
+        "name": "from_col_end",
+        "ordinal": 4,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "dcd05467c49a63534a7fac7e3b1d22890b195de2a639add4e8893de64e629f69"
+}

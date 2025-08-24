@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT id, symbol, file_id, symbol_type, line_start, col_start, line_end, col_end\n            FROM declarations\n            WHERE symbol = ?\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "symbol",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "file_id",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "symbol_type",
+        "ordinal": 3,
+        "type_info": "Int64"
+      },
+      {
+        "name": "line_start",
+        "ordinal": 4,
+        "type_info": "Int64"
+      },
+      {
+        "name": "col_start",
+        "ordinal": 5,
+        "type_info": "Int64"
+      },
+      {
+        "name": "line_end",
+        "ordinal": 6,
+        "type_info": "Int64"
+      },
+      {
+        "name": "col_end",
+        "ordinal": 7,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "39541cf4790aac555ad45a2023f83fb7eb864e44c9bc0c92b7889d88880af4ec"
+}

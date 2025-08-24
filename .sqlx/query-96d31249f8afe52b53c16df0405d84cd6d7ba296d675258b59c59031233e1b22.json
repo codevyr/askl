@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT from_decl, to_symbol, from_line, from_col_start, from_col_end\n            FROM symbol_refs\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "from_decl",
+        "ordinal": 0,
+        "type_info": "Int64"
+      },
+      {
+        "name": "to_symbol",
+        "ordinal": 1,
+        "type_info": "Int64"
+      },
+      {
+        "name": "from_line",
+        "ordinal": 2,
+        "type_info": "Int64"
+      },
+      {
+        "name": "from_col_start",
+        "ordinal": 3,
+        "type_info": "Int64"
+      },
+      {
+        "name": "from_col_end",
+        "ordinal": 4,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "96d31249f8afe52b53c16df0405d84cd6d7ba296d675258b59c59031233e1b22"
+}

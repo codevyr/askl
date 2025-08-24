@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                INSERT INTO declarations (symbol, file_id, symbol_type, line_start, col_start, line_end, col_end)\n                VALUES (?, ?, ?, ?, ?, ?, ?)\n                RETURNING id\n                ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "242f906c82ada8329cca83078e0406892cbf1a7d5f52b2ca82906a84caf18add"
+}

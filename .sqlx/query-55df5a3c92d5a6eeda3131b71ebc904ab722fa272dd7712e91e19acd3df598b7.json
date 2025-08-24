@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO modules\nVALUES (1, \"test\");\n\nINSERT INTO files\nVALUES\n    (1, 1, \"main.c\", \"/main.c\", \"cc\"),\n    (2, 1, \"bar.c\", \"/bar.c\", \"cc\");\n\n\nINSERT INTO symbols\nVALUES\n    (1,  \"a\",    1, 1),\n    (2,  \"b\",    1, 1),\n    (3,  \"c\",    1, 1),\n    (4,  \"d\",    1, 1),\n    (5,  \"e\",    1, 1),\n    (6,  \"f\",    1, 1),\n    (7,  \"g\",    1, 1),\n    (42, \"main\", 1, 1);\n\nINSERT INTO declarations\nVALUES\n    (91,  1,  1, 1, 1, 1, 1, 1),\n    (92,  2,  1, 1, 1, 1, 1, 1),\n    (93,  3,  1, 1, 1, 1, 1, 1),\n    (94,  4,  1, 1, 1, 1, 1, 1),\n    (95,  5,  1, 1, 1, 1, 1, 1),\n    (86,  6,  2, 1, 2, 2, 2, 2),\n    (96,  6,  1, 1, 1, 1, 1, 1),\n    (97,  7,  1, 1, 1, 1, 1, 1),\n    (942, 42, 1, 1, 1, 1, 1, 1);\n\nINSERT INTO symbol_refs\nVALUES\n    (91,  2, 1, 16, 16),\n    (92,  4, 1, 1,  1),\n    (93,  2, 1, 22, 22),\n    (94,  5, 1, 1,  1),\n    (94,  6, 1, 1,  1),\n    (95,  6, 1, 1,  1),\n    (97,  5, 1, 1,  1),\n    (942, 1, 1, 1,  1),\n    (942, 2, 1, 1,  1);\n\n\n-- main -> {a c}\n-- {a c} -> b\n-- b -> d -> {e f}\n-- g -> e -> f",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "55df5a3c92d5a6eeda3131b71ebc904ab722fa272dd7712e91e19acd3df598b7"
+}

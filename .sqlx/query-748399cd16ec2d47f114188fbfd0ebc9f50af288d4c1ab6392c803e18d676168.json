@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO modules\nVALUES (1, \"test\");\n\nINSERT INTO files\nVALUES (1, 1, \"main.c\", \"/main.c\", \"cc\");\n\nINSERT INTO symbols\nVALUES\n    (1,  \"a\",    1, 1),\n    (2,  \"b\",    1, 1),\n    (3,  \"c\",    1, 1),\n    (4,  \"d\",    1, 1),\n    (5,  \"e\",    1, 1),\n    (6,  \"f\",    1, 1),\n    (7,  \"g\",    1, 1),\n    (42, \"main\", 1, 1);\n\nINSERT INTO declarations\nVALUES\n    (91,  1,  1, 1, 1, 1, 1, 1),\n    (92,  2,  1, 1, 1, 1, 1, 1),\n    (93,  3,  1, 1, 1, 1, 1, 1),\n    (94,  4,  1, 1, 1, 1, 1, 1),\n    (95,  5,  1, 1, 1, 1, 1, 1),\n    (96,  6,  1, 1, 1, 1, 1, 1),\n    (97,  7,  1, 1, 1, 1, 1, 1),\n    (942, 42, 1, 1, 1, 1, 1, 1);\n\nINSERT INTO symbol_refs\nVALUES\n    (91,  2, 1, 16, 16),\n    (91,  2, 1, 22, 22),\n    (94,  5, 1, 1,  1),\n    (94,  6, 1, 1,  1),\n    (96,  7, 1, 1,  1),\n    (942, 1, 1, 1,  1),\n    (942, 2, 1, 1,  1);\n\n-- main -> {a b}\n-- a -> b\n-- d -> {e f}\n-- f -> g\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "748399cd16ec2d47f114188fbfd0ebc9f50af288d4c1ab6392c803e18d676168"
+}

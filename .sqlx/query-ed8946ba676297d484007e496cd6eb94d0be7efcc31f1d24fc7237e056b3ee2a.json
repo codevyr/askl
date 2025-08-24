@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO\n    modules\nVALUES\n    (1, \"test\");\n\nINSERT INTO\n    files\nVALUES\n    (1, 1, \"main.c\", \"/main.c\", \"cc\");\n\nINSERT INTO\n    symbols\nVALUES\n    (1, \"foo\", 1, 1),\n    (2, \"foo.bar\", 1, 1),\n    (3, \"foobar\", 1, 1),\n    (4, \"tar\", 1, 1);\n\nINSERT INTO\n    declarations\nVALUES\n    (91, 1, 1, 1, 1, 1, 1, 1),\n    (92, 2, 1, 1, 1, 1, 1, 1),\n    (93, 3, 1, 1, 1, 1, 1, 1),\n    (94, 4, 1, 1, 1, 1, 1, 1);\n\nINSERT INTO\n    symbol_refs\nVALUES\n    (91, 2, 1, 16, 16),\n    (91, 2, 1, 22, 22),\n    (92, 3, 1, 1, 1),\n    (92, 4, 1, 1, 1);",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "ed8946ba676297d484007e496cd6eb94d0be7efcc31f1d24fc7237e056b3ee2a"
+}

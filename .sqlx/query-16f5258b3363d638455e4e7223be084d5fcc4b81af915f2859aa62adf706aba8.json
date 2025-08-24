@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT id AS \"file_id?: FileId\"\n            FROM files\n            WHERE module = ?1 AND module_path = ?2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "file_id?: FileId",
+        "ordinal": 0,
+        "type_info": "Int64"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "16f5258b3363d638455e4e7223be084d5fcc4b81af915f2859aa62adf706aba8"
+}
