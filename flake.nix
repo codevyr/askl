@@ -81,13 +81,9 @@
               User = "1000";
               WorkingDir = "/app";
               Volumes = { "/data" = {}; };
-              Env = [
-                "INDEX_PATH=/data/index-kueue.db"
-                "FORMAT=sqlite"
-              ];
               ExposedPorts = { "80/tcp" = {}; };
               Entrypoint = [ "${built.${name}}/bin/${name}" ];
-              Cmd = [ "--index" "/data/index-kueue.db" "--format" "sqlite" "--host" "0.0.0.0" ];
+              Cmd = [ "--index" "/data/index.db" "--format" "sqlite" "--host" "0.0.0.0" ];
             };
           };
 

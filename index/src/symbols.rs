@@ -295,6 +295,12 @@ impl From<i64> for FileId {
     }
 }
 
+impl Into<i32> for FileId {
+    fn into(self) -> i32 {
+        self.0
+    }
+}
+
 impl fmt::Display for FileId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)

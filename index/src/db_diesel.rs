@@ -204,6 +204,32 @@ impl Index {
         Ok(())
     }
 
+    pub async fn get_file_contents(&self, file_id: FileId) -> Result<String> {
+        use crate::schema_diesel::*;
+
+        let connection = &mut self
+            .pool
+            .get()
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+
+        let file_id: i32 = file_id.into();
+        let result = file_contents::dsl::file_contents
+            .filter(file_contents::dsl::file_id.eq(file_id))
+            .select(file_contents::dsl::content)
+            .first::<Vec<u8>>(connection)
+            .optional()
+            .map_err(|e| anyhow::anyhow!("Failed to query file contents: {}", e))?;
+
+        if result.is_none() {
+            return Err(anyhow::anyhow!(
+                "File contents not found for file_id {}",
+                file_id
+            ));
+        }
+
+        Ok(String::from_utf8_lossy(&result.unwrap()).to_string())
+    }
+
     pub async fn find_symbol_by_name(&self, compound_name: &[&str]) -> Result<Selection> {
         use crate::schema_diesel::modules::dsl::*;
         use crate::schema_diesel::*;

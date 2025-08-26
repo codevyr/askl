@@ -9,10 +9,10 @@ use async_trait::async_trait;
 use core::fmt::Debug;
 use index::db_diesel::{ChildReference, ParentReference, Selection};
 use index::models_diesel::SymbolRef;
+use index::symbols;
 use index::symbols::{
     clean_and_split_string, partial_name_match, DeclarationId, DeclarationRefs, SymbolId,
 };
-use index::{db, symbols};
 use log::debug;
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;

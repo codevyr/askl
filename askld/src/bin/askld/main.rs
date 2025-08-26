@@ -199,13 +199,10 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
 
 #[get["/source/{file_id}"]]
 async fn file(data: web::Data<AsklData>, file_id: web::Path<FileId>) -> impl Responder {
-    let path = if let Some(file) = data.cfg.symbols.files.get(&file_id) {
-        &file.filesystem_path
-    } else {
-        return HttpResponse::NotFound().body("File not found");
-    };
+    let file_id = *file_id;
 
-    if let Ok(source) = std::fs::read_to_string(path) {
+    println!("Received request for file: {}", file_id);
+    if let Ok(source) = data.cfg.index.get_file_contents(file_id).await {
         HttpResponse::Ok().body(source)
     } else {
         HttpResponse::NotFound().body("File not found")

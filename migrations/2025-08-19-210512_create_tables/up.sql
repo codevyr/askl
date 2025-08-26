@@ -52,3 +52,10 @@ CREATE TABLE IF NOT EXISTS symbol_refs
     FOREIGN KEY (to_symbol) REFERENCES symbols(id),
     UNIQUE (from_decl, to_symbol, from_line, from_col_start, from_col_end)
 );
+
+CREATE TABLE IF NOT EXISTS file_contents
+(
+    file_id INTEGER NOT NULL PRIMARY KEY,
+    content BLOB NOT NULL,
+    FOREIGN KEY (file_id) REFERENCES files(id)
+);
