@@ -10,6 +10,42 @@ use diesel::sqlite::Sqlite;
 use diesel::{debug_query, SqliteConnection};
 use diesel::{prelude::*, sql_query};
 
+mod dsl {
+    use diesel::{
+        expression::{AsExpression, Expression},
+        sql_types::{SingleValue, Text},
+    };
+
+    mod predicates {
+        use diesel::sqlite::Sqlite;
+        diesel::infix_operator!(Glob, " GLOB ", backend: Sqlite);
+    }
+
+    use self::predicates::Glob;
+
+    pub trait GlobMethods
+    where
+        Self: Expression<SqlType = Text> + Sized,
+    {
+        fn glob<T>(self, other: T) -> Glob<Self, T::Expression>
+        where
+            Self::SqlType: diesel::sql_types::SqlType,
+            T: AsExpression<Self::SqlType>,
+        {
+            Glob::new(self, other.as_expression())
+        }
+    }
+
+    impl<T> GlobMethods for T
+    where
+        T: Expression<SqlType = diesel::sql_types::Text>,
+        T::SqlType: SingleValue,
+    {
+    }
+}
+
+use self::dsl::GlobMethods;
+
 pub struct Index {
     pool: Pool<ConnectionManager<SqliteConnection>>,
 }
@@ -120,8 +156,6 @@ impl Index {
     fn setup(connection: &mut PooledConnection<ConnectionManager<SqliteConnection>>) -> Result<()> {
         connection.batch_execute(
             r#"
-        PRAGMA case_sensitive_like=ON;
-
         DROP TABLE IF EXISTS symbols_fts;
         CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
             name,                                    -- the tokenized text
@@ -235,8 +269,8 @@ impl Index {
         use crate::schema_diesel::*;
 
         let fts_name_pattern = compound_name.join(" AND ");
-        let name_pattern = compound_name.join("%");
-        let name_pattern = format!("%{}%", name_pattern);
+        let name_pattern = compound_name.join("*");
+        let name_pattern = format!("*{}*", name_pattern);
 
         let connection = &mut self
             .pool
@@ -279,7 +313,7 @@ impl Index {
                         .collect::<Vec<i32>>(),
                 ),
             )
-            .filter(symbols::dsl::name.like(&name_pattern))
+            .filter(symbols::dsl::name.glob(&name_pattern))
             .load::<(Symbol, Declaration, Module, File)>(connection)
             .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?;
 
@@ -320,7 +354,7 @@ impl Index {
                         .collect::<Vec<i32>>(),
                 ),
             )
-            .filter(children_symbols.field(symbols::name).like(&name_pattern))
+            .filter(children_symbols.field(symbols::name).glob(&name_pattern))
             .load::<(File, Symbol, Declaration, SymbolRef, Symbol, Declaration)>(connection)
             .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
 
@@ -355,7 +389,7 @@ impl Index {
             .inner_join(
                 files::dsl::files.on(files::dsl::id.eq(parent_decls.field(declarations::file_id))),
             )
-            .filter(parent_symbols.field(symbols::name).like(&name_pattern))
+            .filter(parent_symbols.field(symbols::name).glob(&name_pattern))
             .select((
                 Symbol::as_select(),
                 Declaration::as_select(),

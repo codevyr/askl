@@ -22,6 +22,7 @@ async fn test_select_matching_name() {
         ("bar", vec![92]),
         ("foo.bar", vec![92]),
         ("FOO.bar", vec![]),
+        ("FOO", vec![]),
     ];
 
     let mut ctx = ExecutionContext::new(); // Assuming there's a default constructor
