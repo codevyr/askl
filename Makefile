@@ -1,16 +1,39 @@
-.PHONY: docker-image-askld
-docker-image-askld:
-	nix build .#askld-image
-	docker load < ./result
+# Usage:
+#   make build                 # build all images
+#   make askld-build           # build only askld
+#   make create-index-build    # build only create-index
+#   make push TAG=v0.1 REGISTRY=ghcr.io/your-org
+#   make askld-run             # quick local run, maps 80:80 and ./data -> /data
 
-docker-image: docker-image-askld
-.PHONY: docker-image
+PROJECTS := askld 
+#create-index
 
-.PHONY: docker-run
-docker-run:
-	@docker run -d --rm --name askld -e RUST_LOG=info -p 8080:80 -v "$$(pwd)/../index:/data/:rw" askld:latest
+# Optional overrides:
+REGISTRY ?=
+TAG ?= latest
+BUILD_ARGS ?=
+# If REGISTRY is set (e.g., ghcr.io/your-org), images become ghcr.io/your-org/<name>:<tag>
+IMAGE_PREFIX := $(if $(REGISTRY),$(REGISTRY)/,)
 
-docker-stop:
-	docker stop askld
-.PHONY: docker-stop
+define build_template
+.PHONY: $(1)-build
+$(1)-build:
+	docker build $(BUILD_ARGS) \
+		-f docker/$(1)/Dockerfile \
+		-t $(IMAGE_PREFIX)$(1):$(TAG) \
+		.
 
+.PHONY: $(1)-push
+$(1)-push:
+	docker push $(IMAGE_PREFIX)$(1):$(TAG)
+
+.PHONY: $(1)-run
+$(1)-run:
+	docker run --rm -p 80:80 -v $$(pwd)/data:/data $(IMAGE_PREFIX)$(1):$(TAG)
+endef
+
+$(foreach p,$(PROJECTS),$(eval $(call build_template,$(p))))
+
+.PHONY: build push
+build: $(addsuffix -build,$(PROJECTS))
+push: $(addsuffix -push,$(PROJECTS))

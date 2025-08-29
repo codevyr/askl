@@ -1,0 +1,16 @@
+# Keep Docker contexts lean
+target/
+.git/
+.gitignore
+Dockerfile
+docker-compose.yml
+*.env
+**/*.rs.bk
+# Nix / direnv / dev
+result
+.nix-*
+.direnv
+devenv.local.nix
+devenv.nix
+flake.nix
+flake.lock
