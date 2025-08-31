@@ -9,6 +9,7 @@
     git
     git
     sqlite-web
+    sqlite
     diesel-cli
     sqlx-cli
     llvmPackages_12.stdenv

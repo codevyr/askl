@@ -10,6 +10,9 @@ use index::symbols::{DeclarationId, FileId, Occurrence, SymbolType};
 use index::symbols::{SymbolId, SymbolMap};
 use log::{debug, info};
 use serde::{Deserialize, Serialize, Serializer};
+use tracing_chrome::ChromeLayerBuilder;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// Indexer for askl
 #[derive(Parser, Debug)]
@@ -30,6 +33,10 @@ struct Args {
     /// Host to bind to
     #[clap(short, long, default_value = "127.0.0.1")]
     host: String,
+
+    /// Enable tracing. Provide a file path to write the trace to.
+    #[clap(short, long, action)]
+    trace: Option<String>,
 }
 
 struct AsklData {
@@ -116,6 +123,8 @@ impl Graph {
 
 #[post("/query")]
 async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
+    let _query = tracing::info_span!("query").entered();
+
     println!("Received query: {}", req_body);
     let ast = if let Ok(ast) = parse(&req_body) {
         ast
@@ -125,9 +134,12 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     debug!("Global scope: {:#?}", ast);
 
     let mut ctx = ExecutionContext::new();
+
+    let _query_execute = tracing::info_span!("query_execute").entered();
     let res = ast
         .execute(&mut ctx, &data.cfg, None, &HashSet::new())
         .await;
+    drop(_query_execute);
     if res.is_none() {
         return HttpResponse::NotFound().body("Did not resolve any symbols");
     }
@@ -199,6 +211,8 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
 
 #[get["/source/{file_id}"]]
 async fn file(data: web::Data<AsklData>, file_id: web::Path<FileId>) -> impl Responder {
+    let _source = tracing::info_span!("source").entered();
+
     let file_id = *file_id;
 
     println!("Received request for file: {}", file_id);
@@ -224,8 +238,32 @@ async fn read_data(args: &Args) -> Result<AsklData> {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    env_logger::init();
     let args = Args::parse();
+
+    let _guard = if let Some(trace_dir) = &args.trace {
+        use chrono::prelude::*;
+        let trace_file = format!("trace-{}.json", Local::now().format("%Y%m%d-%H%M%S"),);
+        let trace_path = std::path::Path::new(trace_dir).join(trace_file);
+        if trace_path.exists() {
+            std::fs::remove_file(&trace_path).expect("Failed to remove old trace file");
+        }
+        let (chrome_layer, _guard) = ChromeLayerBuilder::new()
+            .file(trace_path)
+            .include_args(true)
+            .trace_style(tracing_chrome::TraceStyle::Async)
+            .build();
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer())
+            .with(chrome_layer)
+            .init();
+
+        info!("Tracing enabled, writing to {}", trace_dir);
+        Some(_guard)
+    } else {
+        env_logger::init();
+
+        None
+    };
 
     let askl_data: AsklData = read_data(&args).await.expect("Failed to read data");
     let askl_data = web::Data::new(askl_data);
@@ -234,6 +272,7 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
+            .wrap(tracing_actix_web::TracingLogger::default())
             .app_data(askl_data.clone())
             .service(query)
             .service(file)

@@ -7,6 +7,9 @@ ast.json# Devenv
 .devenv*
 devenv.local.nix
 result
+traces
+perf.data
+perf.data.old
 
 # direnv
 .direnv

@@ -101,6 +101,9 @@ impl Statement {
     }
 
     async fn update_parents(&self, ctx: &mut ExecutionContext, cfg: &ControlFlowGraph) {
+        let _update_parents: tracing::span::EnteredSpan =
+            tracing::info_span!("update_parents").entered();
+
         if let Some(parent) = self.parent() {
             let parent = parent.upgrade().unwrap();
             let has_current = {
@@ -156,6 +159,9 @@ impl Statement {
     }
 
     async fn update_children(&self, ctx: &mut ExecutionContext, cfg: &ControlFlowGraph) {
+        let _update_children: tracing::span::EnteredSpan =
+            tracing::info_span!("update_children").entered();
+
         for child in self.children() {
             let has_current = {
                 let state = child.get_state();
@@ -219,6 +225,8 @@ impl Statement {
             statements.len()
         );
 
+        let _select_nodes: tracing::span::EnteredSpan =
+            tracing::info_span!("select_nodes").entered();
         // First, execute all selectors
         for statement in statements.iter_mut() {
             statement
@@ -226,8 +234,12 @@ impl Statement {
                 .select_nodes(ctx, cfg, statement.as_ref())
                 .await;
         }
+        drop(_select_nodes);
 
         while !statements.iter().all(|s| s.get_state().completed) {
+            let _statement_iteration: tracing::span::EnteredSpan =
+                tracing::info_span!("statement_iteration").entered();
+
             // Find an uncompleted statement with the least number of nodes. If
             // there are no such statements, pick any uncompleted statement.
             statements.sort_by_key(|s| {

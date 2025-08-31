@@ -286,183 +286,198 @@ impl Index {
             debug_query::<Sqlite, _>(&matched_symbols_query)
         );
 
-        let matched_symbols = matched_symbols_query
-            .load::<SymbolRowid>(connection)
-            .map_err(|e| anyhow::anyhow!("Failed to query FTS table: {}", e))?;
-
+        let matched_symbols = {
+            let _matched_symbols_query: tracing::span::EnteredSpan =
+                tracing::info_span!("matched_symbols").entered();
+            matched_symbols_query
+                .load::<SymbolRowid>(connection)
+                .map_err(|e| anyhow::anyhow!("Failed to query FTS table: {}", e))?
+        };
         println!("Matched {} symbols", matched_symbols.len());
-
         println!("Searching for symbols with name pattern: {fts_name_pattern}");
-        use std::time::Instant;
-        let now = Instant::now();
-        let current = symbols::dsl::symbols
-            .inner_join(declarations::dsl::declarations)
-            .inner_join(modules)
-            .inner_join(files::dsl::files.on(files::id.eq(declarations::file_id)))
-            .select((
-                Symbol::as_select(),
-                Declaration::as_select(),
-                Module::as_select(),
-                File::as_select(),
-            ))
-            .filter(
-                symbols::dsl::id.eq_any(
-                    matched_symbols
-                        .iter()
-                        .map(|s| s.rowid)
-                        .collect::<Vec<i32>>(),
-                ),
-            )
-            .filter(symbols::dsl::name.glob(&name_pattern))
-            .load::<(Symbol, Declaration, Module, File)>(connection)
-            .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?;
 
-        let elapsed_current = now.elapsed();
-        let (children_symbols, children_decls) =
-            diesel::alias!(symbols as children_symbols, declarations as children_decls);
+        let current = {
+            let _select_current: tracing::span::EnteredSpan =
+                tracing::info_span!("select_current").entered();
 
-        let parents = symbol_refs::dsl::symbol_refs
-            .inner_join(
-                declarations::dsl::declarations
-                    .on(symbol_refs::dsl::from_decl.eq(declarations::id)),
-            )
-            .inner_join(symbols::dsl::symbols.on(declarations::dsl::symbol.eq(symbols::id)))
-            .inner_join(files::dsl::files.on(files::id.eq(declarations::file_id)))
-            .inner_join(
-                children_symbols.on(children_symbols
-                    .field(symbols::id)
-                    .eq(symbol_refs::dsl::to_symbol)),
-            )
-            .inner_join(
-                children_decls.on(children_decls
-                    .field(declarations::symbol)
-                    .eq(children_symbols.field(symbols::id))),
-            )
-            .select((
-                File::as_select(),
-                Symbol::as_select(),
-                Declaration::as_select(),
-                SymbolRef::as_select(),
-                children_symbols.default_selection(),
-                children_decls.default_selection(),
-            ))
-            .filter(
-                children_symbols.field(symbols::id).eq_any(
-                    matched_symbols
-                        .iter()
-                        .map(|s| s.rowid)
-                        .collect::<Vec<i32>>(),
-                ),
-            )
-            .filter(children_symbols.field(symbols::name).glob(&name_pattern))
-            .load::<(File, Symbol, Declaration, SymbolRef, Symbol, Declaration)>(connection)
-            .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
+            symbols::dsl::symbols
+                .inner_join(declarations::dsl::declarations)
+                .inner_join(modules)
+                .inner_join(files::dsl::files.on(files::id.eq(declarations::file_id)))
+                .select((
+                    Symbol::as_select(),
+                    Declaration::as_select(),
+                    Module::as_select(),
+                    File::as_select(),
+                ))
+                .filter(
+                    symbols::dsl::id.eq_any(
+                        matched_symbols
+                            .iter()
+                            .map(|s| s.rowid)
+                            .collect::<Vec<i32>>(),
+                    ),
+                )
+                .filter(symbols::dsl::name.glob(&name_pattern))
+                .load::<(Symbol, Declaration, Module, File)>(connection)
+                .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?
+        };
 
-        let elapsed_parents = now.elapsed();
+        let parents = {
+            let _parents_span: tracing::span::EnteredSpan =
+                tracing::info_span!("select_parents").entered();
+            let (children_symbols, children_decls) =
+                diesel::alias!(symbols as children_symbols, declarations as children_decls);
+
+            let parents_query = symbol_refs::dsl::symbol_refs
+                .inner_join(
+                    declarations::dsl::declarations
+                        .on(symbol_refs::dsl::from_decl.eq(declarations::id)),
+                )
+                .inner_join(symbols::dsl::symbols.on(declarations::dsl::symbol.eq(symbols::id)))
+                .inner_join(files::dsl::files.on(files::id.eq(declarations::file_id)))
+                .inner_join(
+                    children_symbols.on(children_symbols
+                        .field(symbols::id)
+                        .eq(symbol_refs::dsl::to_symbol)),
+                )
+                .inner_join(
+                    children_decls.on(children_decls
+                        .field(declarations::symbol)
+                        .eq(children_symbols.field(symbols::id))),
+                )
+                .select((
+                    File::as_select(),
+                    Symbol::as_select(),
+                    Declaration::as_select(),
+                    SymbolRef::as_select(),
+                    children_symbols.default_selection(),
+                    children_decls.default_selection(),
+                ))
+                .filter(
+                    children_symbols.field(symbols::id).eq_any(
+                        matched_symbols
+                            .iter()
+                            .map(|s| s.rowid)
+                            .collect::<Vec<i32>>(),
+                    ),
+                )
+                .filter(children_symbols.field(symbols::name).glob(&name_pattern));
+            println!(
+                "Executing parents query: {:?}",
+                debug_query::<Sqlite, _>(&parents_query)
+            );
+            let parents = parents_query
+                .load::<(File, Symbol, Declaration, SymbolRef, Symbol, Declaration)>(connection)
+                .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
+            parents
+        };
 
         let (parent_symbols, parent_decls) =
             diesel::alias!(symbols as parent_symbols, declarations as parent_decls);
 
-        let children = symbol_refs::dsl::symbol_refs
-            .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::id)))
-            .inner_join(
-                declarations::dsl::declarations.on(symbols::dsl::id.eq(declarations::symbol)),
-            )
-            .inner_join(
-                parent_decls.on(parent_decls
-                    .field(declarations::id)
-                    .eq(symbol_refs::dsl::from_decl)),
-            )
-            .inner_join(
-                parent_symbols.on(parent_symbols
-                    .field(symbols::id)
-                    .eq(parent_decls.field(declarations::symbol))),
-            )
-            .filter(
-                parent_symbols.field(symbols::id).eq_any(
-                    matched_symbols
-                        .iter()
-                        .map(|s| s.rowid)
-                        .collect::<Vec<i32>>(),
-                ),
-            )
-            .inner_join(
-                files::dsl::files.on(files::dsl::id.eq(parent_decls.field(declarations::file_id))),
-            )
-            .filter(parent_symbols.field(symbols::name).glob(&name_pattern))
-            .select((
-                Symbol::as_select(),
-                Declaration::as_select(),
-                SymbolRef::as_select(),
-                File::as_select(),
-            ))
-            .load::<(Symbol, Declaration, SymbolRef, File)>(connection)
-            .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
+        let children = {
+            let _select_children: tracing::span::EnteredSpan =
+                tracing::info_span!("select_children").entered();
 
-        let elapsed_children = now.elapsed();
+            symbol_refs::dsl::symbol_refs
+                .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::id)))
+                .inner_join(
+                    declarations::dsl::declarations.on(symbols::dsl::id.eq(declarations::symbol)),
+                )
+                .inner_join(
+                    parent_decls.on(parent_decls
+                        .field(declarations::id)
+                        .eq(symbol_refs::dsl::from_decl)),
+                )
+                .inner_join(
+                    parent_symbols.on(parent_symbols
+                        .field(symbols::id)
+                        .eq(parent_decls.field(declarations::symbol))),
+                )
+                .filter(
+                    parent_symbols.field(symbols::id).eq_any(
+                        matched_symbols
+                            .iter()
+                            .map(|s| s.rowid)
+                            .collect::<Vec<i32>>(),
+                    ),
+                )
+                .inner_join(
+                    files::dsl::files
+                        .on(files::dsl::id.eq(parent_decls.field(declarations::file_id))),
+                )
+                .filter(parent_symbols.field(symbols::name).glob(&name_pattern))
+                .select((
+                    Symbol::as_select(),
+                    Declaration::as_select(),
+                    SymbolRef::as_select(),
+                    File::as_select(),
+                ))
+                .load::<(Symbol, Declaration, SymbolRef, File)>(connection)
+                .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
+        };
 
-        let nodes: Vec<_> = current
-            .into_iter()
-            .map(|(sym, decl, module, file)| SelectionNode {
-                symbol: sym,
-                declaration: decl,
-                module: module,
-                file: file,
-            })
-            .collect();
+        let selection = {
+            let _collect_span: tracing::span::EnteredSpan =
+                tracing::info_span!("collect").entered();
 
-        let parents: Vec<_> = parents
-            .into_iter()
-            .map(
-                |(
+            let nodes: Vec<_> = current
+                .into_iter()
+                .map(|(sym, decl, module, file)| SelectionNode {
+                    symbol: sym,
+                    declaration: decl,
+                    module: module,
+                    file: file,
+                })
+                .collect();
+
+            let parents: Vec<_> = parents
+                .into_iter()
+                .map(
+                    |(
+                        from_file,
+                        from_symbol,
+                        from_declaration,
+                        symbol_ref,
+                        to_symbol,
+                        to_declaration,
+                    )| ParentReference {
+                        from_file,
+                        from_symbol,
+                        from_declaration,
+                        symbol_ref,
+                        to_symbol,
+                        to_declaration,
+                    },
+                )
+                .collect();
+
+            let children: Vec<_> = children
+                .into_iter()
+                .map(|(sym, decl, sym_ref, from_file)| ChildReference {
+                    symbol: sym,
+                    declaration: decl,
+                    symbol_ref: sym_ref,
                     from_file,
-                    from_symbol,
-                    from_declaration,
-                    symbol_ref,
-                    to_symbol,
-                    to_declaration,
-                )| ParentReference {
-                    from_file,
-                    from_symbol,
-                    from_declaration,
-                    symbol_ref,
-                    to_symbol,
-                    to_declaration,
-                },
-            )
-            .collect();
+                })
+                .collect();
 
-        let children: Vec<_> = children
-            .into_iter()
-            .map(|(sym, decl, sym_ref, from_file)| ChildReference {
-                symbol: sym,
-                declaration: decl,
-                symbol_ref: sym_ref,
-                from_file,
+            println!(
+                "Found {} current, {} parents, {} children",
+                nodes.len(),
+                parents.len(),
+                children.len()
+            );
+
+            Ok(Selection {
+                nodes,
+                parents,
+                children,
             })
-            .collect();
+        };
 
-        let elapsed_collect = now.elapsed();
-
-        println!(
-            "Found {} current, {} parents, {} children",
-            nodes.len(),
-            parents.len(),
-            children.len()
-        );
-        println!(
-            "Query times: current: {:?} parents: {:?}, children: {:?}, collect: {:?}",
-            elapsed_current,
-            elapsed_parents - elapsed_current,
-            elapsed_children - elapsed_parents,
-            elapsed_collect - elapsed_children
-        );
-
-        Ok(Selection {
-            nodes,
-            parents,
-            children,
-        })
+        selection
     }
 
     pub async fn find_symbol_by_declid(
@@ -480,128 +495,151 @@ impl Index {
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         println!("Searching for symbols with by decl_id: {declarations:?}");
-        let current = symbols::dsl::symbols
-            .inner_join(declarations::dsl::declarations)
-            .inner_join(modules)
-            .inner_join(files::dsl::files.on(files::id.eq(declarations::file_id)))
-            .filter(declarations::dsl::id.eq_any(&declarations))
-            .select((
-                Symbol::as_select(),
-                Declaration::as_select(),
-                Module::as_select(),
-                File::as_select(),
-            ))
-            .load::<(Symbol, Declaration, Module, File)>(connection)
-            .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?;
+        let current = {
+            let _select_current: tracing::span::EnteredSpan =
+                tracing::info_span!("select_current").entered();
+
+            symbols::dsl::symbols
+                .inner_join(declarations::dsl::declarations)
+                .inner_join(modules)
+                .inner_join(files::dsl::files.on(files::id.eq(declarations::file_id)))
+                .filter(declarations::dsl::id.eq_any(&declarations))
+                .select((
+                    Symbol::as_select(),
+                    Declaration::as_select(),
+                    Module::as_select(),
+                    File::as_select(),
+                ))
+                .load::<(Symbol, Declaration, Module, File)>(connection)
+                .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?
+        };
 
         let (children_symbols, children_decls) =
             diesel::alias!(symbols as children_symbols, declarations as children_decls);
 
-        let parents = symbol_refs::dsl::symbol_refs
-            .inner_join(
-                declarations::dsl::declarations
-                    .on(symbol_refs::dsl::from_decl.eq(declarations::id)),
-            )
-            .inner_join(symbols::dsl::symbols.on(declarations::dsl::symbol.eq(symbols::id)))
-            .inner_join(files::dsl::files.on(files::id.eq(declarations::file_id)))
-            .inner_join(
-                children_symbols.on(children_symbols
-                    .field(symbols::id)
-                    .eq(symbol_refs::dsl::to_symbol)),
-            )
-            .inner_join(
-                children_decls.on(children_decls
-                    .field(declarations::symbol)
-                    .eq(children_symbols.field(symbols::id))),
-            )
-            .select((
-                File::as_select(),
-                Symbol::as_select(),
-                Declaration::as_select(),
-                SymbolRef::as_select(),
-                children_symbols.default_selection(),
-                children_decls.default_selection(),
-            ))
-            .filter(children_decls.field(declarations::id).eq_any(&declarations))
-            .load::<(File, Symbol, Declaration, SymbolRef, Symbol, Declaration)>(connection)
-            .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
+        let parents = {
+            let _parents_span: tracing::span::EnteredSpan =
+                tracing::info_span!("select_parents").entered();
+
+            symbol_refs::dsl::symbol_refs
+                .inner_join(
+                    declarations::dsl::declarations
+                        .on(symbol_refs::dsl::from_decl.eq(declarations::id)),
+                )
+                .inner_join(symbols::dsl::symbols.on(declarations::dsl::symbol.eq(symbols::id)))
+                .inner_join(files::dsl::files.on(files::id.eq(declarations::file_id)))
+                .inner_join(
+                    children_symbols.on(children_symbols
+                        .field(symbols::id)
+                        .eq(symbol_refs::dsl::to_symbol)),
+                )
+                .inner_join(
+                    children_decls.on(children_decls
+                        .field(declarations::symbol)
+                        .eq(children_symbols.field(symbols::id))),
+                )
+                .select((
+                    File::as_select(),
+                    Symbol::as_select(),
+                    Declaration::as_select(),
+                    SymbolRef::as_select(),
+                    children_symbols.default_selection(),
+                    children_decls.default_selection(),
+                ))
+                .filter(children_decls.field(declarations::id).eq_any(&declarations))
+                .load::<(File, Symbol, Declaration, SymbolRef, Symbol, Declaration)>(connection)
+                .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
+        };
 
         let (parent_symbols, parent_decls) =
             diesel::alias!(symbols as parent_symbols, declarations as parent_decls);
 
-        let children = symbol_refs::dsl::symbol_refs
-            .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::id)))
-            .inner_join(
-                declarations::dsl::declarations.on(symbols::dsl::id.eq(declarations::symbol)),
-            )
-            .inner_join(
-                parent_decls.on(parent_decls
-                    .field(declarations::id)
-                    .eq(symbol_refs::dsl::from_decl)),
-            )
-            .inner_join(
-                parent_symbols.on(parent_symbols
-                    .field(symbols::id)
-                    .eq(parent_decls.field(declarations::symbol))),
-            )
-            .inner_join(
-                files::dsl::files.on(files::dsl::id.eq(parent_decls.field(declarations::file_id))),
-            )
-            .select((
-                Symbol::as_select(),
-                Declaration::as_select(),
-                SymbolRef::as_select(),
-                File::as_select(),
-            ))
-            .filter(parent_decls.field(declarations::id).eq_any(&declarations))
-            .load::<(Symbol, Declaration, SymbolRef, File)>(connection)
-            .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
+        let children = {
+            let _select_children: tracing::span::EnteredSpan =
+                tracing::info_span!("select_children").entered();
 
-        let current = current
-            .into_iter()
-            .map(|(sym, decl, module, file)| SelectionNode {
-                symbol: sym,
-                declaration: decl,
-                module: module,
-                file: file,
-            })
-            .collect();
+            symbol_refs::dsl::symbol_refs
+                .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::id)))
+                .inner_join(
+                    declarations::dsl::declarations.on(symbols::dsl::id.eq(declarations::symbol)),
+                )
+                .inner_join(
+                    parent_decls.on(parent_decls
+                        .field(declarations::id)
+                        .eq(symbol_refs::dsl::from_decl)),
+                )
+                .inner_join(
+                    parent_symbols.on(parent_symbols
+                        .field(symbols::id)
+                        .eq(parent_decls.field(declarations::symbol))),
+                )
+                .inner_join(
+                    files::dsl::files
+                        .on(files::dsl::id.eq(parent_decls.field(declarations::file_id))),
+                )
+                .select((
+                    Symbol::as_select(),
+                    Declaration::as_select(),
+                    SymbolRef::as_select(),
+                    File::as_select(),
+                ))
+                .filter(parent_decls.field(declarations::id).eq_any(&declarations))
+                .load::<(Symbol, Declaration, SymbolRef, File)>(connection)
+                .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
+        };
 
-        let parents = parents
-            .into_iter()
-            .map(
-                |(
+        let selection = {
+            let _collect_span: tracing::span::EnteredSpan =
+                tracing::info_span!("collect").entered();
+
+            let current = current
+                .into_iter()
+                .map(|(sym, decl, module, file)| SelectionNode {
+                    symbol: sym,
+                    declaration: decl,
+                    module: module,
+                    file: file,
+                })
+                .collect();
+
+            let parents = parents
+                .into_iter()
+                .map(
+                    |(
+                        from_file,
+                        from_symbol,
+                        from_declaration,
+                        symbol_ref,
+                        to_symbol,
+                        to_declaration,
+                    )| ParentReference {
+                        from_file,
+                        from_symbol,
+                        from_declaration,
+                        symbol_ref,
+                        to_symbol,
+                        to_declaration,
+                    },
+                )
+                .collect();
+
+            let children = children
+                .into_iter()
+                .map(|(sym, decl, sym_ref, from_file)| ChildReference {
+                    symbol: sym,
+                    declaration: decl,
+                    symbol_ref: sym_ref,
                     from_file,
-                    from_symbol,
-                    from_declaration,
-                    symbol_ref,
-                    to_symbol,
-                    to_declaration,
-                )| ParentReference {
-                    from_file,
-                    from_symbol,
-                    from_declaration,
-                    symbol_ref,
-                    to_symbol,
-                    to_declaration,
-                },
-            )
-            .collect();
+                })
+                .collect();
 
-        let children = children
-            .into_iter()
-            .map(|(sym, decl, sym_ref, from_file)| ChildReference {
-                symbol: sym,
-                declaration: decl,
-                symbol_ref: sym_ref,
-                from_file,
+            Ok(Selection {
+                nodes: current,
+                parents,
+                children,
             })
-            .collect();
+        };
 
-        Ok(Selection {
-            nodes: current,
-            parents,
-            children,
-        })
+        selection
     }
 }

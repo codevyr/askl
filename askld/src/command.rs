@@ -53,12 +53,16 @@ impl Command {
     }
 
     pub fn filter(&self, cfg: &ControlFlowGraph, selection: &mut Selection) {
+        let _command_filter: tracing::span::EnteredSpan =
+            tracing::info_span!("command_filter").entered();
         for verb in self.filters() {
             verb.filter(cfg, selection);
         }
     }
 
     pub fn constrain_references(&self, cfg: &ControlFlowGraph, selection: &mut Selection) {
+        let _constrain_references: tracing::span::EnteredSpan =
+            tracing::info_span!("constrain_references").entered();
         self.derivers()
             .for_each(|verb| verb.constrain_references(cfg, selection))
     }

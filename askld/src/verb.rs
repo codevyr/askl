@@ -188,12 +188,32 @@ pub trait Verb: Debug + Sync {
 }
 
 pub trait Filter: Debug {
-    fn filter(&self, cfg: &ControlFlowGraph, selection: &mut Selection);
+    fn filter(&self, cfg: &ControlFlowGraph, selection: &mut Selection) {
+        let filter_name = format!("{:?}", self);
+        let _filter = tracing::info_span!("filter",
+            name = %filter_name,
+        )
+        .entered();
+        self.filter_impl(cfg, selection);
+    }
+
+    fn filter_impl(&self, cfg: &ControlFlowGraph, selection: &mut Selection);
 }
 
 #[async_trait(?Send)]
 pub trait Selector: Debug {
     async fn select_from_all(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+    ) -> Result<Selection> {
+        let select_from_all_name = format!("{:?}", self);
+        let _select_from_all =
+            tracing::info_span!("select_from_all", name = %select_from_all_name).entered();
+        self.select_from_all_impl(ctx, cfg).await
+    }
+
+    async fn select_from_all_impl(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
@@ -208,6 +228,20 @@ pub trait Deriver: Debug {
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         children: &Vec<ChildReference>,
+    ) -> Option<Selection> {
+        let derive_children_name = format!("{:?}", self);
+        let _derive_children =
+            tracing::info_span!("derive_children", name = %derive_children_name).entered();
+        self.derive_children_impl(statement, ctx, cfg, children)
+            .await
+    }
+
+    async fn derive_children_impl(
+        &self,
+        statement: &Statement,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        children: &Vec<ChildReference>,
     ) -> Option<Selection>;
 
     async fn derive_parents(
@@ -216,9 +250,30 @@ pub trait Deriver: Debug {
         statement: &Statement,
         cfg: &ControlFlowGraph,
         parents: &Vec<ParentReference>,
+    ) -> Option<Selection> {
+        let derive_parents_name = format!("{:?}", self);
+        let _derive_parents =
+            tracing::info_span!("derive_parents", name = %derive_parents_name).entered();
+        self.derive_parents_impl(ctx, statement, cfg, parents).await
+    }
+
+    async fn derive_parents_impl(
+        &self,
+        ctx: &mut ExecutionContext,
+        statement: &Statement,
+        cfg: &ControlFlowGraph,
+        parents: &Vec<ParentReference>,
     ) -> Option<Selection>;
 
     fn constrain_references(&self, _cfg: &ControlFlowGraph, selection: &mut Selection) {
+        let constrain_references_name = format!("{:?}", self);
+        let _constrain_references =
+            tracing::info_span!("constrain_references", name = %constrain_references_name)
+                .entered();
+        self.constrain_references_impl(_cfg, selection)
+    }
+
+    fn constrain_references_impl(&self, _cfg: &ControlFlowGraph, selection: &mut Selection) {
         let node_declaration_ids: HashSet<_> = selection
             .nodes
             .iter()
@@ -238,6 +293,19 @@ pub trait Deriver: Debug {
         selection: &mut Selection,
         references: &Vec<ChildReference>,
     ) {
+        let constrain_by_parents_name = format!("{:?}", self);
+        let _constrain_by_parents =
+            tracing::info_span!("constrain_by_parents", name = %constrain_by_parents_name)
+                .entered();
+        self.constrain_by_parents_impl(cfg, selection, references)
+    }
+
+    fn constrain_by_parents_impl(
+        &self,
+        cfg: &ControlFlowGraph,
+        selection: &mut Selection,
+        references: &Vec<ChildReference>,
+    ) {
         selection.nodes.retain(|s| {
             references
                 .iter()
@@ -248,6 +316,19 @@ pub trait Deriver: Debug {
     }
 
     fn constrain_by_children(
+        &self,
+        cfg: &ControlFlowGraph,
+        selection: &mut Selection,
+        references: &Vec<ParentReference>,
+    ) {
+        let constrain_by_children_name = format!("{:?}", self);
+        let _constrain_by_children =
+            tracing::info_span!("constrain_by_children", name = %constrain_by_children_name)
+                .entered();
+        self.constrain_by_children_impl(cfg, selection, references)
+    }
+
+    fn constrain_by_children_impl(
         &self,
         cfg: &ControlFlowGraph,
         selection: &mut Selection,
@@ -300,7 +381,7 @@ impl Verb for NameSelector {
 
 #[async_trait(?Send)]
 impl Selector for NameSelector {
-    async fn select_from_all(
+    async fn select_from_all_impl(
         &self,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
@@ -340,7 +421,7 @@ impl Verb for ForcedVerb {
 
 #[async_trait(?Send)]
 impl Deriver for ForcedVerb {
-    async fn derive_children(
+    async fn derive_children_impl(
         &self,
         statement: &Statement,
         _ctx: &mut ExecutionContext,
@@ -393,7 +474,7 @@ impl Deriver for ForcedVerb {
         Some(normal_selection)
     }
 
-    async fn derive_parents(
+    async fn derive_parents_impl(
         &self,
         _ctx: &mut ExecutionContext,
         _statement: &Statement,
@@ -414,7 +495,7 @@ impl Deriver for ForcedVerb {
         // Some(parent_selection)
     }
 
-    fn constrain_by_parents(
+    fn constrain_by_parents_impl(
         &self,
         cfg: &ControlFlowGraph,
         selection: &mut Selection,
@@ -427,7 +508,7 @@ impl Deriver for ForcedVerb {
 }
 
 impl Filter for ForcedVerb {
-    fn filter(&self, _cfg: &ControlFlowGraph, _selection: &mut Selection) {}
+    fn filter_impl(&self, _cfg: &ControlFlowGraph, _selection: &mut Selection) {}
 }
 
 /// Returns the same symbols as it have received
@@ -452,7 +533,7 @@ impl Verb for UnitVerb {
 
 #[async_trait(?Send)]
 impl Deriver for UnitVerb {
-    async fn derive_children(
+    async fn derive_children_impl(
         &self,
         _statement: &Statement,
         _ctx: &mut ExecutionContext,
@@ -462,7 +543,7 @@ impl Deriver for UnitVerb {
         None
     }
 
-    async fn derive_parents(
+    async fn derive_parents_impl(
         &self,
         _ctx: &mut ExecutionContext,
         _statement: &Statement,
@@ -494,7 +575,7 @@ impl Verb for ChildrenVerb {
 
 #[async_trait(?Send)]
 impl Deriver for ChildrenVerb {
-    async fn derive_children(
+    async fn derive_children_impl(
         &self,
         _statement: &Statement,
         _ctx: &mut ExecutionContext,
@@ -511,7 +592,7 @@ impl Deriver for ChildrenVerb {
         Some(children_selection)
     }
 
-    async fn derive_parents(
+    async fn derive_parents_impl(
         &self,
         _ctx: &mut ExecutionContext,
         _statement: &Statement,
@@ -556,7 +637,7 @@ impl Verb for IgnoreVerb {
 }
 
 impl Filter for IgnoreVerb {
-    fn filter(&self, _cfg: &ControlFlowGraph, selection: &mut Selection) {
+    fn filter_impl(&self, _cfg: &ControlFlowGraph, selection: &mut Selection) {
         selection.nodes.retain(|s| {
             let index_symbol: symbols::Symbol = symbols::Symbol {
                 id: SymbolId(s.symbol.id.clone()),
@@ -604,7 +685,7 @@ impl Verb for ModuleFilter {
 }
 
 impl Filter for ModuleFilter {
-    fn filter(&self, _cfg: &ControlFlowGraph, selection: &mut Selection) {
+    fn filter_impl(&self, _cfg: &ControlFlowGraph, selection: &mut Selection) {
         selection
             .nodes
             .retain(|s| self.module == s.module.module_name);
@@ -655,7 +736,7 @@ impl Verb for IsolatedScope {
 
 #[async_trait(?Send)]
 impl Deriver for IsolatedScope {
-    async fn derive_children(
+    async fn derive_children_impl(
         &self,
         _statement: &Statement,
         _ctx: &mut ExecutionContext,
@@ -665,7 +746,7 @@ impl Deriver for IsolatedScope {
         None
     }
 
-    async fn derive_parents(
+    async fn derive_parents_impl(
         &self,
         _ctx: &mut ExecutionContext,
         _statement: &Statement,
@@ -777,7 +858,7 @@ impl Verb for UserVerb {
 
 #[async_trait(?Send)]
 impl Deriver for UserVerb {
-    async fn derive_children(
+    async fn derive_children_impl(
         &self,
         _statement: &Statement,
         _ctx: &mut ExecutionContext,
@@ -800,7 +881,7 @@ impl Deriver for UserVerb {
         // references
     }
 
-    async fn derive_parents(
+    async fn derive_parents_impl(
         &self,
         _ctx: &mut ExecutionContext,
         _statement: &Statement,
@@ -847,7 +928,7 @@ impl Deriver for UserVerb {
 
 #[async_trait(?Send)]
 impl Selector for UserVerb {
-    async fn select_from_all(
+    async fn select_from_all_impl(
         &self,
         _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
