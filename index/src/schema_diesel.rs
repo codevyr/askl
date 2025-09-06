@@ -45,6 +45,7 @@ diesel::table! {
         from_line -> Integer,
         from_col_start -> Integer,
         from_col_end -> Integer,
+        from_file -> Nullable<Integer>,
     }
 }
 

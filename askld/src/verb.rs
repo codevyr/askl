@@ -337,7 +337,7 @@ pub trait Deriver: Debug {
         selection.nodes.retain(|s| {
             references
                 .iter()
-                .any(|r| r.from_declaration.id == s.declaration.id)
+                .any(|r| r.symbol_ref.from_decl == s.declaration.id)
         });
 
         self.constrain_references(cfg, selection);
@@ -451,15 +451,13 @@ impl Deriver for ForcedVerb {
         for parent_node in parent_selection.nodes.iter() {
             for child_node in normal_selection.nodes.iter() {
                 let reference = ParentReference {
-                    from_file: parent_node.file.clone(),
-                    from_symbol: parent_node.symbol.clone(),
-                    from_declaration: parent_node.declaration.clone(),
                     to_symbol: child_node.symbol.clone(),
                     to_declaration: child_node.declaration.clone(),
                     symbol_ref: SymbolRef {
                         rowid: 0,
                         from_decl: parent_node.declaration.id,
                         to_symbol: child_node.symbol.id,
+                        from_file: parent_node.file.id.into(),
                         from_line: parent_node.declaration.line_start as i32,
                         from_col_start: parent_node.declaration.col_start as i32,
                         from_col_end: parent_node.declaration.col_end as i32,
@@ -601,7 +599,7 @@ impl Deriver for ChildrenVerb {
     ) -> Option<Selection> {
         let decl_ids = parents
             .iter()
-            .map(|p| DeclarationId::new(p.from_declaration.id))
+            .map(|p| DeclarationId::new(p.symbol_ref.from_decl))
             .collect::<Vec<_>>();
         let parent_selection = cfg.index.find_symbol_by_declid(&decl_ids).await.ok()?;
 

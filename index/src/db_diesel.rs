@@ -9,6 +9,9 @@ use diesel::sql_types::{Integer, Text};
 use diesel::sqlite::Sqlite;
 use diesel::{debug_query, SqliteConnection};
 use diesel::{prelude::*, sql_query};
+use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
 mod dsl {
     use diesel::{
@@ -106,9 +109,6 @@ pub type ChildReference = ReferenceResult;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParentReference {
-    pub from_file: File,
-    pub from_symbol: Symbol,
-    pub from_declaration: Declaration,
     pub to_symbol: Symbol,
     pub to_declaration: Declaration,
     pub symbol_ref: SymbolRef,
@@ -181,6 +181,8 @@ impl Index {
             .map_err(|e| anyhow::anyhow!("Failed to create connection pool: {}", e))?;
 
         let connection = &mut pool.get().unwrap();
+        connection.run_pending_migrations(MIGRATIONS).unwrap();
+
         Self::setup(connection)?;
 
         Ok(Self { pool: pool })
@@ -200,6 +202,7 @@ impl Index {
             .batch_execute(include_str!("../../sql/create_tables.sql"))
             .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))?;
 
+        connection.run_pending_migrations(MIGRATIONS).unwrap();
         Self::setup(connection)?;
 
         Ok(Self { pool: pool })
@@ -210,6 +213,13 @@ impl Index {
 
     pub async fn load_test_input(&self, input_path: &str) -> Result<()> {
         let connection = &mut self.pool.get().unwrap();
+
+        connection.revert_all_migrations(MIGRATIONS).unwrap();
+        println!(
+            "Has pending migrations: {}",
+            connection.has_pending_migration(MIGRATIONS).unwrap()
+        );
+        connection.run_pending_migrations(MIGRATIONS).unwrap();
 
         match input_path {
             "test_input_a.sql" => {
@@ -331,12 +341,6 @@ impl Index {
 
             let parents_query = symbol_refs::dsl::symbol_refs
                 .inner_join(
-                    declarations::dsl::declarations
-                        .on(symbol_refs::dsl::from_decl.eq(declarations::id)),
-                )
-                .inner_join(symbols::dsl::symbols.on(declarations::dsl::symbol.eq(symbols::id)))
-                .inner_join(files::dsl::files.on(files::id.eq(declarations::file_id)))
-                .inner_join(
                     children_symbols.on(children_symbols
                         .field(symbols::id)
                         .eq(symbol_refs::dsl::to_symbol)),
@@ -347,9 +351,6 @@ impl Index {
                         .eq(children_symbols.field(symbols::id))),
                 )
                 .select((
-                    File::as_select(),
-                    Symbol::as_select(),
-                    Declaration::as_select(),
                     SymbolRef::as_select(),
                     children_symbols.default_selection(),
                     children_decls.default_selection(),
@@ -368,7 +369,7 @@ impl Index {
                 debug_query::<Sqlite, _>(&parents_query)
             );
             let parents = parents_query
-                .load::<(File, Symbol, Declaration, SymbolRef, Symbol, Declaration)>(connection)
+                .load::<(SymbolRef, Symbol, Declaration)>(connection)
                 .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
             parents
         };
@@ -434,23 +435,11 @@ impl Index {
 
             let parents: Vec<_> = parents
                 .into_iter()
-                .map(
-                    |(
-                        from_file,
-                        from_symbol,
-                        from_declaration,
-                        symbol_ref,
-                        to_symbol,
-                        to_declaration,
-                    )| ParentReference {
-                        from_file,
-                        from_symbol,
-                        from_declaration,
-                        symbol_ref,
-                        to_symbol,
-                        to_declaration,
-                    },
-                )
+                .map(|(symbol_ref, to_symbol, to_declaration)| ParentReference {
+                    symbol_ref,
+                    to_symbol,
+                    to_declaration,
+                })
                 .collect();
 
             let children: Vec<_> = children
@@ -521,13 +510,7 @@ impl Index {
             let _parents_span: tracing::span::EnteredSpan =
                 tracing::info_span!("select_parents").entered();
 
-            symbol_refs::dsl::symbol_refs
-                .inner_join(
-                    declarations::dsl::declarations
-                        .on(symbol_refs::dsl::from_decl.eq(declarations::id)),
-                )
-                .inner_join(symbols::dsl::symbols.on(declarations::dsl::symbol.eq(symbols::id)))
-                .inner_join(files::dsl::files.on(files::id.eq(declarations::file_id)))
+            let parents_query = symbol_refs::dsl::symbol_refs
                 .inner_join(
                     children_symbols.on(children_symbols
                         .field(symbols::id)
@@ -539,16 +522,19 @@ impl Index {
                         .eq(children_symbols.field(symbols::id))),
                 )
                 .select((
-                    File::as_select(),
-                    Symbol::as_select(),
-                    Declaration::as_select(),
                     SymbolRef::as_select(),
                     children_symbols.default_selection(),
                     children_decls.default_selection(),
                 ))
-                .filter(children_decls.field(declarations::id).eq_any(&declarations))
-                .load::<(File, Symbol, Declaration, SymbolRef, Symbol, Declaration)>(connection)
-                .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
+                .filter(children_decls.field(declarations::id).eq_any(&declarations));
+            println!(
+                "Executing parents query (decl_id): {:?}",
+                debug_query::<Sqlite, _>(&parents_query)
+            );
+            let parents = parents_query
+                .load::<(SymbolRef, Symbol, Declaration)>(connection)
+                .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
+            parents
         };
 
         let (parent_symbols, parent_decls) =
@@ -604,23 +590,11 @@ impl Index {
 
             let parents = parents
                 .into_iter()
-                .map(
-                    |(
-                        from_file,
-                        from_symbol,
-                        from_declaration,
-                        symbol_ref,
-                        to_symbol,
-                        to_declaration,
-                    )| ParentReference {
-                        from_file,
-                        from_symbol,
-                        from_declaration,
-                        symbol_ref,
-                        to_symbol,
-                        to_declaration,
-                    },
-                )
+                .map(|(symbol_ref, to_symbol, to_declaration)| ParentReference {
+                    symbol_ref,
+                    to_symbol,
+                    to_declaration,
+                })
                 .collect();
 
             let children = children

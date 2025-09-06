@@ -64,6 +64,7 @@ pub struct SymbolRef {
     pub rowid: i32,
     pub from_decl: i32,
     pub to_symbol: i32,
+    pub from_file: Option<i32>,
     pub from_line: i32,
     pub from_col_start: i32,
     pub from_col_end: i32,

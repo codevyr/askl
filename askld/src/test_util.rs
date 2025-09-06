@@ -28,7 +28,7 @@ pub async fn run_query_async_err(
     let index = db::Index::new_in_memory().await.unwrap();
     index.load_test_input(askl_input).await.unwrap();
     index_diesel.load_test_input(askl_input).await.unwrap();
-    let symbols: SymbolMap = SymbolMap::from_index(&index).await.unwrap();
+    let symbols = SymbolMap::new();
     let cfg = ControlFlowGraph::from_symbols(symbols, index_diesel);
 
     let ast = parse(askl_query)?;

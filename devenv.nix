@@ -4,6 +4,8 @@
   # https://devenv.sh/basics/
   env.DATABASE_URL = "./test.db";
 
+  dotenv.enable = true;
+
   # https://devenv.sh/packages/
   packages = with pkgs ; [
     git

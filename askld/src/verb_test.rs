@@ -14,7 +14,7 @@ async fn test_select_matching_name() {
     let index = db::Index::new_in_memory().await.unwrap();
     index.load_test_input("verb_test.sql").await.unwrap();
     index_diesel.load_test_input("verb_test.sql").await.unwrap();
-    let symbols = SymbolMap::from_index(&index).await.unwrap();
+    let symbols = SymbolMap::new();
     let cfg = ControlFlowGraph::from_symbols(symbols, index_diesel);
 
     let test_cases = vec![

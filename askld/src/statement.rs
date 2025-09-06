@@ -335,7 +335,7 @@ impl Statement {
                 }
 
                 let occurrence = Occurrence {
-                    file: FileId::new(parent.from_file.id),
+                    file: parent.symbol_ref.from_file.unwrap().into(),
                     line_start: parent.symbol_ref.from_line,
                     column_start: parent.symbol_ref.from_col_start,
                     line_end: parent.symbol_ref.from_line,

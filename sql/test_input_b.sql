@@ -30,7 +30,8 @@ VALUES
     (97,  7,  1, 1, 1, 1, 1, 1),
     (942, 42, 1, 1, 1, 1, 1, 1);
 
-INSERT INTO symbol_refs
+INSERT INTO
+    symbol_refs(from_decl, to_symbol, from_line, from_col_start, from_col_end)
 VALUES
     (91,  2, 1, 16, 16),
     (92,  4, 1, 1,  1),
