@@ -4,7 +4,7 @@
 
 ## (including the Traditional Patent License OPTION)
 
-Thank you for your interest in contributing to Codevyr's Askl ("We" or "Us").
+Thank you for your interest in contributing to Codevyr ("We" or "Us").
 
 The purpose of this contributor agreement ("Agreement") is to clarify and document the rights granted by contributors to Us. To make this document effective, please follow the instructions at (https://docs.google.com/forms/d/1j3num4zQ5iFcRLC61YPB-gv3bGHjmZf5hpI9KVeJYzk).
 
