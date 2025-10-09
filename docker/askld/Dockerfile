@@ -13,7 +13,7 @@ WORKDIR /src
 COPY . .
 
 ENV DATABASE_URL=sqlite:./test.db?mode=rwc
-RUN cargo run -p create-index -- -o test.db
+RUN rm -f test.db && cargo run -p create-index -- -o test.db
 
 # Build just the askld crate, with lockfile respected
 RUN cargo build --locked --release -p askld
