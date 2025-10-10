@@ -150,7 +150,6 @@ impl File {
 pub struct Reference {
     pub from_decl: DeclarationId,
     pub to_symbol: SymbolId,
-    pub from_file: Option<i64>,
     pub from_line: i64,
     pub from_col_start: i64,
     pub from_col_end: i64,
@@ -554,7 +553,7 @@ impl Index {
         let references: Vec<Reference> = sqlx::query_as!(
             Reference,
             r#"
-            SELECT from_decl, to_symbol, from_file, from_line, from_col_start, from_col_end
+            SELECT from_decl, to_symbol, from_line, from_col_start, from_col_end
             FROM symbol_refs
             "#
         )

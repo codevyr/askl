@@ -12,6 +12,9 @@ WORKDIR /src
 # Copy the full workspace (simple & robust; rely on Docker layer cache)
 COPY . .
 
+ENV DATABASE_URL=sqlite:./test.db?mode=rwc
+RUN rm -f test.db && cargo run -p create-index -- -o test.db
+
 # Build just the askld crate, with lockfile respected
 RUN cargo build --locked --release -p askld
 
