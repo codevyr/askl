@@ -4,7 +4,9 @@ use index::{
     symbols::{DeclarationId, SymbolMap},
 };
 
-use crate::{cfg::ControlFlowGraph, execution_context::ExecutionContext, verb::*};
+use crate::{
+    cfg::ControlFlowGraph, execution_context::ExecutionContext, test_util::run_query, verb::*,
+};
 
 use std::collections::HashMap;
 
@@ -56,4 +58,27 @@ async fn test_select_matching_name() {
             name
         );
     }
+}
+
+#[test]
+fn test_ignore_package_filter() {
+    let query = r#"
+@preamble
+@ignore(package="foo");
+"foo";
+"foo.bar";
+"foobar";
+"tar";
+"#;
+
+    let (res_nodes, _res_edges) = run_query("verb_test.sql", query);
+
+    assert_eq!(
+        res_nodes.as_vec(),
+        vec![
+            DeclarationId::new(91),
+            DeclarationId::new(93),
+            DeclarationId::new(94),
+        ]
+    );
 }
