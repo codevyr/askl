@@ -559,7 +559,8 @@ pub fn partial_name_match<'a>(name: &'a str) -> SymbolMatcher<'a> {
 ///
 /// The package name consists of multiple parts separated by '.' or '/'. We
 /// consider the symbol matches the pattern of all components of the pattern
-/// match all but last component of the symbol.
+/// match the beginning component of the symbol, except for the last component
+/// of the symbol which is the symbol name itself.
 ///
 /// # Arguments
 ///
@@ -572,11 +573,10 @@ pub fn package_match<'a>(name: &'a str) -> SymbolMatcher<'a> {
     let search_pattern = clean_and_split_string(name);
 
     Box::new(move |(_, s): (&'a SymbolId, &'a Symbol)| {
-        if s.name_split.len() != search_pattern.len() + 1 {
-            return None;
-        }
-
-        for i in 0..(s.name_split.len().saturating_sub(1)) {
+        for i in 0..search_pattern.len() {
+            if s.name_split.len() - 1 <= i {
+                return None;
+            }
             if s.name_split[i] != search_pattern[i] {
                 return None;
             }
