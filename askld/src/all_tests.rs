@@ -1,4 +1,6 @@
-use crate::test_util::{format_edges, run_query, run_query_err, TEST_INPUT_A, TEST_INPUT_B};
+use crate::test_util::{
+    format_edges, run_query, run_query_err, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_MODULES,
+};
 use index::symbols::DeclarationId;
 
 #[test]
@@ -457,6 +459,55 @@ fn project_double_parent_query() {
     );
     let edges = format_edges(res_edges);
     assert_eq!(edges, vec!["91-92", "91-92", "942-91", "942-92"]);
+}
+
+#[test]
+fn module_filter_excludes_other_modules() {
+    const FILTERED_QUERY: &str = r#"@module("test") "a""#;
+    let (filtered_nodes, filtered_edges) = run_query(TEST_INPUT_MODULES, FILTERED_QUERY);
+
+    println!("{:#?}", filtered_nodes);
+    println!("{:#?}", filtered_edges);
+
+    assert_eq!(filtered_nodes.as_vec(), vec![DeclarationId::new(91)]);
+    assert_eq!(filtered_edges.0.len(), 0);
+
+    const UNFILTERED_QUERY: &str = r#""a""#;
+    let (unfiltered_nodes, _) = run_query(TEST_INPUT_MODULES, UNFILTERED_QUERY);
+    let unfiltered_nodes = unfiltered_nodes.as_vec();
+
+    assert_eq!(
+        unfiltered_nodes,
+        vec![DeclarationId::new(91), DeclarationId::new(201)]
+    );
+
+    const FILTERED_AND_UNFILTERED_QUERY: &str = r#"@module("test") "a"; "a""#;
+    let (filtered_unfiltered_nodes, _) =
+        run_query(TEST_INPUT_MODULES, FILTERED_AND_UNFILTERED_QUERY);
+    let filtered_unfiltered_nodes = filtered_unfiltered_nodes.as_vec();
+
+    assert_eq!(
+        filtered_unfiltered_nodes,
+        vec![DeclarationId::new(91), DeclarationId::new(201)]
+    );
+
+    const PREAMBLE_FILTERED_QUERY: &str = r#"@preamble @module("test"); "a""#;
+    let (preamble_filtered_nodes, _) = run_query(TEST_INPUT_MODULES, PREAMBLE_FILTERED_QUERY);
+    let preamble_filtered_nodes = preamble_filtered_nodes.as_vec();
+
+    assert_eq!(preamble_filtered_nodes, vec![DeclarationId::new(91)]);
+}
+
+#[test]
+fn module_filter_selects_other_module() {
+    const QUERY: &str = r#"@module("other") "a""#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_MODULES, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(201)]);
+    assert_eq!(res_edges.0.len(), 0);
 }
 
 #[test]
