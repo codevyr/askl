@@ -82,7 +82,7 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
     let index = Index::new_in_memory().await?;
 
     // Test with empty database first
-    let empty_selection = index.find_symbol_by_name(&["nonexistent"]).await?;
+    let empty_selection = index.find_symbol_by_name("nonexistent").await?;
     assert!(empty_selection.nodes.is_empty());
     assert!(empty_selection.parents.is_empty());
     assert!(empty_selection.children.is_empty());
@@ -91,14 +91,14 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
     index.load_test_input(Index::TEST_INPUT_A).await?;
 
     // Test searching for symbols - use "a" which we know exists
-    let selection = index.find_symbol_by_name(&["a"]).await?;
+    let selection = index.find_symbol_by_name("a").await?;
     assert!(
         !selection.nodes.is_empty(),
         "Should find symbols with 'a' in the name"
     );
 
     // Test searching for symbols - use "main" which we know exists
-    let selection = index.find_symbol_by_name(&["main"]).await?;
+    let selection = index.find_symbol_by_name("main").await?;
     assert!(
         !selection.nodes.is_empty(),
         "Should find symbols with 'main' in the name"
@@ -129,7 +129,7 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
     }
 
     // Test compound name search
-    let compound_selection = index.find_symbol_by_name(&["mai", "n"]).await?;
+    let compound_selection = index.find_symbol_by_name("mai.n").await?;
     assert!(
         compound_selection.nodes.is_empty(),
         "Should find no symbols with compound name search"

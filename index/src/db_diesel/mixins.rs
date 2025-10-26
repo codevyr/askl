@@ -9,7 +9,7 @@ use diesel::sqlite::Sqlite;
 use diesel::{debug_query, sql_query};
 
 use crate::models_diesel::{Declaration, File, Module, Symbol, SymbolRef};
-use crate::symbols::DeclarationId;
+use crate::symbols::{clean_and_split_string, DeclarationId};
 
 use super::dsl::GlobMethods;
 use super::Connection;
@@ -158,7 +158,14 @@ pub type ChildrenQuery<'a> = BoxedSelectStatement<
     Sqlite,
 >;
 
-pub trait SymbolSearchMixin {
+#[derive(Debug, Clone, PartialEq, QueryableByName)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct SymbolRowid {
+    #[diesel(sql_type = Integer)]
+    pub rowid: i32,
+}
+
+pub trait SymbolSearchMixin: std::fmt::Debug {
     fn enter(&mut self, _connection: &mut Connection) -> Result<()> {
         Ok(())
     }
@@ -188,6 +195,7 @@ pub trait SymbolSearchMixin {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct CompoundNameMixin {
     pub compound_name: Vec<String>,
     pub name_pattern: String,
@@ -196,9 +204,10 @@ pub struct CompoundNameMixin {
 }
 
 impl CompoundNameMixin {
-    pub fn new(compound_name: Vec<String>) -> Self {
+    pub fn new(compound_name: &str) -> Self {
+        let name_slice = clean_and_split_string(&compound_name);
         Self {
-            compound_name,
+            compound_name: name_slice,
             name_pattern: String::new(),
             matched_symbols: Vec::new(),
         }
@@ -289,6 +298,7 @@ impl SymbolSearchMixin for CompoundNameMixin {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct DeclarationIdMixin {
     pub decl_ids: Vec<i32>,
 }
@@ -342,9 +352,47 @@ impl SymbolSearchMixin for DeclarationIdMixin {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, QueryableByName)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
-struct SymbolRowid {
-    #[diesel(sql_type = Integer)]
-    pub rowid: i32,
+#[derive(Debug, Clone)]
+pub struct ModuleFilterMixin {
+    pub module_name: String,
+}
+
+impl ModuleFilterMixin {
+    pub fn new(module_name: &str) -> Self {
+        Self {
+            module_name: module_name.to_string(),
+        }
+    }
+}
+
+impl SymbolSearchMixin for ModuleFilterMixin {
+    fn filter_current<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: CurrentQuery<'a>,
+    ) -> Result<CurrentQuery<'a>> {
+        use crate::schema_diesel::modules;
+
+        Ok(query.filter(modules::dsl::module_name.eq(self.module_name.clone())))
+    }
+
+    fn filter_parents<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: ParentsQuery<'a>,
+    ) -> Result<ParentsQuery<'a>> {
+        // We do not filter parents by module, because parents and children can
+        // come only from the same module.
+        Ok(query)
+    }
+
+    fn filter_children<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: ChildrenQuery<'a>,
+    ) -> Result<ChildrenQuery<'a>> {
+        // We do not filter parents by module, because parents and children can
+        // come only from the same module.
+        Ok(query)
+    }
 }

@@ -9,7 +9,7 @@ mod mixins;
 mod selection;
 
 pub use index_impl::Index;
-pub use mixins::{CompoundNameMixin, DeclarationIdMixin, SymbolSearchMixin};
+pub use mixins::{CompoundNameMixin, DeclarationIdMixin, ModuleFilterMixin, SymbolSearchMixin};
 pub use selection::{
     ChildReference, DeclarationFullDiesel, FileFullDiesel, ModuleFullDiesel, ParentReference,
     ReferenceFullDiesel, ReferenceResult, Selection, SelectionNode,

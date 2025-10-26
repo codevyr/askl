@@ -36,7 +36,7 @@ async fn test_select_matching_name() {
         let result = selector
             .as_selector()
             .unwrap()
-            .select_from_all(&mut ctx, &cfg)
+            .select_from_all(&mut ctx, &cfg, vec![])
             .await
             .unwrap();
 

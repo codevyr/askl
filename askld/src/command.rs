@@ -4,7 +4,7 @@ use crate::statement::Statement;
 use crate::verb::{DeriveMethod, Deriver, Filter, Marker, Selector, UnitVerb, Verb};
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{ChildReference, ParentReference, Selection};
+use index::db_diesel::{ChildReference, ParentReference, Selection, SymbolSearchMixin};
 use index::symbols::DeclarationRefs;
 use std::sync::Arc;
 
@@ -105,7 +105,13 @@ impl Command {
 
         let mut selection = Selection::new();
         for selector in selectors.iter() {
-            let current_selection = selector.select_from_all(ctx, cfg).await.unwrap();
+            let search_mixins: Vec<Box<dyn SymbolSearchMixin>> =
+                self.filters().flat_map(|f| f.get_filter_mixins()).collect();
+
+            let current_selection = selector
+                .select_from_all(ctx, cfg, search_mixins)
+                .await
+                .unwrap();
             selection.extend(current_selection);
         }
 

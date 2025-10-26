@@ -5,7 +5,7 @@ use crate::parser_context::ParserContext;
 use crate::statement::Statement;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use index::db_diesel::{ChildReference, ParentReference, Selection};
+use index::db_diesel::{ChildReference, ParentReference, Selection, SymbolSearchMixin};
 use index::symbols::{DeclarationId, DeclarationRefs};
 use log::debug;
 use pest::error::Error;
@@ -124,33 +124,42 @@ pub trait Verb: std::fmt::Debug + Sync {
 }
 
 pub trait Filter: std::fmt::Debug {
+    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
+        vec![]
+    }
+
     fn filter(&self, cfg: &ControlFlowGraph, selection: &mut Selection) {
         let filter_name = format!("{:?}", self);
         let _filter = tracing::info_span!("filter", name = %filter_name).entered();
         self.filter_impl(cfg, selection);
     }
 
-    fn filter_impl(&self, cfg: &ControlFlowGraph, selection: &mut Selection);
+    fn filter_impl(&self, _cfg: &ControlFlowGraph, _selection: &mut Selection) {}
 }
 
 #[async_trait(?Send)]
 pub trait Selector: std::fmt::Debug {
     async fn select_from_all(
         &self,
-        ctx: &mut ExecutionContext,
+        _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
+        search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
     ) -> Result<Selection> {
         let select_from_all_name = format!("{:?}", self);
         let _select_from_all =
             tracing::info_span!("select_from_all", name = %select_from_all_name).entered();
-        self.select_from_all_impl(ctx, cfg).await
+        self.select_from_all_impl(_ctx, cfg, search_mixins).await
     }
 
     async fn select_from_all_impl(
         &self,
-        ctx: &mut ExecutionContext,
+        _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-    ) -> Result<Selection>;
+        search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+    ) -> Result<Selection> {
+        let mut search_mixins = search_mixins;
+        cfg.index.find_symbol(&mut search_mixins).await
+    }
 }
 
 #[async_trait(?Send)]

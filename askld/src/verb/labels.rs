@@ -3,7 +3,7 @@ use crate::execution_context::ExecutionContext;
 use crate::statement::Statement;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use index::db_diesel::{ChildReference, ParentReference, Selection};
+use index::db_diesel::{ChildReference, ParentReference, Selection, SymbolSearchMixin};
 use index::symbols::DeclarationRefs;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -144,6 +144,7 @@ impl Selector for UserVerb {
         &self,
         _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
+        _search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
     ) -> Result<Selection> {
         unimplemented!("UserVerb does not support select_from_all");
     }
