@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use core::fmt::Debug;
 use index::db_diesel::{ChildReference, ParentReference, Selection};
 use index::models_diesel::SymbolRef;
-use index::symbols;
+use index::symbols::{self, package_match};
 use index::symbols::{
     clean_and_split_string, partial_name_match, DeclarationId, DeclarationRefs, SymbolId,
 };
@@ -609,18 +609,35 @@ impl Deriver for ChildrenVerb {
 
 #[derive(Debug)]
 struct IgnoreVerb {
-    name: String,
+    name: Option<String>,
+    package: Option<String>,
 }
 
 impl IgnoreVerb {
     const NAME: &'static str = "ignore";
 
-    fn new(positional: &Vec<String>, _named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
+    fn new(positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
+        let mut verb = Self {
+            name: None,
+            package: None,
+        };
+        let mut empty = true;
+
         if let Some(name) = positional.iter().next() {
-            Ok(Arc::new(Self { name: name.clone() }))
-        } else {
-            bail!("Expected a positional argument");
+            verb.name = Some(name.clone());
+            empty = false;
         }
+
+        if let Some(package) = named.get("package") {
+            verb.package = Some(package.clone());
+            empty = false;
+        }
+
+        if empty {
+            bail!("Expected at least one argument");
+        }
+
+        Ok(Arc::new(verb))
     }
 }
 
@@ -645,10 +662,22 @@ impl Filter for IgnoreVerb {
             };
 
             let id = &index_symbol.id;
-            let matcher = partial_name_match(&self.name);
-            let matched_symbol = matcher((id, &index_symbol));
-            let mismatch = matched_symbol.is_none();
-            mismatch
+            if let Some(ref name) = self.name {
+                let matcher = partial_name_match(name);
+                let matched_symbol = matcher((id, &index_symbol));
+                if matched_symbol.is_none() {
+                    return true;
+                }
+            }
+
+            if let Some(ref package) = self.package {
+                let matcher = package_match(package);
+                let matched_symbol = matcher((id, &index_symbol));
+                if matched_symbol.is_none() {
+                    return true;
+                }
+            }
+            false
         });
     }
 }

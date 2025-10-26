@@ -1,4 +1,4 @@
-use crate::symbols::{partial_name_match, Symbol, SymbolId};
+use crate::symbols::{package_match, partial_name_match, Symbol, SymbolId};
 
 #[test]
 fn test_partial_name_matcher() {
@@ -31,6 +31,46 @@ fn test_partial_name_matcher() {
             symbol_name,
             search_term,
             if expected_match { "" } else { " not" }
+        );
+    }
+}
+
+#[test]
+fn test_package_matcher_with_multiple_patterns() {
+    let symbols = vec![
+        Symbol::new(SymbolId::new(1), "foo.bar.Component".to_string()),
+        Symbol::new(SymbolId::new(2), "foo.bar.baz.Component".to_string()),
+        Symbol::new(SymbolId::new(3), "foo.qux.Utility".to_string()),
+        Symbol::new(SymbolId::new(4), "pkg/apis/core/v1.Pod".to_string()),
+    ];
+
+    let test_cases: Vec<(&str, Vec<&str>)> = vec![
+        (
+            "foo.bar",
+            vec!["foo.bar.Component", "foo.bar.baz.Component"],
+        ),
+        ("foo.bar.baz", vec!["foo.bar.baz.Component"]),
+        ("foo.qux", vec!["foo.qux.Utility"]),
+        ("pkg/apis/core/v1", vec!["pkg/apis/core/v1.Pod"]),
+        ("pkg/apis/core", vec!["pkg/apis/core/v1.Pod"]),
+    ];
+
+    for (pattern, expected_names) in test_cases {
+        let matcher = package_match(pattern);
+        let mut matched_names = Vec::new();
+
+        for symbol in &symbols {
+            if let Some(matched) = matcher((&symbol.id, symbol)) {
+                matched_names.push(matched.name.clone());
+            }
+        }
+
+        let expected: Vec<String> = expected_names.iter().map(|name| name.to_string()).collect();
+
+        assert_eq!(
+            matched_names, expected,
+            "Pattern '{}' should match symbols {:?}",
+            pattern, expected_names
         );
     }
 }
