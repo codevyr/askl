@@ -11,6 +11,7 @@ use tokio::{runtime::Runtime, task};
 
 pub const TEST_INPUT_A: &'static str = index::db::Index::TEST_INPUT_A;
 pub const TEST_INPUT_B: &'static str = index::db::Index::TEST_INPUT_B;
+pub const TEST_INPUT_MODULES: &'static str = index::db::Index::TEST_INPUT_MODULES;
 
 pub fn format_edges(edges: EdgeList) -> Vec<String> {
     edges

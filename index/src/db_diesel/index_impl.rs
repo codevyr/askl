@@ -82,6 +82,7 @@ impl Index {
 
     pub const TEST_INPUT_A: &'static str = "test_input_a.sql";
     pub const TEST_INPUT_B: &'static str = "test_input_b.sql";
+    pub const TEST_INPUT_MODULES: &'static str = "test_input_modules.sql";
 
     pub async fn load_test_input(&self, input_path: &str) -> Result<()> {
         let connection = &mut self.pool.get().unwrap();
@@ -105,6 +106,12 @@ impl Index {
             "test_input_b.sql" => {
                 connection
                     .batch_execute(include_str!("../../../sql/test_input_b.sql"))
+                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
+                    .unwrap();
+            }
+            "test_input_modules.sql" => {
+                connection
+                    .batch_execute(include_str!("../../../sql/test_input_modules.sql"))
                     .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
                     .unwrap();
             }
@@ -148,7 +155,10 @@ impl Index {
         Ok(String::from_utf8_lossy(&result.unwrap()).to_string())
     }
 
-    pub async fn find_symbol(&self, mixins: Vec<Box<dyn SymbolSearchMixin>>) -> Result<Selection> {
+    pub async fn find_symbol(
+        &self,
+        mixins: &mut [Box<dyn SymbolSearchMixin>],
+    ) -> Result<Selection> {
         use crate::schema_diesel::modules::dsl::*;
         use crate::schema_diesel::*;
 
@@ -156,8 +166,6 @@ impl Index {
             .pool
             .get()
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
-
-        let mut mixins = mixins;
 
         for mixin in mixins.iter_mut() {
             mixin.enter(connection)?;
@@ -179,7 +187,7 @@ impl Index {
                 ))
                 .into_boxed::<Sqlite>();
 
-            for mixin in &mixins {
+            for mixin in mixins.iter_mut() {
                 joined_query = mixin.filter_current(connection, joined_query)?;
             }
 
@@ -211,7 +219,7 @@ impl Index {
                 ))
                 .into_boxed::<Sqlite>();
 
-            for mixin in &mixins {
+            for mixin in mixins.iter_mut() {
                 parents_query = mixin.filter_parents(connection, parents_query)?;
             }
 
@@ -254,7 +262,7 @@ impl Index {
                 ))
                 .into_boxed::<Sqlite>();
 
-            for mixin in &mixins {
+            for mixin in mixins {
                 children_query = mixin.filter_children(connection, children_query)?;
             }
 
@@ -313,10 +321,10 @@ impl Index {
         selection
     }
 
-    pub async fn find_symbol_by_name(&self, compound_name: &[&str]) -> Result<Selection> {
-        let mixin = CompoundNameMixin::new(compound_name.iter().map(|s| s.to_string()).collect());
-
-        self.find_symbol(vec![Box::new(mixin)]).await
+    pub async fn find_symbol_by_name(&self, name: &str) -> Result<Selection> {
+        let mixin = CompoundNameMixin::new(name);
+        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![Box::new(mixin)];
+        self.find_symbol(&mut mixins).await
     }
 
     pub async fn find_symbol_by_declid(
@@ -324,6 +332,7 @@ impl Index {
         declarations: &Vec<DeclarationId>,
     ) -> Result<Selection> {
         let mixin = DeclarationIdMixin::new(declarations);
-        self.find_symbol(vec![Box::new(mixin)]).await
+        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![Box::new(mixin)];
+        self.find_symbol(&mut mixins).await
     }
 }

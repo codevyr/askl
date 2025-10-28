@@ -6,7 +6,10 @@ use crate::parser_context::ParserContext;
 use crate::statement::Statement;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
-use index::db_diesel::{ChildReference, ParentReference, Selection};
+use index::db_diesel::{
+    ChildReference, CompoundNameMixin, ModuleFilterMixin, ParentReference, Selection,
+    SymbolSearchMixin,
+};
 use index::models_diesel::SymbolRef;
 use index::symbols::{self, package_match};
 use index::symbols::{clean_and_split_string, partial_name_match, DeclarationId, SymbolId};
@@ -15,6 +18,7 @@ use pest::error::ErrorVariant::CustomError;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::vec;
 
 use super::labels::{LabellerVerb, UserVerb};
 use super::preamble::PreambleVerb;
@@ -117,10 +121,11 @@ impl Selector for NameSelector {
         &self,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
+        search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
     ) -> Result<Selection> {
-        let symbols = cfg.find_symbol_by_name(self.name.as_str()).await;
-
-        symbols
+        let mut search_mixins = search_mixins;
+        search_mixins.push(Box::new(CompoundNameMixin::new(&self.name)));
+        cfg.index.find_symbol(&mut search_mixins).await
     }
 }
 
@@ -423,13 +428,14 @@ impl ModuleFilter {
         positional: &Vec<String>,
         _named: &HashMap<String, String>,
     ) -> Result<Arc<dyn Verb>> {
-        if let Some(module) = positional.iter().next() {
-            Ok(Arc::new(Self {
+        let filter = if let Some(module) = positional.iter().next() {
+            Arc::new(Self {
                 module: module.clone(),
-            }))
+            })
         } else {
             bail!("Expected a positional argument");
-        }
+        };
+        Ok(filter)
     }
 }
 
@@ -444,10 +450,8 @@ impl Verb for ModuleFilter {
 }
 
 impl Filter for ModuleFilter {
-    fn filter_impl(&self, _cfg: &ControlFlowGraph, selection: &mut Selection) {
-        selection
-            .nodes
-            .retain(|s| self.module == s.module.module_name);
+    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
+        vec![Box::new(ModuleFilterMixin::new(&self.module))]
     }
 }
 

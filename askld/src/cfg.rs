@@ -3,7 +3,7 @@ use std::{collections::HashSet, iter::Iterator};
 use anyhow::Result;
 use index::db::{File, Module};
 use index::db_diesel::{Index, Selection, SelectionNode};
-use index::symbols::{clean_and_split_string, DeclarationId, DeclarationRefs, ModuleId};
+use index::symbols::{DeclarationId, DeclarationRefs, ModuleId};
 use index::symbols::{FileId, Occurrence, Symbol, SymbolId, SymbolMap};
 
 pub struct ControlFlowGraph {
@@ -113,10 +113,8 @@ impl ControlFlowGraph {
     }
 
     pub async fn find_symbol_by_name(&self, name: &str) -> Result<Selection> {
-        let name = clean_and_split_string(name);
-        let name_slice: Vec<_> = name.iter().map(String::as_str).collect();
         self.index
-            .find_symbol_by_name(&name_slice)
+            .find_symbol_by_name(&name)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to find symbol by name: {}", e))
     }
