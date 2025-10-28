@@ -241,34 +241,6 @@ impl Index {
     pub const TEST_INPUT_B: &'static str = "test_input_b.sql";
     pub const TEST_INPUT_MODULES: &'static str = "test_input_modules.sql";
 
-    pub async fn load_test_input(&self, input_path: &str) -> Result<()> {
-        match input_path {
-            "test_input_a.sql" => {
-                sqlx::query_file!("../sql/test_input_a.sql")
-                    .execute(&self.pool)
-                    .await?
-            }
-            "test_input_b.sql" => {
-                sqlx::query_file!("../sql/test_input_b.sql")
-                    .execute(&self.pool)
-                    .await?
-            }
-            "test_input_modules.sql" => {
-                sqlx::query_file!("../sql/test_input_modules.sql")
-                    .execute(&self.pool)
-                    .await?
-            }
-            "verb_test.sql" => {
-                sqlx::query_file!("../sql/verb_test.sql")
-                    .execute(&self.pool)
-                    .await?
-            }
-            _ => panic!("Impossible input file"),
-        };
-
-        Ok(())
-    }
-
     pub async fn create_or_get_module(&self, module_name: &str) -> Result<ModuleId> {
         let rec = sqlx::query!(
             r#"
@@ -539,22 +511,6 @@ impl Index {
         Ok(files)
     }
 
-    pub async fn get_file(&self, file_id: FileId) -> Result<File> {
-        let files: File = sqlx::query_as!(
-            File,
-            r#"
-            SELECT *
-            FROM files
-            WHERE id = ?
-            "#,
-            file_id
-        )
-        .fetch_one(&self.pool)
-        .await?;
-
-        Ok(files)
-    }
-
     pub async fn all_refs(&self) -> Result<Vec<Reference>> {
         let references: Vec<Reference> = sqlx::query_as!(
             Reference,
@@ -562,42 +518,6 @@ impl Index {
             SELECT from_decl, to_symbol, from_line, from_col_start, from_col_end
             FROM symbol_refs
             "#
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(references)
-    }
-
-    pub async fn get_parents(&self, child_declaration: DeclarationId) -> Result<Vec<Reference>> {
-        let references: Vec<Reference> = sqlx::query_as!(
-            Reference,
-            r#"
-            SELECT symbol_refs.*
-            FROM symbol_refs
-            INNER JOIN declarations
-            ON declarations.symbol = symbol_refs.to_symbol
-            WHERE declarations.id = ?;
-            "#,
-            child_declaration
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(references)
-    }
-
-    pub async fn get_children(&self, parent_declaration: DeclarationId) -> Result<Vec<Reference>> {
-        let references: Vec<Reference> = sqlx::query_as!(
-            Reference,
-            r#"
-            SELECT symbol_refs.*
-            FROM symbol_refs
-            INNER JOIN declarations
-            ON declarations.symbol = symbol_refs.to_symbol
-            WHERE symbol_refs.from_decl = ?;
-            "#,
-            parent_declaration
         )
         .fetch_all(&self.pool)
         .await?;

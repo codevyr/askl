@@ -1,7 +1,7 @@
 use std::{fs::File, sync::Arc};
 
+use clang::clang::{run_clang_ast, CompileCommand, GlobalVisitorState, ParsedNode};
 use clap::Parser;
-use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState, ParsedNode};
 use index::db::{Index, Module};
 use index::symbols::ModuleId;
 use indicatif::ProgressBar;

@@ -2,7 +2,7 @@
 
 {
   # https://devenv.sh/basics/
-  env.DATABASE_URL = "./test.db";
+  #env.DATABASE_URL = "./test.db";
 
   dotenv.enable = true;
 

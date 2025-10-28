@@ -49,6 +49,7 @@ pub struct SelectionNode {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReferenceResult {
+    pub parent_symbol: Symbol,
     pub symbol: Symbol,
     pub declaration: Declaration,
     pub symbol_ref: SymbolRef,
@@ -61,6 +62,7 @@ pub type ChildReference = ReferenceResult;
 pub struct ParentReference {
     pub to_symbol: Symbol,
     pub to_declaration: Declaration,
+    pub from_declaration: Declaration,
     pub symbol_ref: SymbolRef,
 }
 

@@ -199,6 +199,7 @@ impl Deriver for ForcedVerb {
                 let reference = ParentReference {
                     to_symbol: child_node.symbol.clone(),
                     to_declaration: child_node.declaration.clone(),
+                    from_declaration: parent_node.declaration.clone(),
                     symbol_ref: SymbolRef {
                         rowid: 0,
                         from_decl: parent_node.declaration.id,

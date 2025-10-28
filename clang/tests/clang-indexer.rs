@@ -3,11 +3,15 @@ use std::{env, path::Path};
 
 use index::{
     db::{Module, Symbol},
-    symbols::{DeclarationId, FileId, ModuleId, SymbolId, SymbolMap, SymbolScope, SymbolType},
+    symbols::{
+        self, DeclarationId, FileId, ModuleId, Occurrence, SymbolId, SymbolScope, SymbolType,
+    },
 };
 
-use index::clang::{run_clang_ast, CompileCommand, GlobalVisitorState};
+use clang::clang::{run_clang_ast, CompileCommand, GlobalVisitorState};
+use anyhow::Result;
 use index::db::{Declaration, Index, Reference};
+use std::collections::HashMap;
 
 async fn index_files(files: Vec<&str>, module: &Module) -> GlobalVisitorState {
     dotenv().ok();
@@ -178,5 +182,53 @@ async fn create_state() {
     assert_eq!(refs.len(), expected_refs.len());
 
     let index: Index = state.into();
-    let _symbols = SymbolMap::from_index(&index).await.unwrap();
+    let _symbols = from_index(&index).await.unwrap();
+}
+
+pub async fn from_index(index: &Index) -> Result<()> {
+    let symbols = index.all_symbols().await?;
+    let mut symbols_map = HashMap::new();
+    for symbol in symbols {
+        symbols_map.insert(
+            symbol.id,
+            symbols::Symbol::new(SymbolId::from(symbol.id), symbol.name.clone()),
+        );
+    }
+
+    let declarations = index.all_declarations().await?;
+    let mut declaration_map = HashMap::new();
+    for declaration in declarations {
+        declaration_map.insert(declaration.id, declaration);
+    }
+
+    let files = index.all_files().await?;
+    let mut files_map = HashMap::new();
+    for file in files {
+        files_map.insert(file.id, file);
+    }
+
+    let modules = index.all_modules().await?;
+    let mut modules_map = HashMap::new();
+    for module in modules {
+        modules_map.insert(module.id, module);
+    }
+
+    let references = index.all_refs().await?;
+    for reference in references {
+        let from_declaration = declaration_map.get(&reference.from_decl).unwrap();
+        let from_symbol = symbols_map.get_mut(&from_declaration.symbol).unwrap();
+        let occurrence = Occurrence {
+            file: from_declaration.file_id,
+            line_start: reference.from_line as i32,
+            line_end: reference.from_line as i32,
+            column_start: reference.from_col_start as i32,
+            column_end: reference.from_col_end as i32,
+        };
+        from_symbol.add_child(reference.to_symbol, occurrence.clone());
+
+        let to_symbol = symbols_map.get_mut(&reference.to_symbol).unwrap();
+        to_symbol.add_parent(from_declaration.id, occurrence);
+    }
+
+    Ok(())
 }

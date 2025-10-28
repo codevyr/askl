@@ -52,10 +52,24 @@ type SelectionTuple = (
 pub type CurrentQuery<'a> =
     BoxedSelectStatement<'a, SelectionTuple, FromClause<SymbolDeclarationModuleFileJoin>, Sqlite>;
 
+type DeclarationColumnsSqlType = (
+    Integer,
+    Integer,
+    Integer,
+    Integer,
+    Integer,
+    Integer,
+    Integer,
+    Integer,
+);
+
+type SymbolColumnsSqlType = (Integer, Text, Integer, Integer);
+
 type ParentSelectionTuple = (
     AsSelect<SymbolRef, Sqlite>,
     AsSelect<Symbol, Sqlite>,
     AsSelect<Declaration, Sqlite>,
+    DeclarationColumnsSqlType, // We cannot use AsSelect<Declaration, Sqlite> here due to ambiguity
 );
 
 type SymbolRefSymbolJoin = InnerJoinQuerySource<
@@ -74,6 +88,11 @@ type SymbolRefSymbolDeclarationJoin = InnerJoinQuerySource<
         crate::schema_diesel::symbols::columns::id,
         crate::schema_diesel::declarations::columns::symbol,
     >,
+>;
+
+type ParentDeclOn = Eq<
+    AliasedField<ParentDeclsAlias, crate::schema_diesel::declarations::columns::id>,
+    crate::schema_diesel::symbol_refs::columns::from_decl,
 >;
 
 type ChildSymbolOn = Eq<
@@ -107,24 +126,26 @@ type SymbolRefChildrenActualDeclarationJoin = InnerJoinQuerySource<
     >,
 >;
 
+type SymbolRefChildrenActualDeclarationParentDeclJoin = InnerJoinQuerySource<
+    SymbolRefChildrenActualDeclarationJoin,
+    Alias<ParentDeclsAlias>,
+    ParentDeclOn,
+>;
+
 pub type ParentsQuery<'a> = BoxedSelectStatement<
     'a,
     ParentSelectionTuple,
-    FromClause<SymbolRefChildrenActualDeclarationJoin>,
+    FromClause<SymbolRefChildrenActualDeclarationParentDeclJoin>,
     Sqlite,
 >;
 
 type ChildSelectionTuple = (
+    SymbolColumnsSqlType,
     AsSelect<Symbol, Sqlite>,
     AsSelect<Declaration, Sqlite>,
     AsSelect<SymbolRef, Sqlite>,
     AsSelect<File, Sqlite>,
 );
-
-type ParentDeclOn = Eq<
-    AliasedField<ParentDeclsAlias, crate::schema_diesel::declarations::columns::id>,
-    crate::schema_diesel::symbol_refs::columns::from_decl,
->;
 
 type ParentSymbolOn = Eq<
     AliasedField<ParentSymbolsAlias, crate::schema_diesel::symbols::columns::id>,

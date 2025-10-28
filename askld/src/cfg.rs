@@ -1,15 +1,12 @@
 use std::{collections::HashSet, iter::Iterator};
 
 use anyhow::Result;
-use index::db::{File, Module};
 use index::db_diesel::{Index, Selection, SelectionNode};
-use index::symbols::{DeclarationId, DeclarationRefs, ModuleId};
-use index::symbols::{FileId, Occurrence, Symbol, SymbolId, SymbolMap};
+use index::symbols::Occurrence;
+use index::symbols::{clean_and_split_string, DeclarationId, SymbolId};
 
 pub struct ControlFlowGraph {
-    pub symbols: SymbolMap,
     pub index: Index,
-    pub nodes: HashSet<SymbolId>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,8 +32,14 @@ impl NodeList {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SymbolDeclId {
+    pub symbol_id: SymbolId,
+    pub declaration_id: DeclarationId,
+}
+
 #[derive(Debug, Clone)]
-pub struct EdgeList(pub HashSet<(DeclarationId, DeclarationId, Option<Occurrence>)>);
+pub struct EdgeList(pub HashSet<(SymbolDeclId, SymbolDeclId, Option<Occurrence>)>);
 
 impl EdgeList {
     pub fn new() -> Self {
@@ -45,71 +48,32 @@ impl EdgeList {
 
     pub fn add_reference(
         &mut self,
-        from: DeclarationId,
-        to: DeclarationId,
+        from: SymbolDeclId,
+        to: SymbolDeclId,
         occurrence: Option<Occurrence>,
     ) {
         self.0.insert((from, to, occurrence));
     }
 
-    pub fn as_vec(&self) -> Vec<(DeclarationId, DeclarationId, Option<Occurrence>)> {
+    pub fn as_vec(&self) -> Vec<(SymbolDeclId, SymbolDeclId, Option<Occurrence>)> {
         let mut res: Vec<_> = self.0.clone().into_iter().collect();
-        res.sort();
+        res.sort_by(|(from_a, to_a, _), (from_b, to_b, _)| {
+            from_a
+                .declaration_id
+                .cmp(&from_b.declaration_id)
+                .then_with(|| to_a.declaration_id.cmp(&to_b.declaration_id))
+                .then_with(|| from_a.symbol_id.cmp(&from_b.symbol_id))
+                .then_with(|| to_a.symbol_id.cmp(&to_b.symbol_id))
+        });
         res
     }
 }
 
 impl ControlFlowGraph {
-    pub fn from_symbols(symbols: SymbolMap, index_diesel: Index) -> Self {
-        let nodes: HashSet<SymbolId> = symbols.iter().map(|(id, _)| id.clone()).collect();
+    pub fn from_symbols(index_diesel: Index) -> Self {
         Self {
-            symbols,
             index: index_diesel,
-            nodes,
         }
-    }
-
-    pub fn iter_symbols(&self) -> impl Iterator<Item = (&SymbolId, &Symbol)> {
-        self.symbols.iter()
-    }
-
-    pub fn get_symbol(&self, id: SymbolId) -> Option<&Symbol> {
-        self.symbols.symbols.get(&id)
-    }
-
-    pub fn get_file(&self, id: FileId) -> Option<&File> {
-        self.symbols.files.get(&id)
-    }
-
-    pub fn get_module(&self, id: ModuleId) -> Option<&Module> {
-        self.symbols.modules.get(&id)
-    }
-
-    pub fn find_module(&self, name: &str) -> Option<&Module> {
-        for (_, module) in self.symbols.modules.iter() {
-            if module.module_name == name {
-                return Some(&module);
-            }
-        }
-
-        None
-    }
-
-    pub fn get_declarations_from_symbols(&self, symbols: &Vec<SymbolId>) -> DeclarationRefs {
-        let mut res = DeclarationRefs::new();
-        if symbols.len() == 0 {
-            return res;
-        }
-
-        for symbol in symbols {
-            for (declaration_id, declaration) in self.symbols.declarations.iter() {
-                if declaration.symbol == *symbol {
-                    res.insert(*declaration_id, HashSet::new());
-                }
-            }
-        }
-
-        res
     }
 
     pub async fn find_symbol_by_name(&self, name: &str) -> Result<Selection> {

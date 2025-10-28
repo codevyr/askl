@@ -1,11 +1,11 @@
 use std::{collections::HashMap, path::Path};
 
-use crate::{
+use anyhow::{anyhow, bail, Result};
+use clang_ast::Id;
+use index::{
     db::{Declaration, Index},
     symbols::{self, FileId, ModuleId, SymbolId, SymbolScope, SymbolType},
 };
-use anyhow::{anyhow, bail, Result};
-use clang_ast::Id;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 

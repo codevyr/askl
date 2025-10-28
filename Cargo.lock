@@ -289,7 +289,6 @@ dependencies = [
  "serde",
  "serde_json",
  "shell-words",
- "sqlx",
  "tokio",
  "tracing",
  "tracing-actix-web",
@@ -469,6 +468,41 @@ dependencies = [
  "num-traits",
  "wasm-bindgen",
  "windows-link",
+]
+
+[[package]]
+name = "clang"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clang-ast",
+ "clap",
+ "console",
+ "diesel",
+ "diesel_migrations",
+ "dotenv",
+ "env_logger",
+ "futures",
+ "index",
+ "indicatif",
+ "itertools",
+ "jsonrpc-core",
+ "log",
+ "lsp-types",
+ "pest",
+ "pest_derive",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "serde_stacker",
+ "shell-words",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-actix-web",
+ "url",
 ]
 
 [[package]]
@@ -1018,6 +1052,7 @@ name = "gen-ast"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clang",
  "clang-ast",
  "clap",
  "console",

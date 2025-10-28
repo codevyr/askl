@@ -5,9 +5,9 @@ use anyhow::{anyhow, Result};
 use askld::execution_context::ExecutionContext;
 use askld::{cfg::ControlFlowGraph, parser::parse};
 use clap::Parser;
-use index::db::{self, Index};
+use index::db::{self};
+use index::symbols::SymbolId;
 use index::symbols::{DeclarationId, FileId, Occurrence, SymbolType};
-use index::symbols::{SymbolId, SymbolMap};
 use log::{debug, info};
 use serde::{Deserialize, Serialize, Serializer};
 use tracing_chrome::ChromeLayerBuilder;
@@ -150,27 +150,17 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
 
     let mut result_graph = Graph::new();
 
-    let mut all_symbols = HashSet::new();
     for (from, to, loc) in res_edges.0 {
-        let from_declaration = data.cfg.symbols.declarations.get(&from).unwrap();
-        let to_declaration = data.cfg.symbols.declarations.get(&to).unwrap();
-        all_symbols.insert(from_declaration.symbol);
-        all_symbols.insert(to_declaration.symbol);
-        result_graph.add_edge(Edge::new(
-            from_declaration.symbol,
-            to_declaration.symbol,
-            loc,
-        ));
+        result_graph.add_edge(Edge::new(from.symbol_id, to.symbol_id, loc));
     }
 
+    let mut all_symbols = HashSet::new();
     for declaration in res_nodes.0.iter() {
-        all_symbols.insert(SymbolId(declaration.symbol.id));
+        all_symbols.insert(declaration.symbol.clone());
     }
 
     let mut result_files = HashMap::new();
-    for symbol_id in all_symbols {
-        let sym = data.cfg.get_symbol(symbol_id).unwrap();
-
+    for symbol in all_symbols {
         for declaration in res_nodes.0.iter() {
             if !result_files.contains_key(&FileId::new(declaration.file.id)) {
                 result_files.insert(
@@ -183,7 +173,7 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
         let declarations: Vec<db::Declaration> = res_nodes
             .0
             .iter()
-            .filter(|d| d.declaration.symbol == symbol_id.0)
+            .filter(|d| d.declaration.symbol == symbol.id)
             .map(|d| db::Declaration {
                 id: DeclarationId::new(d.declaration.id),
                 symbol: SymbolId(d.declaration.symbol),
@@ -196,11 +186,12 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
             })
             .collect();
 
-        println!(
-            "Declarations for symbol {}: {:?}",
-            symbol_id.0, declarations
-        );
-        result_graph.add_node(Node::new(symbol_id, sym.name.clone(), declarations));
+        println!("Declarations for symbol {}: {:?}", symbol.id, declarations);
+        result_graph.add_node(Node::new(
+            SymbolId(symbol.id),
+            symbol.name.clone(),
+            declarations,
+        ));
     }
 
     result_graph.files = result_files.into_iter().collect();
@@ -227,9 +218,7 @@ async fn read_data(args: &Args) -> Result<AsklData> {
     match args.format.as_str() {
         "sqlite" => {
             let index_diesel = index::db_diesel::Index::connect(&args.index).await?;
-            let index = Index::connect(&args.index).await?;
-            let symbols = SymbolMap::from_index(&index).await?;
-            let cfg = ControlFlowGraph::from_symbols(symbols, index_diesel);
+            let cfg = ControlFlowGraph::from_symbols(index_diesel);
             Ok(AsklData { cfg: cfg })
         }
         _ => Err(anyhow!("Unsupported index format: {}", args.format)),

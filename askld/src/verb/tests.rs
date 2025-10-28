@@ -1,8 +1,4 @@
-use index::{
-    db,
-    db_diesel::Index,
-    symbols::{DeclarationId, SymbolMap},
-};
+use index::{db_diesel::Index, symbols::DeclarationId};
 
 use crate::{
     cfg::ControlFlowGraph, execution_context::ExecutionContext, test_util::run_query, verb::*,
@@ -13,11 +9,8 @@ use std::collections::HashMap;
 #[tokio::test]
 async fn test_select_matching_name() {
     let index_diesel = Index::new_in_memory().await.unwrap();
-    let index = db::Index::new_in_memory().await.unwrap();
-    index.load_test_input("verb_test.sql").await.unwrap();
     index_diesel.load_test_input("verb_test.sql").await.unwrap();
-    let symbols = SymbolMap::new();
-    let cfg = ControlFlowGraph::from_symbols(symbols, index_diesel);
+    let cfg = ControlFlowGraph::from_symbols(index_diesel);
 
     let test_cases = vec![
         ("foo", vec![91, 92]),

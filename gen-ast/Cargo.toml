@@ -29,3 +29,4 @@ futures = {workspace = true}
 rand = {workspace = true}
 sqlx = {workspace = true}
 index = { path = "../index" }
+clang = { path = "../clang" }

@@ -1,4 +1,4 @@
-use crate::cfg::{ControlFlowGraph, EdgeList, NodeList};
+use crate::cfg::{ControlFlowGraph, EdgeList, NodeList, SymbolDeclId};
 use crate::command::Command;
 use crate::execution_context::ExecutionContext;
 use crate::execution_state::ExecutionState;
@@ -10,7 +10,7 @@ use crate::verb::build_verb;
 use anyhow::Result;
 use core::fmt::Debug;
 use core::panic;
-use index::symbols::{DeclarationId, DeclarationRefs, FileId, Occurrence};
+use index::symbols::{DeclarationId, DeclarationRefs, FileId, Occurrence, SymbolId};
 use pest::error::Error;
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashSet;
@@ -321,8 +321,14 @@ impl Statement {
                     column_end: child.symbol_ref.from_col_end,
                 };
                 all_references.add_reference(
-                    DeclarationId::new(child.symbol_ref.from_decl),
-                    DeclarationId::new(child.declaration.id),
+                    SymbolDeclId {
+                        symbol_id: SymbolId::new(child.parent_symbol.id),
+                        declaration_id: DeclarationId::new(child.symbol_ref.from_decl),
+                    },
+                    SymbolDeclId {
+                        symbol_id: SymbolId::new(child.symbol_ref.to_symbol),
+                        declaration_id: DeclarationId::new(child.declaration.id),
+                    },
                     Some(occurrence),
                 );
             }
@@ -342,8 +348,14 @@ impl Statement {
                     column_end: parent.symbol_ref.from_col_end,
                 };
                 all_references.add_reference(
-                    DeclarationId::new(parent.symbol_ref.from_decl),
-                    DeclarationId::new(parent.to_declaration.id),
+                    SymbolDeclId {
+                        symbol_id: SymbolId::new(parent.from_declaration.symbol),
+                        declaration_id: DeclarationId::new(parent.symbol_ref.from_decl),
+                    },
+                    SymbolDeclId {
+                        symbol_id: SymbolId::new(parent.to_symbol.id),
+                        declaration_id: DeclarationId::new(parent.to_declaration.id),
+                    },
                     Some(occurrence),
                 );
             }

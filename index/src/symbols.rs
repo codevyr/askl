@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::{collections::HashMap, hash, hash::Hasher};
 
-use crate::db::{self, Declaration, File, Index, Module};
+use crate::db::{self};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Hash, Ord, Copy, Clone, Serialize, Deserialize)]
 pub struct FileHash(u64);
@@ -448,14 +448,6 @@ impl From<i32> for SymbolScope {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SymbolMap {
-    pub symbols: HashMap<SymbolId, Symbol>,
-    pub declarations: HashMap<DeclarationId, Declaration>,
-    pub files: HashMap<FileId, File>,
-    pub modules: HashMap<ModuleId, Module>,
-}
-
 type SymbolMatcher<'a> = Box<dyn Fn((&'a SymbolId, &'a Symbol)) -> Option<&'a Symbol> + 'a>;
 
 pub fn exact_name_match<'a>(name: &'a str) -> SymbolMatcher<'a> {
@@ -584,141 +576,3 @@ pub fn package_match<'a>(name: &'a str) -> SymbolMatcher<'a> {
         Some(s)
     })
 }
-
-impl SymbolMap {
-    pub fn new() -> Self {
-        Self {
-            symbols: HashMap::new(),
-            declarations: HashMap::new(),
-            files: HashMap::new(),
-            modules: HashMap::new(),
-        }
-    }
-
-    pub async fn from_index(index: &Index) -> Result<Self> {
-        let symbols = index.all_symbols().await?;
-        let mut symbols_map = HashMap::new();
-        for symbol in symbols {
-            symbols_map.insert(
-                symbol.id,
-                Symbol::new(SymbolId::from(symbol.id), symbol.name.clone()),
-            );
-        }
-
-        let declarations = index.all_declarations().await?;
-        let mut declaration_map = HashMap::new();
-        for declaration in declarations {
-            declaration_map.insert(declaration.id, declaration);
-        }
-
-        let files = index.all_files().await?;
-        let mut files_map = HashMap::new();
-        for file in files {
-            files_map.insert(file.id, file);
-        }
-
-        let modules = index.all_modules().await?;
-        let mut modules_map = HashMap::new();
-        for module in modules {
-            modules_map.insert(module.id, module);
-        }
-
-        let references = index.all_refs().await?;
-        for reference in references {
-            let from_declaration = declaration_map.get(&reference.from_decl).unwrap();
-            let from_symbol = symbols_map.get_mut(&from_declaration.symbol).unwrap();
-            let occurrence = Occurrence {
-                file: from_declaration.file_id,
-                line_start: reference.from_line as i32,
-                line_end: reference.from_line as i32,
-                column_start: reference.from_col_start as i32,
-                column_end: reference.from_col_end as i32,
-            };
-            from_symbol.add_child(reference.to_symbol, occurrence.clone());
-
-            let to_symbol = symbols_map.get_mut(&reference.to_symbol).unwrap();
-            to_symbol.add_parent(from_declaration.id, occurrence);
-        }
-
-        Ok(Self {
-            symbols: symbols_map,
-            declarations: declaration_map,
-            files: files_map,
-            modules: modules_map,
-        })
-    }
-
-    pub fn merge(mut self, other: SymbolMap) -> Self {
-        other.symbols.into_iter().for_each(|(key, value)| {
-            self.symbols
-                .entry(key)
-                .and_modify(|cur_symbol| cur_symbol.children.extend(value.children.clone()))
-                .or_insert(value);
-        });
-        self
-    }
-
-    pub fn iter<'a>(&'a self) -> impl Iterator<Item = (&'a SymbolId, &'a Symbol)> + 'a {
-        self.symbols.iter()
-    }
-
-    pub fn get_parents(&self, symbol_id: SymbolId) -> &DeclarationRefs {
-        let symbol = if let Some(symbol) = self.symbols.get(&symbol_id) {
-            symbol
-        } else {
-            panic!("Unknown symbol");
-        };
-
-        &symbol.parents
-    }
-
-    pub fn find(&self, symbol_name: &str) -> Option<&Symbol> {
-        self.symbols
-            .iter()
-            .find_map(|(_, s)| if s.name == symbol_name { Some(s) } else { None })
-    }
-
-    pub fn find_all<'a>(&'a self, symbol_matcher: SymbolMatcher<'a>) -> Vec<&'a Symbol> {
-        self.symbols.iter().filter_map(symbol_matcher).collect()
-    }
-
-    pub fn find_mut(&mut self, symbol_name: &str) -> Option<&mut Symbol> {
-        self.symbols
-            .iter_mut()
-            .find_map(|(_, s)| if s.name == symbol_name { Some(s) } else { None })
-    }
-
-    pub fn get_mut(&mut self, symbol_id: &SymbolId) -> Option<&mut Symbol> {
-        self.symbols.get_mut(symbol_id)
-    }
-
-    pub fn get_file_id(&self, file: String) -> Option<FileId> {
-        self.files.iter().find_map(|(id, f)| {
-            if f.filesystem_path == file {
-                Some(*id)
-            } else {
-                None
-            }
-        })
-    }
-
-    pub fn set_file_id(&mut self, id: FileId, file: File) {
-        self.files.insert(id, file);
-    }
-}
-
-impl Symbols for SymbolMap {
-    fn into_vec(&self) -> Vec<SymbolId> {
-        self.symbols
-            .iter()
-            .map(|(k, _)| k.clone())
-            .collect::<Vec<_>>()
-    }
-}
-
-// impl ToString for SymbolMap {
-//     fn to_string(&self) -> String {
-//         serde_json::to_string_pretty(&self.symbols.clone().into_values().collect::<Vec<Symbol>>())
-//             .unwrap()
-//     }
-// }
