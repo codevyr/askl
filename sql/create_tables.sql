@@ -1,7 +1,16 @@
+CREATE TABLE IF NOT EXISTS projects
+(
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    project_name TEXT NOT NULL,
+    UNIQUE (project_name)
+);
+
 CREATE TABLE IF NOT EXISTS modules
 (
     id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-    module_name TEXT NOT NULL
+    module_name TEXT NOT NULL,
+    project_id INTEGER NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id)
 );
 
 CREATE TABLE IF NOT EXISTS files
@@ -11,7 +20,8 @@ CREATE TABLE IF NOT EXISTS files
     module_path TEXT NOT NULL,
     filesystem_path TEXT NOT NULL,
     filetype TEXT NOT NULL,
-    UNIQUE (filesystem_path),
+    content_hash TEXT NOT NULL,
+    UNIQUE (module, filesystem_path),
     FOREIGN KEY (module) REFERENCES modules(id)
 );
 

@@ -4,12 +4,13 @@ use std::{env, path::Path};
 use index::{
     db::{Module, Symbol},
     symbols::{
-        self, DeclarationId, FileId, ModuleId, Occurrence, SymbolId, SymbolScope, SymbolType,
+        self, DeclarationId, FileId, ModuleId, Occurrence, ProjectId, SymbolId, SymbolScope,
+        SymbolType,
     },
 };
 
-use clang::clang::{run_clang_ast, CompileCommand, GlobalVisitorState};
 use anyhow::Result;
+use clang::clang::{run_clang_ast, CompileCommand, GlobalVisitorState};
 use index::db::{Declaration, Index, Reference};
 use std::collections::HashMap;
 
@@ -107,7 +108,7 @@ async fn create_state() {
     let filesystem_path = current_dir
         .as_path()
         .join("tests/clang-indexer-code/test1.c");
-    let module = Module::new(ModuleId::new(1), "test");
+    let module = Module::new(ModuleId::new(1), "test", ProjectId::new(1));
     let state = index_files(vec![filesystem_path.to_str().unwrap()], &module).await;
 
     let files = state.get_index().all_files().await.unwrap();

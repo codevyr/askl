@@ -97,13 +97,54 @@ pub enum DeriveMethod {
     Skip,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum VerbTag {
+    ProjectFilter,
+    ModuleFilter,
+    NameSelector,
+    ChildrenSelector,
+}
+
+pub fn add_verb(existing_verbs: Vec<Arc<dyn Verb>>, new_verb: Arc<dyn Verb>) -> Vec<Arc<dyn Verb>> {
+    let mut verbs = existing_verbs;
+    verbs.push(new_verb);
+
+    let mut updated_verbs = vec![];
+    for verb in verbs.into_iter() {
+        updated_verbs = verb.add_verb(updated_verbs);
+        updated_verbs.push(verb);
+    }
+
+    updated_verbs
+}
+
 pub trait Verb: std::fmt::Debug + Sync {
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Skip
     }
 
+    fn extend_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
+        existing_verbs
+    }
+
+    fn replace_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
+        existing_verbs
+            .into_iter()
+            .filter(|v| self.get_tag() != v.get_tag())
+            .collect()
+    }
+
+    fn add_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
+        self.extend_verb(existing_verbs)
+    }
+
     fn update_context(&self, _ctx: &ParserContext) -> Result<bool> {
         Ok(false)
+    }
+
+    // Used to identify verb types for replacement
+    fn get_tag(&self) -> Option<VerbTag> {
+        None
     }
 
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {

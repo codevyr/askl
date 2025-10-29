@@ -25,14 +25,25 @@ pub struct File {
     pub module_path: String,
     pub filesystem_path: String,
     pub filetype: String,
+    pub content_hash: String,
 }
 
 #[derive(Clone, Queryable, Selectable, Identifiable, Debug, PartialEq, Eq, Hash)]
 #[diesel(table_name = crate::schema_diesel::modules)]
+#[diesel(belongs_to(Project, foreign_key = project_id))]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct Module {
     pub id: i32,
     pub module_name: String,
+    pub project_id: i32,
+}
+
+#[derive(Clone, Queryable, Selectable, Identifiable, Debug, PartialEq, Eq, Hash)]
+#[diesel(table_name = crate::schema_diesel::projects)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+pub struct Project {
+    pub id: i32,
+    pub project_name: String,
 }
 
 #[derive(

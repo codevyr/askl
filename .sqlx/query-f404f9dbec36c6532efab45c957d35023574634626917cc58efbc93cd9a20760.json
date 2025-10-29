@@ -27,6 +27,11 @@
         "name": "filetype",
         "ordinal": 4,
         "type_info": "Text"
+      },
+      {
+        "name": "content_hash",
+        "ordinal": 5,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -37,7 +42,8 @@
       false,
       false,
       false,
-      false
+      false,
+      true
     ]
   },
   "hash": "f404f9dbec36c6532efab45c957d35023574634626917cc58efbc93cd9a20760"

@@ -1,4 +1,4 @@
-use crate::models_diesel::{Declaration, File, Module, Symbol, SymbolRef};
+use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
 use crate::symbols::{
     DeclarationId, FileId, ModuleId, Occurrence, SymbolId, SymbolScope, SymbolType,
 };
@@ -16,6 +16,7 @@ pub struct FileFullDiesel {
     pub module_path: String,
     pub filesystem_path: String,
     pub filetype: String,
+    pub content_hash: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -45,6 +46,7 @@ pub struct SelectionNode {
     pub declaration: Declaration,
     pub module: Module,
     pub file: File,
+    pub project: Project,
 }
 
 #[derive(Debug, Clone, PartialEq)]

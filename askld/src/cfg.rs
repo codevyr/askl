@@ -3,7 +3,7 @@ use std::{collections::HashSet, iter::Iterator};
 use anyhow::Result;
 use index::db_diesel::{Index, Selection, SelectionNode};
 use index::symbols::Occurrence;
-use index::symbols::{clean_and_split_string, DeclarationId, SymbolId};
+use index::symbols::{DeclarationId, SymbolId};
 
 pub struct ControlFlowGraph {
     pub index: Index,

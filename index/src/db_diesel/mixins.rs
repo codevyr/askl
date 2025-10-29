@@ -8,7 +8,7 @@ use diesel::sql_types::{Integer, Text};
 use diesel::sqlite::Sqlite;
 use diesel::{debug_query, sql_query};
 
-use crate::models_diesel::{Declaration, File, Module, Symbol, SymbolRef};
+use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
 use crate::symbols::{clean_and_split_string, DeclarationId};
 
 use super::dsl::GlobMethods;
@@ -33,8 +33,17 @@ type SymbolDeclarationJoinSource = InnerJoinQuerySource<
 type SymbolDeclarationModuleJoinSource =
     InnerJoinQuerySource<SymbolDeclarationJoinSource, crate::schema_diesel::modules::table>;
 
-type SymbolDeclarationModuleFileJoin = InnerJoinQuerySource<
+type SymbolDeclarationModuleProjectJoin = InnerJoinQuerySource<
     SymbolDeclarationModuleJoinSource,
+    crate::schema_diesel::projects::table,
+    Eq<
+        crate::schema_diesel::projects::columns::id,
+        crate::schema_diesel::modules::columns::project_id,
+    >,
+>;
+
+type SymbolDeclarationModuleProjectFileJoin = InnerJoinQuerySource<
+    SymbolDeclarationModuleProjectJoin,
     crate::schema_diesel::files::table,
     Eq<
         crate::schema_diesel::files::columns::id,
@@ -47,10 +56,15 @@ type SelectionTuple = (
     AsSelect<Declaration, Sqlite>,
     AsSelect<Module, Sqlite>,
     AsSelect<File, Sqlite>,
+    AsSelect<Project, Sqlite>,
 );
 
-pub type CurrentQuery<'a> =
-    BoxedSelectStatement<'a, SelectionTuple, FromClause<SymbolDeclarationModuleFileJoin>, Sqlite>;
+pub type CurrentQuery<'a> = BoxedSelectStatement<
+    'a,
+    SelectionTuple,
+    FromClause<SymbolDeclarationModuleProjectFileJoin>,
+    Sqlite,
+>;
 
 type DeclarationColumnsSqlType = (
     Integer,
@@ -396,24 +410,29 @@ impl SymbolSearchMixin for ModuleFilterMixin {
 
         Ok(query.filter(modules::dsl::module_name.eq(self.module_name.clone())))
     }
+}
 
-    fn filter_parents<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: ParentsQuery<'a>,
-    ) -> Result<ParentsQuery<'a>> {
-        // We do not filter parents by module, because parents and children can
-        // come only from the same module.
-        Ok(query)
+#[derive(Debug, Clone)]
+pub struct ProjectFilterMixin {
+    pub project_name: String,
+}
+
+impl ProjectFilterMixin {
+    pub fn new(project_name: &str) -> Self {
+        Self {
+            project_name: project_name.to_string(),
+        }
     }
+}
 
-    fn filter_children<'a>(
+impl SymbolSearchMixin for ProjectFilterMixin {
+    fn filter_current<'a>(
         &self,
         _connection: &mut Connection,
-        query: ChildrenQuery<'a>,
-    ) -> Result<ChildrenQuery<'a>> {
-        // We do not filter parents by module, because parents and children can
-        // come only from the same module.
-        Ok(query)
+        query: CurrentQuery<'a>,
+    ) -> Result<CurrentQuery<'a>> {
+        use crate::schema_diesel::projects;
+
+        Ok(query.filter(projects::dsl::project_name.eq(self.project_name.clone())))
     }
 }

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "CREATE TABLE IF NOT EXISTS projects\n(\n    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,\n    project_name TEXT NOT NULL,\n    UNIQUE (project_name)\n);\n\nCREATE TABLE IF NOT EXISTS modules\n(\n    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,\n    module_name TEXT NOT NULL,\n    project_id INTEGER NOT NULL,\n    FOREIGN KEY (project_id) REFERENCES projects(id)\n);\n\nCREATE TABLE IF NOT EXISTS files\n(\n    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,\n    module INTEGER NOT NULL,\n    module_path TEXT NOT NULL,\n    filesystem_path TEXT NOT NULL,\n    filetype TEXT NOT NULL,\n    content_hash TEXT,\n    UNIQUE (module, filesystem_path),\n    FOREIGN KEY (module) REFERENCES modules(id)\n);\n\nCREATE TABLE IF NOT EXISTS symbols\n(\n    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,\n    name TEXT NOT NULL,\n    module INTEGER NOT NULL, -- This references is excessive because it is already in declarations\n    symbol_scope INTEGER NOT NULL,\n    FOREIGN KEY (module) REFERENCES modules(id),\n    UNIQUE (name, module)\n);\n\nCREATE TABLE IF NOT EXISTS declarations\n(\n    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,\n    symbol INTEGER NOT NULL,\n    file_id INTEGER NOT NULL,\n    symbol_type INTEGER NOT NULL,\n    line_start INTEGER NOT NULL,\n    col_start INTEGER NOT NULL,\n    line_end INTEGER NOT NULL,\n    col_end INTEGER NOT NULL,\n    FOREIGN KEY (symbol) REFERENCES symbols(id),\n    FOREIGN KEY (file_id) REFERENCES files(id),\n    UNIQUE (symbol, file_id, line_start, col_start, line_end, col_end)\n);\n\nCREATE TABLE IF NOT EXISTS symbol_refs\n(\n    from_decl INTEGER NOT NULL,\n    to_symbol INTEGER NOT NULL,\n    from_line INTEGER NOT NULL,\n    from_col_start INTEGER NOT NULL,\n    from_col_end INTEGER NOT NULL,\n    FOREIGN KEY (from_decl) REFERENCES declarations(id),\n    FOREIGN KEY (to_symbol) REFERENCES symbols(id),\n    UNIQUE (from_decl, to_symbol, from_line, from_col_start, from_col_end)\n);\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "07d4a98cc7b487c39071de184112a3aac5e99de66c7144fb461cac232d2ff9ce"
+}

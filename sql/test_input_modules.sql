@@ -1,13 +1,20 @@
+INSERT INTO projects
+VALUES
+    (1, "test_project"),
+    (2, "other_project");
+
 INSERT INTO modules
 VALUES
-    (1, "test"),
-    (2, "other");
+    (1, "test", 1),
+    (2, "other", 1),
+    (3, "project_only", 2);
 
 INSERT INTO files
 VALUES
-    (1, 1, "main.c", "/main.c", "cc"),
-    (2, 1, "bar.c", "/bar.c", "cc"),
-    (3, 2, "main.c", "/other_main.c", "cc");
+    (1, 1, "main.c", "/main.c", "cc", ""),
+    (2, 1, "bar.c", "/bar.c", "cc", ""),
+    (3, 2, "main.c", "/other_main.c", "cc", ""),
+    (4, 3, "main.c", "/project_only_main.c", "cc", "");
 
 INSERT INTO symbols
 VALUES
@@ -21,7 +28,8 @@ VALUES
     (42,  "main", 1, 1),
     (101, "a",    2, 1),
     (102, "b",    2, 1),
-    (142, "main", 2, 1);
+    (142, "main", 2, 1),
+    (301, "a",    3, 1);
 
 INSERT INTO declarations
 VALUES
@@ -36,7 +44,8 @@ VALUES
     (942, 42,  1, 1, 1, 1, 1, 1),
     (201, 101, 3, 1, 1, 1, 1, 1),
     (202, 102, 3, 1, 1, 1, 1, 1),
-    (242, 142, 3, 1, 1, 1, 1, 1);
+    (242, 142, 3, 1, 1, 1, 1, 1),
+    (301, 301, 4, 1, 1, 1, 1, 1);
 
 INSERT INTO
     symbol_refs(from_decl, to_symbol, from_line, from_col_start, from_col_end)
@@ -55,3 +64,4 @@ VALUES
 
 -- Module "test" has the same layout as test_input_b.
 -- Module "other" mirrors a subset of the data to exercise module filtering.
+-- Module "project_only" belongs to a separate project to exercise project filtering.

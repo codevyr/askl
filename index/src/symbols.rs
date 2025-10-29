@@ -238,6 +238,43 @@ impl From<i64> for SymbolId {
 
 #[derive(Debug, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, sqlx::Type)]
 #[sqlx(transparent)]
+pub struct ProjectId(i32);
+
+impl ProjectId {
+    pub fn new(id: i32) -> Self {
+        Self(id)
+    }
+}
+
+impl From<i32> for ProjectId {
+    fn from(value: i32) -> Self {
+        Self(value)
+    }
+}
+
+impl From<i64> for ProjectId {
+    fn from(value: i64) -> Self {
+        Self(value as i32)
+    }
+}
+
+impl fmt::Display for ProjectId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl serde::Serialize for ProjectId {
+    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        s.serialize_str(&format!("{}", self.0))
+    }
+}
+
+#[derive(Debug, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, sqlx::Type)]
+#[sqlx(transparent)]
 pub struct ModuleId(i32);
 
 impl ModuleId {

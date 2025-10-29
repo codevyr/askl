@@ -8,7 +8,7 @@ use sqlx::{
 };
 
 use crate::symbols::{
-    DeclarationId, FileId, ModuleId, Occurrence, SymbolId, SymbolScope, SymbolType,
+    DeclarationId, FileId, ModuleId, Occurrence, ProjectId, SymbolId, SymbolScope, SymbolType,
 };
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
@@ -108,13 +108,15 @@ impl Declaration {
 pub struct Module {
     pub id: ModuleId,
     pub module_name: String,
+    pub project_id: ProjectId,
 }
 
 impl Module {
-    pub fn new(id: ModuleId, module_name: &str) -> Self {
+    pub fn new(id: ModuleId, module_name: &str, project_id: ProjectId) -> Self {
         Self {
             id,
             module_name: module_name.to_string(),
+            project_id,
         }
     }
 }
@@ -126,6 +128,7 @@ pub struct File {
     pub module_path: String,
     pub filesystem_path: String,
     pub filetype: String,
+    pub content_hash: String,
 }
 
 impl File {
@@ -142,6 +145,7 @@ impl File {
             module_path: module_path.to_string(),
             filesystem_path: filesystem_path.to_string(),
             filetype: filetype.to_string(),
+            content_hash: "".to_string(),
         }
     }
 }
@@ -168,6 +172,7 @@ pub struct FileFull {
     pub module_path: String,
     pub filesystem_path: String,
     pub filetype: String,
+    pub content_hash: String,
 }
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
@@ -501,7 +506,7 @@ impl Index {
         let files: Vec<File> = sqlx::query_as!(
             File,
             r#"
-            SELECT *
+            SELECT id, module, module_path, filesystem_path, filetype, content_hash
             FROM files
             "#
         )

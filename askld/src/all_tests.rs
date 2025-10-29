@@ -478,7 +478,11 @@ fn module_filter_excludes_other_modules() {
 
     assert_eq!(
         unfiltered_nodes,
-        vec![DeclarationId::new(91), DeclarationId::new(201)]
+        vec![
+            DeclarationId::new(91),
+            DeclarationId::new(201),
+            DeclarationId::new(301)
+        ]
     );
 
     const FILTERED_AND_UNFILTERED_QUERY: &str = r#"@module("test") "a"; "a""#;
@@ -488,7 +492,11 @@ fn module_filter_excludes_other_modules() {
 
     assert_eq!(
         filtered_unfiltered_nodes,
-        vec![DeclarationId::new(91), DeclarationId::new(201)]
+        vec![
+            DeclarationId::new(91),
+            DeclarationId::new(201),
+            DeclarationId::new(301)
+        ]
     );
 
     const PREAMBLE_FILTERED_QUERY: &str = r#"@preamble @module("test"); "a""#;
@@ -507,6 +515,88 @@ fn module_filter_selects_other_module() {
     println!("{:#?}", res_edges);
 
     assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(201)]);
+    assert_eq!(res_edges.0.len(), 0);
+}
+
+#[test]
+fn project_filter_excludes_other_projects() {
+    const FILTERED_QUERY: &str = r#"@project("test_project") "a""#;
+    let (filtered_nodes, filtered_edges) = run_query(TEST_INPUT_MODULES, FILTERED_QUERY);
+
+    println!("{:#?}", filtered_nodes);
+    println!("{:#?}", filtered_edges);
+
+    assert_eq!(
+        filtered_nodes.as_vec(),
+        vec![DeclarationId::new(91), DeclarationId::new(201)]
+    );
+    assert_eq!(filtered_edges.0.len(), 0);
+
+    const UNFILTERED_QUERY: &str = r#""a""#;
+    let (unfiltered_nodes, _) = run_query(TEST_INPUT_MODULES, UNFILTERED_QUERY);
+    let unfiltered_nodes = unfiltered_nodes.as_vec();
+
+    assert_eq!(
+        unfiltered_nodes,
+        vec![
+            DeclarationId::new(91),
+            DeclarationId::new(201),
+            DeclarationId::new(301)
+        ]
+    );
+
+    const FILTERED_AND_UNFILTERED_QUERY: &str = r#"@project("test_project") "a"; "a""#;
+    let (filtered_unfiltered_nodes, _) =
+        run_query(TEST_INPUT_MODULES, FILTERED_AND_UNFILTERED_QUERY);
+    let filtered_unfiltered_nodes = filtered_unfiltered_nodes.as_vec();
+
+    assert_eq!(
+        filtered_unfiltered_nodes,
+        vec![
+            DeclarationId::new(91),
+            DeclarationId::new(201),
+            DeclarationId::new(301)
+        ]
+    );
+
+    const PREAMBLE_FILTERED_QUERY: &str = r#"@preamble @project("test_project"); "a""#;
+    let (preamble_filtered_nodes, _) = run_query(TEST_INPUT_MODULES, PREAMBLE_FILTERED_QUERY);
+    let preamble_filtered_nodes = preamble_filtered_nodes.as_vec();
+
+    assert_eq!(
+        preamble_filtered_nodes,
+        vec![DeclarationId::new(91), DeclarationId::new(201)]
+    );
+
+    const REPLACE_PROJECT_FILTERED_QUERY: &str = r#"@project("adsf") @project("test_project") "a""#;
+    let (replace_project_filtered_nodes, _) =
+        run_query(TEST_INPUT_MODULES, REPLACE_PROJECT_FILTERED_QUERY);
+    let replace_project_filtered_nodes = replace_project_filtered_nodes.as_vec();
+
+    assert_eq!(
+        replace_project_filtered_nodes,
+        vec![DeclarationId::new(91), DeclarationId::new(201)]
+    );
+}
+
+#[test]
+fn project_filter_selects_other_project() {
+    const QUERY: &str = r#"@project("other_project") "a""#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_MODULES, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(301)]);
+    assert_eq!(res_edges.0.len(), 0);
+
+    const WRONG_PROJECT_QUERY: &str = r#"@project("blablabla_project") "a""#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_MODULES, WRONG_PROJECT_QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(res_nodes.as_vec(), vec![]);
     assert_eq!(res_edges.0.len(), 0);
 }
 

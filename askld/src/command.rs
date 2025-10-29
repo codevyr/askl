@@ -1,7 +1,7 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
 use crate::statement::Statement;
-use crate::verb::{DeriveMethod, Deriver, Filter, Marker, Selector, UnitVerb, Verb};
+use crate::verb::{add_verb, DeriveMethod, Deriver, Filter, Marker, Selector, UnitVerb, Verb};
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::{ChildReference, ParentReference, Selection, SymbolSearchMixin};
@@ -33,7 +33,8 @@ impl Command {
     }
 
     pub fn extend(&mut self, other: Arc<dyn Verb>) {
-        self.verbs.push(other);
+        let verbs = std::mem::take(&mut self.verbs);
+        self.verbs = add_verb(verbs, other);
     }
 
     fn filters<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Filter> + 'a> {

@@ -27,6 +27,7 @@ diesel::table! {
         module_path -> Text,
         filesystem_path -> Text,
         filetype -> Text,
+        content_hash -> Text,
     }
 }
 
@@ -34,6 +35,14 @@ diesel::table! {
     modules (id) {
         id -> Integer,
         module_name -> Text,
+        project_id -> Integer,
+    }
+}
+
+diesel::table! {
+    projects (id) {
+        id -> Integer,
+        project_name -> Text,
     }
 }
 
@@ -62,6 +71,7 @@ diesel::joinable!(declarations -> files (file_id));
 diesel::joinable!(declarations -> symbols (symbol));
 diesel::joinable!(file_contents -> files (file_id));
 diesel::joinable!(files -> modules (module));
+diesel::joinable!(modules -> projects (project_id));
 diesel::joinable!(symbol_refs -> declarations (from_decl));
 diesel::joinable!(symbol_refs -> symbols (to_symbol));
 diesel::joinable!(symbols -> modules (module));
@@ -71,6 +81,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     file_contents,
     files,
     modules,
+    projects,
     symbol_refs,
     symbols,
 );

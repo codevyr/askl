@@ -7,8 +7,8 @@ use crate::statement::Statement;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    ChildReference, CompoundNameMixin, ModuleFilterMixin, ParentReference, Selection,
-    SymbolSearchMixin,
+    ChildReference, CompoundNameMixin, ModuleFilterMixin, ParentReference, ProjectFilterMixin,
+    Selection, SymbolSearchMixin,
 };
 use index::models_diesel::SymbolRef;
 use index::symbols::{self, package_match};
@@ -22,7 +22,7 @@ use std::vec;
 
 use super::labels::{LabellerVerb, UserVerb};
 use super::preamble::PreambleVerb;
-use super::{DeriveMethod, Deriver, Filter, Selector, Verb};
+use super::{DeriveMethod, Deriver, Filter, Selector, Verb, VerbTag};
 
 pub(crate) fn build_generic_verb(
     _ctx: Rc<ParserContext>,
@@ -69,6 +69,7 @@ pub(crate) fn build_generic_verb(
     let res = match Identifier::build(ident)?.0.as_str() {
         NameSelector::NAME => NameSelector::new(&positional, &named),
         IgnoreVerb::NAME => IgnoreVerb::new(&positional, &named),
+        ProjectFilter::NAME => ProjectFilter::new(&positional, &named),
         ModuleFilter::NAME => ModuleFilter::new(&positional, &named),
         ForcedVerb::NAME => ForcedVerb::new(&positional, &named),
         IsolatedScope::NAME => IsolatedScope::new(&positional, &named),
@@ -418,6 +419,52 @@ impl Filter for IgnoreVerb {
 }
 
 #[derive(Debug)]
+pub(super) struct ProjectFilter {
+    project: String,
+}
+
+impl ProjectFilter {
+    pub(super) const NAME: &'static str = "project";
+
+    pub fn new(
+        positional: &Vec<String>,
+        _named: &HashMap<String, String>,
+    ) -> Result<Arc<dyn Verb>> {
+        if let Some(project) = positional.iter().next() {
+            Ok(Arc::new(Self {
+                project: project.clone(),
+            }))
+        } else {
+            bail!("Expected a positional argument");
+        }
+    }
+}
+
+impl Verb for ProjectFilter {
+    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
+        Ok(self)
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Clone
+    }
+
+    fn get_tag(&self) -> Option<VerbTag> {
+        Some(VerbTag::ProjectFilter)
+    }
+
+    fn add_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
+        self.replace_verb(existing_verbs)
+    }
+}
+
+impl Filter for ProjectFilter {
+    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
+        vec![Box::new(ProjectFilterMixin::new(&self.project))]
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct ModuleFilter {
     module: String,
 }
@@ -447,6 +494,14 @@ impl Verb for ModuleFilter {
 
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Clone
+    }
+
+    fn get_tag(&self) -> Option<VerbTag> {
+        Some(VerbTag::ModuleFilter)
+    }
+
+    fn add_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
+        self.replace_verb(existing_verbs)
     }
 }
 

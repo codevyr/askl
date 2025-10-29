@@ -1,12 +1,17 @@
 INSERT INTO
+    projects
+VALUES
+    (1, "test_project");
+
+INSERT INTO
     modules
 VALUES
-    (1, "test");
+    (1, "test", 1);
 
 INSERT INTO
     files
 VALUES
-    (1, 1, "main.c", "/main.c", "cc");
+    (1, 1, "main.c", "/main.c", "cc", "");
 
 INSERT INTO
     symbols

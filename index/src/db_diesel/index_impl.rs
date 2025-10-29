@@ -6,7 +6,7 @@ use diesel::sqlite::Sqlite;
 use diesel::SqliteConnection;
 use diesel_migrations::MigrationHarness;
 
-use crate::models_diesel::{Declaration, File, Module, Symbol, SymbolRef};
+use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
 use crate::symbols::{DeclarationId, FileId};
 
 use super::mixins::{
@@ -159,7 +159,6 @@ impl Index {
         &self,
         mixins: &mut [Box<dyn SymbolSearchMixin>],
     ) -> Result<Selection> {
-        use crate::schema_diesel::modules::dsl::*;
         use crate::schema_diesel::*;
 
         let connection: &mut Connection = &mut self
@@ -177,13 +176,17 @@ impl Index {
 
             let mut joined_query = symbols::dsl::symbols
                 .inner_join(declarations::dsl::declarations)
-                .inner_join(modules)
-                .inner_join(files::dsl::files.on(files::id.eq(declarations::file_id)))
+                .inner_join(modules::dsl::modules)
+                .inner_join(
+                    projects::dsl::projects.on(projects::dsl::id.eq(modules::dsl::project_id)),
+                )
+                .inner_join(files::dsl::files.on(files::dsl::id.eq(declarations::dsl::file_id)))
                 .select((
                     Symbol::as_select(),
                     Declaration::as_select(),
                     Module::as_select(),
                     File::as_select(),
+                    Project::as_select(),
                 ))
                 .into_boxed::<Sqlite>();
 
@@ -192,7 +195,7 @@ impl Index {
             }
 
             joined_query
-                .load::<(Symbol, Declaration, Module, File)>(connection)
+                .load::<(Symbol, Declaration, Module, File, Project)>(connection)
                 .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?
         };
 
@@ -284,11 +287,12 @@ impl Index {
 
             let nodes: Vec<_> = current
                 .into_iter()
-                .map(|(sym, decl, module, file)| SelectionNode {
+                .map(|(sym, decl, module, file, project)| SelectionNode {
                     symbol: sym,
                     declaration: decl,
                     module,
                     file,
+                    project,
                 })
                 .collect();
 
