@@ -17,7 +17,7 @@ use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::vec;
 
 use super::labels::{LabellerVerb, UserVerb};
@@ -133,6 +133,7 @@ impl Selector for NameSelector {
 #[derive(Debug)]
 pub(super) struct ForcedVerb {
     name: String,
+    selection: Arc<OnceLock<Selection>>,
 }
 
 impl ForcedVerb {
@@ -143,7 +144,10 @@ impl ForcedVerb {
         named: &HashMap<String, String>,
     ) -> Result<Arc<dyn Verb>> {
         if let Some(name) = named.get("name") {
-            Ok(Arc::new(Self { name: name.clone() }))
+            Ok(Arc::new(Self {
+                name: name.clone(),
+                selection: Arc::new(OnceLock::new()),
+            }))
         } else {
             bail!("Must contain name field");
         }
@@ -151,6 +155,10 @@ impl ForcedVerb {
 }
 
 impl Verb for ForcedVerb {
+    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
+        Ok(self)
+    }
+
     fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
         Ok(self)
     }
@@ -161,12 +169,33 @@ impl Verb for ForcedVerb {
 }
 
 #[async_trait(?Send)]
+impl Selector for ForcedVerb {
+    async fn select_from_all_impl(
+        &self,
+        _ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+    ) -> Result<Selection> {
+        let mut search_mixins = search_mixins;
+        search_mixins.push(Box::new(CompoundNameMixin::new(&self.name)));
+        let selection = cfg.index.find_symbol(&mut search_mixins).await?;
+
+        let _ = self.selection.set(selection);
+
+        // Forced selection should not contribute nodes during the select
+        // phase. Returning an empty selection preserves the previous
+        // behaviour where forcing without parents yielded no matches.
+        Ok(Selection::new())
+    }
+}
+
+#[async_trait(?Send)]
 impl Deriver for ForcedVerb {
     async fn derive_children_impl(
         &self,
         statement: &Statement,
         _ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
+        _cfg: &ControlFlowGraph,
         _children: &Vec<ChildReference>,
     ) -> Option<Selection> {
         let parent_statement = match statement.parent() {
@@ -183,9 +212,11 @@ impl Deriver for ForcedVerb {
             None => return None,
         };
 
-        let mut normal_selection = match cfg.find_symbol_by_name(self.name.as_str()).await {
-            Ok(selection) => selection,
-            Err(_) => {
+        let cached_selection = self.selection.get().cloned();
+
+        let mut normal_selection = match cached_selection {
+            Some(selection) => selection,
+            None => {
                 println!(
                     "ForcedVerb: No symbols found with name {}",
                     self.name.as_str()

@@ -601,6 +601,26 @@ fn project_filter_selects_other_project() {
 }
 
 #[test]
+fn multiple_projects_with_forced() {
+    const QUERY: &str = r#"@project("test_project") "a" { @project("other_project") !"a" }"#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_MODULES, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(
+        res_nodes.as_vec(),
+        vec![
+            DeclarationId::new(91),
+            DeclarationId::new(201),
+            DeclarationId::new(301)
+        ]
+    );
+    let edges = format_edges(res_edges);
+    assert_eq!(edges, vec!["91-301", "201-301"]);
+}
+
+#[test]
 fn implicit_edge() {
     const QUERY: &str = r#""d" {}"#;
     let (res_nodes, res_edges) = run_query(TEST_INPUT_B, QUERY);
