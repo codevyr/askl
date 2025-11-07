@@ -11,6 +11,7 @@ use log::debug;
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -164,13 +165,13 @@ pub trait Verb: std::fmt::Debug + Sync {
     }
 }
 
-pub trait Filter: std::fmt::Debug {
+pub trait Filter: std::fmt::Debug + Display {
     fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
         vec![]
     }
 
     fn filter(&self, cfg: &ControlFlowGraph, selection: &mut Selection) {
-        let filter_name = format!("{:?}", self);
+        let filter_name = format!("{}", self);
         let _filter = tracing::info_span!("filter", name = %filter_name).entered();
         self.filter_impl(cfg, selection);
     }
@@ -204,7 +205,7 @@ pub trait Selector: std::fmt::Debug {
 }
 
 #[async_trait(?Send)]
-pub trait Deriver: std::fmt::Debug {
+pub trait Deriver: std::fmt::Debug + Display {
     async fn derive_children(
         &self,
         statement: &Statement,
@@ -212,7 +213,7 @@ pub trait Deriver: std::fmt::Debug {
         cfg: &ControlFlowGraph,
         children: &Vec<ChildReference>,
     ) -> Option<Selection> {
-        let derive_children_name = format!("{:?}", self);
+        let derive_children_name = format!("{}", self);
         let _derive_children =
             tracing::info_span!("derive_children", name = %derive_children_name).entered();
         self.derive_children_impl(statement, ctx, cfg, children)
@@ -234,7 +235,7 @@ pub trait Deriver: std::fmt::Debug {
         cfg: &ControlFlowGraph,
         parents: &Vec<ParentReference>,
     ) -> Option<Selection> {
-        let derive_parents_name = format!("{:?}", self);
+        let derive_parents_name = format!("{}", self);
         let _derive_parents =
             tracing::info_span!("derive_parents", name = %derive_parents_name).entered();
         self.derive_parents_impl(ctx, statement, cfg, parents).await
@@ -249,7 +250,7 @@ pub trait Deriver: std::fmt::Debug {
     ) -> Option<Selection>;
 
     fn constrain_references(&self, _cfg: &ControlFlowGraph, selection: &mut Selection) {
-        let constrain_references_name = format!("{:?}", self);
+        let constrain_references_name = format!("{}", self);
         let _constrain_references =
             tracing::info_span!("constrain_references", name = %constrain_references_name)
                 .entered();

@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use index::db_diesel::{ChildReference, ParentReference, Selection, SymbolSearchMixin};
 use index::symbols::DeclarationRefs;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
 use std::sync::Arc;
 
 use super::{DeriveMethod, Deriver, Marker, Selector, Verb};
@@ -147,5 +148,11 @@ impl Selector for UserVerb {
         _search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
     ) -> Result<Selection> {
         unimplemented!("UserVerb does not support select_from_all");
+    }
+}
+
+impl Display for UserVerb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "UserVerb(label={}, forced={})", self.label, self.forced)
     }
 }

@@ -16,6 +16,7 @@ use index::symbols::{clean_and_split_string, partial_name_match, DeclarationId, 
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::vec;
@@ -277,6 +278,12 @@ impl Filter for ForcedVerb {
     fn filter_impl(&self, _cfg: &ControlFlowGraph, _selection: &mut Selection) {}
 }
 
+impl Display for ForcedVerb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ForcedVerb(name={})", self.name)
+    }
+}
+
 #[derive(Debug)]
 pub struct UnitVerb {}
 
@@ -316,6 +323,12 @@ impl Deriver for UnitVerb {
         _parents: &Vec<ParentReference>,
     ) -> Option<Selection> {
         None
+    }
+}
+
+impl Display for UnitVerb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "UnitVerb")
     }
 }
 
@@ -371,6 +384,12 @@ impl Deriver for ChildrenVerb {
         let parent_selection = cfg.index.find_symbol_by_declid(&decl_ids).await.ok()?;
 
         Some(parent_selection)
+    }
+}
+
+impl Display for ChildrenVerb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ChildrenVerb")
     }
 }
 
@@ -449,6 +468,16 @@ impl Filter for IgnoreVerb {
     }
 }
 
+impl Display for IgnoreVerb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "IgnoreVerb(name={:?}, package={:?})",
+            self.name, self.package
+        )
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ProjectFilter {
     project: String,
@@ -492,6 +521,12 @@ impl Verb for ProjectFilter {
 impl Filter for ProjectFilter {
     fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
         vec![Box::new(ProjectFilterMixin::new(&self.project))]
+    }
+}
+
+impl Display for ProjectFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ProjectFilter(project={})", self.project)
     }
 }
 
@@ -539,6 +574,12 @@ impl Verb for ModuleFilter {
 impl Filter for ModuleFilter {
     fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
         vec![Box::new(ModuleFilterMixin::new(&self.module))]
+    }
+}
+
+impl Display for ModuleFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ModuleFilter(module={})", self.module)
     }
 }
 
@@ -603,5 +644,11 @@ impl Deriver for IsolatedScope {
         _parents: &Vec<ParentReference>,
     ) -> Option<Selection> {
         None
+    }
+}
+
+impl Display for IsolatedScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "IsolatedScope")
     }
 }
