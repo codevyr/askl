@@ -214,6 +214,26 @@ fn forced_child_query_6() {
 }
 
 #[test]
+fn forced_child_query_7() {
+    const QUERY: &str = r#""main" {}; "b" {!"main"}"#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(
+        res_nodes.as_vec(),
+        vec![
+            DeclarationId::new(91),
+            DeclarationId::new(92),
+            DeclarationId::new(942)
+        ]
+    );
+    let edges = format_edges(res_edges);
+    assert_eq!(edges, vec!["91-92", "91-92", "92-942", "942-91", "942-92"]);
+}
+
+#[test]
 fn generic_forced_child_query_3() {
     const QUERY: &str = r#""main" {
             @forced(name="c")
@@ -328,6 +348,45 @@ fn ignore_node_sibling() {
 #[test]
 fn ignore_node_parent_no_result() {
     const QUERY: &str = r#"@ignore("d") {"e"}"#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(res_nodes.as_vec(), vec![]);
+    let edges = format_edges(res_edges);
+    assert_eq!(edges, Vec::<String>::new());
+}
+
+#[test]
+fn ignore_node_parent_no_result_2() {
+    const QUERY: &str = r#" {@ignore("a") "a"{}}; @ignore("d") {"f" {@ignore("asdf")}};"#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(res_nodes.as_vec(), vec![]);
+    let edges = format_edges(res_edges);
+    assert_eq!(edges, Vec::<String>::new());
+}
+
+#[test]
+fn ignore_node_parent_no_result_3() {
+    const QUERY: &str = r#" {@ignore("a") "a"{}};"#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(res_nodes.as_vec(), vec![]);
+    let edges = format_edges(res_edges);
+    assert_eq!(edges, Vec::<String>::new());
+}
+
+#[test]
+fn ignore_node_parent_no_result_4() {
+    const QUERY: &str = r#"@ignore("d") {"f" {@ignore("asdf")}};"#;
     let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
 
     println!("{:#?}", res_nodes);
@@ -519,6 +578,34 @@ fn module_filter_selects_other_module() {
 }
 
 #[test]
+fn module_filter_replaced_by_second_invocation() {
+    const QUERY: &str = r#"@module("test") @module("other") "a""#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_MODULES, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(201)]);
+    assert_eq!(res_edges.0.len(), 0);
+}
+
+#[test]
+fn module_filter_children_scope_honors_filter() {
+    const QUERY: &str = r#"@module("other") "a" {}"#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_MODULES, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(
+        res_nodes.as_vec(),
+        vec![DeclarationId::new(201), DeclarationId::new(202)]
+    );
+    let edges = format_edges(res_edges);
+    assert_eq!(edges, vec!["201-202"]);
+}
+
+#[test]
 fn project_filter_excludes_other_projects() {
     const FILTERED_QUERY: &str = r#"@project("test_project") "a""#;
     let (filtered_nodes, filtered_edges) = run_query(TEST_INPUT_MODULES, FILTERED_QUERY);
@@ -597,6 +684,49 @@ fn project_filter_selects_other_project() {
     println!("{:#?}", res_edges);
 
     assert_eq!(res_nodes.as_vec(), vec![]);
+    assert_eq!(res_edges.0.len(), 0);
+}
+
+#[test]
+fn project_and_module_filters_combine() {
+    const QUERY: &str = r#"@project("test_project") @module("other") "a""#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_MODULES, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(res_nodes.as_vec(), vec![DeclarationId::new(201)]);
+    assert_eq!(res_edges.0.len(), 0);
+}
+
+#[test]
+fn conflicting_project_and_module_filters_return_empty() {
+    const QUERY: &str = r#"@project("other_project") @module("other") "a""#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_MODULES, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(res_nodes.as_vec(), vec![]);
+    assert_eq!(res_edges.0.len(), 0);
+}
+
+#[test]
+fn scoped_project_filter_does_not_leak() {
+    const QUERY: &str = r#"@project("other_project") "a"; "a""#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_MODULES, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(
+        res_nodes.as_vec(),
+        vec![
+            DeclarationId::new(91),
+            DeclarationId::new(201),
+            DeclarationId::new(301)
+        ]
+    );
     assert_eq!(res_edges.0.len(), 0);
 }
 

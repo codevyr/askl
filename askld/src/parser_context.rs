@@ -2,7 +2,7 @@ use crate::{
     command::Command,
     scope::{DefaultScope, Scope},
     statement::Statement,
-    verb::{ChildrenVerb, Verb},
+    verb::{UnitVerb, Verb},
 };
 use anyhow::Result;
 use std::{
@@ -38,8 +38,7 @@ pub struct ParserContext {
 
 impl ParserContext {
     pub fn new(scope_factory: ScopeFactory) -> Rc<Self> {
-        let mut command = Command::new();
-        command.extend(ChildrenVerb::new());
+        let command = Command::new();
         Rc::new(Self {
             prev: None,
             alternative_context: RefCell::new(None),
@@ -98,7 +97,11 @@ impl ParserContext {
     }
 
     pub fn command(&self) -> Command {
-        self.command.take()
+        let mut command = self.command.take();
+        if command.selectors().count() == 0 {
+            command.extend(UnitVerb::new());
+        }
+        command
     }
 
     pub fn extend_verb(&self, verb: Arc<dyn Verb>) {

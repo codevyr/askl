@@ -1,62 +1,75 @@
-use index::db_diesel::{Selection, SelectionNode};
+use std::rc::Rc;
 
-use crate::{cfg::ControlFlowGraph, execution_context::ExecutionContext, statement::Statement};
+use crate::statement::Statement;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyRole {
+    Parent,
+    Child,
+    User,
+}
+
+#[derive(Debug)]
+pub struct StatementDependency {
+    pub dependency: Rc<Statement>,
+    pub dependency_role: DependencyRole,
+}
+
+impl StatementDependency {
+    pub fn new(statement: Rc<Statement>, dependency_role: DependencyRole) -> Self {
+        Self {
+            dependency: statement,
+            dependency_role,
+        }
+    }
+}
+
+/// A statement that depends on another statement's execution state.
+/// StatementDependent is used to notify the dependent statement when the
+/// statement it depends on has completed its execution and to update its
+/// execution state accordingly.
+#[derive(Debug, Clone)]
+pub struct StatementDependent {
+    pub statement: Rc<Statement>,
+    pub dependency_role: DependencyRole,
+    pub label: Option<String>,
+}
+
+impl StatementDependent {
+    pub fn new(statement: Rc<Statement>, dependency_role: DependencyRole) -> Self {
+        Self {
+            statement,
+            dependency_role,
+            label: None,
+        }
+    }
+
+    pub fn new_user(statement: Rc<Statement>, label: &str) -> Self {
+        Self {
+            statement,
+            dependency_role: DependencyRole::User,
+            label: Some(label.to_string()),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct ExecutionState {
     pub completed: bool,
-    pub current: Option<Selection>,
+    /// Statements that this state still depends on. We use this to determine
+    /// when this state has its dependencies satisfied.
+    pub dependencies: Vec<StatementDependency>,
+    /// Statements that depend on this state. We notify them when this state is
+    /// completed.
+    pub dependents: Vec<StatementDependent>,
 }
 
 impl ExecutionState {
     pub fn new() -> Self {
         Self {
             completed: false,
-            current: None,
-        }
-    }
-
-    /// Initializes the execution state with the selected nodes from the given statement.
-    pub async fn select_nodes(
-        &mut self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        statement: &Statement,
-    ) {
-        let mut selection = if let Some(s) = statement.command().compute_selected(ctx, cfg).await {
-            s
-        } else {
-            println!("No selection found for the statement.");
-            return;
-        };
-
-        statement.command().filter(cfg, &mut selection);
-
-        self.current = Some(selection);
-    }
-
-    pub fn nodes_iter(&self) -> impl Iterator<Item = &SelectionNode> {
-        self.current.iter().flat_map(|s| s.nodes.iter())
-    }
-
-    /// Removes from the current state all the symbols that are not in `declarations`.
-    pub fn retain(&mut self, _ctx: &mut ExecutionContext, constraint: &Selection) {
-        println!("Retaining only : {:?} // {:?}", self.current, constraint);
-        if let Some(current) = &mut self.current {
-            let old_size = current.nodes.len();
-            current.nodes.retain(|cur| {
-                constraint
-                    .nodes
-                    .iter()
-                    .any(|con| cur.declaration.id == con.declaration.id)
-            });
-
-            if old_size != current.nodes.len() {
-                self.completed = false;
-                println!("Updated state after removing: {:?}", self.current);
-            }
-        } else {
-            self.current = Some(constraint.clone());
+            dependencies: vec![],
+            dependents: vec![],
         }
     }
 }

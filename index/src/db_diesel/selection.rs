@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
 use crate::symbols::{
     DeclarationId, FileId, ModuleId, Occurrence, SymbolId, SymbolScope, SymbolType,
@@ -68,7 +70,7 @@ pub struct ParentReference {
     pub symbol_ref: SymbolRef,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Selection {
     pub nodes: Vec<SelectionNode>,
     pub parents: Vec<ParentReference>,
@@ -96,5 +98,53 @@ impl Selection {
 
     pub fn get_decl_ids(&self) -> Vec<i32> {
         self.nodes.iter().map(|node| node.declaration.id).collect()
+    }
+
+    /// Remove any references to declarations that are no longer in the selection
+    pub fn prune_references(&mut self) {
+        let selection = self;
+
+        let node_declaration_ids: HashSet<_> = selection
+            .nodes
+            .iter()
+            .map(|s| DeclarationId::new(s.declaration.id))
+            .collect();
+        selection
+            .parents
+            .retain(|c| node_declaration_ids.contains(&DeclarationId::new(c.to_declaration.id)));
+        selection
+            .children
+            .retain(|c| node_declaration_ids.contains(&DeclarationId::new(c.symbol_ref.from_decl)));
+    }
+}
+
+impl std::fmt::Debug for Selection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Selection")
+            .field(
+                "nodes",
+                &self
+                    .nodes
+                    .iter()
+                    .map(|n| n.symbol.name.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "parents",
+                &self
+                    .parents
+                    .iter()
+                    .map(|p| p.from_declaration.id)
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "children",
+                &self
+                    .children
+                    .iter()
+                    .map(|c| c.symbol.name.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
     }
 }

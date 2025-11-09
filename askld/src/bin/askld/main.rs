@@ -10,6 +10,7 @@ use index::symbols::SymbolId;
 use index::symbols::{DeclarationId, FileId, Occurrence, SymbolType};
 use log::{debug, info};
 use serde::{Deserialize, Serialize, Serializer};
+use tokio::time::{timeout, Duration};
 use tracing_chrome::ChromeLayerBuilder;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -42,6 +43,8 @@ struct Args {
 struct AsklData {
     cfg: ControlFlowGraph,
 }
+
+const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn symbolid_as_string<S>(x: &SymbolId, s: S) -> Result<S::Ok, S::Error>
 where
@@ -135,15 +138,20 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
 
     let mut ctx = ExecutionContext::new();
 
-    let _query_execute = tracing::info_span!("query_execute").entered();
-    let res = ast
-        .execute(&mut ctx, &data.cfg, None, &HashSet::new())
-        .await;
-    drop(_query_execute);
-    if res.is_none() {
-        return HttpResponse::NotFound().body("Did not resolve any symbols");
-    }
-    let (_, res_nodes, res_edges) = res.unwrap();
+    let (_, res_nodes, res_edges) = {
+        let _query_execute = tracing::info_span!("query_execute").entered();
+        let visited = HashSet::new();
+        let execute_future = ast.execute(&mut ctx, &data.cfg, None, &visited);
+        match timeout(QUERY_TIMEOUT, execute_future).await {
+            Ok(None) => {
+                return HttpResponse::NotFound().body("Did not resolve any symbols");
+            }
+            Ok(Some(res)) => res,
+            Err(_) => {
+                return HttpResponse::RequestTimeout().body("Query timed out");
+            }
+        }
+    };
 
     info!("Symbols: {:#?}", res_nodes.as_vec().len());
     info!("Edges: {:#?}", res_edges.0.len());

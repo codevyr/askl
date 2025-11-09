@@ -1,17 +1,20 @@
 use crate::cfg::ControlFlowGraph;
-use crate::execution_context::ExecutionContext;
+use crate::execution_context::{selector_state_with, ExecutionContext};
+use crate::execution_state::DependencyRole;
 use crate::parser::Rule;
 use crate::parser_context::ParserContext;
 use crate::statement::Statement;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use index::db_diesel::{ChildReference, ParentReference, Selection, SymbolSearchMixin};
-use index::symbols::{DeclarationId, DeclarationRefs};
+use index::db_diesel::{DeclarationIdMixin, Index, Selection, SymbolSearchMixin};
+use index::symbols::DeclarationId;
+use itertools::Itertools;
 use log::debug;
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Display;
+use std::ptr;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -19,7 +22,7 @@ mod generic;
 mod labels;
 mod preamble;
 
-pub use self::generic::{ChildrenVerb, NameSelector, UnitVerb};
+pub use self::generic::{NameSelector, UnitVerb};
 
 use self::generic::{build_generic_verb, ForcedVerb};
 
@@ -156,11 +159,7 @@ pub trait Verb: std::fmt::Debug + Sync {
         bail!("Not a filter verb")
     }
 
-    fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
-        bail!("Not a deriver verb")
-    }
-
-    fn as_marker<'a>(&'a self) -> Result<&'a dyn Marker> {
+    fn as_labeler<'a>(&'a self) -> Result<&'a dyn Labeler> {
         bail!("Not a marker verb")
     }
 }
@@ -170,23 +169,126 @@ pub trait Filter: std::fmt::Debug + Display {
         vec![]
     }
 
-    fn filter(&self, cfg: &ControlFlowGraph, selection: &mut Selection) {
+    fn filter(&self, selection: &mut Selection) {
         let filter_name = format!("{}", self);
         let _filter = tracing::info_span!("filter", name = %filter_name).entered();
-        self.filter_impl(cfg, selection);
+        self.filter_impl(selection);
     }
 
-    fn filter_impl(&self, _cfg: &ControlFlowGraph, _selection: &mut Selection) {}
+    fn filter_impl(&self, _selection: &mut Selection) {}
 }
+
+#[derive(Debug)]
+pub struct SelectorState {
+    pub selection: Option<Selection>,
+}
+
+impl SelectorState {
+    pub fn new() -> Self {
+        Self { selection: None }
+    }
+
+    pub fn constrain_selection(&mut self, dependency: &Selection, role: DependencyRole) -> bool {
+        if self.selection.is_none() {
+            return false;
+        }
+
+        let len_before = self.selection.as_ref().unwrap().nodes.len();
+
+        if let Some(_) = &mut self.selection {
+            match role {
+                DependencyRole::Parent => {
+                    self.constrain_by_child(dependency);
+                }
+                DependencyRole::Child => {
+                    self.constrain_by_parent(dependency);
+                }
+                DependencyRole::User => {
+                    self.constrain_by_owner(dependency);
+                }
+            }
+            self.prune_references();
+        }
+
+        let len_after = self.selection.as_ref().unwrap().nodes.len();
+        len_before != len_after
+    }
+
+    fn constrain_by_parent(&mut self, parent: &Selection) {
+        let selection = self.selection.as_mut().unwrap();
+        selection.nodes.retain(|s| {
+            parent
+                .children
+                .iter()
+                .any(|r| r.declaration.id == s.declaration.id)
+        });
+    }
+
+    fn constrain_by_child(&mut self, child: &Selection) {
+        let selection = self.selection.as_mut().unwrap();
+        selection.nodes.retain(|s| {
+            child
+                .parents
+                .iter()
+                .any(|r| r.symbol_ref.from_decl == s.declaration.id)
+        });
+    }
+
+    fn constrain_by_owner(&mut self, owner: &Selection) {
+        let selection = self.selection.as_mut().unwrap();
+        selection.nodes.retain(|u| {
+            owner
+                .nodes
+                .iter()
+                .any(|o| o.declaration.id == u.declaration.id)
+        });
+    }
+
+    fn prune_references(&mut self) {
+        if let Some(selection) = &mut self.selection {
+            selection.prune_references();
+        }
+    }
+}
+
+pub type SelectorId = usize;
 
 #[async_trait(?Send)]
 pub trait Selector: std::fmt::Debug {
+    fn id(&self) -> SelectorId {
+        ptr::from_ref(self) as *const () as SelectorId
+    }
+
+    fn get_label(&self) -> Option<String> {
+        None
+    }
+
+    fn score(&self, state: &SelectorState) -> Option<usize> {
+        state.selection.as_ref().map(|sel| sel.nodes.len())
+    }
+
+    fn dependency_ready(&self, _dependency_role: DependencyRole) -> bool {
+        true
+    }
+
+    // Normally selectors do not update their state automatically.
+    // They rely on notifications from statements they depend on.
+    fn update_state(&self, _state: &mut SelectorState) {}
+
+    fn get_selection_mut<'a>(&'a self, state: &'a mut SelectorState) -> Option<&'a mut Selection> {
+        state.selection.as_mut()
+    }
+
+    fn get_selection<'a>(&'a self, state: &'a SelectorState) -> Option<&'a Selection> {
+        state.selection.as_ref()
+    }
+
     async fn select_from_all(
         &self,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
-    ) -> Result<Selection> {
+    ) -> Result<Option<Selection>> {
         let select_from_all_name = format!("{:?}", self);
         let _select_from_all =
             tracing::info_span!("select_from_all", name = %select_from_all_name).entered();
@@ -198,143 +300,182 @@ pub trait Selector: std::fmt::Debug {
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
-    ) -> Result<Selection> {
+    ) -> Result<Option<Selection>> {
         let mut search_mixins = search_mixins;
-        cfg.index.find_symbol(&mut search_mixins).await
-    }
-}
-
-#[async_trait(?Send)]
-pub trait Deriver: std::fmt::Debug + Display {
-    async fn derive_children(
-        &self,
-        statement: &Statement,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        children: &Vec<ChildReference>,
-    ) -> Option<Selection> {
-        let derive_children_name = format!("{}", self);
-        let _derive_children =
-            tracing::info_span!("derive_children", name = %derive_children_name).entered();
-        self.derive_children_impl(statement, ctx, cfg, children)
-            .await
+        let selection = cfg.index.find_symbol(&mut search_mixins).await?;
+        Ok(Some(selection))
     }
 
-    async fn derive_children_impl(
+    /// Accept a notification from a statement that this selector should update its selection
+    /// based on the statement's selection.
+    ///
+    /// Returns Ok(true) if the selection was updated, Ok(false) if not.
+    async fn accept_notification(
         &self,
-        statement: &Statement,
         ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        children: &Vec<ChildReference>,
-    ) -> Option<Selection>;
+        index: &Index,
+        selector_filters: &[&dyn Filter],
+        notifier: &Statement,
+        role: DependencyRole,
+    ) -> Result<bool> {
+        if !notifier.command().has_selectors() {
+            return Ok(false);
+        }
 
-    async fn derive_parents(
-        &self,
-        ctx: &mut ExecutionContext,
-        statement: &Statement,
-        cfg: &ControlFlowGraph,
-        parents: &Vec<ParentReference>,
-    ) -> Option<Selection> {
-        let derive_parents_name = format!("{}", self);
-        let _derive_parents =
-            tracing::info_span!("derive_parents", name = %derive_parents_name).entered();
-        self.derive_parents_impl(ctx, statement, cfg, parents).await
+        let dependency = match notifier.get_selection(&ctx) {
+            Some(selection) => selection,
+            None => return Ok(false),
+        };
+
+        if role == DependencyRole::User {
+            let notifier_labels = notifier.command().get_labels();
+            let self_label = match self.get_label() {
+                Some(label) => label,
+                None => return Ok(false),
+            };
+            if !notifier_labels.contains(&self_label) {
+                return Ok(false);
+            }
+        }
+
+        let mut changed = false;
+        let constrained = selector_state_with(&mut ctx.registry, self, |state| {
+            if state.selection.is_some() {
+                changed = state.constrain_selection(&dependency, role);
+                true
+            } else {
+                false
+            }
+        });
+
+        if constrained {
+            return Ok(changed);
+        }
+
+        let mut selection = self
+            .derive_selection(ctx, index, selector_filters, notifier, role)
+            .await?;
+
+        if let Some(ref mut selection) = selection {
+            selector_filters.iter().for_each(|f| {
+                f.filter(selection);
+            });
+        }
+
+        selector_state_with(&mut ctx.registry, self, |state| {
+            state.selection = selection;
+            state.prune_references();
+        });
+        Ok(true)
     }
 
-    async fn derive_parents_impl(
+    async fn derive_selection(
         &self,
         ctx: &mut ExecutionContext,
-        statement: &Statement,
-        cfg: &ControlFlowGraph,
-        parents: &Vec<ParentReference>,
-    ) -> Option<Selection>;
+        index: &Index,
+        selector_filters: &[&dyn Filter],
+        notifier: &Statement,
+        role: DependencyRole,
+    ) -> Result<Option<Selection>> {
+        let selection = match role {
+            DependencyRole::Child => {
+                self.derive_from_parent(ctx, index, selector_filters, notifier)
+                    .await?
+            }
+            DependencyRole::Parent => {
+                self.derive_from_child(ctx, index, selector_filters, notifier)
+                    .await?
+            }
+            DependencyRole::User => {
+                self.derive_from_provider(ctx, index, selector_filters, notifier)
+                    .await?
+            }
+        };
 
-    fn constrain_references(&self, _cfg: &ControlFlowGraph, selection: &mut Selection) {
-        let constrain_references_name = format!("{}", self);
-        let _constrain_references =
-            tracing::info_span!("constrain_references", name = %constrain_references_name)
-                .entered();
-        self.constrain_references_impl(_cfg, selection)
+        Ok(selection)
     }
 
-    fn constrain_references_impl(&self, _cfg: &ControlFlowGraph, selection: &mut Selection) {
-        let node_declaration_ids: HashSet<_> = selection
-            .nodes
-            .iter()
-            .map(|s| DeclarationId::new(s.declaration.id))
-            .collect();
-        selection
-            .parents
-            .retain(|c| node_declaration_ids.contains(&DeclarationId::new(c.to_declaration.id)));
-        selection
+    async fn derive_from_parent(
+        &self,
+        ctx: &mut ExecutionContext,
+        index: &Index,
+        selector_filters: &[&dyn Filter],
+        parent: &Statement,
+    ) -> Result<Option<Selection>> {
+        let parent = match parent.get_selection(&ctx) {
+            Some(selection) => selection,
+            None => return Ok(None),
+        };
+        let decl_ids = parent
             .children
-            .retain(|c| node_declaration_ids.contains(&DeclarationId::new(c.symbol_ref.from_decl)));
+            .iter()
+            .map(|p| DeclarationId::new(p.declaration.id))
+            .unique()
+            .collect::<Vec<_>>();
+
+        let children_selection = self
+            .find_symbol_by_declid(index, selector_filters, &decl_ids)
+            .await?;
+
+        Ok(Some(children_selection))
     }
 
-    fn constrain_by_parents(
+    async fn derive_from_child(
         &self,
-        cfg: &ControlFlowGraph,
-        selection: &mut Selection,
-        references: &Vec<ChildReference>,
-    ) {
-        let constrain_by_parents_name = format!("{:?}", self);
-        let _constrain_by_parents =
-            tracing::info_span!("constrain_by_parents", name = %constrain_by_parents_name)
-                .entered();
-        self.constrain_by_parents_impl(cfg, selection, references)
+        ctx: &mut ExecutionContext,
+        index: &Index,
+        selector_filters: &[&dyn Filter],
+        child: &Statement,
+    ) -> Result<Option<Selection>> {
+        let child = match child.get_selection(&ctx) {
+            Some(selection) => selection,
+            None => return Ok(None),
+        };
+        let decl_ids = child
+            .parents
+            .iter()
+            .map(|p| DeclarationId::new(p.symbol_ref.from_decl))
+            .unique()
+            .collect::<Vec<_>>();
+        let parent_selection = self
+            .find_symbol_by_declid(index, selector_filters, &decl_ids)
+            .await?;
+
+        Ok(Some(parent_selection))
     }
 
-    fn constrain_by_parents_impl(
+    async fn derive_from_provider(
         &self,
-        cfg: &ControlFlowGraph,
-        selection: &mut Selection,
-        references: &Vec<ChildReference>,
-    ) {
-        selection.nodes.retain(|s| {
-            references
-                .iter()
-                .any(|r| r.declaration.id == s.declaration.id)
-        });
-
-        self.constrain_references(cfg, selection);
+        ctx: &mut ExecutionContext,
+        _index: &Index,
+        _selector_filters: &[&dyn Filter],
+        provider: &Statement,
+    ) -> Result<Option<Selection>> {
+        let provider = match provider.get_selection(&ctx) {
+            Some(selection) => selection,
+            None => return Ok(None),
+        };
+        Ok(Some(provider.clone()))
     }
 
-    fn constrain_by_children(
+    async fn find_symbol_by_declid(
         &self,
-        cfg: &ControlFlowGraph,
-        selection: &mut Selection,
-        references: &Vec<ParentReference>,
-    ) {
-        let constrain_by_children_name = format!("{:?}", self);
-        let _constrain_by_children =
-            tracing::info_span!("constrain_by_children", name = %constrain_by_children_name)
-                .entered();
-        self.constrain_by_children_impl(cfg, selection, references)
-    }
-
-    fn constrain_by_children_impl(
-        &self,
-        cfg: &ControlFlowGraph,
-        selection: &mut Selection,
-        references: &Vec<ParentReference>,
-    ) {
-        selection.nodes.retain(|s| {
-            references
-                .iter()
-                .any(|r| r.symbol_ref.from_decl == s.declaration.id)
-        });
-
-        self.constrain_references(cfg, selection);
+        index: &Index,
+        selector_filters: &[&dyn Filter],
+        declarations: &Vec<DeclarationId>,
+    ) -> Result<Selection> {
+        let mixin = DeclarationIdMixin::new(declarations);
+        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> = selector_filters
+            .iter()
+            .flat_map(|f| f.get_filter_mixins())
+            .collect();
+        mixins.push(Box::new(mixin));
+        index.find_symbol(&mut mixins).await
     }
 }
 
-pub trait Marker: std::fmt::Debug {
-    fn mark(
-        &self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        symbols: &DeclarationRefs,
-    ) -> Result<()>;
+pub trait Labeler: std::fmt::Debug {
+    fn get_label(&self) -> Option<String>;
 }
 
 #[cfg(test)]

@@ -1,18 +1,18 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
-use crate::hierarchy::Hierarchy;
+use crate::execution_state::DependencyRole;
 use crate::parser::{Identifier, NamedArgument, PositionalArgument, Rule};
 use crate::parser_context::ParserContext;
 use crate::statement::Statement;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    ChildReference, CompoundNameMixin, ModuleFilterMixin, ParentReference, ProjectFilterMixin,
-    Selection, SymbolSearchMixin,
+    CompoundNameMixin, Index, ModuleFilterMixin, ParentReference, ProjectFilterMixin, Selection,
+    SymbolSearchMixin,
 };
 use index::models_diesel::SymbolRef;
 use index::symbols::{self, package_match};
-use index::symbols::{clean_and_split_string, partial_name_match, DeclarationId, SymbolId};
+use index::symbols::{clean_and_split_string, partial_name_match, SymbolId};
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
 use std::collections::HashMap;
@@ -21,9 +21,9 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::vec;
 
-use super::labels::{LabellerVerb, UserVerb};
+use super::labels::{LabelVerb, UserVerb};
 use super::preamble::PreambleVerb;
-use super::{DeriveMethod, Deriver, Filter, Selector, Verb, VerbTag};
+use super::{DeriveMethod, Filter, Selector, Verb, VerbTag};
 
 pub(crate) fn build_generic_verb(
     _ctx: Rc<ParserContext>,
@@ -74,7 +74,7 @@ pub(crate) fn build_generic_verb(
         ModuleFilter::NAME => ModuleFilter::new(&positional, &named),
         ForcedVerb::NAME => ForcedVerb::new(&positional, &named),
         IsolatedScope::NAME => IsolatedScope::new(&positional, &named),
-        LabellerVerb::NAME => LabellerVerb::new(&positional, &named),
+        LabelVerb::NAME => LabelVerb::new(&positional, &named),
         UserVerb::NAME => UserVerb::new(&positional, &named),
         PreambleVerb::NAME => PreambleVerb::new(&positional, &named),
         unknown => Err(anyhow!("unknown verb : {}", unknown)),
@@ -124,10 +124,11 @@ impl Selector for NameSelector {
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
-    ) -> Result<Selection> {
+    ) -> Result<Option<Selection>> {
         let mut search_mixins = search_mixins;
         search_mixins.push(Box::new(CompoundNameMixin::new(&self.name)));
-        cfg.index.find_symbol(&mut search_mixins).await
+        let selection = cfg.index.find_symbol(&mut search_mixins).await?;
+        Ok(Some(selection))
     }
 }
 
@@ -160,10 +161,6 @@ impl Verb for ForcedVerb {
         Ok(self)
     }
 
-    fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
-        Ok(self)
-    }
-
     fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
         Ok(self)
     }
@@ -171,46 +168,45 @@ impl Verb for ForcedVerb {
 
 #[async_trait(?Send)]
 impl Selector for ForcedVerb {
+    fn dependency_ready(&self, dependency_role: DependencyRole) -> bool {
+        if dependency_role == DependencyRole::Parent {
+            false
+        } else {
+            true
+        }
+    }
+
     async fn select_from_all_impl(
         &self,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
-    ) -> Result<Selection> {
+    ) -> Result<Option<Selection>> {
         let mut search_mixins = search_mixins;
         search_mixins.push(Box::new(CompoundNameMixin::new(&self.name)));
         let selection = cfg.index.find_symbol(&mut search_mixins).await?;
 
+        // Cache the forced selection so derivations can fabricate the
+        // correct parent ↔ child relationship later on.
         let _ = self.selection.set(selection);
 
-        // Forced selection should not contribute nodes during the select
-        // phase. Returning an empty selection preserves the previous
-        // behaviour where forcing without parents yielded no matches.
-        Ok(Selection::new())
+        // Forced matches shouldn't directly contribute nodes; they are only
+        // materialised when another statement (e.g. a parent) references
+        // them. Returning an empty selection keeps the execution state unset
+        // so derivations can populate it when needed.
+        Ok(None)
     }
-}
 
-#[async_trait(?Send)]
-impl Deriver for ForcedVerb {
-    async fn derive_children_impl(
+    async fn derive_from_parent(
         &self,
-        statement: &Statement,
-        _ctx: &mut ExecutionContext,
-        _cfg: &ControlFlowGraph,
-        _children: &Vec<ChildReference>,
-    ) -> Option<Selection> {
-        let parent_statement = match statement.parent() {
-            Some(parent) => parent,
-            None => return None,
-        };
-        let parent_statement = match parent_statement.upgrade() {
-            Some(parent) => parent,
-            None => return None,
-        };
-        let parent_state = parent_statement.get_state();
-        let parent_selection = match parent_state.current.as_ref() {
+        ctx: &mut ExecutionContext,
+        _index: &Index,
+        _selector_filters: &[&dyn Filter],
+        parent: &Statement,
+    ) -> Result<Option<Selection>> {
+        let parent_selection = match parent.get_selection(ctx) {
             Some(selection) => selection,
-            None => return None,
+            None => return Ok(None),
         };
 
         let cached_selection = self.selection.get().cloned();
@@ -222,7 +218,7 @@ impl Deriver for ForcedVerb {
                     "ForcedVerb: No symbols found with name {}",
                     self.name.as_str()
                 );
-                return None;
+                return Ok(Some(Selection::new()));
             }
         };
 
@@ -249,33 +245,12 @@ impl Deriver for ForcedVerb {
 
         normal_selection.parents = fake_parent_references;
 
-        Some(normal_selection)
-    }
-
-    async fn derive_parents_impl(
-        &self,
-        _ctx: &mut ExecutionContext,
-        _statement: &Statement,
-        _cfg: &ControlFlowGraph,
-        _parents: &Vec<ParentReference>,
-    ) -> Option<Selection> {
-        unimplemented!("ForcedVerb does not support derive_parents");
-    }
-
-    fn constrain_by_parents_impl(
-        &self,
-        cfg: &ControlFlowGraph,
-        selection: &mut Selection,
-        _references: &Vec<ChildReference>,
-    ) {
-        selection.nodes.retain(|s| self.name == s.symbol.name);
-
-        self.constrain_references(cfg, selection);
+        Ok(Some(normal_selection))
     }
 }
 
 impl Filter for ForcedVerb {
-    fn filter_impl(&self, _cfg: &ControlFlowGraph, _selection: &mut Selection) {}
+    fn filter_impl(&self, _selection: &mut Selection) {}
 }
 
 impl Display for ForcedVerb {
@@ -294,7 +269,7 @@ impl UnitVerb {
 }
 
 impl Verb for UnitVerb {
-    fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
+    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
         Ok(self)
     }
 
@@ -304,92 +279,20 @@ impl Verb for UnitVerb {
 }
 
 #[async_trait(?Send)]
-impl Deriver for UnitVerb {
-    async fn derive_children_impl(
-        &self,
-        _statement: &Statement,
-        _ctx: &mut ExecutionContext,
-        _cfg: &ControlFlowGraph,
-        _children: &Vec<ChildReference>,
-    ) -> Option<Selection> {
-        None
-    }
-
-    async fn derive_parents_impl(
+impl Selector for UnitVerb {
+    async fn select_from_all_impl(
         &self,
         _ctx: &mut ExecutionContext,
-        _statement: &Statement,
         _cfg: &ControlFlowGraph,
-        _parents: &Vec<ParentReference>,
-    ) -> Option<Selection> {
-        None
+        _search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+    ) -> Result<Option<Selection>> {
+        Ok(None)
     }
 }
 
 impl Display for UnitVerb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "UnitVerb")
-    }
-}
-
-#[derive(Debug)]
-pub struct ChildrenVerb {}
-
-impl ChildrenVerb {
-    pub fn new() -> Arc<dyn Verb> {
-        Arc::new(Self {})
-    }
-}
-
-impl Verb for ChildrenVerb {
-    fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
-        Ok(self)
-    }
-
-    fn derive_method(&self) -> DeriveMethod {
-        DeriveMethod::Clone
-    }
-}
-
-#[async_trait(?Send)]
-impl Deriver for ChildrenVerb {
-    async fn derive_children_impl(
-        &self,
-        _statement: &Statement,
-        _ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        children: &Vec<ChildReference>,
-    ) -> Option<Selection> {
-        let decl_ids = children
-            .iter()
-            .map(|p| DeclarationId::new(p.declaration.id))
-            .collect::<Vec<_>>();
-
-        let children_selection = cfg.index.find_symbol_by_declid(&decl_ids).await.ok()?;
-
-        Some(children_selection)
-    }
-
-    async fn derive_parents_impl(
-        &self,
-        _ctx: &mut ExecutionContext,
-        _statement: &Statement,
-        cfg: &ControlFlowGraph,
-        parents: &Vec<ParentReference>,
-    ) -> Option<Selection> {
-        let decl_ids = parents
-            .iter()
-            .map(|p| DeclarationId::new(p.symbol_ref.from_decl))
-            .collect::<Vec<_>>();
-        let parent_selection = cfg.index.find_symbol_by_declid(&decl_ids).await.ok()?;
-
-        Some(parent_selection)
-    }
-}
-
-impl Display for ChildrenVerb {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ChildrenVerb")
     }
 }
 
@@ -438,7 +341,7 @@ impl Verb for IgnoreVerb {
 }
 
 impl Filter for IgnoreVerb {
-    fn filter_impl(&self, _cfg: &ControlFlowGraph, selection: &mut Selection) {
+    fn filter_impl(&self, selection: &mut Selection) {
         selection.nodes.retain(|s| {
             let index_symbol: symbols::Symbol = symbols::Symbol {
                 id: SymbolId(s.symbol.id.clone()),
@@ -619,31 +522,20 @@ impl Verb for IsolatedScope {
         DeriveMethod::Skip
     }
 
-    fn as_deriver<'a>(&'a self) -> Result<&'a dyn Deriver> {
+    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
         Ok(self)
     }
 }
 
 #[async_trait(?Send)]
-impl Deriver for IsolatedScope {
-    async fn derive_children_impl(
-        &self,
-        _statement: &Statement,
-        _ctx: &mut ExecutionContext,
-        _cfg: &ControlFlowGraph,
-        _children: &Vec<ChildReference>,
-    ) -> Option<Selection> {
-        None
-    }
-
-    async fn derive_parents_impl(
+impl Selector for IsolatedScope {
+    async fn select_from_all_impl(
         &self,
         _ctx: &mut ExecutionContext,
-        _statement: &Statement,
         _cfg: &ControlFlowGraph,
-        _parents: &Vec<ParentReference>,
-    ) -> Option<Selection> {
-        None
+        _search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+    ) -> Result<Option<Selection>> {
+        Ok(Some(Selection::new()))
     }
 }
 

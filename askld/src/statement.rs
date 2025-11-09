@@ -1,7 +1,9 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, NodeList, SymbolDeclId};
-use crate::command::Command;
+use crate::command::{Command, LabeledStatements};
 use crate::execution_context::ExecutionContext;
-use crate::execution_state::ExecutionState;
+use crate::execution_state::{
+    DependencyRole, ExecutionState, StatementDependency, StatementDependent,
+};
 use crate::hierarchy::Hierarchy;
 use crate::parser::Rule;
 use crate::parser_context::ParserContext;
@@ -9,7 +11,7 @@ use crate::scope::{build_scope, EmptyScope, Scope, StatementIter};
 use crate::verb::build_verb;
 use anyhow::Result;
 use core::fmt::Debug;
-use core::panic;
+use index::db_diesel::Selection;
 use index::symbols::{DeclarationId, DeclarationRefs, FileId, Occurrence, SymbolId};
 use pest::error::Error;
 use std::cell::{Ref, RefCell, RefMut};
@@ -51,7 +53,8 @@ pub fn build_statement<'a>(
         ));
     }
 
-    let statement = Statement::new(sub_ctx.command(), scope.clone());
+    let command = sub_ctx.command();
+    let statement = Statement::new(command, scope.clone());
     scope.set_parent(Rc::downgrade(&statement));
 
     Ok(statement)
@@ -60,8 +63,8 @@ pub fn build_statement<'a>(
 pub fn build_empty_statement(ctx: Rc<ParserContext>) -> Rc<Statement> {
     let scope: Rc<dyn Scope> = Rc::new(EmptyScope::new());
     let sub_ctx = ParserContext::derive(ctx);
-    let verb = sub_ctx.command();
-    let statement = Statement::new(verb.into(), scope.clone());
+    let command = sub_ctx.command();
+    let statement = Statement::new(command, scope.clone());
     scope.set_parent(Rc::downgrade(&statement));
     return statement;
 }
@@ -100,113 +103,97 @@ impl Statement {
         self.execution_state.borrow()
     }
 
-    async fn update_parents(&self, ctx: &mut ExecutionContext, cfg: &ControlFlowGraph) {
-        let _update_parents: tracing::span::EnteredSpan =
-            tracing::info_span!("update_parents").entered();
+    pub fn dependency_ready(&self, dependency_role: DependencyRole) -> bool {
+        self.command()
+            .selectors()
+            .all(|selector| selector.dependency_ready(dependency_role))
+    }
 
-        if let Some(parent) = self.parent() {
-            let parent = parent.upgrade().unwrap();
-            let has_current = {
-                let state = parent.get_state();
-                state.current.is_some()
-            }; // Drop the immutable borrow here
+    // A lower score means higher priority for execution
+    fn statement_score(&self, ctx: &ExecutionContext) -> usize {
+        let mandatory_completed = self
+            .get_state()
+            .dependencies
+            .iter()
+            .all(|dep| dep.dependency.dependency_ready(dep.dependency_role));
+        if !mandatory_completed {
+            return usize::MAX;
+        }
 
-            if has_current {
-                let current_declarations = {
-                    let current_state = self.get_state();
-                    current_state.current.as_ref().unwrap().parents.clone()
-                }; // Drop the borrow here
-
-                let mut state = parent.get_state_mut();
-                let parent_selection = state.current.as_mut().unwrap();
-
-                let old_decl_ids = parent_selection.get_decl_ids();
-                // If the parent already has a current selection, filter it by the
-                // current declarations.
-
-                parent.command().constrain_by_children(
-                    cfg,
-                    parent_selection,
-                    &current_declarations,
-                );
-
-                if old_decl_ids != parent_selection.get_decl_ids() {
-                    state.completed = false
+        let mut total_score: Option<usize> = None;
+        ctx.registry
+            .for_each_selector(self.command().selectors(), |selector, state| {
+                match (total_score, selector.score(state)) {
+                    (None, Some(score)) => {
+                        total_score = Some(score);
+                    }
+                    (Some(current_score), Some(selection)) => {
+                        total_score = Some(current_score.saturating_add(selection));
+                    }
+                    (Some(_), None) => {
+                        total_score = Some(usize::MAX);
+                    }
+                    (None, None) => {
+                        total_score = Some(usize::MAX);
+                    }
                 }
-            } else {
-                // If the parent does not have a current selection, derive it from
-                // the current declarations.
-                let current_declarations = {
-                    let current_state = self.get_state();
-                    current_state.current.as_ref().unwrap().parents.clone()
-                }; // Drop the borrow here
+            });
+        total_score.or(Some(usize::MAX)).unwrap()
+    }
 
-                let parents_selection = parent
-                    .command()
-                    .derive_parents(ctx, &parent, cfg, &current_declarations)
-                    .await;
-
-                if parents_selection.is_none() {
-                    return;
+    pub fn get_selection(&self, ctx: &ExecutionContext) -> Option<Selection> {
+        let mut selection: Option<Selection> = None;
+        ctx.registry
+            .for_each_selector(self.command().selectors(), |selector, state| {
+                if let Some(sel) = selector.get_selection(state) {
+                    if let Some(current_selection) = &mut selection {
+                        current_selection.extend(sel.clone());
+                    } else {
+                        selection = Some(sel.clone());
+                    }
+                } else {
+                    selection = None;
                 }
-                let mut parents_selection = parents_selection.unwrap();
+            });
+        selection
+    }
 
-                parent.command().filter(cfg, &mut parents_selection);
-                let mut state = parent.get_state_mut();
-                state.current = Some(parents_selection);
+    fn is_selection_some(&self, ctx: &ExecutionContext) -> bool {
+        let mut is_some = true;
+        ctx.registry
+            .for_each_selector(self.command().selectors(), |selector, sel_state| {
+                if selector.get_selection(sel_state).is_none() {
+                    is_some = false;
+                }
+            });
+        is_some
+    }
+
+    // Statements that have dependencies resolved and are ready to execute
+    async fn compute_selectors(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        statements: &Vec<Rc<Statement>>,
+    ) {
+        let _select_nodes: tracing::span::EnteredSpan =
+            tracing::info_span!("select_nodes").entered();
+
+        for statement in statements.iter() {
+            statement.command().compute_selected(ctx, cfg).await;
+
+            if !statement.command().has_selectors() {
+                statement.get_state_mut().completed = true;
             }
         }
     }
 
-    async fn update_children(&self, ctx: &mut ExecutionContext, cfg: &ControlFlowGraph) {
-        let _update_children: tracing::span::EnteredSpan =
-            tracing::info_span!("update_children").entered();
-
-        for child in self.children() {
-            let has_current = {
-                let state = child.get_state();
-                state.current.is_some()
-            }; // Drop the immutable borrow here
-
-            if has_current {
-                let current_declarations = {
-                    let current_state = self.get_state();
-                    current_state.current.as_ref().unwrap().children.clone()
-                }; // Drop the borrow here
-
-                let mut state = child.get_state_mut();
-                let child_selection = state.current.as_mut().unwrap();
-
-                let old_decl_ids = child_selection.get_decl_ids();
-
-                child
-                    .command()
-                    .constrain_by_parents(cfg, child_selection, &current_declarations);
-                if old_decl_ids != child_selection.get_decl_ids() {
-                    state.completed = false
-                }
-            } else {
-                let child: &Statement = child.as_ref();
-                let current_declarations = {
-                    let current_state = self.get_state();
-                    current_state.current.as_ref().unwrap().children.clone()
-                }; // Drop the borrow here
-
-                let children_selection = child
-                    .command()
-                    .derive_children(child, ctx, cfg, &current_declarations)
-                    .await;
-
-                if children_selection.is_none() {
-                    continue;
-                }
-                let mut children_selection = children_selection.unwrap();
-
-                child.command().filter(cfg, &mut children_selection);
-                let mut state = child.get_state_mut();
-                state.current = Some(children_selection);
-            }
-        }
+    fn init_dependencies(&self, labeled_statements_map: &LabeledStatements) -> Result<()> {
+        crate::scope::visit(self.scope(), &mut |statement| {
+            init_dependencies(statement, &labeled_statements_map);
+            true
+        })?;
+        Ok(())
     }
 
     async fn compute_nodes(
@@ -214,27 +201,18 @@ impl Statement {
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
     ) -> Result<Vec<Rc<Statement>>> {
+        let mut labeled_statements = LabeledStatements::new();
         let mut statements = vec![];
         crate::scope::visit(self.scope(), &mut |statement| {
-            statements.push(statement);
+            statements.push(statement.clone());
+            labeled_statements.remember(statement);
             true
         })?;
 
-        println!(
-            "Executing global statement with {} statements",
-            statements.len()
-        );
-
-        let _select_nodes: tracing::span::EnteredSpan =
-            tracing::info_span!("select_nodes").entered();
         // First, execute all selectors
-        for statement in statements.iter_mut() {
-            statement
-                .get_state_mut()
-                .select_nodes(ctx, cfg, statement.as_ref())
-                .await;
-        }
-        drop(_select_nodes);
+        self.compute_selectors(ctx, cfg, &statements).await;
+
+        self.init_dependencies(&labeled_statements)?;
 
         while !statements.iter().all(|s| s.get_state().completed) {
             let _statement_iteration: tracing::span::EnteredSpan =
@@ -242,34 +220,38 @@ impl Statement {
 
             // Find an uncompleted statement with the least number of nodes. If
             // there are no such statements, pick any uncompleted statement.
-            statements.sort_by_key(|s| {
-                s.get_state()
-                    .current
-                    .as_ref()
-                    .map_or(usize::MAX, |refs| refs.nodes.len())
-            });
-
-            let mut uncompleted_statements: Vec<_> = statements
+            statements.sort_by_key(|s| s.statement_score(ctx));
+            let current_statement = statements
                 .iter_mut()
                 .filter(|s| !s.get_state().completed)
-                .collect();
-            if uncompleted_statements.is_empty() {
-                panic!("No uncompleted statements found, this should not happen");
-            }
+                .next()
+                .expect("No uncompleted statements found, this should not happen");
 
-            let current_node = &mut *uncompleted_statements[0];
+            ctx.registry.for_each_selector_mut(
+                current_statement.command().selectors(),
+                |selector, state| {
+                    selector.update_state(state);
 
-            if let Some(selection) = &mut current_node.get_state_mut().current {
-                current_node.command().filter(cfg, selection);
-                current_node.command().constrain_references(cfg, selection);
-            }
+                    if let Some(selection) = selector.get_selection_mut(state) {
+                        current_statement.command().filter(selection);
+                    }
+                },
+            );
 
-            if current_node.get_state().current.as_ref().is_some() {
-                current_node.update_parents(ctx, cfg).await;
-                current_node.update_children(ctx, cfg).await;
+            current_statement.get_state_mut().completed = true;
+            // TODO: The default case for statement not to have selection is
+            // something like a standalone unit verb. But if the query cannot be
+            // resolved, it also results in no selection. We should distinguish
+            // these two cases when implementing error reporting.
+            if !current_statement.is_selection_some(ctx) {
+                continue;
             };
 
-            current_node.get_state_mut().completed = true;
+            // Notify dependents
+            let dependents = current_statement.get_state().dependents.clone();
+            for dependent in dependents {
+                current_statement.notify(ctx, cfg, &dependent).await?;
+            }
         }
 
         Ok(statements)
@@ -286,7 +268,13 @@ impl Statement {
 
         let mut all_nodes = Vec::new();
         for statement in &statements {
-            all_nodes.extend(statement.get_state_mut().nodes_iter().cloned());
+            all_nodes.extend(
+                statement
+                    .get_selection(ctx)
+                    .iter()
+                    .map(|s| s.nodes.clone())
+                    .flatten(),
+            );
         }
 
         let complete_selection = all_nodes.clone();
@@ -299,9 +287,7 @@ impl Statement {
 
         let mut all_references = EdgeList::new();
         for statement in &statements {
-            let state = statement.get_state_mut();
-
-            let current = if let Some(current) = state.current.as_ref() {
+            let current = if let Some(current) = statement.get_selection(ctx) {
                 current
             } else {
                 continue;
@@ -367,6 +353,28 @@ impl Statement {
             all_references,
         ));
     }
+
+    /// Notify the dependent statement's execution state about change in the
+    /// state of a dependency.
+    pub async fn notify(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        dependent: &StatementDependent,
+    ) -> Result<()> {
+        let _update_dependency: tracing::span::EnteredSpan =
+            tracing::info_span!("notify").entered();
+        let changed = dependent
+            .statement
+            .command()
+            .accept_notification(ctx, &cfg.index, self, dependent.dependency_role)
+            .await?;
+
+        if changed {
+            dependent.statement.get_state_mut().completed = false;
+        }
+        Ok(())
+    }
 }
 
 impl Hierarchy for Statement {
@@ -380,5 +388,65 @@ impl Hierarchy for Statement {
 
     fn children(&self) -> StatementIter {
         self.scope().statements()
+    }
+}
+
+pub fn init_dependencies(statement: Rc<Statement>, labeled_statements_map: &LabeledStatements) {
+    let mut state = statement.get_state_mut();
+    if let Some(parent) = statement.parent().and_then(|p| p.upgrade()) {
+        // Add a parent as a dependent
+        state.dependents.push(StatementDependent::new(
+            parent.clone(),
+            DependencyRole::Parent,
+        ));
+
+        // Add ourself as a dependency to the parent
+        parent
+            .get_state_mut()
+            .dependencies
+            .push(StatementDependency::new(
+                statement.clone(),
+                DependencyRole::Parent,
+            ));
+    }
+
+    for child in statement.children() {
+        state.dependents.push(StatementDependent::new(
+            child.clone(),
+            DependencyRole::Child,
+        ));
+
+        // Add ourself as a dependency to the child
+        child
+            .get_state_mut()
+            .dependencies
+            .push(StatementDependency::new(
+                statement.clone(),
+                DependencyRole::Child,
+            ));
+    }
+
+    // For every user verb, add current statement as dependent to the labeled statements
+    for user in statement.command().selectors() {
+        let Some(label) = user.get_label() else {
+            continue;
+        };
+        let labeled_statements = labeled_statements_map.get_statements(&label).unwrap();
+
+        for labeled_statement in labeled_statements {
+            labeled_statement
+                .get_state_mut()
+                .dependents
+                .push(StatementDependent::new_user(
+                    statement.clone(),
+                    label.as_str(),
+                ));
+
+            // Add ourself as a dependency to the labeled statement
+            state.dependencies.push(StatementDependency::new(
+                labeled_statement.clone(),
+                DependencyRole::User,
+            ));
+        }
     }
 }

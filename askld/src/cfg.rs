@@ -1,7 +1,6 @@
 use std::{collections::HashSet, iter::Iterator};
 
-use anyhow::Result;
-use index::db_diesel::{Index, Selection, SelectionNode};
+use index::db_diesel::{Index, SelectionNode};
 use index::symbols::Occurrence;
 use index::symbols::{DeclarationId, SymbolId};
 
@@ -74,12 +73,5 @@ impl ControlFlowGraph {
         Self {
             index: index_diesel,
         }
-    }
-
-    pub async fn find_symbol_by_name(&self, name: &str) -> Result<Selection> {
-        self.index
-            .find_symbol_by_name(&name)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to find symbol by name: {}", e))
     }
 }

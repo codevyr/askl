@@ -34,6 +34,7 @@ async fn test_select_matching_name() {
             .unwrap();
 
         let mut got_declarations: Vec<DeclarationId> = result
+            .unwrap()
             .nodes
             .into_iter()
             .map(|s| DeclarationId::new(s.declaration.id))

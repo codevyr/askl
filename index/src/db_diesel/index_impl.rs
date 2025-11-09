@@ -7,11 +7,11 @@ use diesel::SqliteConnection;
 use diesel_migrations::MigrationHarness;
 
 use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
-use crate::symbols::{DeclarationId, FileId};
+use crate::symbols::FileId;
 
 use super::mixins::{
-    CompoundNameMixin, DeclarationIdMixin, SymbolSearchMixin, CHILDREN_SYMBOLS_ALIAS,
-    PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
+    CompoundNameMixin, SymbolSearchMixin, CHILDREN_SYMBOLS_ALIAS, PARENT_DECLS_ALIAS,
+    PARENT_SYMBOLS_ALIAS,
 };
 use super::selection::{ChildReference, ParentReference, Selection, SelectionNode};
 use super::Connection;
@@ -342,15 +342,6 @@ impl Index {
 
     pub async fn find_symbol_by_name(&self, name: &str) -> Result<Selection> {
         let mixin = CompoundNameMixin::new(name);
-        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![Box::new(mixin)];
-        self.find_symbol(&mut mixins).await
-    }
-
-    pub async fn find_symbol_by_declid(
-        &self,
-        declarations: &Vec<DeclarationId>,
-    ) -> Result<Selection> {
-        let mixin = DeclarationIdMixin::new(declarations);
         let mut mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![Box::new(mixin)];
         self.find_symbol(&mut mixins).await
     }

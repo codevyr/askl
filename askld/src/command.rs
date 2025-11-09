@@ -1,11 +1,13 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
+use crate::execution_state::DependencyRole;
 use crate::statement::Statement;
-use crate::verb::{add_verb, DeriveMethod, Deriver, Filter, Marker, Selector, UnitVerb, Verb};
+use crate::verb::{add_verb, DeriveMethod, Filter, Labeler, Selector, Verb};
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{ChildReference, ParentReference, Selection, SymbolSearchMixin};
-use index::symbols::DeclarationRefs;
+use index::db_diesel::{Index, Selection, SymbolSearchMixin};
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 #[derive(Debug, Default)]
@@ -15,9 +17,7 @@ pub struct Command {
 
 impl Command {
     pub fn new() -> Command {
-        Self {
-            verbs: vec![UnitVerb::new()],
-        }
+        Self { verbs: vec![] }
     }
 
     pub fn derive(&self) -> Self {
@@ -41,124 +41,98 @@ impl Command {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_filter().ok()))
     }
 
-    fn selectors<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Selector> + 'a> {
+    pub fn selectors<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Selector> + 'a> {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_selector().ok()))
     }
 
-    fn derivers<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Deriver> + 'a> {
-        Box::new(self.verbs.iter().filter_map(|verb| verb.as_deriver().ok()))
+    pub fn has_selectors(&self) -> bool {
+        self.verbs.iter().any(|verb| verb.as_selector().is_ok())
     }
 
-    fn markers<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Marker> + 'a> {
-        Box::new(self.verbs.iter().filter_map(|verb| verb.as_marker().ok()))
+    fn labels<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Labeler> + 'a> {
+        Box::new(self.verbs.iter().filter_map(|verb| verb.as_labeler().ok()))
     }
 
-    pub fn filter(&self, cfg: &ControlFlowGraph, selection: &mut Selection) {
+    pub fn get_labels(&self) -> Vec<String> {
+        self.labels().flat_map(|m| m.get_label()).collect()
+    }
+
+    pub fn filter(&self, selection: &mut Selection) {
         let _command_filter: tracing::span::EnteredSpan =
             tracing::info_span!("command_filter").entered();
         for verb in self.filters() {
-            verb.filter(cfg, selection);
+            verb.filter(selection);
         }
     }
 
-    pub fn constrain_references(&self, cfg: &ControlFlowGraph, selection: &mut Selection) {
-        let _constrain_references: tracing::span::EnteredSpan =
-            tracing::info_span!("constrain_references").entered();
-        self.derivers()
-            .for_each(|verb| verb.constrain_references(cfg, selection))
-    }
-
-    pub fn constrain_by_parents(
+    pub async fn accept_notification(
         &self,
-        cfg: &ControlFlowGraph,
-        selection: &mut Selection,
-        parent_refs: &Vec<ChildReference>,
-    ) {
-        self.derivers()
-            .for_each(|verb| verb.constrain_by_parents(cfg, selection, parent_refs))
-    }
-
-    pub fn constrain_by_children(
-        &self,
-        cfg: &ControlFlowGraph,
-        selection: &mut Selection,
-        child_refs: &Vec<ParentReference>,
-    ) {
-        self.derivers()
-            .for_each(|verb| verb.constrain_by_children(cfg, selection, child_refs))
+        ctx: &mut ExecutionContext,
+        index: &Index,
+        notifier: &Statement,
+        role: DependencyRole,
+    ) -> Result<bool> {
+        // Collect filters so we can iterate over them multiple times while notifying selectors.
+        let mut changed = false;
+        let selector_filters: Vec<&dyn Filter> = self.filters().collect();
+        for selector in self.selectors() {
+            changed |= selector
+                .accept_notification(ctx, index, &selector_filters, notifier, role)
+                .await?;
+        }
+        Ok(changed)
     }
 
     /// Computes the selected symbols based on the selectors defined in the
     /// command. This method returns an `Option<DeclarationRefs>`, which will be
     /// `None` if no symbols are selected. It returns
     /// `Some(DeclarationRefs::new())` if no symbols match the selectors.
-    pub async fn compute_selected(
-        &self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-    ) -> Option<Selection> {
-        let selectors: Vec<_> = self.selectors().collect();
+    pub async fn compute_selected(&self, ctx: &mut ExecutionContext, cfg: &ControlFlowGraph) {
+        let selectors: Vec<&dyn Selector> = self.selectors().collect();
 
         // Nothing to do
         if selectors.len() == 0 {
-            return None;
+            return;
         }
 
-        let mut selection = Selection::new();
-        for selector in selectors.iter() {
+        for selector in selectors.into_iter() {
             let search_mixins: Vec<Box<dyn SymbolSearchMixin>> =
                 self.filters().flat_map(|f| f.get_filter_mixins()).collect();
 
-            let current_selection = selector
+            let mut current_selection = selector
                 .select_from_all(ctx, cfg, search_mixins)
                 .await
                 .unwrap();
-            selection.extend(current_selection);
+            if let Some(selection) = &mut current_selection {
+                self.filter(selection);
+                selection.prune_references();
+            }
+            ctx.registry.add(selector, current_selection);
+        }
+    }
+}
+
+pub struct LabeledStatements(HashMap<String, Vec<Rc<Statement>>>);
+
+impl LabeledStatements {
+    pub fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    pub fn remember(&mut self, statement: Rc<Statement>) -> usize {
+        let marks = statement.command().get_labels();
+        let marks_len = marks.len();
+        for mark in marks {
+            self.0
+                .entry(mark)
+                .or_insert(vec![statement.clone()])
+                .push(statement.clone());
         }
 
-        if selection.is_empty() {
-            return None;
-        }
-
-        self.filter(cfg, &mut selection);
-
-        Some(selection)
+        marks_len
     }
 
-    pub async fn derive_children(
-        &self,
-        statement: &Statement,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        children_refs: &Vec<ChildReference>,
-    ) -> Option<Selection> {
-        self.derivers()
-            .last()
-            .unwrap()
-            .derive_children(statement, ctx, cfg, children_refs)
-            .await
-    }
-
-    pub async fn derive_parents(
-        &self,
-        ctx: &mut ExecutionContext,
-        statement: &Statement,
-        cfg: &ControlFlowGraph,
-        parents_refs: &Vec<ParentReference>,
-    ) -> Option<Selection> {
-        self.derivers()
-            .last()
-            .unwrap()
-            .derive_parents(ctx, statement, cfg, parents_refs)
-            .await
-    }
-
-    pub fn mark(
-        &self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        symbols: &DeclarationRefs,
-    ) -> Result<()> {
-        self.markers().try_for_each(|m| m.mark(ctx, cfg, symbols))
+    pub fn get_statements(&self, label: &str) -> Option<&Vec<Rc<Statement>>> {
+        self.0.get(label)
     }
 }
