@@ -172,6 +172,19 @@ fn sibling_label_use_loop_returns_no_results() {
 }
 
 #[test]
+fn label_use_reports_error_instead_of_panic() {
+    const QUERY: &str = r#"
+        @label("A") "main" {
+        };
+        {@use("a")}
+    "#;
+
+    let result = run_query_err(TEST_INPUT_A, QUERY);
+
+    assert!(result.is_err());
+}
+
+#[test]
 fn forced_label_use_loop_returns_empty() {
     const QUERY: &str = r#"
         "a" @label("foo") @use("bar", forced="true");

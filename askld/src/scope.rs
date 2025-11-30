@@ -2,6 +2,7 @@ use crate::hierarchy::Hierarchy;
 use crate::parser::Rule;
 use crate::parser_context::ParserContext;
 use crate::statement::{build_empty_statement, build_statement, Statement};
+use anyhow::Result;
 use async_trait::async_trait;
 use core::fmt::Debug;
 use pest::error::Error;
@@ -29,12 +30,12 @@ pub fn build_scope(
 }
 
 /// Visit every statement included in the scope recursively
-pub fn visit<'a, 'b, F>(scope: Rc<dyn Scope>, func: &'b mut F) -> Result<(), Error<Rule>>
+pub fn visit<'a, 'b, F>(scope: Rc<dyn Scope>, func: &'b mut F) -> Result<()>
 where
-    F: FnMut(Rc<Statement>) -> bool,
+    F: FnMut(Rc<Statement>) -> Result<bool>,
 {
     for statement in scope.statements() {
-        if !func(statement.clone()) {
+        if !func(statement.clone())? {
             return Ok(());
         }
         visit(statement.scope(), func)?;

@@ -9,7 +9,7 @@ use crate::parser::Rule;
 use crate::parser_context::ParserContext;
 use crate::scope::{build_scope, EmptyScope, Scope, StatementIter};
 use crate::verb::build_verb;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use core::fmt::Debug;
 use index::db_diesel::Selection;
 use index::symbols::{DeclarationId, DeclarationRefs, FileId, Occurrence, SymbolId};
@@ -189,9 +189,9 @@ impl Statement {
     }
 
     fn init_dependencies(&self, labeled_statements_map: &LabeledStatements) -> Result<()> {
-        crate::scope::visit(self.scope(), &mut |statement| {
-            init_dependencies(statement, &labeled_statements_map);
-            true
+        crate::scope::visit(self.scope(), &mut |statement| -> Result<bool> {
+            init_dependencies(statement, &labeled_statements_map)?;
+            Ok(true)
         })?;
         Ok(())
     }
@@ -206,7 +206,7 @@ impl Statement {
         crate::scope::visit(self.scope(), &mut |statement| {
             statements.push(statement.clone());
             labeled_statements.remember(statement);
-            true
+            Ok(true)
         })?;
 
         // First, execute all selectors
@@ -391,7 +391,10 @@ impl Hierarchy for Statement {
     }
 }
 
-pub fn init_dependencies(statement: Rc<Statement>, labeled_statements_map: &LabeledStatements) {
+pub fn init_dependencies(
+    statement: Rc<Statement>,
+    labeled_statements_map: &LabeledStatements,
+) -> Result<()> {
     let mut state = statement.get_state_mut();
     if let Some(parent) = statement.parent().and_then(|p| p.upgrade()) {
         // Add a parent as a dependent
@@ -431,7 +434,12 @@ pub fn init_dependencies(statement: Rc<Statement>, labeled_statements_map: &Labe
         let Some(label) = user.get_label() else {
             continue;
         };
-        let labeled_statements = labeled_statements_map.get_statements(&label).unwrap();
+        let labeled_statements =
+            if let Some(labeled_statements) = labeled_statements_map.get_statements(&label) {
+                labeled_statements
+            } else {
+                bail!("Label '{}' not found for user selector", label);
+            };
 
         for labeled_statement in labeled_statements {
             labeled_statement
@@ -449,4 +457,6 @@ pub fn init_dependencies(statement: Rc<Statement>, labeled_statements_map: &Labe
             ));
         }
     }
+
+    Ok(())
 }
