@@ -13,6 +13,8 @@ async fn test_select_matching_name() {
     let cfg = ControlFlowGraph::from_symbols(index_diesel);
 
     let test_cases = vec![
+        ("sort.Sort", vec![96]),
+        ("sort.IsSorted", vec![95]),
         ("foo", vec![91, 92]),
         ("bar", vec![92]),
         ("foo.bar", vec![92]),

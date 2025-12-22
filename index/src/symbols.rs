@@ -530,9 +530,8 @@ pub fn clean_and_split_string(input: &str) -> Vec<String> {
 /// * `subset` - The sequence that might be an ordered subset
 ///
 /// # Returns
-///
 /// `true` if `subset` is an ordered subset of `superset`, `false` otherwise
-fn is_ordered_subset<T: PartialEq>(superset: &[T], subset: &[T]) -> bool {
+pub fn is_ordered_subset<T: PartialEq>(superset: &[T], subset: &[T]) -> bool {
     // Empty subset is always an ordered subset
     if subset.is_empty() {
         return true;

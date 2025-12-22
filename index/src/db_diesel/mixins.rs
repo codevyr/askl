@@ -9,7 +9,7 @@ use diesel::sqlite::Sqlite;
 use diesel::{debug_query, sql_query};
 
 use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
-use crate::symbols::{clean_and_split_string, DeclarationId};
+use crate::symbols::{clean_and_split_string, is_ordered_subset, DeclarationId};
 
 use super::dsl::GlobMethods;
 use super::Connection;
@@ -200,6 +200,15 @@ struct SymbolRowid {
     pub rowid: i32,
 }
 
+#[derive(Debug, Clone, QueryableByName)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct SymbolFtsMatch {
+    #[diesel(sql_type = Text)]
+    pub name: String,
+    #[diesel(embed)]
+    pub rowid: SymbolRowid,
+}
+
 pub trait SymbolSearchMixin: std::fmt::Debug {
     fn enter(&mut self, _connection: &mut Connection) -> Result<()> {
         Ok(())
@@ -256,7 +265,7 @@ impl SymbolSearchMixin for CompoundNameMixin {
         self.name_pattern = format!("*{}*", name_pattern);
 
         let matched_symbols_query =
-            sql_query("SELECT rowid FROM symbols_fts WHERE symbols_fts MATCH ?")
+            sql_query("SELECT name, rowid FROM symbols_fts WHERE symbols_fts MATCH ?")
                 .bind::<Text, _>(&fts_name_pattern);
 
         println!(
@@ -264,13 +273,22 @@ impl SymbolSearchMixin for CompoundNameMixin {
             debug_query::<Sqlite, _>(&matched_symbols_query)
         );
 
-        self.matched_symbols = {
+        let fts_matches: Vec<SymbolFtsMatch> = {
             let _matched_symbols_query: tracing::span::EnteredSpan =
                 tracing::info_span!("matched_symbols").entered();
             matched_symbols_query
-                .load::<SymbolRowid>(connection)
+                .load::<SymbolFtsMatch>(connection)
                 .map_err(|e| anyhow::anyhow!("Failed to query FTS table: {}", e))?
         };
+
+        self.matched_symbols = fts_matches
+            .into_iter()
+            .filter(|matched| {
+                let cleaned_name = clean_and_split_string(&matched.name);
+                is_ordered_subset(&cleaned_name, &self.compound_name)
+            })
+            .map(|matched| matched.rowid)
+            .collect();
         println!("Matched {} symbols", self.matched_symbols.len());
         println!("Searching for symbols with name pattern: {fts_name_pattern}");
         Ok(())
