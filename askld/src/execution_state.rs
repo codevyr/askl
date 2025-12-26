@@ -62,6 +62,8 @@ pub struct ExecutionState {
     /// Statements that depend on this state. We notify them when this state is
     /// completed.
     pub dependents: Vec<StatementDependent>,
+    /// Weak unit statements do not constrain the selection of their dependencies.
+    pub weak: bool,
 }
 
 impl ExecutionState {
@@ -70,6 +72,7 @@ impl ExecutionState {
             completed: false,
             dependencies: vec![],
             dependents: vec![],
+            weak: false,
         }
     }
 }

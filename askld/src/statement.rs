@@ -196,6 +196,51 @@ impl Statement {
         Ok(())
     }
 
+    /// Mark weak statements.
+    ///
+    /// A statement is weak if it contains only unit verbs AND one of:
+    /// - Has no parent
+    /// - Has no children
+    /// - All its children are weak
+    /// - Its parent is weak
+    fn mark_weak_statements(&self, statements: &Vec<Rc<Statement>>) {
+        // This iterative algorithm is inefficient but the dependency
+        // graph is expected to be small.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for statement in statements.iter() {
+                let mut state = statement.get_state_mut();
+                if state.weak {
+                    continue;
+                }
+
+                let is_unit_statement = statement.command().is_unit();
+
+                if !is_unit_statement {
+                    continue;
+                }
+
+                let parent_weak = if let Some(parent_weak) = statement
+                    .parent()
+                    .and_then(|p| p.upgrade())
+                    .map(|p| p.get_state().weak)
+                {
+                    parent_weak
+                } else {
+                    true
+                };
+
+                let all_children_weak = statement.children().all(|child| child.get_state().weak);
+
+                if parent_weak || all_children_weak {
+                    state.weak = true;
+                    changed = true;
+                }
+            }
+        }
+    }
+
     async fn compute_nodes(
         &self,
         ctx: &mut ExecutionContext,
@@ -213,6 +258,8 @@ impl Statement {
         self.compute_selectors(ctx, cfg, &statements).await;
 
         self.init_dependencies(&labeled_statements)?;
+
+        self.mark_weak_statements(&statements);
 
         while !statements.iter().all(|s| s.get_state().completed) {
             let _statement_iteration: tracing::span::EnteredSpan =

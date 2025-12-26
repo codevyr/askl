@@ -65,7 +65,13 @@ fn double_parent_query() {
     assert_eq!(edges, vec!["91-92", "91-92", "942-91", "942-92"]);
 }
 
+// This test is ignored for now because current behavior considers children of
+// "a" to be weak statements, meaning that the non-existing grandchild does not
+// constrain an existing child. In future, we may want to add a syntax to
+// indicate that the grandchild is strong, so only children with grandchildren are
+// selected.
 #[test]
+#[ignore]
 fn missing_child_query() {
     // "a" does not have grandchildren, so this should return no results
     const QUERY: &str = r#""a"{{}}"#;
@@ -862,4 +868,52 @@ fn preamble_isolated_scope() {
     assert_eq!(res_nodes.as_vec(), vec![]);
     let edges = format_edges(res_edges);
     assert_eq!(edges, Vec::<String>::new());
+}
+
+#[test]
+fn weak_grandchild() {
+    const QUERY: &str = r#""f"{{}}"#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(
+        res_nodes.as_vec(),
+        vec![DeclarationId::new(96), DeclarationId::new(97)]
+    );
+    let edges = format_edges(res_edges);
+    assert_eq!(edges, vec!["96-97"]);
+}
+
+#[test]
+fn weak_grandparent() {
+    const QUERY: &str = r#"{{"a"}}"#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(
+        res_nodes.as_vec(),
+        vec![DeclarationId::new(91), DeclarationId::new(942)]
+    );
+    let edges = format_edges(res_edges);
+    assert_eq!(edges, vec!["942-91"]);
+}
+
+#[test]
+fn weak_grandparent_2() {
+    const QUERY: &str = r#"{"main"{"a"}}"#;
+    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+
+    println!("{:#?}", res_nodes);
+    println!("{:#?}", res_edges);
+
+    assert_eq!(
+        res_nodes.as_vec(),
+        vec![DeclarationId::new(91), DeclarationId::new(942)]
+    );
+    let edges = format_edges(res_edges);
+    assert_eq!(edges, vec!["942-91"]);
 }

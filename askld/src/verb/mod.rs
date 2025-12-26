@@ -151,6 +151,10 @@ pub trait Verb: std::fmt::Debug + Sync {
         None
     }
 
+    fn is_unit(&self) -> bool {
+        false
+    }
+
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
         bail!("Not a selector verb")
     }
@@ -334,6 +338,15 @@ pub trait Selector: std::fmt::Debug {
                 None => return Ok(false),
             };
             if !notifier_labels.contains(&self_label) {
+                return Ok(false);
+            }
+        }
+
+        // Weak statements do not constrain the selection of their dependencies.
+        if notifier.get_state().weak {
+            let state_exists =
+                selector_state_with(&mut ctx.registry, self, |state| state.selection.is_some());
+            if state_exists {
                 return Ok(false);
             }
         }

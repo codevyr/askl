@@ -276,6 +276,10 @@ impl Verb for UnitVerb {
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Clone
     }
+
+    fn is_unit(&self) -> bool {
+        true
+    }
 }
 
 #[async_trait(?Send)]

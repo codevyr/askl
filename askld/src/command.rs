@@ -49,6 +49,10 @@ impl Command {
         self.verbs.iter().any(|verb| verb.as_selector().is_ok())
     }
 
+    pub fn is_unit(&self) -> bool {
+        self.verbs.iter().all(|verb| verb.is_unit())
+    }
+
     fn labels<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Labeler> + 'a> {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_labeler().ok()))
     }
