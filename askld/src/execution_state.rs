@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::statement::Statement;
+use crate::{parser::Rule, statement::Statement};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DependencyRole {
@@ -64,6 +64,8 @@ pub struct ExecutionState {
     pub dependents: Vec<StatementDependent>,
     /// Weak unit statements do not constrain the selection of their dependencies.
     pub weak: bool,
+    /// Warnings that occurred during the execution of this state.
+    pub warnings: Vec<pest::error::Error<Rule>>,
 }
 
 impl ExecutionState {
@@ -73,6 +75,7 @@ impl ExecutionState {
             dependencies: vec![],
             dependents: vec![],
             weak: false,
+            warnings: vec![],
         }
     }
 }

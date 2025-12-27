@@ -1,4 +1,4 @@
-use crate::parser_context::ParserContext;
+use crate::{parser_context::ParserContext, span::Span};
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -6,12 +6,15 @@ use std::sync::Arc;
 use super::{DeriveMethod, Verb};
 
 #[derive(Debug)]
-pub(super) struct PreambleVerb {}
+pub(super) struct PreambleVerb {
+    span: Span,
+}
 
 impl PreambleVerb {
     pub(super) const NAME: &'static str = "preamble";
 
     pub(super) fn new(
+        span: Span,
         positional: &Vec<String>,
         named: &HashMap<String, String>,
     ) -> Result<Arc<dyn Verb>> {
@@ -23,11 +26,19 @@ impl PreambleVerb {
             bail!("Unexpected named arguments");
         };
 
-        Ok(Arc::new(Self {}))
+        Ok(Arc::new(Self { span }))
     }
 }
 
 impl Verb for PreambleVerb {
+    fn name(&self) -> &str {
+        PreambleVerb::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Skip
     }

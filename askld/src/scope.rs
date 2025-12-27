@@ -1,18 +1,19 @@
 use crate::hierarchy::Hierarchy;
 use crate::parser::Rule;
 use crate::parser_context::ParserContext;
+use crate::span::Span;
 use crate::statement::{build_empty_statement, build_statement, Statement};
 use anyhow::Result;
 use async_trait::async_trait;
 use core::fmt::Debug;
-use pest::error::Error;
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};
 
 pub fn build_scope(
     ctx: Rc<ParserContext>,
     pair: pest::iterators::Pair<Rule>,
-) -> Result<Rc<dyn Scope>, Error<Rule>> {
+) -> Result<Rc<dyn Scope>, pest::error::Error<Rule>> {
+    let scope_span = Span::from_pest(pair.as_span(), ctx.source());
     let statements: Result<Vec<Rc<Statement>>, _> = pair
         .into_inner()
         .map(|p| build_statement(ctx.clone(), p))
@@ -20,7 +21,7 @@ pub fn build_scope(
 
     let statements = statements?;
     let statements = if statements.is_empty() {
-        vec![build_empty_statement(ctx.clone())]
+        vec![build_empty_statement(ctx.clone(), scope_span)]
     } else {
         statements
     };
@@ -30,9 +31,9 @@ pub fn build_scope(
 }
 
 /// Visit every statement included in the scope recursively
-pub fn visit<'a, 'b, F>(scope: Rc<dyn Scope>, func: &'b mut F) -> Result<()>
+pub fn visit<'a, 'b, F, E>(scope: Rc<dyn Scope>, func: &'b mut F) -> Result<(), E>
 where
-    F: FnMut(Rc<Statement>) -> Result<bool>,
+    F: FnMut(Rc<Statement>) -> Result<bool, E>,
 {
     for statement in scope.statements() {
         if !func(statement.clone())? {

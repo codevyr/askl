@@ -1,7 +1,8 @@
 use index::{db_diesel::Index, symbols::DeclarationId};
 
 use crate::{
-    cfg::ControlFlowGraph, execution_context::ExecutionContext, test_util::run_query, verb::*,
+    cfg::ControlFlowGraph, execution_context::ExecutionContext, span::Span, test_util::run_query,
+    verb::*,
 };
 
 use std::collections::HashMap;
@@ -25,8 +26,9 @@ async fn test_select_matching_name() {
     let mut ctx = ExecutionContext::new(); // Assuming there's a default constructor
 
     for (name, expected_ids) in test_cases {
+        let fake_span = Span::synthetic(name);
         let named_args = HashMap::from([("name".to_string(), name.to_string())]);
-        let selector = NameSelector::new(&vec![], &named_args).unwrap();
+        let selector = NameSelector::new(fake_span, &vec![], &named_args).unwrap();
 
         let result = selector
             .as_selector()
@@ -67,10 +69,10 @@ fn test_ignore_package_filter() {
 "tar";
 "#;
 
-    let (res_nodes, _res_edges) = run_query("verb_test.sql", query);
+    let res = run_query("verb_test.sql", query);
 
     assert_eq!(
-        res_nodes.as_vec(),
+        res.nodes.as_vec(),
         vec![
             DeclarationId::new(91),
             DeclarationId::new(93),

@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use anyhow::{anyhow, Result};
 use askld::execution_context::ExecutionContext;
+use askld::parser::Rule;
 use askld::{cfg::ControlFlowGraph, parser::parse};
 use clap::Parser;
 use index::db::{self};
@@ -104,6 +105,7 @@ struct Graph {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     files: Vec<(FileId, String)>,
+    warnings: Vec<ErrorResponse>,
 }
 
 impl Graph {
@@ -112,6 +114,7 @@ impl Graph {
             nodes: vec![],
             edges: vec![],
             files: vec![],
+            warnings: vec![],
         }
     }
 
@@ -122,6 +125,64 @@ impl Graph {
     fn add_edge(&mut self, edge: Edge) {
         self.edges.push(edge);
     }
+
+    fn add_warnings(&mut self, warnings: Vec<pest::error::Error<Rule>>) {
+        for warning in warnings {
+            let error_response = ErrorResponse {
+                message: warning.to_string(),
+                location: warning.location.clone().into(),
+                line_col: warning.line_col.clone().into(),
+                path: warning.path().map(|p| p.to_string()),
+                line: warning.line().to_string(),
+            };
+            self.warnings.push(error_response);
+        }
+    }
+}
+
+/// Where an `Error` has occurred.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum InputLocation {
+    /// `Error` was created by `Error::new_from_pos`
+    Pos(usize),
+    /// `Error` was created by `Error::new_from_span`
+    Span((usize, usize)),
+}
+
+impl From<pest::error::InputLocation> for InputLocation {
+    fn from(loc: pest::error::InputLocation) -> Self {
+        match loc {
+            pest::error::InputLocation::Pos(pos) => InputLocation::Pos(pos),
+            pest::error::InputLocation::Span(span) => InputLocation::Span(span),
+        }
+    }
+}
+
+/// Line/column where an `Error` has occurred.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum LineColLocation {
+    /// Line/column pair if `Error` was created by `Error::new_from_pos`
+    Pos((usize, usize)),
+    /// Line/column pairs if `Error` was created by `Error::new_from_span`
+    Span((usize, usize), (usize, usize)),
+}
+
+impl From<pest::error::LineColLocation> for LineColLocation {
+    fn from(loc: pest::error::LineColLocation) -> Self {
+        match loc {
+            pest::error::LineColLocation::Pos(pos) => LineColLocation::Pos(pos),
+            pest::error::LineColLocation::Span(start, end) => LineColLocation::Span(start, end),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ErrorResponse {
+    message: String,
+    location: InputLocation,
+    line_col: LineColLocation,
+    path: Option<String>,
+    line: String,
 }
 
 #[post("/query")]
@@ -129,47 +190,63 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     let _query = tracing::info_span!("query").entered();
 
     println!("Received query: {}", req_body);
-    let ast = if let Ok(ast) = parse(&req_body) {
-        ast
-    } else {
-        return HttpResponse::BadRequest().body("Invalid query");
+    let ast = match parse(&req_body) {
+        Ok(ast) => ast,
+        Err(err) => {
+            println!("Parse error: {}", err);
+            let json_err = serde_json::to_string(&ErrorResponse {
+                message: err.to_string(),
+                location: err.location.clone().into(),
+                line_col: err.line_col.clone().into(),
+                path: err.path().map(|p| p.to_string()),
+                line: err.line().to_string(),
+            })
+            .unwrap();
+            return HttpResponse::BadRequest().body(json_err);
+        }
     };
     debug!("Global scope: {:#?}", ast);
 
     let mut ctx = ExecutionContext::new();
 
-    let (_, res_nodes, res_edges) = {
+    let res = {
         let _query_execute = tracing::info_span!("query_execute").entered();
-        let visited = HashSet::new();
-        let execute_future = ast.execute(&mut ctx, &data.cfg, None, &visited);
+        let execute_future = ast.execute(&mut ctx, &data.cfg);
         match timeout(QUERY_TIMEOUT, execute_future).await {
-            Ok(None) => {
-                return HttpResponse::NotFound().body("Did not resolve any symbols");
+            Ok(Err(err)) => {
+                let json_err = serde_json::to_string(&ErrorResponse {
+                    message: err.to_string(),
+                    location: err.location.clone().into(),
+                    line_col: err.line_col.clone().into(),
+                    path: err.path().map(|p| p.to_string()),
+                    line: err.line().to_string(),
+                });
+                return HttpResponse::BadRequest().body(json_err.unwrap());
             }
-            Ok(Some(res)) => res,
+            Ok(Ok(res)) => res,
             Err(_) => {
                 return HttpResponse::RequestTimeout().body("Query timed out");
             }
         }
     };
 
-    info!("Symbols: {:#?}", res_nodes.as_vec().len());
-    info!("Edges: {:#?}", res_edges.0.len());
+    info!("Symbols: {:#?}", res.nodes.as_vec().len());
+    info!("Edges: {:#?}", res.edges.0.len());
 
     let mut result_graph = Graph::new();
 
-    for (from, to, loc) in res_edges.0 {
+    for (from, to, loc) in res.edges.0 {
         result_graph.add_edge(Edge::new(from.symbol_id, to.symbol_id, loc));
     }
 
     let mut all_symbols = HashSet::new();
-    for declaration in res_nodes.0.iter() {
+    for declaration in res.nodes.0.iter() {
         all_symbols.insert(declaration.symbol.clone());
     }
 
     let mut result_files = HashMap::new();
     for symbol in all_symbols {
-        for declaration in res_nodes.0.iter() {
+        for declaration in res.nodes.0.iter() {
             if !result_files.contains_key(&FileId::new(declaration.file.id)) {
                 result_files.insert(
                     FileId::new(declaration.file.id),
@@ -178,7 +255,8 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
             }
         }
 
-        let declarations: Vec<db::Declaration> = res_nodes
+        let declarations: Vec<db::Declaration> = res
+            .nodes
             .0
             .iter()
             .filter(|d| d.declaration.symbol == symbol.id)
@@ -203,6 +281,7 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     }
 
     result_graph.files = result_files.into_iter().collect();
+    result_graph.add_warnings(res.warnings);
 
     let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();
     HttpResponse::Ok().body(json_graph)

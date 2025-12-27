@@ -43,3 +43,10 @@ fn parse_child_query() {
     //     r#"GlobalStatement { command: Command { verbs: [UnitVerb] }, scope: DefaultScope(RefCell { value: [DefaultStatement { command: Command { verbs: [UnitVerb, ChildrenVerb, NameSelector { name: "a" }] }, scope: DefaultScope(RefCell { value: [DefaultStatement { command: Command { verbs: [UnitVerb, ChildrenVerb] }, scope: EmptyScope }] }) }] }) }"#
     // );
 }
+
+#[test]
+fn parse_unit_verb() {
+    const QUERY: &str = r#"@ignore(package="k8s.io/klog");; "a""#;
+    let ast = parse(QUERY).unwrap();
+    println!("{:?}", ast);
+}

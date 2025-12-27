@@ -1,6 +1,7 @@
 use crate::{
     command::Command,
     scope::{DefaultScope, Scope},
+    span::Span,
     statement::Statement,
     verb::{UnitVerb, Verb},
 };
@@ -30,6 +31,7 @@ impl ScopeFactory {
 
 #[derive(Debug)]
 pub struct ParserContext {
+    source: Arc<String>,
     prev: Option<Weak<ParserContext>>,
     alternative_context: RefCell<Option<Weak<ParserContext>>>,
     scope_factory: Option<ScopeFactory>,
@@ -37,9 +39,10 @@ pub struct ParserContext {
 }
 
 impl ParserContext {
-    pub fn new(scope_factory: ScopeFactory) -> Rc<Self> {
-        let command = Command::new();
+    pub fn new(source: Arc<String>, scope_factory: ScopeFactory) -> Rc<Self> {
+        let command = Command::new(Span::entire(source.clone()));
         Rc::new(Self {
+            source,
             prev: None,
             alternative_context: RefCell::new(None),
             command: RefCell::new(command),
@@ -47,11 +50,12 @@ impl ParserContext {
         })
     }
 
-    pub fn derive(from: Rc<Self>) -> Rc<Self> {
+    pub fn derive(from: Rc<Self>, span: Span) -> Rc<Self> {
         Rc::new(Self {
+            source: from.source.clone(),
             prev: Some(Rc::downgrade(&from)),
             alternative_context: RefCell::new(from.alternative_context.borrow().clone()),
-            command: RefCell::new(from.command.borrow().derive()),
+            command: RefCell::new(from.command.borrow().derive(span)),
             scope_factory: None,
         })
     }
@@ -96,10 +100,10 @@ impl ParserContext {
         self.prev.clone()
     }
 
-    pub fn command(&self) -> Command {
+    pub fn command(&self, span: Span) -> Command {
         let mut command = self.command.take();
         if command.selectors().count() == 0 {
-            command.extend(UnitVerb::new());
+            command.extend(UnitVerb::new(span));
         }
         command
     }
@@ -112,5 +116,9 @@ impl ParserContext {
         };
 
         ctx.command.borrow_mut().extend(verb);
+    }
+
+    pub fn source(&self) -> Arc<String> {
+        self.source.clone()
     }
 }

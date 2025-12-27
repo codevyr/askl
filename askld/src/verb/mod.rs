@@ -1,8 +1,10 @@
 use crate::cfg::ControlFlowGraph;
+use crate::command::NotificationResult;
 use crate::execution_context::{selector_state_with, ExecutionContext};
 use crate::execution_state::DependencyRole;
 use crate::parser::Rule;
 use crate::parser_context::ParserContext;
+use crate::span::Span;
 use crate::statement::Statement;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
@@ -30,7 +32,7 @@ pub fn build_verb(
     ctx: Rc<ParserContext>,
     pair: pest::iterators::Pair<Rule>,
 ) -> Result<(), Error<Rule>> {
-    let span = pair.as_span();
+    let verb_span = Span::from_pest(pair.as_span(), ctx.source());
     debug!("Build verb {:#?}", pair);
     let verb = if let Some(verb) = pair.into_inner().next() {
         verb
@@ -39,7 +41,7 @@ pub fn build_verb(
             CustomError {
                 message: format!("Expected a specific rule"),
             },
-            span,
+            verb_span.as_pest_span(),
         ));
     };
 
@@ -52,23 +54,31 @@ pub fn build_verb(
                 let positional = vec![];
                 let mut named = HashMap::new();
                 named.insert("name".into(), ident.as_str().into());
-                NameSelector::new(&positional, &named)
+                NameSelector::new(verb_span.clone(), &positional, &named)
             }
             Rule::forced_verb => {
                 let ident = verb.into_inner().next().unwrap();
                 let positional = vec![];
                 let mut named = HashMap::new();
                 named.insert("name".into(), ident.as_str().into());
-                ForcedVerb::new(&positional, &named)
+                ForcedVerb::new(verb_span.clone(), &positional, &named)
             }
-            _ => unreachable!("Unknown rule: {:#?}", verb.as_rule()),
+            _ => {
+                return Err(Error::new_from_span(
+                    pest::error::ErrorVariant::ParsingError {
+                        positives: vec![Rule::generic_verb, Rule::plain_filter, Rule::forced_verb],
+                        negatives: vec![verb.as_rule()],
+                    },
+                    verb_span.as_pest_span(),
+                ))
+            }
         }
         .map_err(|e| {
             Error::new_from_span(
                 CustomError {
                     message: format!("Failed to create filter: {}", e),
                 },
-                span,
+                verb_span.as_pest_span(),
             )
         })?
     };
@@ -78,7 +88,7 @@ pub fn build_verb(
             CustomError {
                 message: format!("Failed to consume verb: {}", e),
             },
-            span,
+            verb_span.as_pest_span(),
         )
     })?;
 
@@ -123,6 +133,8 @@ pub fn add_verb(existing_verbs: Vec<Arc<dyn Verb>>, new_verb: Arc<dyn Verb>) -> 
 }
 
 pub trait Verb: std::fmt::Debug + Sync {
+    fn name(&self) -> &str;
+
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Skip
     }
@@ -155,6 +167,10 @@ pub trait Verb: std::fmt::Debug + Sync {
         false
     }
 
+    fn span(&self) -> pest::Span<'_> {
+        panic!("Verb does not have a span")
+    }
+
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
         bail!("Not a selector verb")
     }
@@ -168,7 +184,7 @@ pub trait Verb: std::fmt::Debug + Sync {
     }
 }
 
-pub trait Filter: std::fmt::Debug + Display {
+pub trait Filter: std::fmt::Debug + Display + Verb {
     fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
         vec![]
     }
@@ -258,7 +274,7 @@ impl SelectorState {
 pub type SelectorId = usize;
 
 #[async_trait(?Send)]
-pub trait Selector: std::fmt::Debug {
+pub trait Selector: std::fmt::Debug + Verb {
     fn id(&self) -> SelectorId {
         ptr::from_ref(self) as *const () as SelectorId
     }
@@ -321,24 +337,24 @@ pub trait Selector: std::fmt::Debug {
         selector_filters: &[&dyn Filter],
         notifier: &Statement,
         role: DependencyRole,
-    ) -> Result<bool> {
+    ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         if !notifier.command().has_selectors() {
-            return Ok(false);
+            return Ok(NotificationResult::new(false, vec![]));
         }
 
         let dependency = match notifier.get_selection(&ctx) {
             Some(selection) => selection,
-            None => return Ok(false),
+            None => return Ok(NotificationResult::new(false, vec![])),
         };
 
         if role == DependencyRole::User {
             let notifier_labels = notifier.command().get_labels();
             let self_label = match self.get_label() {
                 Some(label) => label,
-                None => return Ok(false),
+                None => return Ok(NotificationResult::new(false, vec![])),
             };
             if !notifier_labels.contains(&self_label) {
-                return Ok(false);
+                return Ok(NotificationResult::new(false, vec![]));
             }
         }
 
@@ -347,27 +363,47 @@ pub trait Selector: std::fmt::Debug {
             let state_exists =
                 selector_state_with(&mut ctx.registry, self, |state| state.selection.is_some());
             if state_exists {
-                return Ok(false);
+                return Ok(NotificationResult::new(false, vec![]));
             }
         }
 
         let mut changed = false;
-        let constrained = selector_state_with(&mut ctx.registry, self, |state| {
+        let (constrained, warnings) = selector_state_with(&mut ctx.registry, self, |state| {
             if state.selection.is_some() {
                 changed = state.constrain_selection(&dependency, role);
-                true
+                let mut warnings = vec![];
+                if changed && state.selection.as_ref().unwrap().nodes.is_empty() {
+                    warnings.push(Error::new_from_span(
+                        CustomError {
+                            message: format!(
+                                "Statement did not match any symbols after applying constraints from {}.",
+                                notifier.command().span(),
+                            ),
+                        },
+                        self.span(),
+                    ));
+                }
+                (true, warnings)
             } else {
-                false
+                (false, vec![])
             }
         });
 
         if constrained {
-            return Ok(changed);
+            return Ok(NotificationResult::new(changed, warnings));
         }
 
         let mut selection = self
             .derive_selection(ctx, index, selector_filters, notifier, role)
-            .await?;
+            .await
+            .map_err(|e| {
+                Error::new_from_span(
+                    CustomError {
+                        message: format!("Failed to derive selection: {}", e),
+                    },
+                    self.span(),
+                )
+            })?;
 
         if let Some(ref mut selection) = selection {
             selector_filters.iter().for_each(|f| {
@@ -379,7 +415,7 @@ pub trait Selector: std::fmt::Debug {
             state.selection = selection;
             state.prune_references();
         });
-        Ok(true)
+        Ok(NotificationResult::new(true, vec![]))
     }
 
     async fn derive_selection(

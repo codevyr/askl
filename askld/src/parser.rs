@@ -1,6 +1,7 @@
 use crate::{
     hierarchy,
     parser_context::{ParserContext, ScopeFactory},
+    span::Span,
     statement::{build_statement, Statement},
 };
 use anyhow::Result;
@@ -8,6 +9,7 @@ use core::fmt::Debug;
 use pest::{error::Error, Parser};
 use pest_derive::Parser;
 use std::rc::Rc;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[grammar = "askl.pest"]
@@ -80,16 +82,25 @@ impl PositionalArgument {
     }
 }
 
-pub fn parse(ask_code: &str) -> Result<Rc<Statement>> {
-    let pairs = AsklParser::parse(Rule::ask, ask_code)?;
+pub fn parse(ask_code: &str) -> Result<Rc<Statement>, pest::error::Error<Rule>> {
+    let source = Arc::new(ask_code.to_string());
+    let pairs = AsklParser::parse(Rule::ask, &source)?;
 
-    let ctx = ParserContext::new(ScopeFactory::Children);
+    let ctx = ParserContext::new(source.clone(), ScopeFactory::Children);
     let mut ast = vec![];
     for pair in pairs {
         match pair.as_rule() {
             Rule::statement => ast.push(build_statement(ctx.clone(), pair)?),
             Rule::EOI => {}
-            _ => unreachable!("Unknown rule: {:#?}", pair.as_rule()),
+            _ => {
+                return Err(Error::new_from_span(
+                    pest::error::ErrorVariant::ParsingError {
+                        positives: vec![Rule::statement],
+                        negatives: vec![pair.as_rule()],
+                    },
+                    pair.as_span(),
+                ))?
+            }
         };
     }
 
@@ -99,7 +110,8 @@ pub fn parse(ask_code: &str) -> Result<Rc<Statement>> {
         hierarchy::populate_parents(&statement);
     }
 
-    let statement = Statement::new(ctx.command(), scope.clone());
+    let whole_span: Span = Span::entire(source.clone());
+    let statement = Statement::new(ctx.command(whole_span), scope.clone());
     scope.set_parent(Rc::downgrade(&statement));
 
     Ok(statement)

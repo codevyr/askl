@@ -3,6 +3,7 @@ use crate::execution_context::ExecutionContext;
 use crate::execution_state::DependencyRole;
 use crate::parser::{Identifier, NamedArgument, PositionalArgument, Rule};
 use crate::parser_context::ParserContext;
+use crate::span::Span;
 use crate::statement::Statement;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
@@ -26,9 +27,10 @@ use super::preamble::PreambleVerb;
 use super::{DeriveMethod, Filter, Selector, Verb, VerbTag};
 
 pub(crate) fn build_generic_verb(
-    _ctx: Rc<ParserContext>,
+    ctx: Rc<ParserContext>,
     pair: pest::iterators::Pair<Rule>,
 ) -> Result<Arc<dyn Verb>, Error<Rule>> {
+    let verb_span = Span::from_pest(pair.as_span(), ctx.source());
     let mut pair = pair.into_inner();
     let ident = pair.next().unwrap();
     let mut positional = vec![];
@@ -68,15 +70,15 @@ pub(crate) fn build_generic_verb(
 
     let span = ident.as_span();
     let res = match Identifier::build(ident)?.0.as_str() {
-        NameSelector::NAME => NameSelector::new(&positional, &named),
-        IgnoreVerb::NAME => IgnoreVerb::new(&positional, &named),
-        ProjectFilter::NAME => ProjectFilter::new(&positional, &named),
-        ModuleFilter::NAME => ModuleFilter::new(&positional, &named),
-        ForcedVerb::NAME => ForcedVerb::new(&positional, &named),
-        IsolatedScope::NAME => IsolatedScope::new(&positional, &named),
-        LabelVerb::NAME => LabelVerb::new(&positional, &named),
-        UserVerb::NAME => UserVerb::new(&positional, &named),
-        PreambleVerb::NAME => PreambleVerb::new(&positional, &named),
+        NameSelector::NAME => NameSelector::new(verb_span, &positional, &named),
+        IgnoreVerb::NAME => IgnoreVerb::new(verb_span, &positional, &named),
+        ProjectFilter::NAME => ProjectFilter::new(verb_span, &positional, &named),
+        ModuleFilter::NAME => ModuleFilter::new(verb_span, &positional, &named),
+        ForcedVerb::NAME => ForcedVerb::new(verb_span, &positional, &named),
+        IsolatedScope::NAME => IsolatedScope::new(verb_span, &positional, &named),
+        LabelVerb::NAME => LabelVerb::new(verb_span, &positional, &named),
+        UserVerb::NAME => UserVerb::new(verb_span, &positional, &named),
+        PreambleVerb::NAME => PreambleVerb::new(verb_span, &positional, &named),
         unknown => Err(anyhow!("unknown verb : {}", unknown)),
     };
 
@@ -93,6 +95,7 @@ pub(crate) fn build_generic_verb(
 
 #[derive(Debug)]
 pub struct NameSelector {
+    span: Span,
     pub name: String,
 }
 
@@ -100,11 +103,15 @@ impl NameSelector {
     pub(super) const NAME: &'static str = "select";
 
     pub fn new(
+        span: Span,
         _positional: &Vec<String>,
         named: &HashMap<String, String>,
     ) -> Result<Arc<dyn Verb>> {
         if let Some(name) = named.get("name") {
-            Ok(Arc::new(Self { name: name.clone() }))
+            Ok(Arc::new(Self {
+                span,
+                name: name.clone(),
+            }))
         } else {
             bail!("Must contain name field");
         }
@@ -112,8 +119,16 @@ impl NameSelector {
 }
 
 impl Verb for NameSelector {
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
         Ok(self)
+    }
+
+    fn name(&self) -> &str {
+        NameSelector::NAME
     }
 }
 
@@ -134,6 +149,7 @@ impl Selector for NameSelector {
 
 #[derive(Debug)]
 pub(super) struct ForcedVerb {
+    span: Span,
     name: String,
     selection: Arc<OnceLock<Selection>>,
 }
@@ -142,11 +158,13 @@ impl ForcedVerb {
     pub(super) const NAME: &'static str = "forced";
 
     pub fn new(
+        span: Span,
         _positional: &Vec<String>,
         named: &HashMap<String, String>,
     ) -> Result<Arc<dyn Verb>> {
         if let Some(name) = named.get("name") {
             Ok(Arc::new(Self {
+                span,
                 name: name.clone(),
                 selection: Arc::new(OnceLock::new()),
             }))
@@ -157,6 +175,14 @@ impl ForcedVerb {
 }
 
 impl Verb for ForcedVerb {
+    fn name(&self) -> &str {
+        ForcedVerb::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
         Ok(self)
     }
@@ -260,15 +286,25 @@ impl Display for ForcedVerb {
 }
 
 #[derive(Debug)]
-pub struct UnitVerb {}
+pub struct UnitVerb {
+    span: Span,
+}
 
 impl UnitVerb {
-    pub fn new() -> Arc<dyn Verb> {
-        Arc::new(Self {})
+    pub fn new(span: Span) -> Arc<dyn Verb> {
+        Arc::new(Self { span })
     }
 }
 
 impl Verb for UnitVerb {
+    fn name(&self) -> &str {
+        "unit"
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
         Ok(self)
     }
@@ -302,6 +338,7 @@ impl Display for UnitVerb {
 
 #[derive(Debug)]
 pub(super) struct IgnoreVerb {
+    span: Span,
     name: Option<String>,
     package: Option<String>,
 }
@@ -309,8 +346,13 @@ pub(super) struct IgnoreVerb {
 impl IgnoreVerb {
     pub(super) const NAME: &'static str = "ignore";
 
-    pub fn new(positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
+    pub fn new(
+        span: Span,
+        positional: &Vec<String>,
+        named: &HashMap<String, String>,
+    ) -> Result<Arc<dyn Verb>> {
         let mut verb = Self {
+            span,
             name: None,
             package: None,
         };
@@ -335,6 +377,14 @@ impl IgnoreVerb {
 }
 
 impl Verb for IgnoreVerb {
+    fn name(&self) -> &str {
+        IgnoreVerb::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
     fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
         Ok(self)
     }
@@ -387,6 +437,7 @@ impl Display for IgnoreVerb {
 
 #[derive(Debug)]
 pub(super) struct ProjectFilter {
+    span: Span,
     project: String,
 }
 
@@ -394,11 +445,13 @@ impl ProjectFilter {
     pub(super) const NAME: &'static str = "project";
 
     pub fn new(
+        span: Span,
         positional: &Vec<String>,
         _named: &HashMap<String, String>,
     ) -> Result<Arc<dyn Verb>> {
         if let Some(project) = positional.iter().next() {
             Ok(Arc::new(Self {
+                span,
                 project: project.clone(),
             }))
         } else {
@@ -408,6 +461,14 @@ impl ProjectFilter {
 }
 
 impl Verb for ProjectFilter {
+    fn name(&self) -> &str {
+        ProjectFilter::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
     fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
         Ok(self)
     }
@@ -439,6 +500,7 @@ impl Display for ProjectFilter {
 
 #[derive(Debug)]
 pub(super) struct ModuleFilter {
+    span: Span,
     module: String,
 }
 
@@ -446,11 +508,13 @@ impl ModuleFilter {
     pub(super) const NAME: &'static str = "module";
 
     pub fn new(
+        span: Span,
         positional: &Vec<String>,
         _named: &HashMap<String, String>,
     ) -> Result<Arc<dyn Verb>> {
         let filter = if let Some(module) = positional.iter().next() {
             Arc::new(Self {
+                span,
                 module: module.clone(),
             })
         } else {
@@ -461,6 +525,14 @@ impl ModuleFilter {
 }
 
 impl Verb for ModuleFilter {
+    fn name(&self) -> &str {
+        ModuleFilter::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
     fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
         Ok(self)
     }
@@ -492,13 +564,18 @@ impl Display for ModuleFilter {
 
 #[derive(Debug)]
 pub(super) struct IsolatedScope {
+    span: Span,
     _isolated: bool,
 }
 
 impl IsolatedScope {
     pub(super) const NAME: &'static str = "scope";
 
-    pub fn new(positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Arc<dyn Verb>> {
+    pub fn new(
+        span: Span,
+        positional: &Vec<String>,
+        named: &HashMap<String, String>,
+    ) -> Result<Arc<dyn Verb>> {
         if !positional.is_empty() {
             bail!("Unexpected positional arguments");
         }
@@ -516,12 +593,21 @@ impl IsolatedScope {
         };
 
         Ok(Arc::new(Self {
+            span,
             _isolated: isolated,
         }))
     }
 }
 
 impl Verb for IsolatedScope {
+    fn name(&self) -> &str {
+        IsolatedScope::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Skip
     }

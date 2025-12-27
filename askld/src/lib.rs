@@ -7,6 +7,7 @@ pub mod hierarchy;
 pub mod parser;
 pub mod parser_context;
 pub mod scope;
+pub mod span;
 pub mod statement;
 pub mod verb;
 

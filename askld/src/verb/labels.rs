@@ -1,10 +1,14 @@
-use crate::{execution_context::selector_state_with, execution_state::DependencyRole};
+use crate::{
+    command::NotificationResult, execution_context::selector_state_with,
+    execution_state::DependencyRole, parser::Rule, span::Span,
+};
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::{
     db_diesel::{Index, ParentReference, Selection, SymbolSearchMixin},
     models_diesel::SymbolRef,
 };
+use pest::error::ErrorVariant::CustomError;
 use std::fmt::Display;
 use std::sync::Arc;
 use std::{collections::HashMap, sync::OnceLock};
@@ -16,6 +20,7 @@ use crate::verb::Filter;
 
 #[derive(Debug)]
 pub(super) struct LabelVerb {
+    span: Span,
     pub(super) label: String,
 }
 
@@ -23,6 +28,7 @@ impl LabelVerb {
     pub(super) const NAME: &'static str = "label";
 
     pub(super) fn new(
+        span: Span,
         positional: &Vec<String>,
         named: &HashMap<String, String>,
     ) -> Result<Arc<dyn Verb>> {
@@ -32,6 +38,7 @@ impl LabelVerb {
 
         if let Some(label) = positional.iter().next() {
             Ok(Arc::new(Self {
+                span,
                 label: label.clone(),
             }))
         } else {
@@ -41,6 +48,14 @@ impl LabelVerb {
 }
 
 impl Verb for LabelVerb {
+    fn name(&self) -> &str {
+        LabelVerb::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Skip
     }
@@ -58,6 +73,7 @@ impl Labeler for LabelVerb {
 
 #[derive(Debug)]
 pub(super) struct UserVerb {
+    span: Span,
     pub(super) label: String,
     pub(super) forced: bool,
 
@@ -68,6 +84,7 @@ impl UserVerb {
     pub(super) const NAME: &'static str = "use";
 
     pub(super) fn new(
+        span: Span,
         positional: &Vec<String>,
         named: &HashMap<String, String>,
     ) -> Result<Arc<dyn Verb>> {
@@ -85,6 +102,7 @@ impl UserVerb {
 
         if let Some(label) = positional.iter().next() {
             Ok(Arc::new(Self {
+                span,
                 label: label.clone(),
                 forced,
                 selection: Arc::new(OnceLock::new()),
@@ -96,6 +114,14 @@ impl UserVerb {
 }
 
 impl Verb for UserVerb {
+    fn name(&self) -> &str {
+        UserVerb::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Skip
     }
@@ -268,24 +294,24 @@ impl Selector for UserVerb {
         selector_filters: &[&dyn Filter],
         notifier: &Statement,
         role: DependencyRole,
-    ) -> Result<bool> {
+    ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         if !notifier.command().has_selectors() {
-            return Ok(false);
+            return Ok(NotificationResult::new(false, vec![]));
         }
 
         let dependency = match notifier.get_selection(&ctx) {
             Some(selection) => selection,
-            None => return Ok(false),
+            None => return Ok(NotificationResult::new(false, vec![])),
         };
 
         if role == DependencyRole::User {
             let notifier_labels = notifier.command().get_labels();
             let self_label = match self.get_label() {
                 Some(label) => label,
-                None => return Ok(false),
+                None => return Ok(NotificationResult::new(false, vec![])),
             };
             if !notifier_labels.contains(&self_label) {
-                return Ok(false);
+                return Ok(NotificationResult::new(false, vec![]));
             }
         }
 
@@ -302,13 +328,33 @@ impl Selector for UserVerb {
             });
 
             if constrained {
-                return Ok(changed);
+                return Ok(NotificationResult::new(changed, vec![]));
+            }
+
+            if role == DependencyRole::Child {
+                return Err(pest::error::Error::new_from_span(
+                    CustomError {
+                        message: format!(
+                            "Use verb '{}' is not resolvable because of a circular dependency.",
+                            self.label
+                        ),
+                    },
+                    self.span.as_pest_span(),
+                ));
             }
         }
 
         let mut selection = self
             .derive_selection(ctx, index, selector_filters, notifier, role)
-            .await?;
+            .await
+            .map_err(|e| {
+                pest::error::Error::new_from_span(
+                    CustomError {
+                        message: format!("Error deriving selection for user verb: {}", e),
+                    },
+                    self.span.as_pest_span(),
+                )
+            })?;
 
         if let Some(ref mut selection) = selection {
             selector_filters.iter().for_each(|f| {
@@ -320,7 +366,7 @@ impl Selector for UserVerb {
             state.selection = selection;
             state.prune_references();
         });
-        Ok(true)
+        Ok(NotificationResult::new(true, vec![]))
     }
 
     fn get_label(&self) -> Option<String> {

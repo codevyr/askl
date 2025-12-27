@@ -8,11 +8,12 @@ use crate::hierarchy::Hierarchy;
 use crate::parser::Rule;
 use crate::parser_context::ParserContext;
 use crate::scope::{build_scope, EmptyScope, Scope, StatementIter};
+use crate::span::Span;
 use crate::verb::build_verb;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::Selection;
-use index::symbols::{DeclarationId, DeclarationRefs, FileId, Occurrence, SymbolId};
+use index::symbols::{DeclarationId, FileId, Occurrence, SymbolId};
 use pest::error::Error;
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashSet;
@@ -22,8 +23,9 @@ pub fn build_statement<'a>(
     ctx: Rc<ParserContext>,
     pair: pest::iterators::Pair<Rule>,
 ) -> Result<Rc<Statement>, Error<Rule>> {
+    let statement_span = Span::from_pest(pair.as_span(), ctx.source());
     let mut iter = pair.into_inner();
-    let sub_ctx = ParserContext::derive(ctx);
+    let sub_ctx = ParserContext::derive(ctx, statement_span.clone());
     let mut scope: Rc<dyn Scope> = Rc::new(EmptyScope::new());
     for pair in iter.by_ref() {
         match pair.as_rule() {
@@ -53,20 +55,40 @@ pub fn build_statement<'a>(
         ));
     }
 
-    let command = sub_ctx.command();
+    let command = sub_ctx.command(statement_span);
     let statement = Statement::new(command, scope.clone());
     scope.set_parent(Rc::downgrade(&statement));
 
     Ok(statement)
 }
 
-pub fn build_empty_statement(ctx: Rc<ParserContext>) -> Rc<Statement> {
+pub fn build_empty_statement(ctx: Rc<ParserContext>, span: Span) -> Rc<Statement> {
     let scope: Rc<dyn Scope> = Rc::new(EmptyScope::new());
-    let sub_ctx = ParserContext::derive(ctx);
-    let command = sub_ctx.command();
+    let sub_ctx = ParserContext::derive(ctx, span.clone());
+    let command = sub_ctx.command(span);
     let statement = Statement::new(command, scope.clone());
     scope.set_parent(Rc::downgrade(&statement));
     return statement;
+}
+
+pub struct ExecutionResult {
+    pub nodes: NodeList,
+    pub edges: EdgeList,
+    pub warnings: Vec<pest::error::Error<Rule>>,
+}
+
+impl ExecutionResult {
+    pub fn new(
+        nodes: NodeList,
+        edges: EdgeList,
+        warnings: Vec<pest::error::Error<Rule>>,
+    ) -> ExecutionResult {
+        ExecutionResult {
+            nodes,
+            edges,
+            warnings,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -180,16 +202,23 @@ impl Statement {
             tracing::info_span!("select_nodes").entered();
 
         for statement in statements.iter() {
-            statement.command().compute_selected(ctx, cfg).await;
+            let warnings = statement.command().compute_selected(ctx, cfg).await;
 
+            statement.get_state_mut().warnings.extend(warnings);
             if !statement.command().has_selectors() {
                 statement.get_state_mut().completed = true;
             }
         }
     }
 
-    fn init_dependencies(&self, labeled_statements_map: &LabeledStatements) -> Result<()> {
-        crate::scope::visit(self.scope(), &mut |statement| -> Result<bool> {
+    fn init_dependencies(
+        &self,
+        labeled_statements_map: &LabeledStatements,
+    ) -> Result<(), pest::error::Error<Rule>> {
+        crate::scope::visit(self.scope(), &mut |statement| -> Result<
+            bool,
+            pest::error::Error<Rule>,
+        > {
             init_dependencies(statement, &labeled_statements_map)?;
             Ok(true)
         })?;
@@ -245,7 +274,7 @@ impl Statement {
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-    ) -> Result<Vec<Rc<Statement>>> {
+    ) -> Result<Vec<Rc<Statement>>, pest::error::Error<Rule>> {
         let mut labeled_statements = LabeledStatements::new();
         let mut statements = vec![];
         crate::scope::visit(self.scope(), &mut |statement| {
@@ -304,14 +333,51 @@ impl Statement {
         Ok(statements)
     }
 
+    /// Gather all warnings from the statement and its scope. If some warnings
+    /// have overlapping spans, include only the innermost ones.
+    pub fn gather_warnings(
+        &self,
+        statements: &Vec<Rc<Statement>>,
+    ) -> Vec<pest::error::Error<Rule>> {
+        let mut all_warnings = vec![];
+        for statement in statements.iter() {
+            let state = statement.get_state();
+            all_warnings.extend(state.warnings.clone());
+        }
+
+        all_warnings.sort_by_key(|e| match e.location {
+            pest::error::InputLocation::Pos(pos) => pos,
+            pest::error::InputLocation::Span((start, _end)) => start,
+        });
+        let mut filtered_warnings: Vec<Error<Rule>> = vec![];
+        for warning in all_warnings.iter() {
+            if let Some(last) = filtered_warnings.last() {
+                let last_end_pos = match last.location {
+                    pest::error::InputLocation::Pos(pos) => pos,
+                    pest::error::InputLocation::Span((_, end)) => end,
+                };
+                let cur_start_pos = match warning.location {
+                    pest::error::InputLocation::Pos(pos) => pos,
+                    pest::error::InputLocation::Span((start, _)) => start,
+                };
+                if last_end_pos >= cur_start_pos {
+                    continue;
+                }
+            }
+            filtered_warnings.push(warning.clone());
+        }
+
+        filtered_warnings
+    }
+
     pub async fn execute(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        _symbols: Option<DeclarationRefs>,
-        _ignored_symbols: &HashSet<DeclarationId>,
-    ) -> Option<(DeclarationRefs, NodeList, EdgeList)> {
-        let statements = self.compute_nodes(ctx, cfg).await.ok()?;
+    ) -> Result<ExecutionResult, pest::error::Error<Rule>> {
+        let statements = self.compute_nodes(ctx, cfg).await?;
+
+        let warnings = self.gather_warnings(&statements);
 
         let mut all_nodes = Vec::new();
         for statement in &statements {
@@ -394,10 +460,10 @@ impl Statement {
             }
         }
 
-        return Some((
-            DeclarationRefs::new(),
+        return Ok(ExecutionResult::new(
             NodeList(complete_selection.into_iter().collect()),
             all_references,
+            warnings,
         ));
     }
 
@@ -408,18 +474,23 @@ impl Statement {
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         dependent: &StatementDependent,
-    ) -> Result<()> {
+    ) -> Result<(), pest::error::Error<Rule>> {
         let _update_dependency: tracing::span::EnteredSpan =
             tracing::info_span!("notify").entered();
-        let changed = dependent
+        let res = dependent
             .statement
             .command()
             .accept_notification(ctx, &cfg.index, self, dependent.dependency_role)
             .await?;
 
-        if changed {
+        if res.changed {
             dependent.statement.get_state_mut().completed = false;
         }
+        dependent
+            .statement
+            .get_state_mut()
+            .warnings
+            .extend(res.warnings);
         Ok(())
     }
 }
@@ -441,7 +512,7 @@ impl Hierarchy for Statement {
 pub fn init_dependencies(
     statement: Rc<Statement>,
     labeled_statements_map: &LabeledStatements,
-) -> Result<()> {
+) -> Result<(), pest::error::Error<Rule>> {
     let mut state = statement.get_state_mut();
     if let Some(parent) = statement.parent().and_then(|p| p.upgrade()) {
         // Add a parent as a dependent
@@ -485,7 +556,12 @@ pub fn init_dependencies(
             if let Some(labeled_statements) = labeled_statements_map.get_statements(&label) {
                 labeled_statements
             } else {
-                bail!("Label '{}' not found for user selector", label);
+                return Err(Error::new_from_span(
+                    pest::error::ErrorVariant::CustomError {
+                        message: format!("Label '{}' not found for user selector", label),
+                    },
+                    user.span(),
+                ));
             };
 
         for labeled_statement in labeled_statements {

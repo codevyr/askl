@@ -1,9 +1,8 @@
-use std::collections::HashSet;
-
-use crate::cfg::{EdgeList, NodeList};
+use crate::cfg::EdgeList;
 use crate::execution_context::ExecutionContext;
+use crate::statement::ExecutionResult;
 use crate::{cfg::ControlFlowGraph, parser::parse};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use index::db_diesel::Index;
 use tokio::{runtime::Runtime, task};
 
@@ -19,10 +18,7 @@ pub fn format_edges(edges: EdgeList) -> Vec<String> {
         .collect()
 }
 
-pub async fn run_query_async_err(
-    askl_input: &str,
-    askl_query: &str,
-) -> Result<(NodeList, EdgeList)> {
+pub async fn run_query_async_err(askl_input: &str, askl_query: &str) -> Result<ExecutionResult> {
     let index_diesel = Index::new_in_memory().await.unwrap();
     index_diesel.load_test_input(askl_input).await.unwrap();
     let cfg = ControlFlowGraph::from_symbols(index_diesel);
@@ -31,19 +27,15 @@ pub async fn run_query_async_err(
     println!("{:#?}", ast);
 
     let mut ctx = ExecutionContext::new();
-    let res = ast.execute(&mut ctx, &cfg, None, &HashSet::new()).await;
-    if res.is_none() {
-        return Err(anyhow!("Did not resolve any symbols"));
-    }
-    let (_, nodes, edges) = res.unwrap();
-    Ok((nodes, edges))
+    let res = ast.execute(&mut ctx, &cfg).await?;
+    Ok(res)
 }
 
-pub async fn run_query_async(askl_input: &str, askl_query: &str) -> (NodeList, EdgeList) {
+pub async fn run_query_async(askl_input: &str, askl_query: &str) -> ExecutionResult {
     run_query_async_err(askl_input, askl_query).await.unwrap()
 }
 
-pub fn run_query_err(askl_input: &str, askl_query: &str) -> Result<(NodeList, EdgeList)> {
+pub fn run_query_err(askl_input: &str, askl_query: &str) -> Result<ExecutionResult> {
     let mut rt = Runtime::new().unwrap();
     let local = task::LocalSet::new();
     local.block_on(&mut rt, async {
@@ -51,7 +43,7 @@ pub fn run_query_err(askl_input: &str, askl_query: &str) -> Result<(NodeList, Ed
     })
 }
 
-pub fn run_query(askl_input: &str, askl_query: &str) -> (NodeList, EdgeList) {
+pub fn run_query(askl_input: &str, askl_query: &str) -> ExecutionResult {
     let mut rt = Runtime::new().unwrap();
     let local = task::LocalSet::new();
     local.block_on(&mut rt, async {

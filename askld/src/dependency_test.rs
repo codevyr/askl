@@ -4,45 +4,45 @@ use index::symbols::DeclarationId;
 #[test]
 fn label_use_syntax_check() {
     const QUERY: &str = r#""b" "a" {@label("foo")}; @use("foo")"#;
-    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+    let res = run_query(TEST_INPUT_A, QUERY);
 
-    println!("{:#?}", res_nodes);
-    println!("{:#?}", res_edges);
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
 
     assert_eq!(
-        res_nodes.as_vec(),
+        res.nodes.as_vec(),
         vec![DeclarationId::new(91), DeclarationId::new(92),]
     );
-    let edges = format_edges(res_edges);
+    let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-92", "91-92"]);
 }
 
 #[test]
 fn label_use() {
     const QUERY: &str = r#"@label("foo") "a"; @use("foo") {}"#;
-    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+    let res = run_query(TEST_INPUT_A, QUERY);
 
-    println!("{:#?}", res_nodes);
-    println!("{:#?}", res_edges);
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
 
     assert_eq!(
-        res_nodes.as_vec(),
+        res.nodes.as_vec(),
         vec![DeclarationId::new(91), DeclarationId::new(92),]
     );
-    let edges = format_edges(res_edges);
+    let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-92", "91-92"]);
 }
 
 #[test]
 fn label_use_with_selector() {
     const QUERY: &str = r#"@label("foo") "a"; @use("foo") "d" {}"#;
-    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+    let res = run_query(TEST_INPUT_A, QUERY);
 
-    println!("{:#?}", res_nodes);
-    println!("{:#?}", res_edges);
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
 
     assert_eq!(
-        res_nodes.as_vec(),
+        res.nodes.as_vec(),
         vec![
             DeclarationId::new(91),
             DeclarationId::new(92),
@@ -51,20 +51,20 @@ fn label_use_with_selector() {
             DeclarationId::new(96),
         ]
     );
-    let edges = format_edges(res_edges);
+    let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-92", "91-92", "94-95", "94-96"]);
 }
 
 #[test]
 fn label_use_with_selector_2() {
     const QUERY: &str = r#"@label("foo") "a"; "d" @use("foo")  {}"#;
-    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+    let res = run_query(TEST_INPUT_A, QUERY);
 
-    println!("{:#?}", res_nodes);
-    println!("{:#?}", res_edges);
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
 
     assert_eq!(
-        res_nodes.as_vec(),
+        res.nodes.as_vec(),
         vec![
             DeclarationId::new(91),
             DeclarationId::new(92),
@@ -73,47 +73,47 @@ fn label_use_with_selector_2() {
             DeclarationId::new(96),
         ]
     );
-    let edges = format_edges(res_edges);
+    let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-92", "91-92", "94-95", "94-96"]);
 }
 
 #[test]
 fn multiple_label_use() {
     const QUERY: &str = r#"@label("main") "main"; @label("b") "b"; @use("main"){{@use("b")}}"#;
-    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+    let res = run_query(TEST_INPUT_A, QUERY);
 
-    println!("{:#?}", res_nodes);
-    println!("{:#?}", res_edges);
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
 
     assert_eq!(
-        res_nodes.as_vec(),
+        res.nodes.as_vec(),
         vec![
             DeclarationId::new(91),
             DeclarationId::new(92),
             DeclarationId::new(942),
         ]
     );
-    let edges = format_edges(res_edges);
+    let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-92", "91-92", "942-91", "942-92"]);
 }
 
 #[test]
 fn label_use_forced() {
     const QUERY: &str = r#""main" @label("foo") {}; "b" {@use("foo", forced="true")}"#;
-    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+    let res = run_query(TEST_INPUT_A, QUERY);
 
-    println!("{:#?}", res_nodes);
-    println!("{:#?}", res_edges);
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
 
     assert_eq!(
-        res_nodes.as_vec(),
+        res.nodes.as_vec(),
         vec![
             DeclarationId::new(91),
             DeclarationId::new(92),
             DeclarationId::new(942)
         ]
     );
-    let edges = format_edges(res_edges);
+    let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-92", "91-92", "92-942", "942-91", "942-92"]);
 }
 
@@ -124,10 +124,10 @@ fn three_statement_label_use_loop_returns_empty() {
         "b" @label("beta") @use("alpha");
         "c" @label("gamma") @use("beta")
     "#;
-    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+    let res = run_query(TEST_INPUT_A, QUERY);
 
-    assert_eq!(res_nodes.as_vec(), vec![]);
-    let edges = format_edges(res_edges);
+    assert_eq!(res.nodes.as_vec(), vec![]);
+    let edges = format_edges(res.edges);
     assert_eq!(edges, Vec::<String>::new());
 }
 
@@ -137,10 +137,10 @@ fn mutual_label_use_loop_returns_empty() {
         "a" @label("alpha") @use("beta");
         "b" @label("beta") @use("alpha")
     "#;
-    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+    let res = run_query(TEST_INPUT_A, QUERY);
 
-    assert_eq!(res_nodes.as_vec(), vec![]);
-    let edges = format_edges(res_edges);
+    assert_eq!(res.nodes.as_vec(), vec![]);
+    let edges = format_edges(res.edges);
     assert_eq!(edges, Vec::<String>::new());
 }
 
@@ -190,9 +190,9 @@ fn forced_label_use_loop_returns_empty() {
         "a" @label("foo") @use("bar", forced="true");
         "b" @label("bar") @use("foo", forced="true")
     "#;
-    let (res_nodes, res_edges) = run_query(TEST_INPUT_A, QUERY);
+    let res = run_query(TEST_INPUT_A, QUERY);
 
-    assert!(res_nodes.as_vec().is_empty());
-    let edges = format_edges(res_edges);
+    assert!(res.nodes.as_vec().is_empty());
+    let edges = format_edges(res.edges);
     assert!(edges.is_empty());
 }
