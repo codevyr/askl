@@ -74,7 +74,7 @@ impl Command {
     }
 
     pub fn is_unit(&self) -> bool {
-        self.verbs.iter().all(|verb| verb.is_unit())
+        self.selectors().all(|verb| verb.is_unit())
     }
 
     fn labels<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Labeler> + 'a> {

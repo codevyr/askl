@@ -330,7 +330,7 @@ fn ignore_node_no_result() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![]);
+    assert_eq!(res.nodes.as_vec(), vec![DeclarationId::new(91)]);
     let edges = format_edges(res.edges);
     assert_eq!(edges, Vec::<String>::new());
 }
@@ -359,7 +359,7 @@ fn ignore_node_parent_no_result() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![]);
+    assert_eq!(res.nodes.as_vec(), vec![DeclarationId::new(95)]);
     let edges = format_edges(res.edges);
     assert_eq!(edges, Vec::<String>::new());
 }
@@ -372,9 +372,14 @@ fn ignore_node_parent_no_result_2() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![]);
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![DeclarationId::new(96), DeclarationId::new(97)]
+    );
     let edges = format_edges(res.edges);
-    assert_eq!(edges, Vec::<String>::new());
+    assert_eq!(edges, vec!["96-97"]);
+    println!("{:#?}", res.warnings);
+    assert_eq!(res.warnings.len(), 1);
 }
 
 #[test]
@@ -398,9 +403,12 @@ fn ignore_node_parent_no_result_4() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![]);
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![DeclarationId::new(96), DeclarationId::new(97)]
+    );
     let edges = format_edges(res.edges);
-    assert_eq!(edges, Vec::<String>::new());
+    assert_eq!(edges, vec!["96-97"]);
 }
 
 #[test]
@@ -428,7 +436,7 @@ fn ignore_node_recurse() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![]);
+    assert_eq!(res.nodes.as_vec(), vec![DeclarationId::new(91)]);
     let edges = format_edges(res.edges);
     assert_eq!(edges, Vec::<String>::new());
 }
@@ -442,7 +450,7 @@ fn ignore_another_statement() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![]);
+    assert_eq!(res.nodes.as_vec(), vec![DeclarationId::new(91)]);
     let edges = format_edges(res.edges);
     assert_eq!(edges, Vec::<String>::new());
 }
@@ -881,6 +889,23 @@ fn weak_grandchild() {
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["96-97"]);
+}
+
+#[test]
+fn weak_grandchild_2() {
+    const QUERY: &str = r#"@preamble @project("test_project"); "a"{{{{{}}}}}"#;
+    let res = run_query(TEST_INPUT_A, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![DeclarationId::new(91), DeclarationId::new(92)]
+    );
+    assert_eq!(res.warnings.len(), 0);
+    let edges = format_edges(res.edges);
+    assert_eq!(edges, vec!["91-92", "91-92"]);
 }
 
 #[test]
