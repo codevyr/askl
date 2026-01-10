@@ -1,6 +1,6 @@
 use std::{path::Path, str::FromStr};
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePool},
@@ -36,10 +36,8 @@ pub struct Declaration {
     pub symbol: SymbolId,
     pub file_id: FileId,
     pub symbol_type: SymbolType,
-    pub line_start: i64,
-    pub col_start: i64,
-    pub line_end: i64,
-    pub col_end: i64,
+    pub start_offset: i64,
+    pub end_offset: i64,
 }
 
 impl Declaration {
@@ -54,10 +52,8 @@ impl Declaration {
             symbol,
             file_id,
             symbol_type,
-            line_start: 1,
-            col_start: 1,
-            line_end: 1,
-            col_end: 1,
+            start_offset: 0,
+            end_offset: 0,
         }
     }
 
@@ -67,33 +63,18 @@ impl Declaration {
         symbol_type: SymbolType,
         range: &Option<clang_ast::SourceRange>,
     ) -> Result<Self> {
-        let range = if let Some(range) = range {
-            range
-        } else {
-            bail!("Range does not exist");
-        };
-
-        let begin = if let Some(begin) = &range.begin.expansion_loc {
-            begin
-        } else {
-            bail!("Begin does not exist");
-        };
-
-        let end = if let Some(end) = &range.end.expansion_loc {
-            end
-        } else {
-            bail!("End does not exist");
-        };
+        let (start_offset, end_offset) =
+            Occurrence::offsets_from_range(range).ok_or(anyhow::anyhow!(
+                "Range does not provide byte offsets"
+            ))?;
 
         Ok(Self {
             id: DeclarationId::invalid(),
             symbol,
             file_id,
             symbol_type,
-            line_start: begin.line as i64,
-            col_start: begin.col as i64,
-            line_end: end.line as i64,
-            col_end: end.col as i64,
+            start_offset: start_offset as i64,
+            end_offset: end_offset as i64,
         })
     }
 
@@ -154,9 +135,9 @@ impl File {
 pub struct Reference {
     pub from_decl: DeclarationId,
     pub to_symbol: SymbolId,
-    pub from_line: i64,
-    pub from_col_start: i64,
-    pub from_col_end: i64,
+    pub from_file: FileId,
+    pub from_offset_start: i64,
+    pub from_offset_end: i64,
 }
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
@@ -370,16 +351,14 @@ impl Index {
         let rec = sqlx::query_as!(
                 Declaration,
                 r#"
-                SELECT id, symbol, file_id, symbol_type, line_start, col_start, line_end, col_end
+                SELECT id, symbol, file_id, symbol_type, start_offset, end_offset
                 FROM declarations
-                WHERE symbol = ? AND file_id = ? AND line_start = ? AND col_start = ? AND line_end = ? AND col_end = ?
+                WHERE symbol = ? AND file_id = ? AND start_offset = ? AND end_offset = ?
                 "#,
                 declaration.symbol,
                 declaration.file_id,
-                declaration.line_start,
-                declaration.col_start,
-                declaration.line_end,
-                declaration.col_end
+                declaration.start_offset,
+                declaration.end_offset
             )
             .fetch_optional(&self.pool)
             .await?;
@@ -390,17 +369,15 @@ impl Index {
 
         let rec = sqlx::query!(
                 r#"
-                INSERT INTO declarations (symbol, file_id, symbol_type, line_start, col_start, line_end, col_end)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO declarations (symbol, file_id, symbol_type, start_offset, end_offset)
+                VALUES (?, ?, ?, ?, ?)
                 RETURNING id
                 "#,
                 declaration.symbol,
                 declaration.file_id,
                 declaration.symbol_type,
-                declaration.line_start,
-                declaration.col_start,
-                declaration.line_end,
-                declaration.col_end
+                declaration.start_offset,
+                declaration.end_offset
             )
             .fetch_one(&self.pool)
             .await?;
@@ -418,14 +395,13 @@ impl Index {
     ) -> Result<()> {
         let res = sqlx::query!(
             r#"
-            INSERT OR IGNORE INTO symbol_refs (from_decl, to_symbol, from_line, from_col_start, from_col_end)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO symbol_refs (to_symbol, from_file, from_offset_start, from_offset_end)
+            VALUES (?, ?, ?, ?)
             "#,
-            from_decl,
             to_symbol,
-            occurrence.line_start,
-            occurrence.column_start,
-            occurrence.column_end
+            occurrence.file,
+            occurrence.start_offset,
+            occurrence.end_offset
         )
         .execute(&self.pool)
         .await;
@@ -462,7 +438,7 @@ impl Index {
         let declarations: Vec<Declaration> = sqlx::query_as!(
             Declaration,
             r#"
-            SELECT id, symbol, file_id, symbol_type, line_start, col_start, line_end, col_end
+            SELECT id, symbol, file_id, symbol_type, start_offset, end_offset
             FROM declarations
             "#
         )
@@ -476,7 +452,7 @@ impl Index {
         let declarations: Vec<Declaration> = sqlx::query_as!(
             Declaration,
             r#"
-            SELECT id, symbol, file_id, symbol_type, line_start, col_start, line_end, col_end
+            SELECT id, symbol, file_id, symbol_type, start_offset, end_offset
             FROM declarations
             WHERE symbol = ?
             "#,
@@ -520,8 +496,16 @@ impl Index {
         let references: Vec<Reference> = sqlx::query_as!(
             Reference,
             r#"
-            SELECT from_decl, to_symbol, from_line, from_col_start, from_col_end
+            SELECT from_decls.id as "from_decl!: DeclarationId",
+                   symbol_refs.to_symbol as "to_symbol: SymbolId",
+                   symbol_refs.from_file as "from_file: FileId",
+                   symbol_refs.from_offset_start,
+                   symbol_refs.from_offset_end
             FROM symbol_refs
+            JOIN declarations AS from_decls
+              ON symbol_refs.from_file = from_decls.file_id
+             AND from_decls.start_offset <= symbol_refs.from_offset_start
+             AND from_decls.end_offset >= symbol_refs.from_offset_end
             "#
         )
         .fetch_all(&self.pool)

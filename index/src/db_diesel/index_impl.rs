@@ -175,8 +175,13 @@ impl Index {
                 tracing::info_span!("select_current").entered();
 
             let mut joined_query = symbols::dsl::symbols
-                .inner_join(declarations::dsl::declarations)
-                .inner_join(modules::dsl::modules)
+                .inner_join(
+                    declarations::dsl::declarations
+                        .on(symbols::dsl::id.eq(declarations::dsl::symbol)),
+                )
+                .inner_join(
+                    modules::dsl::modules.on(symbols::dsl::module.eq(modules::dsl::id)),
+                )
                 .inner_join(
                     projects::dsl::projects.on(projects::dsl::id.eq(modules::dsl::project_id)),
                 )
@@ -220,8 +225,18 @@ impl Index {
                 )
                 .inner_join(
                     parent_decls.on(parent_decls
-                        .field(declarations::dsl::id)
-                        .eq(symbol_refs::dsl::from_decl)),
+                        .field(declarations::dsl::file_id)
+                        .eq(symbol_refs::dsl::from_file)),
+                )
+                .filter(
+                    parent_decls
+                        .field(declarations::dsl::start_offset)
+                        .le(symbol_refs::dsl::from_offset_start),
+                )
+                .filter(
+                    parent_decls
+                        .field(declarations::dsl::end_offset)
+                        .ge(symbol_refs::dsl::from_offset_end),
                 )
                 .select((
                     SymbolRef::as_select(),
@@ -251,22 +266,33 @@ impl Index {
                 )
                 .inner_join(
                     parent_decls.on(parent_decls
-                        .field(declarations::id)
-                        .eq(symbol_refs::dsl::from_decl)),
+                        .field(declarations::dsl::file_id)
+                        .eq(symbol_refs::dsl::from_file)),
+                )
+                .filter(
+                    parent_decls
+                        .field(declarations::dsl::start_offset)
+                        .le(symbol_refs::dsl::from_offset_start),
+                )
+                .filter(
+                    parent_decls
+                        .field(declarations::dsl::end_offset)
+                        .ge(symbol_refs::dsl::from_offset_end),
                 )
                 .inner_join(
                     parent_symbols.on(parent_symbols
-                        .field(symbols::id)
-                        .eq(parent_decls.field(declarations::symbol))),
+                        .field(symbols::dsl::id)
+                        .eq(parent_decls.field(declarations::dsl::symbol))),
                 )
                 .inner_join(
                     files::dsl::files
-                        .on(files::dsl::id.eq(parent_decls.field(declarations::file_id))),
+                        .on(files::dsl::id.eq(parent_decls.field(declarations::dsl::file_id))),
                 )
                 .select((
                     parent_symbols.fields(crate::schema_diesel::symbols::all_columns),
                     Symbol::as_select(),
                     Declaration::as_select(),
+                    parent_decls.fields(crate::schema_diesel::declarations::all_columns),
                     SymbolRef::as_select(),
                     File::as_select(),
                 ))
@@ -277,7 +303,7 @@ impl Index {
             }
 
             children_query
-                .load::<(Symbol, Symbol, Declaration, SymbolRef, File)>(connection)
+                .load::<(Symbol, Symbol, Declaration, Declaration, SymbolRef, File)>(connection)
                 .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
         };
 
@@ -311,17 +337,20 @@ impl Index {
             let mut children: Vec<_> = children
                 .into_iter()
                 .map(
-                    |(parent_symbol, sym, decl, sym_ref, from_file)| ChildReference {
-                        parent_symbol,
-                        symbol: sym,
-                        declaration: decl,
-                        symbol_ref: sym_ref,
-                        from_file,
+                    |(parent_symbol, sym, decl, from_declaration, sym_ref, from_file)| {
+                        ChildReference {
+                            parent_symbol,
+                            symbol: sym,
+                            declaration: decl,
+                            from_declaration,
+                            symbol_ref: sym_ref,
+                            from_file,
+                        }
                     },
                 )
                 .collect();
 
-            children.sort_by_key(|child| (child.symbol_ref.from_decl, child.declaration.id));
+            children.sort_by_key(|child| (child.from_declaration.id, child.declaration.id));
 
             println!(
                 "Found {} current, {} parents, {} children",

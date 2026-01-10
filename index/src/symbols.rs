@@ -24,45 +24,31 @@ impl FileHash {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct Occurrence {
-    pub line_start: i32,
-    pub line_end: i32,
-    pub column_start: i32,
-    pub column_end: i32,
+    pub start_offset: i32,
+    pub end_offset: i32,
     pub file: FileId,
 }
 
 impl Occurrence {
     pub fn new(range: &Option<SourceRange>, file_id: FileId) -> Option<Self> {
-        let range = if let Some(range) = range {
-            range
-        } else {
-            return None;
-        };
-
-        let begin = if let Some(begin) = &range.begin.expansion_loc {
-            begin
-        } else {
-            return None;
-        };
-
-        let end = if let Some(end) = &range.end.expansion_loc {
-            end
-        } else {
-            return None;
-        };
-
-        // let file = begin.file.clone().to_string();
-        // fs::canonicalize(file.clone())
-        // .or::<PathBuf>(Ok(PathBuf::from(file)))
-        // .unwrap()
-
+        let (start_offset, end_offset) = Self::offsets_from_range(range)?;
         Some(Self {
-            line_start: begin.line as i32,
-            column_start: begin.col as i32,
-            line_end: end.line as i32,
-            column_end: end.col as i32,
+            start_offset,
+            end_offset,
             file: file_id,
         })
+    }
+
+    pub(crate) fn offsets_from_range(range: &Option<SourceRange>) -> Option<(i32, i32)> {
+        let range = range.as_ref()?;
+        let begin = range.begin.expansion_loc.as_ref()?;
+        let end = range.end.expansion_loc.as_ref()?;
+        let file = begin.file.clone().to_string();
+        let content = fs::read(&file).ok()?;
+        let start_offset =
+            offset_from_line_col(&content, begin.line as usize, begin.col as usize)?;
+        let end_offset = offset_from_line_col(&content, end.line as usize, end.col as usize)?;
+        Some((start_offset, end_offset))
     }
 
     pub fn get_file(range: &Option<SourceRange>) -> Option<PathBuf> {
@@ -87,13 +73,44 @@ impl Occurrence {
     }
 }
 
+fn offset_from_line_col(content: &[u8], line: usize, col: usize) -> Option<i32> {
+    if line == 0 || col == 0 {
+        return None;
+    }
+
+    let mut current_line = 1usize;
+    let mut line_start = 0usize;
+    for (idx, byte) in content.iter().enumerate() {
+        if *byte == b'\n' {
+            if current_line == line {
+                let line_len = idx.saturating_sub(line_start);
+                let col_idx = col.saturating_sub(1);
+                if col_idx <= line_len {
+                    return Some((line_start + col_idx) as i32);
+                }
+                return None;
+            }
+            current_line += 1;
+            line_start = idx + 1;
+        }
+    }
+
+    if current_line == line {
+        let line_len = content.len().saturating_sub(line_start);
+        let col_idx = col.saturating_sub(1);
+        if col_idx <= line_len {
+            return Some((line_start + col_idx) as i32);
+        }
+    }
+
+    None
+}
+
 impl From<db::Declaration> for Occurrence {
     fn from(symbol: db::Declaration) -> Self {
         Occurrence {
-            line_start: symbol.line_start as i32,
-            line_end: symbol.line_end as i32,
-            column_start: symbol.col_start as i32,
-            column_end: symbol.col_end as i32,
+            start_offset: symbol.start_offset as i32,
+            end_offset: symbol.end_offset as i32,
             file: symbol.file_id,
         }
     }

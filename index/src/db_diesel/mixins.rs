@@ -28,10 +28,20 @@ diesel::alias! {
 type SymbolDeclarationJoinSource = InnerJoinQuerySource<
     crate::schema_diesel::symbols::table,
     crate::schema_diesel::declarations::table,
+    Eq<
+        crate::schema_diesel::symbols::columns::id,
+        crate::schema_diesel::declarations::columns::symbol,
+    >,
 >;
 
-type SymbolDeclarationModuleJoinSource =
-    InnerJoinQuerySource<SymbolDeclarationJoinSource, crate::schema_diesel::modules::table>;
+type SymbolDeclarationModuleJoinSource = InnerJoinQuerySource<
+    SymbolDeclarationJoinSource,
+    crate::schema_diesel::modules::table,
+    Eq<
+        crate::schema_diesel::symbols::columns::module,
+        crate::schema_diesel::modules::columns::id,
+    >,
+>;
 
 type SymbolDeclarationModuleProjectJoin = InnerJoinQuerySource<
     SymbolDeclarationModuleJoinSource,
@@ -66,16 +76,7 @@ pub type CurrentQuery<'a> = BoxedSelectStatement<
     Sqlite,
 >;
 
-type DeclarationColumnsSqlType = (
-    Integer,
-    Integer,
-    Integer,
-    Integer,
-    Integer,
-    Integer,
-    Integer,
-    Integer,
-);
+type DeclarationColumnsSqlType = (Integer, Integer, Integer, Integer, Integer, Integer);
 
 type SymbolColumnsSqlType = (Integer, Text, Integer, Integer);
 
@@ -105,8 +106,8 @@ type SymbolRefSymbolDeclarationJoin = InnerJoinQuerySource<
 >;
 
 type ParentDeclOn = Eq<
-    AliasedField<ParentDeclsAlias, crate::schema_diesel::declarations::columns::id>,
-    crate::schema_diesel::symbol_refs::columns::from_decl,
+    AliasedField<ParentDeclsAlias, crate::schema_diesel::declarations::columns::file_id>,
+    crate::schema_diesel::symbol_refs::columns::from_file,
 >;
 
 type ChildSymbolOn = Eq<
@@ -157,6 +158,7 @@ type ChildSelectionTuple = (
     SymbolColumnsSqlType,
     AsSelect<Symbol, Sqlite>,
     AsSelect<Declaration, Sqlite>,
+    DeclarationColumnsSqlType,
     AsSelect<SymbolRef, Sqlite>,
     AsSelect<File, Sqlite>,
 );

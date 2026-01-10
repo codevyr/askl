@@ -41,23 +41,35 @@ CREATE TABLE IF NOT EXISTS declarations
     symbol INTEGER NOT NULL,
     file_id INTEGER NOT NULL,
     symbol_type INTEGER NOT NULL,
-    line_start INTEGER NOT NULL,
-    col_start INTEGER NOT NULL,
-    line_end INTEGER NOT NULL,
-    col_end INTEGER NOT NULL,
+    start_offset INTEGER NOT NULL,
+    end_offset INTEGER NOT NULL,
     FOREIGN KEY (symbol) REFERENCES symbols(id),
     FOREIGN KEY (file_id) REFERENCES files(id),
-    UNIQUE (symbol, file_id, line_start, col_start, line_end, col_end)
+    UNIQUE (symbol, file_id, start_offset, end_offset)
 );
 
 CREATE TABLE IF NOT EXISTS symbol_refs
 (
-    from_decl INTEGER NOT NULL,
     to_symbol INTEGER NOT NULL,
-    from_line INTEGER NOT NULL,
-    from_col_start INTEGER NOT NULL,
-    from_col_end INTEGER NOT NULL,
-    FOREIGN KEY (from_decl) REFERENCES declarations(id),
+    from_file INTEGER NOT NULL,
+    from_offset_start INTEGER NOT NULL,
+    from_offset_end INTEGER NOT NULL,
     FOREIGN KEY (to_symbol) REFERENCES symbols(id),
-    UNIQUE (from_decl, to_symbol, from_line, from_col_start, from_col_end)
+    FOREIGN KEY (from_file) REFERENCES files(id),
+    UNIQUE (to_symbol, from_file, from_offset_start, from_offset_end)
+);
+
+CREATE INDEX IF NOT EXISTS symbol_refs_to_symbol_idx ON symbol_refs(to_symbol);
+
+CREATE INDEX IF NOT EXISTS symbol_refs_ref_loc_idx ON symbol_refs(
+    from_file,
+    from_offset_start,
+    from_offset_end
+);
+
+CREATE TABLE IF NOT EXISTS file_contents
+(
+    file_id INTEGER PRIMARY KEY,
+    content BLOB NOT NULL,
+    FOREIGN KEY (file_id) REFERENCES files(id)
 );

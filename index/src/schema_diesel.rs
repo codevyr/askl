@@ -6,10 +6,8 @@ diesel::table! {
         symbol -> Integer,
         file_id -> Integer,
         symbol_type -> Integer,
-        line_start -> Integer,
-        col_start -> Integer,
-        line_end -> Integer,
-        col_end -> Integer,
+        start_offset -> Integer,
+        end_offset -> Integer,
     }
 }
 
@@ -49,12 +47,10 @@ diesel::table! {
 diesel::table! {
     symbol_refs (rowid) {
         rowid -> Integer,
-        from_decl -> Integer,
         to_symbol -> Integer,
-        from_line -> Integer,
-        from_col_start -> Integer,
-        from_col_end -> Integer,
-        from_file -> Nullable<Integer>,
+        from_file -> Integer,
+        from_offset_start -> Integer,
+        from_offset_end -> Integer,
     }
 }
 
@@ -72,7 +68,6 @@ diesel::joinable!(declarations -> symbols (symbol));
 diesel::joinable!(file_contents -> files (file_id));
 diesel::joinable!(files -> modules (module));
 diesel::joinable!(modules -> projects (project_id));
-diesel::joinable!(symbol_refs -> declarations (from_decl));
 diesel::joinable!(symbol_refs -> symbols (to_symbol));
 diesel::joinable!(symbols -> modules (module));
 

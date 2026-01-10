@@ -56,6 +56,7 @@ pub struct ReferenceResult {
     pub parent_symbol: Symbol,
     pub symbol: Symbol,
     pub declaration: Declaration,
+    pub from_declaration: Declaration,
     pub symbol_ref: SymbolRef,
     pub from_file: File,
 }
@@ -114,7 +115,7 @@ impl Selection {
             .retain(|c| node_declaration_ids.contains(&DeclarationId::new(c.to_declaration.id)));
         selection
             .children
-            .retain(|c| node_declaration_ids.contains(&DeclarationId::new(c.symbol_ref.from_decl)));
+            .retain(|c| node_declaration_ids.contains(&DeclarationId::new(c.from_declaration.id)));
     }
 }
 

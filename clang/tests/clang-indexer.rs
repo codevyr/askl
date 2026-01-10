@@ -74,10 +74,8 @@ fn mask_declaration(symbol: &Declaration) -> Declaration {
         // name: symbol.name.clone(),
         file_id: symbol.file_id,
         symbol_type: symbol.symbol_type,
-        line_start: 1,
-        col_start: 1,
-        line_end: 1,
-        col_end: 1,
+        start_offset: 0,
+        end_offset: 0,
     }
 }
 
@@ -85,9 +83,9 @@ fn mask_ref(reference: &Reference) -> Reference {
     Reference {
         from_decl: reference.from_decl,
         to_symbol: reference.to_symbol,
-        from_line: 1,
-        from_col_start: 1,
-        from_col_end: 1,
+        from_file: reference.from_file,
+        from_offset_start: 0,
+        from_offset_end: 0,
     }
 }
 
@@ -95,9 +93,9 @@ fn new_ref(from_decl: i32, to_symbol: i32) -> Reference {
     Reference {
         from_decl: DeclarationId::new(from_decl),
         to_symbol: SymbolId(to_symbol),
-        from_line: 1,
-        from_col_start: 1,
-        from_col_end: 1,
+        from_file: FileId::new(1),
+        from_offset_start: 0,
+        from_offset_end: 0,
     }
 }
 
@@ -220,10 +218,8 @@ pub async fn from_index(index: &Index) -> Result<()> {
         let from_symbol = symbols_map.get_mut(&from_declaration.symbol).unwrap();
         let occurrence = Occurrence {
             file: from_declaration.file_id,
-            line_start: reference.from_line as i32,
-            line_end: reference.from_line as i32,
-            column_start: reference.from_col_start as i32,
-            column_end: reference.from_col_end as i32,
+            start_offset: reference.from_offset_start as i32,
+            end_offset: reference.from_offset_end as i32,
         };
         from_symbol.add_child(reference.to_symbol, occurrence.clone());
 

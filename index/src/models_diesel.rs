@@ -9,10 +9,8 @@ pub struct Declaration {
     pub symbol: i32,
     pub file_id: i32,
     pub symbol_type: i32,
-    pub line_start: i32,
-    pub col_start: i32,
-    pub line_end: i32,
-    pub col_end: i32,
+    pub start_offset: i32,
+    pub end_offset: i32,
 }
 
 #[derive(Clone, Queryable, Selectable, Identifiable, Associations, Debug, PartialEq, Eq, Hash)]
@@ -73,10 +71,8 @@ pub struct Symbol {
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct SymbolRef {
     pub rowid: i32,
-    pub from_decl: i32,
     pub to_symbol: i32,
-    pub from_file: Option<i32>,
-    pub from_line: i32,
-    pub from_col_start: i32,
-    pub from_col_end: i32,
+    pub from_file: i32,
+    pub from_offset_start: i32,
+    pub from_offset_end: i32,
 }

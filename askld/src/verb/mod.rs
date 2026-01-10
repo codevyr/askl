@@ -250,7 +250,7 @@ impl SelectorState {
             child
                 .parents
                 .iter()
-                .any(|r| r.symbol_ref.from_decl == s.declaration.id)
+                .any(|r| r.from_declaration.id == s.declaration.id)
         });
     }
 
@@ -483,7 +483,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         let decl_ids = child
             .parents
             .iter()
-            .map(|p| DeclarationId::new(p.symbol_ref.from_decl))
+            .map(|p| DeclarationId::new(p.from_declaration.id))
             .unique()
             .collect::<Vec<_>>();
         let parent_selection = self

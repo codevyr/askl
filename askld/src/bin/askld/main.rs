@@ -80,22 +80,24 @@ struct Edge {
     #[serde(serialize_with = "symbolid_as_string")]
     to: SymbolId,
     from_file: Option<FileId>,
-    from_line: Option<i32>,
+    from_offset_start: Option<i32>,
+    from_offset_end: Option<i32>,
 }
 
 impl Edge {
     fn new(from: SymbolId, to: SymbolId, occurence: Option<Occurrence>) -> Self {
-        let (filename, line) = if let Some(occ) = occurence {
-            (Some(occ.file), Some(occ.line_start))
+        let (filename, start_offset, end_offset) = if let Some(occ) = occurence {
+            (Some(occ.file), Some(occ.start_offset), Some(occ.end_offset))
         } else {
-            (None, None)
+            (None, None, None)
         };
         Self {
             id: format!("{}-{}", from, to),
             from: from,
             to: to,
             from_file: filename,
-            from_line: line,
+            from_offset_start: start_offset,
+            from_offset_end: end_offset,
         }
     }
 }
@@ -265,10 +267,8 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
                 symbol: SymbolId(d.declaration.symbol),
                 file_id: FileId::new(d.file.id),
                 symbol_type: SymbolType::from(d.declaration.symbol_type),
-                line_start: d.declaration.line_start as i64,
-                line_end: d.declaration.line_end as i64,
-                col_start: d.declaration.col_start as i64,
-                col_end: d.declaration.col_end as i64,
+                start_offset: d.declaration.start_offset as i64,
+                end_offset: d.declaration.end_offset as i64,
             })
             .collect();
 

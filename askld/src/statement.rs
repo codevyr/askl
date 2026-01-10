@@ -406,7 +406,7 @@ impl Statement {
                 continue;
             };
             for child in &current.children {
-                if !all_nodes.contains(&DeclarationId::new(child.symbol_ref.from_decl))
+                if !all_nodes.contains(&DeclarationId::new(child.from_declaration.id))
                     || !all_nodes.contains(&DeclarationId::new(child.declaration.id))
                 {
                     continue;
@@ -414,15 +414,13 @@ impl Statement {
 
                 let occurrence = Occurrence {
                     file: FileId::new(child.from_file.id),
-                    line_start: child.symbol_ref.from_line,
-                    column_start: child.symbol_ref.from_col_start,
-                    line_end: child.symbol_ref.from_line,
-                    column_end: child.symbol_ref.from_col_end,
+                    start_offset: child.symbol_ref.from_offset_start,
+                    end_offset: child.symbol_ref.from_offset_end,
                 };
                 all_references.add_reference(
                     SymbolDeclId {
                         symbol_id: SymbolId::new(child.parent_symbol.id),
-                        declaration_id: DeclarationId::new(child.symbol_ref.from_decl),
+                        declaration_id: DeclarationId::new(child.from_declaration.id),
                     },
                     SymbolDeclId {
                         symbol_id: SymbolId::new(child.symbol_ref.to_symbol),
@@ -433,23 +431,21 @@ impl Statement {
             }
 
             for parent in &current.parents {
-                if !all_nodes.contains(&DeclarationId::new(parent.symbol_ref.from_decl))
+                if !all_nodes.contains(&DeclarationId::new(parent.from_declaration.id))
                     || !all_nodes.contains(&DeclarationId::new(parent.to_declaration.id))
                 {
                     continue;
                 }
 
                 let occurrence = Occurrence {
-                    file: parent.symbol_ref.from_file.unwrap().into(),
-                    line_start: parent.symbol_ref.from_line,
-                    column_start: parent.symbol_ref.from_col_start,
-                    line_end: parent.symbol_ref.from_line,
-                    column_end: parent.symbol_ref.from_col_end,
+                    file: parent.from_declaration.file_id.into(),
+                    start_offset: parent.symbol_ref.from_offset_start,
+                    end_offset: parent.symbol_ref.from_offset_end,
                 };
                 all_references.add_reference(
                     SymbolDeclId {
                         symbol_id: SymbolId::new(parent.from_declaration.symbol),
-                        declaration_id: DeclarationId::new(parent.symbol_ref.from_decl),
+                        declaration_id: DeclarationId::new(parent.from_declaration.id),
                     },
                     SymbolDeclId {
                         symbol_id: SymbolId::new(parent.to_symbol.id),
