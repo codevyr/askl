@@ -23,7 +23,7 @@ FROM debian:trixie-slim AS runtime
 
 # Minimal runtime deps (certs, tzdata, sqlite runtime/cli)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates tzdata sqlite3 libsqlite3-0 netcat-openbsd \
+    ca-certificates tzdata sqlite3 libsqlite3-0 libpq5 netcat-openbsd \
  && rm -rf /var/lib/apt/lists/*
 
 # Non-root user with uid 1000 to match your flake config
