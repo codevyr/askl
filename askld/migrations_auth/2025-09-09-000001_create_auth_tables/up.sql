@@ -18,3 +18,4 @@ CREATE TABLE IF NOT EXISTS api_keys
 );
 
 CREATE INDEX IF NOT EXISTS api_keys_user_id_idx ON api_keys(user_id);
+CREATE INDEX IF NOT EXISTS api_keys_revoked_at_idx ON api_keys(revoked_at);
