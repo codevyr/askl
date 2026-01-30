@@ -17,6 +17,8 @@
     llvmPackages_12.stdenv
     llvmPackages_12.clang-unwrapped
 
+    libpq
+
     lldb
   ];
 

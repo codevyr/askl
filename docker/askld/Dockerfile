@@ -39,4 +39,4 @@ COPY --from=builder /src/target/release/askld /usr/local/bin/askld
 
 # Same entrypoint & args you used in the flake
 ENTRYPOINT ["/usr/local/bin/askld"]
-CMD ["--index","/data/index.db","--format","sqlite","--host","0.0.0.0"]
+CMD ["serve","--index","/data/index.db","--format","sqlite","--host","0.0.0.0"]

@@ -1,15 +1,21 @@
 use std::collections::{HashMap, HashSet};
 
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{
+    dev::Service, get, post, web, App, HttpRequest, HttpResponse, HttpServer, Responder,
+};
 use anyhow::{anyhow, Result};
+use askld::auth::{
+    AuthIdentity, AuthStore, CreateApiKeyRequest, CreateApiKeyResponse, RevokeApiKeyRequest,
+    RevokeApiKeyResponse,
+};
 use askld::execution_context::ExecutionContext;
 use askld::parser::Rule;
-use askld::{cfg::ControlFlowGraph, parser::parse};
-use clap::Parser;
+use askld::{auth, cfg::ControlFlowGraph, parser::parse};
+use clap::{Args as ClapArgs, Parser, Subcommand};
 use index::db::{self};
 use index::symbols::SymbolId;
 use index::symbols::{DeclarationId, FileId, Occurrence, SymbolType};
-use log::{debug, info};
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize, Serializer};
 use tokio::time::{timeout, Duration};
 use tracing_chrome::ChromeLayerBuilder;
@@ -20,25 +26,72 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
-    // Path to the index file
+    #[clap(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    Serve(ServeArgs),
+    Auth(AuthArgs),
+}
+
+#[derive(ClapArgs, Debug)]
+struct ServeArgs {
+    /// Path to the index file
     #[clap(short, long)]
     index: String,
 
-    // Format of the index file
+    /// Format of the index file
     #[clap(short, long, default_value = "askl")]
     format: String,
+
+    /// Postgres connection string for the auth DB
+    #[clap(long, env = "ASKL_DATABASE_URL")]
+    database_url: String,
 
     /// Port to listen on
     #[clap(short, long, default_value = "80")]
     port: u16,
 
     /// Host to bind to
-    #[clap(short, long, default_value = "127.0.0.1")]
+    #[clap(short = 'H', long, default_value = "127.0.0.1")]
     host: String,
 
     /// Enable tracing. Provide a file path to write the trace to.
     #[clap(short, long, action)]
     trace: Option<String>,
+}
+
+#[derive(ClapArgs, Debug)]
+struct AuthArgs {
+    /// Port to call on localhost
+    #[clap(short, long, default_value = "80")]
+    port: u16,
+
+    #[clap(subcommand)]
+    command: AuthCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum AuthCommand {
+    CreateApiKey {
+        #[clap(long)]
+        email: String,
+        #[clap(long)]
+        name: Option<String>,
+        #[clap(long, action)]
+        json: bool,
+        /// RFC3339 timestamp, e.g. 2026-01-01T00:00:00Z
+        #[clap(long)]
+        expires_at: Option<String>,
+    },
+    RevokeApiKey {
+        #[clap(long)]
+        token_id: String,
+        #[clap(long, action)]
+        json: bool,
+    },
 }
 
 struct AsklData {
@@ -187,6 +240,103 @@ struct ErrorResponse {
     line: String,
 }
 
+#[get("/version")]
+async fn version(_identity: AuthIdentity) -> impl Responder {
+    HttpResponse::Ok().body(env!("CARGO_PKG_VERSION"))
+}
+
+#[post("/auth/local/create-api-key")]
+async fn create_api_key(
+    req: HttpRequest,
+    auth_store: web::Data<AuthStore>,
+    payload: web::Json<CreateApiKeyRequest>,
+) -> impl Responder {
+    if !auth::is_loopback(&req) {
+        return HttpResponse::Forbidden().body("Loopback connections only");
+    }
+
+    if !auth::bootstrap_allowed() {
+        return HttpResponse::Forbidden().body("Bootstrap mode disabled");
+    }
+
+    if payload.email.trim().is_empty() {
+        return HttpResponse::BadRequest().body("Email is required");
+    }
+
+    let expires_at = match payload.expires_at.as_deref() {
+        None => None,
+        Some(raw) => match chrono::DateTime::parse_from_rfc3339(raw) {
+            Ok(value) => Some(value.with_timezone(&chrono::Utc)),
+            Err(_) => {
+                return HttpResponse::BadRequest()
+                    .body("Invalid expires_at; use RFC3339 like 2026-01-01T00:00:00Z");
+            }
+        },
+    };
+
+    if let Some(expires_at) = expires_at.as_ref() {
+        if *expires_at <= chrono::Utc::now() {
+            return HttpResponse::BadRequest().body("expires_at must be in the future");
+        }
+    }
+
+    let expires_at_response = expires_at.as_ref().map(|value| value.to_rfc3339());
+
+    match auth_store
+        .create_api_key(
+            payload.email.trim(),
+            payload.name.as_deref(),
+            expires_at,
+        )
+        .await
+    {
+        Ok(token) => HttpResponse::Ok().json(CreateApiKeyResponse {
+            token,
+            expires_at: expires_at_response,
+        }),
+        Err(err) => {
+            error!("Failed to create API key: {}", err);
+            HttpResponse::InternalServerError().body("Failed to create API key")
+        }
+    }
+}
+
+#[post("/auth/local/revoke-api-key")]
+async fn revoke_api_key(
+    req: HttpRequest,
+    auth_store: web::Data<AuthStore>,
+    payload: web::Json<RevokeApiKeyRequest>,
+) -> impl Responder {
+    if !auth::is_loopback(&req) {
+        return HttpResponse::Forbidden().body("Loopback connections only");
+    }
+
+    if !auth::bootstrap_allowed() {
+        return HttpResponse::Forbidden().body("Bootstrap mode disabled");
+    }
+
+    let token_id = match uuid::Uuid::parse_str(payload.token_id.trim()) {
+        Ok(token_id) => token_id,
+        Err(_) => {
+            return HttpResponse::BadRequest().body("Invalid token_id; expected UUID");
+        }
+    };
+
+    match auth_store.revoke_api_key(token_id).await {
+        Ok(revoked) => {
+            if revoked {
+                HttpResponse::Ok().json(RevokeApiKeyResponse { revoked })
+            } else {
+                HttpResponse::NotFound().body("API key not found or already revoked")
+            }
+        }
+        Err(err) => {
+            error!("Failed to revoke API key: {}", err);
+            HttpResponse::InternalServerError().body("Failed to revoke API key")
+        }
+    }
+}
+
 #[post("/query")]
 async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     let _query = tracing::info_span!("query").entered();
@@ -301,22 +451,101 @@ async fn file(data: web::Data<AsklData>, file_id: web::Path<FileId>) -> impl Res
     }
 }
 
-async fn read_data(args: &Args) -> Result<AsklData> {
-    match args.format.as_str() {
+async fn read_data(index_path: &str, format: &str) -> Result<AsklData> {
+    match format {
         "sqlite" => {
-            let index_diesel = index::db_diesel::Index::connect(&args.index).await?;
+            let index_diesel = index::db_diesel::Index::connect(index_path).await?;
             let cfg = ControlFlowGraph::from_symbols(index_diesel);
             Ok(AsklData { cfg: cfg })
         }
-        _ => Err(anyhow!("Unsupported index format: {}", args.format)),
+        _ => Err(anyhow!("Unsupported index format: {}", format)),
     }
+}
+
+async fn run_auth_command(port: u16, command: AuthCommand) -> Result<()> {
+    match command {
+        AuthCommand::CreateApiKey {
+            email,
+            name,
+            json,
+            expires_at,
+        } => {
+            let client = reqwest::Client::new();
+            let url = format!("http://127.0.0.1:{}/auth/local/create-api-key", port);
+            let response = client
+                .post(url)
+                .json(&CreateApiKeyRequest {
+                    email,
+                    name,
+                    expires_at,
+                })
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                return Err(anyhow!("Request failed ({}): {}", status, body));
+            }
+
+            let token_response: CreateApiKeyResponse = response.json().await?;
+            if json {
+                let output = serde_json::to_string_pretty(&token_response)?;
+                println!("{}", output);
+            } else {
+                println!("API key: {}", token_response.token);
+                if let Some(expires_at) = token_response.expires_at {
+                    println!("Expires: {}", expires_at);
+                }
+                eprintln!("Store this token securely; it will not be shown again.");
+            }
+        }
+        AuthCommand::RevokeApiKey { token_id, json } => {
+            let client = reqwest::Client::new();
+            let url = format!("http://127.0.0.1:{}/auth/local/revoke-api-key", port);
+            let response = client
+                .post(url)
+                .json(&RevokeApiKeyRequest { token_id })
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                return Err(anyhow!("Request failed ({}): {}", status, body));
+            }
+
+            let result: RevokeApiKeyResponse = response.json().await?;
+            if json {
+                let output = serde_json::to_string_pretty(&result)?;
+                println!("{}", output);
+            } else if result.revoked {
+                println!("API key revoked.");
+            } else {
+                println!("API key not revoked.");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
-    let _guard = if let Some(trace_dir) = &args.trace {
+    let serve_args = match args.command {
+        Command::Auth(auth_args) => {
+            if let Err(err) = run_auth_command(auth_args.port, auth_args.command).await {
+                eprintln!("Failed to create API key: {}", err);
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Command::Serve(serve_args) => serve_args,
+    };
+
+    let _guard = if let Some(trace_dir) = &serve_args.trace {
         use chrono::prelude::*;
         let trace_file = format!("trace-{}.json", Local::now().format("%Y%m%d-%H%M%S"),);
         let trace_path = std::path::Path::new(trace_dir).join(trace_file);
@@ -341,19 +570,36 @@ async fn main() -> std::io::Result<()> {
         None
     };
 
-    let askl_data: AsklData = read_data(&args).await.expect("Failed to read data");
+    let askl_data: AsklData = read_data(&serve_args.index, &serve_args.format)
+        .await
+        .expect("Failed to read data");
     let askl_data = web::Data::new(askl_data);
+    let auth_store =
+        AuthStore::connect(&serve_args.database_url).expect("Failed to initialize auth store");
+    let auth_store = web::Data::new(auth_store);
 
-    info!("Starting server on {}:{}...", args.host, args.port);
+    info!(
+        "Starting server on {}:{}...",
+        serve_args.host, serve_args.port
+    );
 
     HttpServer::new(move || {
         App::new()
             .wrap(tracing_actix_web::TracingLogger::default())
+            .wrap_fn(|mut req, srv| {
+                auth::redact_auth_headers(&mut req);
+                let fut = srv.call(req);
+                async move { fut.await }
+            })
             .app_data(askl_data.clone())
+            .app_data(auth_store.clone())
+            .service(version)
+            .service(create_api_key)
+            .service(revoke_api_key)
             .service(query)
             .service(file)
     })
-    .bind((args.host, args.port))?
+    .bind((serve_args.host, serve_args.port))?
     .run()
     .await
 }

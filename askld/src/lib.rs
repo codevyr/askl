@@ -1,5 +1,6 @@
 pub mod cfg;
 pub mod command;
+pub mod auth;
 pub mod execution_context;
 pub mod execution_state;
 pub mod group;
