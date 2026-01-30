@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS api_keys
     created_at TIMESTAMPTZ NOT NULL,
     last_used_at TIMESTAMPTZ NULL,
     revoked_at TIMESTAMPTZ NULL,
+    expires_at TIMESTAMPTZ NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
