@@ -5,8 +5,8 @@ use actix_web::{
 };
 use anyhow::{anyhow, Result};
 use askld::auth::{
-    AuthIdentity, AuthStore, CreateApiKeyRequest, CreateApiKeyResponse, RevokeApiKeyRequest,
-    RevokeApiKeyResponse,
+    ApiKeyInfo, AuthIdentity, AuthStore, CreateApiKeyRequest, CreateApiKeyResponse,
+    ListApiKeysRequest, ListApiKeysResponse, RevokeApiKeyRequest, RevokeApiKeyResponse,
 };
 use askld::execution_context::ExecutionContext;
 use askld::parser::Rule;
@@ -92,6 +92,12 @@ enum AuthCommand {
         #[clap(long, action)]
         json: bool,
     },
+    ListApiKeys {
+        #[clap(long)]
+        email: String,
+        #[clap(long, action)]
+        json: bool,
+    },
 }
 
 struct AsklData {
@@ -105,6 +111,24 @@ where
     S: Serializer,
 {
     s.serialize_str(&format!("{}", x))
+}
+
+fn print_key(key: &ApiKeyInfo) {
+    println!("ID: {}", key.id);
+    if let Some(name) = &key.name {
+        println!("Name: {}", name);
+    }
+    println!("Created: {}", key.created_at);
+    if let Some(last_used) = &key.last_used_at {
+        println!("Last used: {}", last_used);
+    }
+    if let Some(revoked_at) = &key.revoked_at {
+        println!("Revoked: {}", revoked_at);
+    }
+    if let Some(expires_at) = &key.expires_at {
+        println!("Expires: {}", expires_at);
+    }
+    println!();
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -337,6 +361,33 @@ async fn revoke_api_key(
     }
 }
 
+#[post("/auth/local/list-api-keys")]
+async fn list_api_keys(
+    req: HttpRequest,
+    auth_store: web::Data<AuthStore>,
+    payload: web::Json<ListApiKeysRequest>,
+) -> impl Responder {
+    if !auth::is_loopback(&req) {
+        return HttpResponse::Forbidden().body("Loopback connections only");
+    }
+
+    if !auth::bootstrap_allowed() {
+        return HttpResponse::Forbidden().body("Bootstrap mode disabled");
+    }
+
+    if payload.email.trim().is_empty() {
+        return HttpResponse::BadRequest().body("Email is required");
+    }
+
+    match auth_store.list_api_keys(payload.email.trim()).await {
+        Ok(keys) => HttpResponse::Ok().json(ListApiKeysResponse { keys }),
+        Err(err) => {
+            error!("Failed to list API keys: {}", err);
+            HttpResponse::InternalServerError().body("Failed to list API keys")
+        }
+    }
+}
+
 #[post("/query")]
 async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     let _query = tracing::info_span!("query").entered();
@@ -525,6 +576,35 @@ async fn run_auth_command(port: u16, command: AuthCommand) -> Result<()> {
                 println!("API key not revoked.");
             }
         }
+        AuthCommand::ListApiKeys { email, json } => {
+            let client = reqwest::Client::new();
+            let url = format!("http://127.0.0.1:{}/auth/local/list-api-keys", port);
+            let response = client
+                .post(url)
+                .json(&ListApiKeysRequest { email })
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                return Err(anyhow!("Request failed ({}): {}", status, body));
+            }
+
+            let result: ListApiKeysResponse = response.json().await?;
+            if json {
+                let output = serde_json::to_string_pretty(&result)?;
+                println!("{}", output);
+            } else {
+                if result.keys.is_empty() {
+                    println!("No API keys found.");
+                } else {
+                    for key in result.keys {
+                        print_key(&key);
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -596,6 +676,7 @@ async fn main() -> std::io::Result<()> {
             .service(version)
             .service(create_api_key)
             .service(revoke_api_key)
+            .service(list_api_keys)
             .service(query)
             .service(file)
     })

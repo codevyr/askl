@@ -89,6 +89,26 @@ pub struct RevokeApiKeyResponse {
     pub revoked: bool,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ListApiKeysRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ApiKeyInfo {
+    pub id: String,
+    pub name: Option<String>,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub revoked_at: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ListApiKeysResponse {
+    pub keys: Vec<ApiKeyInfo>,
+}
+
 #[derive(Debug)]
 pub enum AuthError {
     InvalidToken,
@@ -133,6 +153,16 @@ struct NewApiKey {
     id: Uuid,
     user_id: Uuid,
     hashed_secret: String,
+    name: Option<String>,
+    created_at: DateTime<Utc>,
+    last_used_at: Option<DateTime<Utc>>,
+    revoked_at: Option<DateTime<Utc>>,
+    expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Queryable)]
+struct ApiKeyRow {
+    id: Uuid,
     name: Option<String>,
     created_at: DateTime<Utc>,
     last_used_at: Option<DateTime<Utc>>,
@@ -307,6 +337,47 @@ impl AuthStore {
         .map_err(|err| AuthError::Storage(err.to_string()))??;
 
         Ok(revoked)
+    }
+
+    pub async fn list_api_keys(&self, email: &str) -> Result<Vec<ApiKeyInfo>, AuthError> {
+        let email = email.trim().to_string();
+        let pool = self.pool.clone();
+        let rows = task::spawn_blocking(move || {
+            let mut conn = pool
+                .get()
+                .map_err(|err| AuthError::Storage(err.to_string()))?;
+
+            let rows = api_keys::table
+                .inner_join(users::table)
+                .select((
+                    api_keys::id,
+                    api_keys::name,
+                    api_keys::created_at,
+                    api_keys::last_used_at,
+                    api_keys::revoked_at,
+                    api_keys::expires_at,
+                ))
+                .filter(users::email.eq(email))
+                .order(api_keys::created_at.desc())
+                .load::<ApiKeyRow>(&mut conn)
+                .map_err(|err| AuthError::Storage(err.to_string()))?;
+
+            Ok(rows)
+        })
+        .await
+        .map_err(|err| AuthError::Storage(err.to_string()))??;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| ApiKeyInfo {
+                id: row.id.to_string(),
+                name: row.name,
+                created_at: row.created_at.to_rfc3339(),
+                last_used_at: row.last_used_at.map(|value| value.to_rfc3339()),
+                revoked_at: row.revoked_at.map(|value| value.to_rfc3339()),
+                expires_at: row.expires_at.map(|value| value.to_rfc3339()),
+            })
+            .collect())
     }
 }
 

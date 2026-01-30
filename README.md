@@ -32,6 +32,11 @@ cargo run --  --lsp-command "/home/desertfox/src/llvm-project/build/bin/clangd -
   ASKL_BOOTSTRAP_MODE=true cargo run --bin askld -- auth revoke-api-key \\
     --token-id <uuid>
   ```
+- List keys for a user (local only):
+  ```
+  ASKL_BOOTSTRAP_MODE=true cargo run --bin askld -- auth list-api-keys \\
+    --email user@example.com
+  ```
 
 Notes:
 - API tokens are rejected over plain HTTP unless `ASKL_ALLOW_INSECURE_TOKENS=true` is set.
