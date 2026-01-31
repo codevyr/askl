@@ -63,3 +63,13 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Delete old GHCR container versions
+        if: github.event_name != 'pull_request'
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: askld
+          package-type: container
+          owner: ${{ github.repository_owner }}
+          min-versions-to-keep: 20
+          delete-only-untagged-versions: true
