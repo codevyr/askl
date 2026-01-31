@@ -4,76 +4,76 @@ use diesel::helper_types::{AsSelect, InnerJoinQuerySource};
 use diesel::internal::table_macro::{BoxedSelectStatement, FromClause};
 use diesel::prelude::*;
 use diesel::query_source::{Alias, AliasedField};
+use diesel::pg::Pg;
 use diesel::sql_types::{Integer, Text};
-use diesel::sqlite::Sqlite;
 use diesel::{debug_query, sql_query};
 
 use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
+use crate::schema_diesel as index_schema;
 use crate::symbols::{clean_and_split_string, is_ordered_subset, DeclarationId};
 
-use super::dsl::GlobMethods;
 use super::Connection;
 
 diesel::alias! {
     pub const CHILDREN_SYMBOLS_ALIAS: Alias<ChildrenSymbolsAlias> =
-        crate::schema_diesel::symbols as children_symbols;
+        index_schema::symbols as children_symbols;
     pub const CHILDREN_DECLS_ALIAS: Alias<ChildrenDeclsAlias> =
-        crate::schema_diesel::declarations as children_decls;
+        index_schema::declarations as children_decls;
     pub const PARENT_SYMBOLS_ALIAS: Alias<ParentSymbolsAlias> =
-        crate::schema_diesel::symbols as parent_symbols;
+        index_schema::symbols as parent_symbols;
     pub const PARENT_DECLS_ALIAS: Alias<ParentDeclsAlias> =
-        crate::schema_diesel::declarations as parent_decls;
+        index_schema::declarations as parent_decls;
 }
 
 type SymbolDeclarationJoinSource = InnerJoinQuerySource<
-    crate::schema_diesel::symbols::table,
-    crate::schema_diesel::declarations::table,
+    index_schema::symbols::table,
+    index_schema::declarations::table,
     Eq<
-        crate::schema_diesel::symbols::columns::id,
-        crate::schema_diesel::declarations::columns::symbol,
+        index_schema::symbols::columns::id,
+        index_schema::declarations::columns::symbol,
     >,
 >;
 
 type SymbolDeclarationModuleJoinSource = InnerJoinQuerySource<
     SymbolDeclarationJoinSource,
-    crate::schema_diesel::modules::table,
+    index_schema::modules::table,
     Eq<
-        crate::schema_diesel::symbols::columns::module,
-        crate::schema_diesel::modules::columns::id,
+        index_schema::symbols::columns::module,
+        index_schema::modules::columns::id,
     >,
 >;
 
 type SymbolDeclarationModuleProjectJoin = InnerJoinQuerySource<
     SymbolDeclarationModuleJoinSource,
-    crate::schema_diesel::projects::table,
+    index_schema::projects::table,
     Eq<
-        crate::schema_diesel::projects::columns::id,
-        crate::schema_diesel::modules::columns::project_id,
+        index_schema::projects::columns::id,
+        index_schema::modules::columns::project_id,
     >,
 >;
 
 type SymbolDeclarationModuleProjectFileJoin = InnerJoinQuerySource<
     SymbolDeclarationModuleProjectJoin,
-    crate::schema_diesel::files::table,
+    index_schema::files::table,
     Eq<
-        crate::schema_diesel::files::columns::id,
-        crate::schema_diesel::declarations::columns::file_id,
+        index_schema::files::columns::id,
+        index_schema::declarations::columns::file_id,
     >,
 >;
 
 type SelectionTuple = (
-    AsSelect<Symbol, Sqlite>,
-    AsSelect<Declaration, Sqlite>,
-    AsSelect<Module, Sqlite>,
-    AsSelect<File, Sqlite>,
-    AsSelect<Project, Sqlite>,
+    AsSelect<Symbol, Pg>,
+    AsSelect<Declaration, Pg>,
+    AsSelect<Module, Pg>,
+    AsSelect<File, Pg>,
+    AsSelect<Project, Pg>,
 );
 
 pub type CurrentQuery<'a> = BoxedSelectStatement<
     'a,
     SelectionTuple,
     FromClause<SymbolDeclarationModuleProjectFileJoin>,
-    Sqlite,
+    Pg,
 >;
 
 type DeclarationColumnsSqlType = (Integer, Integer, Integer, Integer, Integer, Integer);
@@ -81,63 +81,63 @@ type DeclarationColumnsSqlType = (Integer, Integer, Integer, Integer, Integer, I
 type SymbolColumnsSqlType = (Integer, Text, Integer, Integer);
 
 type ParentSelectionTuple = (
-    AsSelect<SymbolRef, Sqlite>,
-    AsSelect<Symbol, Sqlite>,
-    AsSelect<Declaration, Sqlite>,
-    DeclarationColumnsSqlType, // We cannot use AsSelect<Declaration, Sqlite> here due to ambiguity
+    AsSelect<SymbolRef, Pg>,
+    AsSelect<Symbol, Pg>,
+    AsSelect<Declaration, Pg>,
+    DeclarationColumnsSqlType, // We cannot use AsSelect<Declaration, Pg> here due to ambiguity
 );
 
 type SymbolRefSymbolJoin = InnerJoinQuerySource<
-    crate::schema_diesel::symbol_refs::table,
-    crate::schema_diesel::symbols::table,
+    index_schema::symbol_refs::table,
+    index_schema::symbols::table,
     Eq<
-        crate::schema_diesel::symbol_refs::columns::to_symbol,
-        crate::schema_diesel::symbols::columns::id,
+        index_schema::symbol_refs::columns::to_symbol,
+        index_schema::symbols::columns::id,
     >,
 >;
 
 type SymbolRefSymbolDeclarationJoin = InnerJoinQuerySource<
     SymbolRefSymbolJoin,
-    crate::schema_diesel::declarations::table,
+    index_schema::declarations::table,
     Eq<
-        crate::schema_diesel::symbols::columns::id,
-        crate::schema_diesel::declarations::columns::symbol,
+        index_schema::symbols::columns::id,
+        index_schema::declarations::columns::symbol,
     >,
 >;
 
 type ParentDeclOn = Eq<
-    AliasedField<ParentDeclsAlias, crate::schema_diesel::declarations::columns::file_id>,
-    crate::schema_diesel::symbol_refs::columns::from_file,
+    AliasedField<ParentDeclsAlias, index_schema::declarations::columns::file_id>,
+    index_schema::symbol_refs::columns::from_file,
 >;
 
 type ChildSymbolOn = Eq<
-    AliasedField<ChildrenSymbolsAlias, crate::schema_diesel::symbols::columns::id>,
-    crate::schema_diesel::symbol_refs::columns::to_symbol,
+    AliasedField<ChildrenSymbolsAlias, index_schema::symbols::columns::id>,
+    index_schema::symbol_refs::columns::to_symbol,
 >;
 
 type SymbolRefChildrenJoin = InnerJoinQuerySource<
-    crate::schema_diesel::symbol_refs::table,
+    index_schema::symbol_refs::table,
     Alias<ChildrenSymbolsAlias>,
     ChildSymbolOn,
 >;
 
 type ChildActualSymbolOn = Eq<
-    crate::schema_diesel::symbol_refs::columns::to_symbol,
-    crate::schema_diesel::symbols::columns::id,
+    index_schema::symbol_refs::columns::to_symbol,
+    index_schema::symbols::columns::id,
 >;
 
 type SymbolRefChildrenActualJoin = InnerJoinQuerySource<
     SymbolRefChildrenJoin,
-    crate::schema_diesel::symbols::table,
+    index_schema::symbols::table,
     ChildActualSymbolOn,
 >;
 
 type SymbolRefChildrenActualDeclarationJoin = InnerJoinQuerySource<
     SymbolRefChildrenActualJoin,
-    crate::schema_diesel::declarations::table,
+    index_schema::declarations::table,
     Eq<
-        crate::schema_diesel::symbols::columns::id,
-        crate::schema_diesel::declarations::columns::symbol,
+        index_schema::symbols::columns::id,
+        index_schema::declarations::columns::symbol,
     >,
 >;
 
@@ -151,26 +151,26 @@ pub type ParentsQuery<'a> = BoxedSelectStatement<
     'a,
     ParentSelectionTuple,
     FromClause<SymbolRefChildrenActualDeclarationParentDeclJoin>,
-    Sqlite,
+    Pg,
 >;
 
 type ChildSelectionTuple = (
     SymbolColumnsSqlType,
-    AsSelect<Symbol, Sqlite>,
-    AsSelect<Declaration, Sqlite>,
+    AsSelect<Symbol, Pg>,
+    AsSelect<Declaration, Pg>,
     DeclarationColumnsSqlType,
-    AsSelect<SymbolRef, Sqlite>,
-    AsSelect<File, Sqlite>,
+    AsSelect<SymbolRef, Pg>,
+    AsSelect<File, Pg>,
 );
 
 type ParentSymbolOn = Eq<
-    AliasedField<ParentSymbolsAlias, crate::schema_diesel::symbols::columns::id>,
-    AliasedField<ParentDeclsAlias, crate::schema_diesel::declarations::columns::symbol>,
+    AliasedField<ParentSymbolsAlias, index_schema::symbols::columns::id>,
+    AliasedField<ParentDeclsAlias, index_schema::declarations::columns::symbol>,
 >;
 
 type ParentFileOn = Eq<
-    crate::schema_diesel::files::columns::id,
-    AliasedField<ParentDeclsAlias, crate::schema_diesel::declarations::columns::file_id>,
+    index_schema::files::columns::id,
+    AliasedField<ParentDeclsAlias, index_schema::declarations::columns::file_id>,
 >;
 
 type SymbolRefSymbolDeclParentDeclJoin =
@@ -184,7 +184,7 @@ type SymbolRefSymbolDeclParentDeclParentSymbolJoin = InnerJoinQuerySource<
 
 type SymbolRefSymbolDeclParentDeclParentSymbolFileJoin = InnerJoinQuerySource<
     SymbolRefSymbolDeclParentDeclParentSymbolJoin,
-    crate::schema_diesel::files::table,
+    index_schema::files::table,
     ParentFileOn,
 >;
 
@@ -192,23 +192,16 @@ pub type ChildrenQuery<'a> = BoxedSelectStatement<
     'a,
     ChildSelectionTuple,
     FromClause<SymbolRefSymbolDeclParentDeclParentSymbolFileJoin>,
-    Sqlite,
+    Pg,
 >;
 
 #[derive(Debug, Clone, PartialEq, QueryableByName)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
-struct SymbolRowid {
+#[diesel(check_for_backend(diesel::pg::Pg))]
+struct SymbolMatch {
     #[diesel(sql_type = Integer)]
-    pub rowid: i32,
-}
-
-#[derive(Debug, Clone, QueryableByName)]
-#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
-struct SymbolFtsMatch {
+    pub id: i32,
     #[diesel(sql_type = Text)]
     pub name: String,
-    #[diesel(embed)]
-    pub rowid: SymbolRowid,
 }
 
 pub trait SymbolSearchMixin: std::fmt::Debug {
@@ -245,8 +238,9 @@ pub trait SymbolSearchMixin: std::fmt::Debug {
 pub struct CompoundNameMixin {
     pub compound_name: Vec<String>,
     pub name_pattern: String,
+    pub raw_name: String,
 
-    matched_symbols: Vec<SymbolRowid>,
+    matched_symbols: Vec<i32>,
 }
 
 impl CompoundNameMixin {
@@ -255,6 +249,7 @@ impl CompoundNameMixin {
         Self {
             compound_name: name_slice,
             name_pattern: String::new(),
+            raw_name: compound_name.to_string(),
             matched_symbols: Vec::new(),
         }
     }
@@ -262,37 +257,37 @@ impl CompoundNameMixin {
 
 impl SymbolSearchMixin for CompoundNameMixin {
     fn enter(&mut self, connection: &mut Connection) -> Result<()> {
-        let fts_name_pattern = self.compound_name.join(" AND ");
-        let name_pattern = self.compound_name.join("*");
-        self.name_pattern = format!("*{}*", name_pattern);
+        let name_pattern = self.compound_name.join("%");
+        self.name_pattern = format!("%{}%", name_pattern);
 
-        let matched_symbols_query =
-            sql_query("SELECT name, rowid FROM symbols_fts WHERE symbols_fts MATCH ?")
-                .bind::<Text, _>(&fts_name_pattern);
+        let matched_symbols_query = sql_query(
+            "SELECT id, name FROM index.symbols WHERE name % $1 ORDER BY similarity(name, $1) DESC",
+        )
+        .bind::<Text, _>(&self.raw_name);
 
         println!(
-            "Executing FTS query: {:?}",
-            debug_query::<Sqlite, _>(&matched_symbols_query)
+            "Executing trigram query: {:?}",
+            debug_query::<Pg, _>(&matched_symbols_query)
         );
 
-        let fts_matches: Vec<SymbolFtsMatch> = {
+        let symbol_matches: Vec<SymbolMatch> = {
             let _matched_symbols_query: tracing::span::EnteredSpan =
                 tracing::info_span!("matched_symbols").entered();
             matched_symbols_query
-                .load::<SymbolFtsMatch>(connection)
-                .map_err(|e| anyhow::anyhow!("Failed to query FTS table: {}", e))?
+                .load::<SymbolMatch>(connection)
+                .map_err(|e| anyhow::anyhow!("Failed to query trigram index: {}", e))?
         };
 
-        self.matched_symbols = fts_matches
+        self.matched_symbols = symbol_matches
             .into_iter()
             .filter(|matched| {
                 let cleaned_name = clean_and_split_string(&matched.name);
                 is_ordered_subset(&cleaned_name, &self.compound_name)
             })
-            .map(|matched| matched.rowid)
+            .map(|matched| matched.id)
             .collect();
         println!("Matched {} symbols", self.matched_symbols.len());
-        println!("Searching for symbols with name pattern: {fts_name_pattern}");
+        println!("Searching for symbols with name pattern: {}", self.name_pattern);
         Ok(())
     }
 
@@ -303,11 +298,11 @@ impl SymbolSearchMixin for CompoundNameMixin {
     ) -> Result<CurrentQuery<'a>> {
         use crate::schema_diesel::*;
 
-        let symbol_ids: Vec<i32> = self.matched_symbols.iter().map(|s| s.rowid).collect();
+        let symbol_ids: Vec<i32> = self.matched_symbols.clone();
 
         Ok(query
             .filter(symbols::dsl::id.eq_any(symbol_ids))
-            .filter(symbols::dsl::name.glob(self.name_pattern.clone())))
+            .filter(symbols::dsl::name.ilike(self.name_pattern.clone())))
     }
 
     fn filter_parents<'a>(
@@ -317,7 +312,7 @@ impl SymbolSearchMixin for CompoundNameMixin {
     ) -> Result<ParentsQuery<'a>> {
         use crate::schema_diesel::symbols;
 
-        let symbol_ids: Vec<i32> = self.matched_symbols.iter().map(|s| s.rowid).collect();
+        let symbol_ids: Vec<i32> = self.matched_symbols.clone();
 
         Ok(query
             .filter(
@@ -328,7 +323,7 @@ impl SymbolSearchMixin for CompoundNameMixin {
             .filter(
                 CHILDREN_SYMBOLS_ALIAS
                     .field(symbols::dsl::name)
-                    .glob(self.name_pattern.clone()),
+                    .ilike(self.name_pattern.clone()),
             ))
     }
 
@@ -337,18 +332,18 @@ impl SymbolSearchMixin for CompoundNameMixin {
         _connection: &mut Connection,
         query: ChildrenQuery<'a>,
     ) -> Result<ChildrenQuery<'a>> {
-        let symbol_ids: Vec<i32> = self.matched_symbols.iter().map(|s| s.rowid).collect();
+        let symbol_ids: Vec<i32> = self.matched_symbols.clone();
 
         Ok(query
             .filter(
                 PARENT_SYMBOLS_ALIAS
-                    .field(crate::schema_diesel::symbols::dsl::id)
+                    .field(index_schema::symbols::dsl::id)
                     .eq_any(symbol_ids),
             )
             .filter(
                 PARENT_SYMBOLS_ALIAS
-                    .field(crate::schema_diesel::symbols::dsl::name)
-                    .glob(self.name_pattern.clone()),
+                    .field(index_schema::symbols::dsl::name)
+                    .ilike(self.name_pattern.clone()),
             ))
     }
 }

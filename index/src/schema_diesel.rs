@@ -1,7 +1,7 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
-    declarations (id) {
+    index.declarations (id) {
         id -> Integer,
         symbol -> Integer,
         file_id -> Integer,
@@ -12,14 +12,14 @@ diesel::table! {
 }
 
 diesel::table! {
-    file_contents (file_id) {
+    index.file_contents (file_id) {
         file_id -> Integer,
         content -> Binary,
     }
 }
 
 diesel::table! {
-    files (id) {
+    index.files (id) {
         id -> Integer,
         module -> Integer,
         module_path -> Text,
@@ -30,7 +30,7 @@ diesel::table! {
 }
 
 diesel::table! {
-    modules (id) {
+    index.modules (id) {
         id -> Integer,
         module_name -> Text,
         project_id -> Integer,
@@ -38,15 +38,15 @@ diesel::table! {
 }
 
 diesel::table! {
-    projects (id) {
+    index.projects (id) {
         id -> Integer,
         project_name -> Text,
     }
 }
 
 diesel::table! {
-    symbol_refs (rowid) {
-        rowid -> Integer,
+    index.symbol_refs (id) {
+        id -> Integer,
         to_symbol -> Integer,
         from_file -> Integer,
         from_offset_start -> Integer,
@@ -55,7 +55,7 @@ diesel::table! {
 }
 
 diesel::table! {
-    symbols (id) {
+    index.symbols (id) {
         id -> Integer,
         name -> Text,
         module -> Integer,

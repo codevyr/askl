@@ -1,24 +1,26 @@
-INSERT INTO projects
-VALUES (1, "test_project");
+SET search_path TO index, public;
 
-INSERT INTO modules
-VALUES (1, "test", 1);
+INSERT INTO projects (id, project_name)
+VALUES (1, 'test_project');
 
-INSERT INTO files
-VALUES (1, 1, "main.c", "/main.c", "cc", "");
+INSERT INTO modules (id, module_name, project_id)
+VALUES (1, 'test', 1);
 
-INSERT INTO symbols
+INSERT INTO files (id, module, module_path, filesystem_path, filetype, content_hash)
+VALUES (1, 1, 'main.c', '/main.c', 'cc', '');
+
+INSERT INTO symbols (id, name, module, symbol_scope)
 VALUES
-    (1,  "a",    1, 1),
-    (2,  "b",    1, 1),
-    (3,  "c",    1, 1),
-    (4,  "d",    1, 1),
-    (5,  "e",    1, 1),
-    (6,  "f",    1, 1),
-    (7,  "g",    1, 1),
-    (42, "main", 1, 1);
+    (1,  'a',    1, 1),
+    (2,  'b',    1, 1),
+    (3,  'c',    1, 1),
+    (4,  'd',    1, 1),
+    (5,  'e',    1, 1),
+    (6,  'f',    1, 1),
+    (7,  'g',    1, 1),
+    (42, 'main', 1, 1);
 
-INSERT INTO declarations
+INSERT INTO declarations (id, symbol, file_id, symbol_type, start_offset, end_offset)
 VALUES
     (91,  1,  1, 1, 910, 919),
     (92,  2,  1, 1, 920, 929),

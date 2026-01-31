@@ -1,7 +1,8 @@
-use std::{path::Path, str::FromStr};
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "legacy-sqlite")]
+use std::{path::Path, str::FromStr};
+#[cfg(feature = "legacy-sqlite")]
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePool},
     Pool, Sqlite,
@@ -177,10 +178,12 @@ pub struct DeclarationFull {
     pub parents: Vec<ReferenceFull>,
 }
 
+#[cfg(feature = "legacy-sqlite")]
 pub struct Index {
     pool: SqlitePool,
 }
 
+#[cfg(feature = "legacy-sqlite")]
 impl Index {
     pub async fn connect(database: &str) -> Result<Self> {
         let options = SqliteConnectOptions::new().filename(database);

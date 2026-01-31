@@ -28,7 +28,7 @@ const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations_auth");
 
 mod schema {
     diesel::table! {
-        users (id) {
+        auth.users (id) {
             id -> Uuid,
             email -> Text,
             created_at -> Timestamptz,
@@ -36,7 +36,7 @@ mod schema {
     }
 
     diesel::table! {
-        api_keys (id) {
+        auth.api_keys (id) {
             id -> Uuid,
             user_id -> Uuid,
             hashed_secret -> Text,
@@ -174,7 +174,10 @@ impl AuthStore {
     pub fn connect(database_url: &str) -> anyhow::Result<Self> {
         let manager = ConnectionManager::<PgConnection>::new(database_url);
         let pool = Pool::builder().build(manager)?;
+        Self::from_pool(pool)
+    }
 
+    pub fn from_pool(pool: Pool<ConnectionManager<PgConnection>>) -> anyhow::Result<Self> {
         let mut connection = pool.get()?;
         connection
             .run_pending_migrations(MIGRATIONS)

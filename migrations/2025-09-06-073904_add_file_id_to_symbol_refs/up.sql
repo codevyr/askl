@@ -1,1 +1,0 @@
--- No-op: symbol_refs now stores from_file and offsets in the base schema.

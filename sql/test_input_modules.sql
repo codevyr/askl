@@ -1,37 +1,39 @@
-INSERT INTO projects
-VALUES
-    (1, "test_project"),
-    (2, "other_project");
+SET search_path TO index, public;
 
-INSERT INTO modules
+INSERT INTO projects (id, project_name)
 VALUES
-    (1, "test", 1),
-    (2, "other", 1),
-    (3, "project_only", 2);
+    (1, 'test_project'),
+    (2, 'other_project');
 
-INSERT INTO files
+INSERT INTO modules (id, module_name, project_id)
 VALUES
-    (1, 1, "main.c", "/main.c", "cc", ""),
-    (2, 1, "bar.c", "/bar.c", "cc", ""),
-    (3, 2, "main.c", "/other_main.c", "cc", ""),
-    (4, 3, "main.c", "/project_only_main.c", "cc", "");
+    (1, 'test', 1),
+    (2, 'other', 1),
+    (3, 'project_only', 2);
 
-INSERT INTO symbols
+INSERT INTO files (id, module, module_path, filesystem_path, filetype, content_hash)
 VALUES
-    (1,   "a",    1, 1),
-    (2,   "b",    1, 1),
-    (3,   "c",    1, 1),
-    (4,   "d",    1, 1),
-    (5,   "e",    1, 1),
-    (6,   "f",    1, 1),
-    (7,   "g",    1, 1),
-    (42,  "main", 1, 1),
-    (101, "a",    2, 1),
-    (102, "b",    2, 1),
-    (142, "main", 2, 1),
-    (301, "a",    3, 1);
+    (1, 1, 'main.c', '/main.c', 'cc', ''),
+    (2, 1, 'bar.c', '/bar.c', 'cc', ''),
+    (3, 2, 'main.c', '/other_main.c', 'cc', ''),
+    (4, 3, 'main.c', '/project_only_main.c', 'cc', '');
 
-INSERT INTO declarations
+INSERT INTO symbols (id, name, module, symbol_scope)
+VALUES
+    (1,   'a',    1, 1),
+    (2,   'b',    1, 1),
+    (3,   'c',    1, 1),
+    (4,   'd',    1, 1),
+    (5,   'e',    1, 1),
+    (6,   'f',    1, 1),
+    (7,   'g',    1, 1),
+    (42,  'main', 1, 1),
+    (101, 'a',    2, 1),
+    (102, 'b',    2, 1),
+    (142, 'main', 2, 1),
+    (301, 'a',    3, 1);
+
+INSERT INTO declarations (id, symbol, file_id, symbol_type, start_offset, end_offset)
 VALUES
     (91,  1,   1, 1, 910, 919),
     (92,  2,   1, 1, 920, 929),

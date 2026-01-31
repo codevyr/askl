@@ -1,7 +1,4 @@
-use anyhow::bail;
 use clap::Parser;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
-use std::{fs, path::Path};
 
 /// Indexer for askl
 #[derive(Parser, Debug, Clone)]
@@ -16,29 +13,13 @@ struct Args {
     output: String,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args = Args::parse();
-
-    let output = Path::new(&args.output);
-    if args.force && output.exists() {
-        // Delete old database
-        fs::remove_file(output)?
-    } else if output.exists() {
-        bail!("File exists");
-    }
-
-    let options = SqliteConnectOptions::new()
-        .filename(&args.output)
-        .create_if_missing(true);
-
-    let pool = SqlitePool::connect_with(options).await?;
-
-    let sql = include_str!("../sql/create_tables.sql");
-    let res = sqlx::query(sql).execute(&pool).await?;
-
-    println!("Finished {:?}", res);
+    println!(
+        "create-index is deprecated. Use the protobuf upload API instead (requested output: {}).",
+        args.output
+    );
 
     Ok(())
 }

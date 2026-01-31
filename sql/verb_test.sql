@@ -1,30 +1,27 @@
-INSERT INTO
-    projects
-VALUES
-    (1, "test_project");
+SET search_path TO index, public;
 
-INSERT INTO
-    modules
+INSERT INTO projects (id, project_name)
 VALUES
-    (1, "test", 1);
+    (1, 'test_project');
 
-INSERT INTO
-    files
+INSERT INTO modules (id, module_name, project_id)
 VALUES
-    (1, 1, "main.c", "/main.c", "cc", "");
+    (1, 'test', 1);
 
-INSERT INTO
-    symbols
+INSERT INTO files (id, module, module_path, filesystem_path, filetype, content_hash)
 VALUES
-    (1, "foo", 1, 1),
-    (2, "foo.bar", 1, 1),
-    (3, "foobar", 1, 1),
-    (4, "tar", 1, 1),
-    (5, "sort.IsSorted", 1, 1),
-    (6, "sort.Sort", 1, 1);
+    (1, 1, 'main.c', '/main.c', 'cc', '');
 
-INSERT INTO
-    declarations
+INSERT INTO symbols (id, name, module, symbol_scope)
+VALUES
+    (1, 'foo', 1, 1),
+    (2, 'foo.bar', 1, 1),
+    (3, 'foobar', 1, 1),
+    (4, 'tar', 1, 1),
+    (5, 'sort.IsSorted', 1, 1),
+    (6, 'sort.Sort', 1, 1);
+
+INSERT INTO declarations (id, symbol, file_id, symbol_type, start_offset, end_offset)
 VALUES
     (91, 1, 1, 1, 910, 919),
     (92, 2, 1, 1, 920, 929),

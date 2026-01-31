@@ -1,75 +1,73 @@
-CREATE TABLE IF NOT EXISTS projects
+CREATE SCHEMA IF NOT EXISTS index;
+
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+CREATE TABLE IF NOT EXISTS index.projects
 (
-    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-    project_name TEXT NOT NULL,
-    UNIQUE (project_name)
+    id SERIAL PRIMARY KEY,
+    project_name TEXT NOT NULL UNIQUE
 );
 
-CREATE TABLE IF NOT EXISTS modules
+CREATE TABLE IF NOT EXISTS index.modules
 (
-    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     module_name TEXT NOT NULL,
-    project_id INTEGER NOT NULL,
-    FOREIGN KEY (project_id) REFERENCES projects(id)
+    project_id INTEGER NOT NULL REFERENCES index.projects(id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS files
+CREATE TABLE IF NOT EXISTS index.files
 (
-    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-    module INTEGER NOT NULL,
+    id SERIAL PRIMARY KEY,
+    module INTEGER NOT NULL REFERENCES index.modules(id) ON DELETE CASCADE,
     module_path TEXT NOT NULL,
     filesystem_path TEXT NOT NULL,
     filetype TEXT NOT NULL,
     content_hash TEXT NOT NULL,
-    UNIQUE (module, filesystem_path),
-    FOREIGN KEY (module) REFERENCES modules(id)
+    UNIQUE (module, filesystem_path)
 );
 
-CREATE TABLE IF NOT EXISTS symbols
+CREATE TABLE IF NOT EXISTS index.symbols
 (
-    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
-    module INTEGER NOT NULL, -- This references is excessive because it is already in declarations
+    module INTEGER NOT NULL REFERENCES index.modules(id) ON DELETE CASCADE,
     symbol_scope INTEGER NOT NULL,
-    FOREIGN KEY (module) REFERENCES modules(id),
     UNIQUE (name, module)
 );
 
-CREATE TABLE IF NOT EXISTS declarations
+CREATE INDEX IF NOT EXISTS symbols_name_trgm_idx ON index.symbols USING GIN (name gin_trgm_ops);
+
+CREATE TABLE IF NOT EXISTS index.declarations
 (
-    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-    symbol INTEGER NOT NULL,
-    file_id INTEGER NOT NULL,
+    id SERIAL PRIMARY KEY,
+    symbol INTEGER NOT NULL REFERENCES index.symbols(id) ON DELETE CASCADE,
+    file_id INTEGER NOT NULL REFERENCES index.files(id) ON DELETE CASCADE,
     symbol_type INTEGER NOT NULL,
     start_offset INTEGER NOT NULL,
     end_offset INTEGER NOT NULL,
-    FOREIGN KEY (symbol) REFERENCES symbols(id),
-    FOREIGN KEY (file_id) REFERENCES files(id),
     UNIQUE (symbol, file_id, start_offset, end_offset)
 );
 
-CREATE TABLE IF NOT EXISTS symbol_refs
+CREATE TABLE IF NOT EXISTS index.symbol_refs
 (
-    to_symbol INTEGER NOT NULL,
-    from_file INTEGER NOT NULL,
+    id SERIAL PRIMARY KEY,
+    to_symbol INTEGER NOT NULL REFERENCES index.symbols(id) ON DELETE CASCADE,
+    from_file INTEGER NOT NULL REFERENCES index.files(id) ON DELETE CASCADE,
     from_offset_start INTEGER NOT NULL,
     from_offset_end INTEGER NOT NULL,
-    FOREIGN KEY (to_symbol) REFERENCES symbols(id),
-    FOREIGN KEY (from_file) REFERENCES files(id),
     UNIQUE (to_symbol, from_file, from_offset_start, from_offset_end)
 );
 
-CREATE INDEX IF NOT EXISTS symbol_refs_to_symbol_idx ON symbol_refs(to_symbol);
+CREATE INDEX IF NOT EXISTS symbol_refs_to_symbol_idx ON index.symbol_refs(to_symbol);
 
-CREATE INDEX IF NOT EXISTS symbol_refs_ref_loc_idx ON symbol_refs(
+CREATE INDEX IF NOT EXISTS symbol_refs_ref_loc_idx ON index.symbol_refs(
     from_file,
     from_offset_start,
     from_offset_end
 );
 
-CREATE TABLE IF NOT EXISTS file_contents
+CREATE TABLE IF NOT EXISTS index.file_contents
 (
-    file_id INTEGER PRIMARY KEY,
-    content BLOB NOT NULL,
-    FOREIGN KEY (file_id) REFERENCES files(id)
+    file_id INTEGER PRIMARY KEY REFERENCES index.files(id) ON DELETE CASCADE,
+    content BYTEA NOT NULL
 );
