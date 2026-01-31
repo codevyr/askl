@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task;
 use uuid::Uuid;
 
-const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations_auth");
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!("../migrations");
 
 mod schema {
     diesel::table! {
