@@ -42,6 +42,14 @@ message SymbolRef {
   int32 from_offset_end = 3;
 }
 
-enum SymbolScope { LOCAL = 0; GLOBAL = 1; }
+enum SymbolScope {
+  SYMBOL_SCOPE_UNSPECIFIED = 0;
+  LOCAL = 1;
+  GLOBAL = 2;
+}
 
-enum SymbolType { DEFINITION = 0; DECLARATION = 1; }
+enum SymbolType {
+  SYMBOL_TYPE_UNSPECIFIED = 0;
+  DEFINITION = 1;
+  DECLARATION = 2;
+}
