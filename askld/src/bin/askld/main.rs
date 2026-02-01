@@ -41,6 +41,7 @@ struct Args {
 enum Command {
     Serve(ServeArgs),
     Auth(AuthArgs),
+    Index(IndexArgs),
 }
 
 #[derive(ClapArgs, Debug)]
@@ -99,11 +100,42 @@ enum AuthCommand {
     },
 }
 
+#[derive(ClapArgs, Debug)]
+struct IndexArgs {
+    #[clap(subcommand)]
+    command: IndexCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum IndexCommand {
+    Upload {
+        /// Path to protobuf payload file
+        #[clap(long = "file")]
+        file_path: String,
+        /// askld base URL
+        #[clap(long, default_value = "http://127.0.0.1:80")]
+        url: String,
+        /// Bearer token (falls back to ASKL_TOKEN)
+        #[clap(long)]
+        token: Option<String>,
+        /// Override project name from the protobuf payload
+        #[clap(long)]
+        project: Option<String>,
+        /// Request timeout in seconds (0 disables timeout)
+        #[clap(long, default_value = "30")]
+        timeout: u64,
+        /// Print JSON response only
+        #[clap(long, action)]
+        json: bool,
+    },
+}
+
 struct AsklData {
     cfg: ControlFlowGraph,
 }
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
 
 fn symbolid_as_string<S>(x: &SymbolId, s: S) -> Result<S::Ok, S::Error>
 where
@@ -263,7 +295,7 @@ struct ErrorResponse {
     line: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct IndexUploadResponse {
     project_id: i32,
 }
@@ -398,7 +430,6 @@ async fn list_api_keys(
     }
 }
 
-#[post("/v1/index/upload")]
 async fn upload_index(
     _identity: AuthIdentity,
     store: web::Data<IndexStore>,
@@ -693,6 +724,89 @@ async fn run_auth_command(port: u16, command: AuthCommand) -> Result<()> {
     Ok(())
 }
 
+async fn run_index_command(command: IndexCommand) -> Result<()> {
+    match command {
+        IndexCommand::Upload {
+            file_path,
+            url,
+            token,
+            project,
+            timeout,
+            json,
+        } => {
+            use reqwest::header as reqwest_header;
+
+            let token = token.or_else(|| std::env::var("ASKL_TOKEN").ok());
+            let token = match token {
+                Some(token) if !token.trim().is_empty() => token,
+                _ => return Err(anyhow!("Missing token; pass --token or set ASKL_TOKEN")),
+            };
+
+            let payload = std::fs::read(&file_path)
+                .map_err(|err| anyhow!("Failed to read {}: {}", file_path, err))?;
+            if payload.is_empty() {
+                return Err(anyhow!("Payload file is empty: {}", file_path));
+            }
+
+            let payload = if let Some(project_name) = project {
+                let mut upload = IndexUpload::decode(payload.as_slice())
+                    .map_err(|err| anyhow!("Failed to decode protobuf payload: {}", err))?;
+                upload.project_name = project_name;
+                let mut buffer = Vec::with_capacity(upload.encoded_len());
+                upload.encode(&mut buffer)?;
+                buffer
+            } else {
+                payload
+            };
+
+            let mut base_url = url.trim().to_string();
+            if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+                base_url = format!("http://{}", base_url);
+            }
+            let base_url = base_url.trim_end_matches('/');
+            let endpoint = format!("{}/v1/index/upload", base_url);
+
+            let mut client_builder = reqwest::Client::builder();
+            if timeout > 0 {
+                client_builder = client_builder.timeout(Duration::from_secs(timeout));
+            }
+            let client = client_builder.build()?;
+
+            let response = client
+                .post(endpoint)
+                .header(reqwest_header::CONTENT_TYPE, "application/x-protobuf")
+                .header(reqwest_header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(payload)
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                if status == reqwest::StatusCode::CONFLICT {
+                    let message = if body.trim().is_empty() {
+                        "Project already exists".to_string()
+                    } else {
+                        body
+                    };
+                    return Err(anyhow!("Request failed ({}): {}", status, message));
+                }
+                return Err(anyhow!("Request failed ({}): {}", status, body));
+            }
+
+            let result: IndexUploadResponse = response.json().await?;
+            if json {
+                let output = serde_json::to_string_pretty(&result)?;
+                println!("{}", output);
+            } else {
+                println!("Uploaded index; project id: {}", result.project_id);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
@@ -701,6 +815,13 @@ async fn main() -> std::io::Result<()> {
         Command::Auth(auth_args) => {
             if let Err(err) = run_auth_command(auth_args.port, auth_args.command).await {
                 eprintln!("Failed to create API key: {}", err);
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Command::Index(index_args) => {
+            if let Err(err) = run_index_command(index_args.command).await {
+                eprintln!("Failed to upload index: {}", err);
                 std::process::exit(1);
             }
             return Ok(());
@@ -770,7 +891,11 @@ async fn main() -> std::io::Result<()> {
             .service(create_api_key)
             .service(revoke_api_key)
             .service(list_api_keys)
-            .service(upload_index)
+            .service(
+                web::resource("/v1/index/upload")
+                    .app_data(web::PayloadConfig::new(MAX_UPLOAD_BYTES))
+                    .route(web::post().to(upload_index)),
+            )
             .service(list_index_projects)
             .service(get_index_project)
             .service(delete_index_project)

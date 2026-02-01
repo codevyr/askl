@@ -11,6 +11,8 @@ use tokio::task;
 use crate::proto::askl::index::{IndexUpload, Module as UploadModule};
 use index::schema_diesel as index_schema;
 
+const MAX_INSERT_ROWS: usize = 1000;
+
 #[derive(Clone)]
 pub struct IndexStore {
     pool: Pool<ConnectionManager<PgConnection>>,
@@ -162,18 +164,10 @@ impl IndexStore {
                 let symbol_map = insert_symbols(conn, symbol_inserts)?;
 
                 let declaration_rows = build_declarations(&upload.modules, &file_map, &symbol_map)?;
-                if !declaration_rows.is_empty() {
-                    diesel::insert_into(index_schema::declarations::table)
-                        .values(&declaration_rows)
-                        .execute(conn)?;
-                }
+                insert_declarations(conn, &declaration_rows)?;
 
                 let symbol_ref_rows = build_symbol_refs(&upload.modules, &file_map, &symbol_map)?;
-                if !symbol_ref_rows.is_empty() {
-                    diesel::insert_into(index_schema::symbol_refs::table)
-                        .values(&symbol_ref_rows)
-                        .execute(conn)?;
-                }
+                insert_symbol_refs(conn, &symbol_ref_rows)?;
 
                 Ok(project_id)
             })
@@ -325,17 +319,19 @@ fn insert_modules(
         return Ok(HashMap::new());
     }
 
-    let rows: Vec<NewModule> = inserts.iter().map(|entry| entry.row.clone()).collect();
-    let ids: Vec<i32> = diesel::insert_into(index_schema::modules::table)
-        .values(&rows)
-        .returning(index_schema::modules::id)
-        .get_results(conn)?;
+    let mut module_map = HashMap::new();
+    for chunk in inserts.chunks(MAX_INSERT_ROWS) {
+        let rows: Vec<NewModule> = chunk.iter().map(|entry| entry.row.clone()).collect();
+        let ids: Vec<i32> = diesel::insert_into(index_schema::modules::table)
+            .values(&rows)
+            .returning(index_schema::modules::id)
+            .get_results(conn)?;
+        for (entry, id) in chunk.iter().zip(ids) {
+            module_map.insert(entry.local_id, id);
+        }
+    }
 
-    Ok(inserts
-        .into_iter()
-        .zip(ids)
-        .map(|(entry, id)| (entry.local_id, id))
-        .collect())
+    Ok(module_map)
 }
 
 fn build_files(
@@ -382,25 +378,27 @@ fn insert_files(
         return Ok(HashMap::new());
     }
 
-    let rows: Vec<NewFile> = inserts.iter().map(|entry| entry.row.clone()).collect();
-    let ids: Vec<i32> = diesel::insert_into(index_schema::files::table)
-        .values(&rows)
-        .returning(index_schema::files::id)
-        .get_results(conn)?;
-
     let mut file_map = HashMap::new();
-    let mut file_contents = Vec::with_capacity(ids.len());
-    for (entry, id) in inserts.iter().zip(ids.iter()) {
-        file_map.insert(entry.local_id, *id);
-        file_contents.push(NewFileContent {
-            file_id: *id,
-            content: entry.content.clone(),
-        });
-    }
+    for chunk in inserts.chunks(MAX_INSERT_ROWS) {
+        let rows: Vec<NewFile> = chunk.iter().map(|entry| entry.row.clone()).collect();
+        let ids: Vec<i32> = diesel::insert_into(index_schema::files::table)
+            .values(&rows)
+            .returning(index_schema::files::id)
+            .get_results(conn)?;
 
-    diesel::insert_into(index_schema::file_contents::table)
-        .values(&file_contents)
-        .execute(conn)?;
+        let mut file_contents = Vec::with_capacity(ids.len());
+        for (entry, id) in chunk.iter().zip(ids.iter()) {
+            file_map.insert(entry.local_id, *id);
+            file_contents.push(NewFileContent {
+                file_id: *id,
+                content: entry.content.clone(),
+            });
+        }
+
+        diesel::insert_into(index_schema::file_contents::table)
+            .values(&file_contents)
+            .execute(conn)?;
+    }
 
     Ok(file_map)
 }
@@ -446,17 +444,19 @@ fn insert_symbols(
         return Ok(HashMap::new());
     }
 
-    let rows: Vec<NewSymbol> = inserts.iter().map(|entry| entry.row.clone()).collect();
-    let ids: Vec<i32> = diesel::insert_into(index_schema::symbols::table)
-        .values(&rows)
-        .returning(index_schema::symbols::id)
-        .get_results(conn)?;
+    let mut symbol_map = HashMap::new();
+    for chunk in inserts.chunks(MAX_INSERT_ROWS) {
+        let rows: Vec<NewSymbol> = chunk.iter().map(|entry| entry.row.clone()).collect();
+        let ids: Vec<i32> = diesel::insert_into(index_schema::symbols::table)
+            .values(&rows)
+            .returning(index_schema::symbols::id)
+            .get_results(conn)?;
+        for (entry, id) in chunk.iter().zip(ids) {
+            symbol_map.insert(entry.local_id, id);
+        }
+    }
 
-    Ok(inserts
-        .into_iter()
-        .zip(ids)
-        .map(|(entry, id)| (entry.local_id, id))
-        .collect())
+    Ok(symbol_map)
 }
 
 fn build_declarations(
@@ -524,6 +524,27 @@ fn build_symbol_refs(
         }
     }
     Ok(rows)
+}
+
+fn insert_declarations(
+    conn: &mut PgConnection,
+    rows: &[NewDeclaration],
+) -> Result<(), UploadError> {
+    for chunk in rows.chunks(MAX_INSERT_ROWS) {
+        diesel::insert_into(index_schema::declarations::table)
+            .values(chunk)
+            .execute(conn)?;
+    }
+    Ok(())
+}
+
+fn insert_symbol_refs(conn: &mut PgConnection, rows: &[NewSymbolRef]) -> Result<(), UploadError> {
+    for chunk in rows.chunks(MAX_INSERT_ROWS) {
+        diesel::insert_into(index_schema::symbol_refs::table)
+            .values(chunk)
+            .execute(conn)?;
+    }
+    Ok(())
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
