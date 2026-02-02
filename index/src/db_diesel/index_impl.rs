@@ -49,6 +49,7 @@ impl Index {
     pub const TEST_INPUT_A: &'static str = "test_input_a.sql";
     pub const TEST_INPUT_B: &'static str = "test_input_b.sql";
     pub const TEST_INPUT_MODULES: &'static str = "test_input_modules.sql";
+    pub const TEST_INPUT_SYMBOL_TOKENS: &'static str = "test_input_symbol_tokens.sql";
 
     pub async fn load_test_input(&self, input_path: &str) -> Result<()> {
         let connection = &mut self.pool.get().unwrap();
@@ -78,6 +79,12 @@ impl Index {
             "test_input_modules.sql" => {
                 connection
                     .batch_execute(include_str!("../../../sql/test_input_modules.sql"))
+                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
+                    .unwrap();
+            }
+            "test_input_symbol_tokens.sql" => {
+                connection
+                    .batch_execute(include_str!("../../../sql/test_input_symbol_tokens.sql"))
                     .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
                     .unwrap();
             }
