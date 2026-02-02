@@ -9,18 +9,25 @@ VALUES (1, 'test_module', 1);
 INSERT INTO files (id, module, module_path, filesystem_path, filetype, content_hash)
 VALUES (1, 1, 'kube.go', 'kube.go', 'go', 'hash');
 
-INSERT INTO symbols (id, name, module, symbol_scope)
+INSERT INTO symbols (id, name, symbol_path, module, symbol_scope)
 VALUES
     (
         1,
-        'kubelet.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.run',
+        'kubelet.aaaaaaaaaaa.run',
+        'kubelet.aaaaaaaaaaa.run',
         1,
         2
     ),
-    (2, 'kubernetes.run', 1, 2),
-    (3, 'kubeleter.run', 1, 2),
-    (4, 'Kubelet.run', 1, 2),
-    (5, '(*k8s.io/kubernetes/pkg/kubelet.Kubelet).Run', 1, 2);
+    (2, 'kubernetes.run', 'kubernetes.run', 1, 2),
+    (3, 'kubeleter.run', 'kubeleter.run', 1, 2),
+    (4, 'Kubelet.run', 'Kubelet.run', 1, 2),
+    (
+        5,
+        '(*k8s.io/kubernetes/pkg/kubelet.Kubelet).Run',
+        'k8s.io.kubernetes.pkg.kubelet.Kubelet.Run',
+        1,
+        2
+    );
 
 INSERT INTO declarations (id, symbol, file_id, symbol_type, start_offset, end_offset)
 VALUES

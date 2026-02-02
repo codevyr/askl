@@ -1,16 +1,16 @@
 use anyhow::Result;
-use diesel::dsl::Eq;
+use diesel::dsl::{sql, Eq};
 use diesel::helper_types::{AsSelect, InnerJoinQuerySource};
 use diesel::internal::table_macro::{BoxedSelectStatement, FromClause};
 use diesel::prelude::*;
 use diesel::query_source::{Alias, AliasedField};
 use diesel::pg::Pg;
-use diesel::sql_types::{Integer, Text};
-use diesel::{debug_query, sql_query};
+use diesel::sql_types::{Bool, Integer, Text};
 
 use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
 use crate::schema_diesel as index_schema;
-use crate::symbols::{clean_and_split_string, is_ordered_subset, DeclarationId};
+use crate::ltree::Ltree;
+use crate::symbols::{symbol_query_to_lquery, DeclarationId};
 
 use super::Connection;
 
@@ -78,7 +78,7 @@ pub type CurrentQuery<'a> = BoxedSelectStatement<
 
 type DeclarationColumnsSqlType = (Integer, Integer, Integer, Integer, Integer, Integer);
 
-type SymbolColumnsSqlType = (Integer, Text, Integer, Integer);
+type SymbolColumnsSqlType = (Integer, Text, Ltree, Integer, Integer);
 
 type ParentSelectionTuple = (
     AsSelect<SymbolRef, Pg>,
@@ -195,13 +195,8 @@ pub type ChildrenQuery<'a> = BoxedSelectStatement<
     Pg,
 >;
 
-#[derive(Debug, Clone, PartialEq, QueryableByName)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-struct SymbolMatch {
-    #[diesel(sql_type = Integer)]
-    pub id: i32,
-    #[diesel(sql_type = Text)]
-    pub name: String,
+fn ltree_filter_sql(column: &str, lquery: &str) -> String {
+    format!("{} ~ '{}'::lquery", column, lquery)
 }
 
 pub trait SymbolSearchMixin: std::fmt::Debug {
@@ -236,58 +231,22 @@ pub trait SymbolSearchMixin: std::fmt::Debug {
 
 #[derive(Debug, Clone)]
 pub struct CompoundNameMixin {
-    pub compound_name: Vec<String>,
-    pub name_pattern: String,
     pub raw_name: String,
-
-    matched_symbols: Vec<i32>,
+    lquery: Option<String>,
 }
 
 impl CompoundNameMixin {
     pub fn new(compound_name: &str) -> Self {
-        let name_slice = clean_and_split_string(&compound_name);
         Self {
-            compound_name: name_slice,
-            name_pattern: String::new(),
             raw_name: compound_name.to_string(),
-            matched_symbols: Vec::new(),
+            lquery: symbol_query_to_lquery(compound_name),
         }
     }
 }
 
 impl SymbolSearchMixin for CompoundNameMixin {
-    fn enter(&mut self, connection: &mut Connection) -> Result<()> {
-        let name_pattern = self.compound_name.join("%");
-        self.name_pattern = format!("%{}%", name_pattern);
-
-        let matched_symbols_query = sql_query(
-            "SELECT id, name FROM index.symbols WHERE name % $1 ORDER BY similarity(name, $1) DESC",
-        )
-        .bind::<Text, _>(&self.raw_name);
-
-        println!(
-            "Executing trigram query: {:?}",
-            debug_query::<Pg, _>(&matched_symbols_query)
-        );
-
-        let symbol_matches: Vec<SymbolMatch> = {
-            let _matched_symbols_query: tracing::span::EnteredSpan =
-                tracing::info_span!("matched_symbols").entered();
-            matched_symbols_query
-                .load::<SymbolMatch>(connection)
-                .map_err(|e| anyhow::anyhow!("Failed to query trigram index: {}", e))?
-        };
-
-        self.matched_symbols = symbol_matches
-            .into_iter()
-            .filter(|matched| {
-                let cleaned_name = clean_and_split_string(&matched.name);
-                is_ordered_subset(&cleaned_name, &self.compound_name)
-            })
-            .map(|matched| matched.id)
-            .collect();
-        println!("Matched {} symbols", self.matched_symbols.len());
-        println!("Searching for symbols with name pattern: {}", self.name_pattern);
+    fn enter(&mut self, _connection: &mut Connection) -> Result<()> {
+        println!("Searching for symbols by lquery: {:?}", self.lquery);
         Ok(())
     }
 
@@ -296,13 +255,12 @@ impl SymbolSearchMixin for CompoundNameMixin {
         _connection: &mut Connection,
         query: CurrentQuery<'a>,
     ) -> Result<CurrentQuery<'a>> {
-        use crate::schema_diesel::*;
-
-        let symbol_ids: Vec<i32> = self.matched_symbols.clone();
-
-        Ok(query
-            .filter(symbols::dsl::id.eq_any(symbol_ids))
-            .filter(symbols::dsl::name.ilike(self.name_pattern.clone())))
+        if let Some(lquery) = &self.lquery {
+            let filter_sql = ltree_filter_sql("symbols.symbol_path", lquery);
+            Ok(query.filter(sql::<Bool>(&filter_sql)))
+        } else {
+            Ok(query)
+        }
     }
 
     fn filter_parents<'a>(
@@ -310,21 +268,12 @@ impl SymbolSearchMixin for CompoundNameMixin {
         _connection: &mut Connection,
         query: ParentsQuery<'a>,
     ) -> Result<ParentsQuery<'a>> {
-        use crate::schema_diesel::symbols;
-
-        let symbol_ids: Vec<i32> = self.matched_symbols.clone();
-
-        Ok(query
-            .filter(
-                CHILDREN_SYMBOLS_ALIAS
-                    .field(symbols::dsl::id)
-                    .eq_any(symbol_ids),
-            )
-            .filter(
-                CHILDREN_SYMBOLS_ALIAS
-                    .field(symbols::dsl::name)
-                    .ilike(self.name_pattern.clone()),
-            ))
+        if let Some(lquery) = &self.lquery {
+            let filter_sql = ltree_filter_sql("children_symbols.symbol_path", lquery);
+            Ok(query.filter(sql::<Bool>(&filter_sql)))
+        } else {
+            Ok(query)
+        }
     }
 
     fn filter_children<'a>(
@@ -332,19 +281,12 @@ impl SymbolSearchMixin for CompoundNameMixin {
         _connection: &mut Connection,
         query: ChildrenQuery<'a>,
     ) -> Result<ChildrenQuery<'a>> {
-        let symbol_ids: Vec<i32> = self.matched_symbols.clone();
-
-        Ok(query
-            .filter(
-                PARENT_SYMBOLS_ALIAS
-                    .field(index_schema::symbols::dsl::id)
-                    .eq_any(symbol_ids),
-            )
-            .filter(
-                PARENT_SYMBOLS_ALIAS
-                    .field(index_schema::symbols::dsl::name)
-                    .ilike(self.name_pattern.clone()),
-            ))
+        if let Some(lquery) = &self.lquery {
+            let filter_sql = ltree_filter_sql("parent_symbols.symbol_path", lquery);
+            Ok(query.filter(sql::<Bool>(&filter_sql)))
+        } else {
+            Ok(query)
+        }
     }
 }
 

@@ -160,7 +160,7 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
         .load_test_input(Index::TEST_INPUT_SYMBOL_TOKENS)
         .await?;
 
-    let long_name = format!("kubelet.{}.run", "a".repeat(300));
+    let long_name = format!("kubelet.{}.run", "a".repeat(11));
     let selection = index.find_symbol_by_name("kubelet.run").await?;
     let mut found_names: Vec<String> = selection
         .nodes

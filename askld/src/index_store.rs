@@ -9,7 +9,9 @@ use sha2::{Digest, Sha256};
 use tokio::task;
 
 use crate::proto::askl::index::{IndexUpload, Module as UploadModule};
+use index::ltree::LtreePath;
 use index::schema_diesel as index_schema;
+use index::symbols::symbol_name_to_path;
 
 const MAX_INSERT_ROWS: usize = 1000;
 
@@ -85,6 +87,7 @@ struct NewFileContent {
 #[diesel(table_name = index_schema::symbols)]
 struct NewSymbol {
     name: String,
+    symbol_path: LtreePath,
     module: i32,
     symbol_scope: i32,
 }
@@ -427,6 +430,7 @@ fn build_symbols(
                 local_id: symbol.local_id,
                 row: NewSymbol {
                     name: symbol.name.clone(),
+                    symbol_path: LtreePath(symbol_name_to_path(&symbol.name)),
                     module: *module_id,
                     symbol_scope: symbol.scope,
                 },

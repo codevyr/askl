@@ -536,6 +536,47 @@ pub fn clean_and_split_string(input: &str) -> Vec<String> {
         .collect()
 }
 
+pub fn normalize_symbol_tokens(input: &str) -> Vec<String> {
+    clean_and_split_string(input)
+        .into_iter()
+        .filter_map(|token| {
+            let cleaned: String = token
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if cleaned.is_empty() {
+                None
+            } else {
+                Some(cleaned)
+            }
+        })
+        .collect()
+}
+
+pub fn symbol_name_to_path(input: &str) -> String {
+    let tokens = normalize_symbol_tokens(input);
+    if tokens.is_empty() {
+        "unknown".to_string()
+    } else {
+        tokens.join(".")
+    }
+}
+
+pub fn symbol_query_to_lquery(input: &str) -> Option<String> {
+    let tokens = normalize_symbol_tokens(input);
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let mut parts: Vec<String> = Vec::with_capacity(tokens.len() * 2 + 1);
+    parts.push("*{0,}".to_string());
+    for token in tokens {
+        parts.push(token);
+        parts.push("*{0,}".to_string());
+    }
+    Some(parts.join("."))
+}
+
 /// Checks if `subset` is an ordered subset of `superset`.
 ///
 /// An ordered subset means that the elements in `subset` appear in the same order

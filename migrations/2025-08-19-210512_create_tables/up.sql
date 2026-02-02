@@ -1,6 +1,7 @@
 CREATE SCHEMA IF NOT EXISTS index;
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS ltree;
 
 CREATE TABLE IF NOT EXISTS index.projects
 (
@@ -30,12 +31,14 @@ CREATE TABLE IF NOT EXISTS index.symbols
 (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
+    symbol_path LTREE NOT NULL,
     module INTEGER NOT NULL REFERENCES index.modules(id) ON DELETE CASCADE,
     symbol_scope INTEGER NOT NULL,
     UNIQUE (name, module)
 );
 
 CREATE INDEX IF NOT EXISTS symbols_name_trgm_idx ON index.symbols USING GIN (name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS symbols_path_idx ON index.symbols USING GIST (symbol_path);
 
 CREATE TABLE IF NOT EXISTS index.declarations
 (

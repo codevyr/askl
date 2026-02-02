@@ -62,6 +62,7 @@ pub struct Project {
 pub struct Symbol {
     pub id: i32,
     pub name: String,
+    pub symbol_path: String,
     pub module: i32,
     pub symbol_scope: i32,
 }

@@ -55,9 +55,13 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::*;
+    use crate::ltree::Ltree;
+
     index.symbols (id) {
         id -> Integer,
         name -> Text,
+        symbol_path -> Ltree,
         module -> Integer,
         symbol_scope -> Integer,
     }
