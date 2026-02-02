@@ -12,14 +12,14 @@ INSERT INTO files (id, module, module_path, filesystem_path, filetype, content_h
 VALUES
     (1, 1, 'main.c', '/main.c', 'cc', '');
 
-INSERT INTO symbols (id, name, symbol_path, module, symbol_scope)
+INSERT INTO symbols (id, name, module, symbol_scope)
 VALUES
-    (1, 'foo', 'foo', 1, 1),
-    (2, 'foo.bar', 'foo.bar', 1, 1),
-    (3, 'foobar', 'foobar', 1, 1),
-    (4, 'tar', 'tar', 1, 1),
-    (5, 'sort.IsSorted', 'sort.IsSorted', 1, 1),
-    (6, 'sort.Sort', 'sort.Sort', 1, 1);
+    (1, 'foo', 1, 1),
+    (2, 'foo.bar', 1, 1),
+    (3, 'foobar', 1, 1),
+    (4, 'tar', 1, 1),
+    (5, 'sort.IsSorted', 1, 1),
+    (6, 'sort.Sort', 1, 1);
 
 INSERT INTO declarations (id, symbol, file_id, symbol_type, start_offset, end_offset)
 VALUES

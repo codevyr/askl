@@ -18,20 +18,20 @@ VALUES
     (3, 2, 'main.c', '/other_main.c', 'cc', ''),
     (4, 3, 'main.c', '/project_only_main.c', 'cc', '');
 
-INSERT INTO symbols (id, name, symbol_path, module, symbol_scope)
+INSERT INTO symbols (id, name, module, symbol_scope)
 VALUES
-    (1,   'a',    'a',    1, 1),
-    (2,   'b',    'b',    1, 1),
-    (3,   'c',    'c',    1, 1),
-    (4,   'd',    'd',    1, 1),
-    (5,   'e',    'e',    1, 1),
-    (6,   'f',    'f',    1, 1),
-    (7,   'g',    'g',    1, 1),
-    (42,  'main', 'main', 1, 1),
-    (101, 'a',    'a',    2, 1),
-    (102, 'b',    'b',    2, 1),
-    (142, 'main', 'main', 2, 1),
-    (301, 'a',    'a',    3, 1);
+    (1,   'a',    1, 1),
+    (2,   'b',    1, 1),
+    (3,   'c',    1, 1),
+    (4,   'd',    1, 1),
+    (5,   'e',    1, 1),
+    (6,   'f',    1, 1),
+    (7,   'g',    1, 1),
+    (42,  'main', 1, 1),
+    (101, 'a',    2, 1),
+    (102, 'b',    2, 1),
+    (142, 'main', 2, 1),
+    (301, 'a',    3, 1);
 
 INSERT INTO declarations (id, symbol, file_id, symbol_type, start_offset, end_offset)
 VALUES

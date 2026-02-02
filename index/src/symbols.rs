@@ -45,8 +45,7 @@ impl Occurrence {
         let end = range.end.expansion_loc.as_ref()?;
         let file = begin.file.clone().to_string();
         let content = fs::read(&file).ok()?;
-        let start_offset =
-            offset_from_line_col(&content, begin.line as usize, begin.col as usize)?;
+        let start_offset = offset_from_line_col(&content, begin.line as usize, begin.col as usize)?;
         let end_offset = offset_from_line_col(&content, end.line as usize, end.col as usize)?;
         Some((start_offset, end_offset))
     }
@@ -569,10 +568,10 @@ pub fn symbol_query_to_lquery(input: &str) -> Option<String> {
     }
 
     let mut parts: Vec<String> = Vec::with_capacity(tokens.len() * 2 + 1);
-    parts.push("*{0,}".to_string());
+    parts.push("*".to_string());
     for token in tokens {
         parts.push(token);
-        parts.push("*{0,}".to_string());
+        parts.push("*".to_string());
     }
     Some(parts.join("."))
 }
