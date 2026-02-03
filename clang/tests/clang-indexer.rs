@@ -1,5 +1,5 @@
 use dotenv::dotenv;
-use std::{env, ops::Bound, path::Path};
+use std::{env, path::Path};
 
 use index::{
     db::{Module, Symbol},
@@ -74,7 +74,7 @@ fn mask_declaration(symbol: &Declaration) -> Declaration {
         // name: symbol.name.clone(),
         file_id: symbol.file_id,
         symbol_type: symbol.symbol_type,
-        offset_range: (Bound::Unbounded, Bound::Unbounded),
+        offset_range: (0, 0),
     }
 }
 
@@ -218,8 +218,8 @@ pub async fn from_index(index: &Index) -> Result<()> {
         let occurrence = Occurrence {
             file: from_declaration.file_id,
             offset_range: (
-                Bound::Included(reference.from_offset_start as i32),
-                Bound::Included(reference.from_offset_end as i32),
+                reference.from_offset_start as i32,
+                reference.from_offset_end as i32,
             ),
         };
         from_symbol.add_child(reference.to_symbol, occurrence.clone());

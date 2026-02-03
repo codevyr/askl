@@ -5,7 +5,6 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePool},
     Pool, Sqlite,
 };
-use std::ops::Bound;
 #[cfg(feature = "legacy-sqlite")]
 use std::{path::Path, str::FromStr};
 
@@ -38,7 +37,7 @@ pub struct Declaration {
     pub symbol: SymbolId,
     pub file_id: FileId,
     pub symbol_type: SymbolType,
-    pub offset_range: (Bound<i32>, Bound<i32>),
+    pub offset_range: (i32, i32),
 }
 
 impl Declaration {
@@ -53,7 +52,7 @@ impl Declaration {
             symbol,
             file_id,
             symbol_type,
-            offset_range: (Bound::Unbounded, Bound::Unbounded),
+            offset_range: (0, 0),
         }
     }
 
@@ -71,10 +70,7 @@ impl Declaration {
             symbol,
             file_id,
             symbol_type,
-            offset_range: (
-                Bound::Included(start_offset as i32),
-                Bound::Excluded(end_offset as i32),
-            ),
+            offset_range: (start_offset as i32, end_offset as i32),
         })
     }
 

@@ -1,6 +1,3 @@
-use std::collections::{HashMap, HashSet};
-use std::ops::Bound;
-
 use actix_web::{
     delete, dev::Service, get, http::header, post, web, App, HttpRequest, HttpResponse, HttpServer,
     Responder,
@@ -12,6 +9,7 @@ use askld::auth::{
 };
 use askld::execution_context::ExecutionContext;
 use askld::index_store::{IndexStore, StoreError, UploadError};
+use askld::offset_range::range_bounds_to_offsets;
 use askld::parser::Rule;
 use askld::proto::askl::index::IndexUpload;
 use askld::{auth, cfg::ControlFlowGraph, parser::parse};
@@ -24,6 +22,7 @@ use index::symbols::{DeclarationId, FileId, Occurrence, SymbolType};
 use log::{debug, error, info};
 use prost::Message;
 use serde::{Deserialize, Serialize, Serializer};
+use std::collections::{HashMap, HashSet};
 use tokio::time::{timeout, Duration};
 use tracing_chrome::ChromeLayerBuilder;
 use tracing_subscriber::layer::SubscriberExt;
@@ -180,22 +179,6 @@ impl Node {
     }
 }
 
-pub fn range_bounds_to_offsets(range: &(Bound<i32>, Bound<i32>)) -> Option<(i32, i32)> {
-    let start = match range.0 {
-        Bound::Included(value) => value,
-        Bound::Excluded(value) => value.saturating_add(1),
-        Bound::Unbounded => return None,
-    };
-
-    let end = match range.1 {
-        Bound::Excluded(value) => value,
-        Bound::Included(value) => value.saturating_add(1),
-        Bound::Unbounded => return None,
-    };
-
-    Some((start, end))
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct Edge {
     id: String,
@@ -210,11 +193,7 @@ struct Edge {
 
 impl Edge {
     fn new(from: SymbolId, to: SymbolId, occurrence: Option<Occurrence>) -> Self {
-        let range = if let Some(occurrence) = &occurrence {
-            range_bounds_to_offsets(&occurrence.offset_range)
-        } else {
-            None
-        };
+        let range = occurrence.as_ref().map(|o| o.offset_range.clone());
         Self {
             id: format!("{}-{}", from, to),
             from: from,
@@ -605,7 +584,7 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
                 symbol: SymbolId(d.declaration.symbol),
                 file_id: FileId::new(d.file.id),
                 symbol_type: SymbolType::from(d.declaration.symbol_type),
-                offset_range: d.declaration.offset_range.clone(),
+                offset_range: range_bounds_to_offsets(&d.declaration.offset_range).unwrap(),
             })
             .collect();
 

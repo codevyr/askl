@@ -6,6 +6,7 @@ pub mod execution_state;
 pub mod group;
 pub mod hierarchy;
 pub mod index_store;
+pub mod offset_range;
 pub mod parser;
 pub mod parser_context;
 pub mod proto;
