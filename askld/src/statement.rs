@@ -414,8 +414,7 @@ impl Statement {
 
                 let occurrence = Occurrence {
                     file: FileId::new(child.from_file.id),
-                    start_offset: child.symbol_ref.from_offset_start,
-                    end_offset: child.symbol_ref.from_offset_end,
+                    offset_range: child.symbol_ref.from_offset_range,
                 };
                 all_references.add_reference(
                     SymbolDeclId {
@@ -439,8 +438,7 @@ impl Statement {
 
                 let occurrence = Occurrence {
                     file: parent.from_declaration.file_id.into(),
-                    start_offset: parent.symbol_ref.from_offset_start,
-                    end_offset: parent.symbol_ref.from_offset_end,
+                    offset_range: parent.symbol_ref.from_offset_range,
                 };
                 all_references.add_reference(
                     SymbolDeclId {

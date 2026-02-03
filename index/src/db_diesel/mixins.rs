@@ -5,7 +5,7 @@ use diesel::internal::table_macro::{BoxedSelectStatement, FromClause};
 use diesel::prelude::*;
 use diesel::query_source::{Alias, AliasedField};
 use diesel::pg::Pg;
-use diesel::sql_types::{Bool, Integer, Text};
+use diesel::sql_types::{Bool, Int4range, Integer, Text};
 
 use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
 use crate::schema_diesel as index_schema;
@@ -76,7 +76,7 @@ pub type CurrentQuery<'a> = BoxedSelectStatement<
     Pg,
 >;
 
-type DeclarationColumnsSqlType = (Integer, Integer, Integer, Integer, Integer, Integer);
+type DeclarationColumnsSqlType = (Integer, Integer, Integer, Integer, Int4range);
 
 type SymbolColumnsSqlType = (Integer, Text, Ltree, Integer, Integer);
 

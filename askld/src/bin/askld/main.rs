@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Bound;
 
 use actix_web::{
-    delete, dev::Service, get,
-    http::header,
-    post, web, App, HttpRequest, HttpResponse, HttpServer, Responder,
+    delete, dev::Service, get, http::header, post, web, App, HttpRequest, HttpResponse, HttpServer,
+    Responder,
 };
 use anyhow::{anyhow, Result};
 use askld::auth::{
@@ -12,8 +12,8 @@ use askld::auth::{
 };
 use askld::execution_context::ExecutionContext;
 use askld::index_store::{IndexStore, StoreError, UploadError};
-use askld::proto::askl::index::IndexUpload;
 use askld::parser::Rule;
+use askld::proto::askl::index::IndexUpload;
 use askld::{auth, cfg::ControlFlowGraph, parser::parse};
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use diesel::pg::PgConnection;
@@ -180,6 +180,22 @@ impl Node {
     }
 }
 
+pub fn range_bounds_to_offsets(range: &(Bound<i32>, Bound<i32>)) -> Option<(i32, i32)> {
+    let start = match range.0 {
+        Bound::Included(value) => value,
+        Bound::Excluded(value) => value.saturating_add(1),
+        Bound::Unbounded => return None,
+    };
+
+    let end = match range.1 {
+        Bound::Excluded(value) => value,
+        Bound::Included(value) => value.saturating_add(1),
+        Bound::Unbounded => return None,
+    };
+
+    Some((start, end))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Edge {
     id: String,
@@ -193,19 +209,19 @@ struct Edge {
 }
 
 impl Edge {
-    fn new(from: SymbolId, to: SymbolId, occurence: Option<Occurrence>) -> Self {
-        let (filename, start_offset, end_offset) = if let Some(occ) = occurence {
-            (Some(occ.file), Some(occ.start_offset), Some(occ.end_offset))
+    fn new(from: SymbolId, to: SymbolId, occurrence: Option<Occurrence>) -> Self {
+        let range = if let Some(occurrence) = &occurrence {
+            range_bounds_to_offsets(&occurrence.offset_range)
         } else {
-            (None, None, None)
+            None
         };
         Self {
             id: format!("{}-{}", from, to),
             from: from,
             to: to,
-            from_file: filename,
-            from_offset_start: start_offset,
-            from_offset_end: end_offset,
+            from_file: occurrence.map(|o| o.file),
+            from_offset_start: range.map(|r| r.0),
+            from_offset_end: range.map(|r| r.1),
         }
     }
 }
@@ -349,11 +365,7 @@ async fn create_api_key(
     let expires_at_response = expires_at.as_ref().map(|value| value.to_rfc3339());
 
     match auth_store
-        .create_api_key(
-            payload.email.trim(),
-            payload.name.as_deref(),
-            expires_at,
-        )
+        .create_api_key(payload.email.trim(), payload.name.as_deref(), expires_at)
         .await
     {
         Ok(token) => HttpResponse::Ok().json(CreateApiKeyResponse {
@@ -593,8 +605,7 @@ async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
                 symbol: SymbolId(d.declaration.symbol),
                 file_id: FileId::new(d.file.id),
                 symbol_type: SymbolType::from(d.declaration.symbol_type),
-                start_offset: d.declaration.start_offset as i64,
-                end_offset: d.declaration.end_offset as i64,
+                offset_range: d.declaration.offset_range.clone(),
             })
             .collect();
 

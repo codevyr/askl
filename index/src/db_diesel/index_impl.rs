@@ -3,6 +3,7 @@ use diesel::connection::SimpleConnection;
 use diesel::pg::{Pg, PgConnection};
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool};
+use diesel::PgRangeExpressionMethods;
 use diesel_migrations::MigrationHarness;
 
 use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
@@ -150,9 +151,7 @@ impl Index {
                     declarations::dsl::declarations
                         .on(symbols::dsl::id.eq(declarations::dsl::symbol)),
                 )
-                .inner_join(
-                    modules::dsl::modules.on(symbols::dsl::module.eq(modules::dsl::id)),
-                )
+                .inner_join(modules::dsl::modules.on(symbols::dsl::module.eq(modules::dsl::id)))
                 .inner_join(
                     projects::dsl::projects.on(projects::dsl::id.eq(modules::dsl::project_id)),
                 )
@@ -201,13 +200,8 @@ impl Index {
                 )
                 .filter(
                     parent_decls
-                        .field(declarations::dsl::start_offset)
-                        .le(symbol_refs::dsl::from_offset_start),
-                )
-                .filter(
-                    parent_decls
-                        .field(declarations::dsl::end_offset)
-                        .ge(symbol_refs::dsl::from_offset_end),
+                        .field(declarations::dsl::offset_range)
+                        .contains_range(symbol_refs::dsl::from_offset_range),
                 )
                 .select((
                     SymbolRef::as_select(),
@@ -242,13 +236,8 @@ impl Index {
                 )
                 .filter(
                     parent_decls
-                        .field(declarations::dsl::start_offset)
-                        .le(symbol_refs::dsl::from_offset_start),
-                )
-                .filter(
-                    parent_decls
-                        .field(declarations::dsl::end_offset)
-                        .ge(symbol_refs::dsl::from_offset_end),
+                        .field(declarations::dsl::offset_range)
+                        .contains_range(symbol_refs::dsl::from_offset_range),
                 )
                 .inner_join(
                     parent_symbols.on(parent_symbols

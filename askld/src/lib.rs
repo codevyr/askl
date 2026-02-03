@@ -1,11 +1,11 @@
+pub mod auth;
 pub mod cfg;
 pub mod command;
-pub mod auth;
 pub mod execution_context;
 pub mod execution_state;
-pub mod index_store;
 pub mod group;
 pub mod hierarchy;
+pub mod index_store;
 pub mod parser;
 pub mod parser_context;
 pub mod proto;

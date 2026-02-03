@@ -259,8 +259,7 @@ impl Selector for ForcedVerb {
                         id: 0,
                         to_symbol: child_node.symbol.id,
                         from_file: parent_node.file.id,
-                        from_offset_start: parent_node.declaration.start_offset as i32,
-                        from_offset_end: parent_node.declaration.end_offset as i32,
+                        from_offset_range: parent_node.declaration.offset_range.clone(),
                     },
                 };
                 fake_parent_references.push(reference);

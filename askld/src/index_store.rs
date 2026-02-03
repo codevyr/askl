@@ -95,8 +95,7 @@ struct NewDeclaration {
     symbol: i32,
     file_id: i32,
     symbol_type: i32,
-    start_offset: i32,
-    end_offset: i32,
+    offset_range: std::ops::Range<i32>,
 }
 
 #[derive(Insertable, Clone)]
@@ -104,8 +103,7 @@ struct NewDeclaration {
 struct NewSymbolRef {
     to_symbol: i32,
     from_file: i32,
-    from_offset_start: i32,
-    from_offset_end: i32,
+    from_offset_range: std::ops::Range<i32>,
 }
 
 impl From<diesel::result::Error> for UploadError {
@@ -484,8 +482,7 @@ fn build_declarations(
                     symbol: *symbol_id,
                     file_id: *file_id,
                     symbol_type: declaration.symbol_type,
-                    start_offset: declaration.start_offset,
-                    end_offset: declaration.end_offset,
+                    offset_range: declaration.start_offset..declaration.end_offset,
                 });
             }
         }
@@ -517,8 +514,7 @@ fn build_symbol_refs(
                 rows.push(NewSymbolRef {
                     to_symbol: *symbol_id,
                     from_file: *file_id,
-                    from_offset_start: reference.from_offset_start,
-                    from_offset_end: reference.from_offset_end,
+                    from_offset_range: reference.from_offset_start..reference.from_offset_end,
                 });
             }
         }
