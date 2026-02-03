@@ -3,13 +3,16 @@ pub mod command;
 pub mod auth;
 pub mod execution_context;
 pub mod execution_state;
+pub mod index_store;
 pub mod group;
 pub mod hierarchy;
 pub mod parser;
 pub mod parser_context;
+pub mod proto;
 pub mod scope;
 pub mod span;
 pub mod statement;
+pub mod test_support;
 pub mod verb;
 
 #[cfg(test)]

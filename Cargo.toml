@@ -26,4 +26,7 @@ futures = "0.3"
 actix-web = "4"
 rand = "0.8"
 sqlx = { version = "0.7", features = [ "runtime-tokio", "sqlite", "macros" ] }
-diesel = { version = "2.2", features = ["returning_clauses_for_sqlite_3_35", "sqlite"] }
+diesel = { version = "2.2", features = ["postgres", "r2d2", "chrono", "uuid"] }
+prost = "0.12"
+prost-build = "0.12"
+protoc-bin-vendored = "3.0.0"

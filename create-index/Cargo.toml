@@ -8,6 +8,4 @@ edition = "2021"
 
 anyhow = {workspace = true}
 clap = {workspace = true}
-tokio = {workspace = true}
-sqlx = {workspace = true}
 env_logger = {workspace = true}

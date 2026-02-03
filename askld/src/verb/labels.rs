@@ -241,7 +241,7 @@ impl Selector for UserVerb {
                     to_declaration: child_node.declaration.clone(),
                     from_declaration: parent_node.declaration.clone(),
                     symbol_ref: SymbolRef {
-                        rowid: 0,
+                        id: 0,
                         to_symbol: child_node.symbol.id,
                         from_file: parent_node.file.id,
                         from_offset_start: parent_node.declaration.start_offset as i32,

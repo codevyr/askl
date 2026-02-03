@@ -1,4 +1,5 @@
 use askld::auth::{AuthError, AuthStore};
+use askld::test_support::wait_for_postgres;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::sql_types::BigInt;
@@ -24,6 +25,8 @@ async fn auth_store_round_trip_with_postgres() {
     let node = docker.run(image);
     let port = node.get_host_port_ipv4(5432);
     let url = format!("postgres://postgres:postgres@127.0.0.1:{}/askl", port);
+
+    wait_for_postgres(&url).await.expect("wait for postgres");
 
     let store = AuthStore::connect(&url).expect("connect auth store");
     let token = store
@@ -77,10 +80,10 @@ async fn auth_store_round_trip_with_postgres() {
     assert!(matches!(err, AuthError::RevokedToken));
 
     let mut conn = PgConnection::establish(&url).expect("connect pg");
-    let user_count: CountRow = diesel::sql_query("SELECT COUNT(*) as count FROM users")
+    let user_count: CountRow = diesel::sql_query("SELECT COUNT(*) as count FROM auth.users")
         .get_result(&mut conn)
         .expect("count users");
-    let key_count: CountRow = diesel::sql_query("SELECT COUNT(*) as count FROM api_keys")
+    let key_count: CountRow = diesel::sql_query("SELECT COUNT(*) as count FROM auth.api_keys")
         .get_result(&mut conn)
         .expect("count api_keys");
 

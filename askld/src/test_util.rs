@@ -4,11 +4,14 @@ use crate::statement::ExecutionResult;
 use crate::{cfg::ControlFlowGraph, parser::parse};
 use anyhow::Result;
 use index::db_diesel::Index;
+use testcontainers::{clients, core::WaitFor, GenericImage};
 use tokio::{runtime::Runtime, task};
 
-pub const TEST_INPUT_A: &'static str = index::db::Index::TEST_INPUT_A;
-pub const TEST_INPUT_B: &'static str = index::db::Index::TEST_INPUT_B;
-pub const TEST_INPUT_MODULES: &'static str = index::db::Index::TEST_INPUT_MODULES;
+use crate::test_support::wait_for_postgres;
+
+pub const TEST_INPUT_A: &'static str = index::db_diesel::Index::TEST_INPUT_A;
+pub const TEST_INPUT_B: &'static str = index::db_diesel::Index::TEST_INPUT_B;
+pub const TEST_INPUT_MODULES: &'static str = index::db_diesel::Index::TEST_INPUT_MODULES;
 
 pub fn format_edges(edges: EdgeList) -> Vec<String> {
     edges
@@ -19,7 +22,21 @@ pub fn format_edges(edges: EdgeList) -> Vec<String> {
 }
 
 pub async fn run_query_async_err(askl_input: &str, askl_query: &str) -> Result<ExecutionResult> {
-    let index_diesel = Index::new_in_memory().await.unwrap();
+    let docker = clients::Cli::default();
+    let image = GenericImage::new("postgres", "15-alpine")
+        .with_env_var("POSTGRES_PASSWORD", "postgres")
+        .with_env_var("POSTGRES_USER", "postgres")
+        .with_env_var("POSTGRES_DB", "askl")
+        .with_wait_for(WaitFor::message_on_stdout(
+            "database system is ready to accept connections",
+        ));
+    let node = docker.run(image);
+    let port = node.get_host_port_ipv4(5432);
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{}/askl", port);
+
+    wait_for_postgres(&url).await?;
+
+    let index_diesel = Index::connect(&url).await.unwrap();
     index_diesel.load_test_input(askl_input).await.unwrap();
     let cfg = ControlFlowGraph::from_symbols(index_diesel);
 

@@ -1,9 +1,8 @@
 use anyhow::Result;
 use diesel::connection::SimpleConnection;
+use diesel::pg::{Pg, PgConnection};
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool};
-use diesel::sqlite::Sqlite;
-use diesel::SqliteConnection;
 use diesel_migrations::MigrationHarness;
 
 use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
@@ -17,72 +16,40 @@ use super::selection::{ChildReference, ParentReference, Selection, SelectionNode
 use super::Connection;
 
 pub struct Index {
-    pub(super) pool: Pool<ConnectionManager<SqliteConnection>>,
+    pub(super) pool: Pool<ConnectionManager<PgConnection>>,
 }
 
 impl Index {
-    fn setup(connection: &mut Connection) -> Result<()> {
-        connection.batch_execute(
-            r#"
-        DROP TABLE IF EXISTS symbols_fts;
-        CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
-            name,                                    -- the tokenized text
-            content='symbols',                        -- link to base table
-            content_rowid='id',                       -- rowid = symbols.id
-            tokenize='ascii'  -- default tokenization; '.' stays a separator
-        );
-
-        INSERT INTO symbols_fts(rowid, name)
-        SELECT id, name FROM symbols;
-        "#,
-        )?;
-
-        Ok(())
+    pub fn from_pool(pool: Pool<ConnectionManager<PgConnection>>) -> Result<Self> {
+        let connection = &mut pool
+            .get()
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+        connection
+            .run_pending_migrations(super::MIGRATIONS)
+            .map_err(|e| anyhow::anyhow!("Failed to run migrations: {}", e))?;
+        Ok(Self { pool })
     }
 
-    pub async fn connect(database: &str) -> Result<Self> {
-        let manager = ConnectionManager::<SqliteConnection>::new(database);
-
+    pub async fn connect(database_url: &str) -> Result<Self> {
+        let manager = ConnectionManager::<PgConnection>::new(database_url);
         let pool = Pool::builder()
             .test_on_check_out(true)
             .build(manager)
             .map_err(|e| anyhow::anyhow!("Failed to create connection pool: {}", e))?;
 
-        let connection = &mut pool.get().unwrap();
-        connection
-            .run_pending_migrations(super::MIGRATIONS)
-            .unwrap();
-
-        Self::setup(connection)?;
-
-        Ok(Self { pool })
+        Self::from_pool(pool)
     }
 
     pub async fn new_in_memory() -> Result<Self> {
-        let db_url = format!("file::memory:?mode=memory");
-        let manager = ConnectionManager::<SqliteConnection>::new(db_url);
-
-        let pool = Pool::builder()
-            .test_on_check_out(true)
-            .build(manager)
-            .map_err(|e| anyhow::anyhow!("Failed to create connection pool: {}", e))?;
-
-        let connection = &mut pool.get().unwrap();
-        connection
-            .batch_execute(include_str!("../../../sql/create_tables.sql"))
-            .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))?;
-
-        connection
-            .run_pending_migrations(super::MIGRATIONS)
-            .unwrap();
-        Self::setup(connection)?;
-
-        Ok(Self { pool })
+        Err(anyhow::anyhow!(
+            "In-memory Postgres is not supported; use Index::connect with a test database"
+        ))
     }
 
     pub const TEST_INPUT_A: &'static str = "test_input_a.sql";
     pub const TEST_INPUT_B: &'static str = "test_input_b.sql";
     pub const TEST_INPUT_MODULES: &'static str = "test_input_modules.sql";
+    pub const TEST_INPUT_SYMBOL_TOKENS: &'static str = "test_input_symbol_tokens.sql";
 
     pub async fn load_test_input(&self, input_path: &str) -> Result<()> {
         let connection = &mut self.pool.get().unwrap();
@@ -115,6 +82,12 @@ impl Index {
                     .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
                     .unwrap();
             }
+            "test_input_symbol_tokens.sql" => {
+                connection
+                    .batch_execute(include_str!("../../../sql/test_input_symbol_tokens.sql"))
+                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
+                    .unwrap();
+            }
             "verb_test.sql" => {
                 connection
                     .batch_execute(include_str!("../../../sql/verb_test.sql"))
@@ -123,8 +96,6 @@ impl Index {
             }
             _ => panic!("Impossible input file"),
         };
-
-        Self::setup(connection)?;
 
         Ok(())
     }
@@ -193,7 +164,7 @@ impl Index {
                     File::as_select(),
                     Project::as_select(),
                 ))
-                .into_boxed::<Sqlite>();
+                .into_boxed::<Pg>();
 
             for mixin in mixins.iter_mut() {
                 joined_query = mixin.filter_current(connection, joined_query)?;
@@ -244,7 +215,7 @@ impl Index {
                     Declaration::as_select(),
                     parent_decls.fields(crate::schema_diesel::declarations::all_columns),
                 ))
-                .into_boxed::<Sqlite>();
+                .into_boxed::<Pg>();
 
             for mixin in mixins.iter_mut() {
                 parents_query = mixin.filter_parents(connection, parents_query)?;
@@ -296,7 +267,7 @@ impl Index {
                     SymbolRef::as_select(),
                     File::as_select(),
                 ))
-                .into_boxed::<Sqlite>();
+                .into_boxed::<Pg>();
 
             for mixin in mixins {
                 children_query = mixin.filter_children(connection, children_query)?;

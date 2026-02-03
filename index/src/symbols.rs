@@ -45,8 +45,7 @@ impl Occurrence {
         let end = range.end.expansion_loc.as_ref()?;
         let file = begin.file.clone().to_string();
         let content = fs::read(&file).ok()?;
-        let start_offset =
-            offset_from_line_col(&content, begin.line as usize, begin.col as usize)?;
+        let start_offset = offset_from_line_col(&content, begin.line as usize, begin.col as usize)?;
         let end_offset = offset_from_line_col(&content, end.line as usize, end.col as usize)?;
         Some((start_offset, end_offset))
     }
@@ -534,6 +533,47 @@ pub fn clean_and_split_string(input: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect()
+}
+
+pub fn normalize_symbol_tokens(input: &str) -> Vec<String> {
+    clean_and_split_string(input)
+        .into_iter()
+        .filter_map(|token| {
+            let cleaned: String = token
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if cleaned.is_empty() {
+                None
+            } else {
+                Some(cleaned)
+            }
+        })
+        .collect()
+}
+
+pub fn symbol_name_to_path(input: &str) -> String {
+    let tokens = normalize_symbol_tokens(input);
+    if tokens.is_empty() {
+        "unknown".to_string()
+    } else {
+        tokens.join(".")
+    }
+}
+
+pub fn symbol_query_to_lquery(input: &str) -> Option<String> {
+    let tokens = normalize_symbol_tokens(input);
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let mut parts: Vec<String> = Vec::with_capacity(tokens.len() * 2 + 1);
+    parts.push("*".to_string());
+    for token in tokens {
+        parts.push(token);
+        parts.push("*".to_string());
+    }
+    Some(parts.join("."))
 }
 
 /// Checks if `subset` is an ordered subset of `superset`.

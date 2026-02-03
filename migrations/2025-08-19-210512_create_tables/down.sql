@@ -1,6 +1,3 @@
--- This file should undo anything in `up.sql`
-DROP TABLE IF EXISTS symbol_refs;
-DROP TABLE IF EXISTS declarations;
-DROP TABLE IF EXISTS symbols;
-DROP TABLE IF EXISTS files;
-DROP TABLE IF EXISTS modules;
+DROP SCHEMA IF EXISTS index CASCADE;
+DROP EXTENSION IF EXISTS pg_trgm;
+DROP EXTENSION IF EXISTS ltree;

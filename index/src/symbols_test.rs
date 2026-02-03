@@ -1,4 +1,8 @@
 use crate::symbols::{package_match, partial_name_match, Symbol, SymbolId};
+use diesel::pg::PgConnection;
+use diesel::Connection;
+use testcontainers::{clients, core::WaitFor, Container, GenericImage};
+use tokio::time::{sleep, Duration};
 
 #[test]
 fn test_partial_name_matcher() {
@@ -75,11 +79,16 @@ fn test_package_matcher_with_multiple_patterns() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn test_find_symbol_by_name() -> anyhow::Result<()> {
     use crate::db_diesel::Index;
 
-    let index = Index::new_in_memory().await?;
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+
+    wait_for_postgres(&url).await?;
+
+    let index = Index::connect(&url).await?;
 
     // Test with empty database first
     let empty_selection = index.find_symbol_by_name("nonexistent").await?;
@@ -135,5 +144,92 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
         "Should find no symbols with compound name search"
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
+    use crate::db_diesel::Index;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+
+    wait_for_postgres(&url).await?;
+    let index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_SYMBOL_TOKENS)
+        .await?;
+
+    let long_name = format!("kubelet.{}.run", "a".repeat(11));
+    let selection = index.find_symbol_by_name("kubelet.run").await?;
+    let mut found_names: Vec<String> = selection
+        .nodes
+        .iter()
+        .map(|node| node.symbol.name.clone())
+        .collect();
+    found_names.sort();
+
+    assert_eq!(
+        found_names,
+        vec![long_name.clone()],
+        "Expected only exact-token ordered match"
+    );
+
+    let kubelet_run = "(*k8s.io/kubernetes/pkg/kubelet.Kubelet).Run".to_string();
+    let selection = index.find_symbol_by_name("kubelet").await?;
+    let mut found_names: Vec<String> = selection
+        .nodes
+        .iter()
+        .map(|node| node.symbol.name.clone())
+        .collect();
+    found_names.sort();
+
+    assert_eq!(
+        found_names,
+        vec![kubelet_run, long_name.clone()],
+        "Expected only exact-token ordered match"
+    );
+
+    let reverse_selection = index.find_symbol_by_name("run.kubelet").await?;
+    assert!(
+        reverse_selection.nodes.is_empty(),
+        "Expected token order mismatch to return no results"
+    );
+
+    Ok(())
+}
+
+fn start_postgres(docker: &clients::Cli) -> (Container<'_, GenericImage>, String) {
+    let image = GenericImage::new("postgres", "15-alpine")
+        .with_env_var("POSTGRES_PASSWORD", "postgres")
+        .with_env_var("POSTGRES_USER", "postgres")
+        .with_env_var("POSTGRES_DB", "askl")
+        .with_wait_for(WaitFor::message_on_stdout(
+            "database system is ready to accept connections",
+        ));
+    let node = docker.run(image);
+    let port = node.get_host_port_ipv4(5432);
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{}/askl", port);
+    (node, url)
+}
+
+async fn wait_for_postgres(url: &str) -> anyhow::Result<()> {
+    let mut delay = Duration::from_millis(50);
+    for attempt in 1..=10 {
+        match PgConnection::establish(url) {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                if attempt == 10 {
+                    return Err(anyhow::anyhow!(
+                        "Postgres not ready after {} attempts: {}",
+                        attempt,
+                        err
+                    ));
+                }
+            }
+        }
+        sleep(delay).await;
+        delay = std::cmp::min(delay * 2, Duration::from_secs(1));
+    }
     Ok(())
 }

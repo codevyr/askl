@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use actix_web::{
-    dev::Service, get, post, web, App, HttpRequest, HttpResponse, HttpServer, Responder,
+    delete, dev::Service, get,
+    http::header,
+    post, web, App, HttpRequest, HttpResponse, HttpServer, Responder,
 };
 use anyhow::{anyhow, Result};
 use askld::auth::{
@@ -9,13 +11,18 @@ use askld::auth::{
     ListApiKeysRequest, ListApiKeysResponse, RevokeApiKeyRequest, RevokeApiKeyResponse,
 };
 use askld::execution_context::ExecutionContext;
+use askld::index_store::{IndexStore, StoreError, UploadError};
+use askld::proto::askl::index::IndexUpload;
 use askld::parser::Rule;
 use askld::{auth, cfg::ControlFlowGraph, parser::parse};
 use clap::{Args as ClapArgs, Parser, Subcommand};
+use diesel::pg::PgConnection;
+use diesel::r2d2::{ConnectionManager, Pool};
 use index::db::{self};
 use index::symbols::SymbolId;
 use index::symbols::{DeclarationId, FileId, Occurrence, SymbolType};
 use log::{debug, error, info};
+use prost::Message;
 use serde::{Deserialize, Serialize, Serializer};
 use tokio::time::{timeout, Duration};
 use tracing_chrome::ChromeLayerBuilder;
@@ -34,19 +41,12 @@ struct Args {
 enum Command {
     Serve(ServeArgs),
     Auth(AuthArgs),
+    Index(IndexArgs),
 }
 
 #[derive(ClapArgs, Debug)]
 struct ServeArgs {
-    /// Path to the index file
-    #[clap(short, long)]
-    index: String,
-
-    /// Format of the index file
-    #[clap(short, long, default_value = "askl")]
-    format: String,
-
-    /// Postgres connection string for the auth DB
+    /// Postgres connection string for the auth and index DB
     #[clap(long, env = "ASKL_DATABASE_URL")]
     database_url: String,
 
@@ -100,11 +100,42 @@ enum AuthCommand {
     },
 }
 
+#[derive(ClapArgs, Debug)]
+struct IndexArgs {
+    #[clap(subcommand)]
+    command: IndexCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum IndexCommand {
+    Upload {
+        /// Path to protobuf payload file
+        #[clap(long = "file")]
+        file_path: String,
+        /// askld base URL
+        #[clap(long, default_value = "http://127.0.0.1:80")]
+        url: String,
+        /// Bearer token (falls back to ASKL_TOKEN)
+        #[clap(long)]
+        token: Option<String>,
+        /// Override project name from the protobuf payload
+        #[clap(long)]
+        project: Option<String>,
+        /// Request timeout in seconds (0 disables timeout)
+        #[clap(long, default_value = "30")]
+        timeout: u64,
+        /// Print JSON response only
+        #[clap(long, action)]
+        json: bool,
+    },
+}
+
 struct AsklData {
     cfg: ControlFlowGraph,
 }
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
 
 fn symbolid_as_string<S>(x: &SymbolId, s: S) -> Result<S::Ok, S::Error>
 where
@@ -264,6 +295,17 @@ struct ErrorResponse {
     line: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct IndexUploadResponse {
+    project_id: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct IndexDeleteResponse {
+    project_id: i32,
+    deleted: bool,
+}
+
 #[get("/version")]
 async fn version(_identity: AuthIdentity) -> impl Responder {
     HttpResponse::Ok().body(env!("CARGO_PKG_VERSION"))
@@ -388,6 +430,89 @@ async fn list_api_keys(
     }
 }
 
+async fn upload_index(
+    _identity: AuthIdentity,
+    store: web::Data<IndexStore>,
+    req: HttpRequest,
+    body: web::Bytes,
+) -> impl Responder {
+    let content_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !content_type.starts_with("application/x-protobuf") {
+        return HttpResponse::UnsupportedMediaType().body("Expected application/x-protobuf");
+    }
+
+    let upload = match IndexUpload::decode(body.as_ref()) {
+        Ok(upload) => upload,
+        Err(err) => {
+            return HttpResponse::BadRequest()
+                .body(format!("Failed to decode protobuf payload: {}", err));
+        }
+    };
+
+    match store.upload_index(upload).await {
+        Ok(project_id) => HttpResponse::Ok().json(IndexUploadResponse { project_id }),
+        Err(UploadError::Conflict) => HttpResponse::Conflict().body("Project already exists"),
+        Err(UploadError::Invalid(message)) => HttpResponse::BadRequest().body(message),
+        Err(UploadError::Storage(message)) => {
+            error!("Index upload failed: {}", message);
+            HttpResponse::InternalServerError().body("Failed to upload index")
+        }
+    }
+}
+
+#[get("/v1/index/projects")]
+async fn list_index_projects(
+    _identity: AuthIdentity,
+    store: web::Data<IndexStore>,
+) -> impl Responder {
+    match store.list_projects().await {
+        Ok(projects) => HttpResponse::Ok().json(projects),
+        Err(StoreError::Storage(message)) => {
+            error!("Failed to list projects: {}", message);
+            HttpResponse::InternalServerError().body("Failed to list projects")
+        }
+    }
+}
+
+#[get("/v1/index/projects/{project_id}")]
+async fn get_index_project(
+    _identity: AuthIdentity,
+    store: web::Data<IndexStore>,
+    project_id: web::Path<i32>,
+) -> impl Responder {
+    match store.get_project_details(*project_id).await {
+        Ok(Some(details)) => HttpResponse::Ok().json(details),
+        Ok(None) => HttpResponse::NotFound().body("Project not found"),
+        Err(StoreError::Storage(message)) => {
+            error!("Failed to load project {}: {}", project_id, message);
+            HttpResponse::InternalServerError().body("Failed to load project")
+        }
+    }
+}
+
+#[delete("/v1/index/projects/{project_id}")]
+async fn delete_index_project(
+    _identity: AuthIdentity,
+    store: web::Data<IndexStore>,
+    project_id: web::Path<i32>,
+) -> impl Responder {
+    match store.delete_project(*project_id).await {
+        Ok(true) => HttpResponse::Ok().json(IndexDeleteResponse {
+            project_id: *project_id,
+            deleted: true,
+        }),
+        Ok(false) => HttpResponse::NotFound().body("Project not found"),
+        Err(StoreError::Storage(message)) => {
+            error!("Failed to delete project {}: {}", project_id, message);
+            HttpResponse::InternalServerError().body("Failed to delete project")
+        }
+    }
+}
+
 #[post("/query")]
 async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     let _query = tracing::info_span!("query").entered();
@@ -502,17 +627,6 @@ async fn file(data: web::Data<AsklData>, file_id: web::Path<FileId>) -> impl Res
     }
 }
 
-async fn read_data(index_path: &str, format: &str) -> Result<AsklData> {
-    match format {
-        "sqlite" => {
-            let index_diesel = index::db_diesel::Index::connect(index_path).await?;
-            let cfg = ControlFlowGraph::from_symbols(index_diesel);
-            Ok(AsklData { cfg: cfg })
-        }
-        _ => Err(anyhow!("Unsupported index format: {}", format)),
-    }
-}
-
 async fn run_auth_command(port: u16, command: AuthCommand) -> Result<()> {
     match command {
         AuthCommand::CreateApiKey {
@@ -610,6 +724,89 @@ async fn run_auth_command(port: u16, command: AuthCommand) -> Result<()> {
     Ok(())
 }
 
+async fn run_index_command(command: IndexCommand) -> Result<()> {
+    match command {
+        IndexCommand::Upload {
+            file_path,
+            url,
+            token,
+            project,
+            timeout,
+            json,
+        } => {
+            use reqwest::header as reqwest_header;
+
+            let token = token.or_else(|| std::env::var("ASKL_TOKEN").ok());
+            let token = match token {
+                Some(token) if !token.trim().is_empty() => token,
+                _ => return Err(anyhow!("Missing token; pass --token or set ASKL_TOKEN")),
+            };
+
+            let payload = std::fs::read(&file_path)
+                .map_err(|err| anyhow!("Failed to read {}: {}", file_path, err))?;
+            if payload.is_empty() {
+                return Err(anyhow!("Payload file is empty: {}", file_path));
+            }
+
+            let payload = if let Some(project_name) = project {
+                let mut upload = IndexUpload::decode(payload.as_slice())
+                    .map_err(|err| anyhow!("Failed to decode protobuf payload: {}", err))?;
+                upload.project_name = project_name;
+                let mut buffer = Vec::with_capacity(upload.encoded_len());
+                upload.encode(&mut buffer)?;
+                buffer
+            } else {
+                payload
+            };
+
+            let mut base_url = url.trim().to_string();
+            if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+                base_url = format!("http://{}", base_url);
+            }
+            let base_url = base_url.trim_end_matches('/');
+            let endpoint = format!("{}/v1/index/upload", base_url);
+
+            let mut client_builder = reqwest::Client::builder();
+            if timeout > 0 {
+                client_builder = client_builder.timeout(Duration::from_secs(timeout));
+            }
+            let client = client_builder.build()?;
+
+            let response = client
+                .post(endpoint)
+                .header(reqwest_header::CONTENT_TYPE, "application/x-protobuf")
+                .header(reqwest_header::AUTHORIZATION, format!("Bearer {}", token))
+                .body(payload)
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                if status == reqwest::StatusCode::CONFLICT {
+                    let message = if body.trim().is_empty() {
+                        "Project already exists".to_string()
+                    } else {
+                        body
+                    };
+                    return Err(anyhow!("Request failed ({}): {}", status, message));
+                }
+                return Err(anyhow!("Request failed ({}): {}", status, body));
+            }
+
+            let result: IndexUploadResponse = response.json().await?;
+            if json {
+                let output = serde_json::to_string_pretty(&result)?;
+                println!("{}", output);
+            } else {
+                println!("Uploaded index; project id: {}", result.project_id);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
@@ -618,6 +815,13 @@ async fn main() -> std::io::Result<()> {
         Command::Auth(auth_args) => {
             if let Err(err) = run_auth_command(auth_args.port, auth_args.command).await {
                 eprintln!("Failed to create API key: {}", err);
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Command::Index(index_args) => {
+            if let Err(err) = run_index_command(index_args.command).await {
+                eprintln!("Failed to upload index: {}", err);
                 std::process::exit(1);
             }
             return Ok(());
@@ -650,13 +854,22 @@ async fn main() -> std::io::Result<()> {
         None
     };
 
-    let askl_data: AsklData = read_data(&serve_args.index, &serve_args.format)
-        .await
-        .expect("Failed to read data");
-    let askl_data = web::Data::new(askl_data);
-    let auth_store =
-        AuthStore::connect(&serve_args.database_url).expect("Failed to initialize auth store");
+    let manager = ConnectionManager::<PgConnection>::new(&serve_args.database_url);
+    let pool = Pool::builder()
+        .build(manager)
+        .expect("Failed to build database pool");
+
+    let auth_store = AuthStore::from_pool(pool.clone()).expect("Failed to initialize auth store");
     let auth_store = web::Data::new(auth_store);
+
+    let index_store = IndexStore::from_pool(pool.clone());
+    let index_store = web::Data::new(index_store);
+
+    let index_query =
+        index::db_diesel::Index::from_pool(pool.clone()).expect("Failed to initialize index");
+    let askl_data = web::Data::new(AsklData {
+        cfg: ControlFlowGraph::from_symbols(index_query),
+    });
 
     info!(
         "Starting server on {}:{}...",
@@ -673,10 +886,19 @@ async fn main() -> std::io::Result<()> {
             })
             .app_data(askl_data.clone())
             .app_data(auth_store.clone())
+            .app_data(index_store.clone())
             .service(version)
             .service(create_api_key)
             .service(revoke_api_key)
             .service(list_api_keys)
+            .service(
+                web::resource("/v1/index/upload")
+                    .app_data(web::PayloadConfig::new(MAX_UPLOAD_BYTES))
+                    .route(web::post().to(upload_index)),
+            )
+            .service(list_index_projects)
+            .service(get_index_project)
+            .service(delete_index_project)
             .service(query)
             .service(file)
     })

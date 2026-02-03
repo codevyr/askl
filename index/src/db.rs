@@ -1,11 +1,12 @@
-use std::{path::Path, str::FromStr};
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "legacy-sqlite")]
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePool},
     Pool, Sqlite,
 };
+#[cfg(feature = "legacy-sqlite")]
+use std::{path::Path, str::FromStr};
 
 use crate::symbols::{
     DeclarationId, FileId, ModuleId, Occurrence, ProjectId, SymbolId, SymbolScope, SymbolType,
@@ -63,10 +64,8 @@ impl Declaration {
         symbol_type: SymbolType,
         range: &Option<clang_ast::SourceRange>,
     ) -> Result<Self> {
-        let (start_offset, end_offset) =
-            Occurrence::offsets_from_range(range).ok_or(anyhow::anyhow!(
-                "Range does not provide byte offsets"
-            ))?;
+        let (start_offset, end_offset) = Occurrence::offsets_from_range(range)
+            .ok_or(anyhow::anyhow!("Range does not provide byte offsets"))?;
 
         Ok(Self {
             id: DeclarationId::invalid(),
@@ -177,10 +176,12 @@ pub struct DeclarationFull {
     pub parents: Vec<ReferenceFull>,
 }
 
+#[cfg(feature = "legacy-sqlite")]
 pub struct Index {
     pool: SqlitePool,
 }
 
+#[cfg(feature = "legacy-sqlite")]
 impl Index {
     pub async fn connect(database: &str) -> Result<Self> {
         let options = SqliteConnectOptions::new().filename(database);
@@ -190,12 +191,11 @@ impl Index {
         Ok(Self { pool })
     }
 
-    async fn create_tables(pool: &Pool<Sqlite>) -> Result<()> {
-        sqlx::query_file!("../sql/create_tables.sql")
-            .execute(pool)
-            .await?;
-
-        Ok(())
+    async fn create_tables(_pool: &Pool<Sqlite>) -> Result<()> {
+        panic!("Use migrations instead of create_tables");
+        // sqlx::query_file!("../sql/create_tables.sql")
+        //     .execute(pool)
+        //     .await?;
     }
 
     pub async fn new_in_memory() -> Result<Self> {
@@ -349,38 +349,38 @@ impl Index {
 
     pub async fn add_declaration(&self, declaration: Declaration) -> Result<Declaration> {
         let rec = sqlx::query_as!(
-                Declaration,
-                r#"
+            Declaration,
+            r#"
                 SELECT id, symbol, file_id, symbol_type, start_offset, end_offset
                 FROM declarations
                 WHERE symbol = ? AND file_id = ? AND start_offset = ? AND end_offset = ?
                 "#,
-                declaration.symbol,
-                declaration.file_id,
-                declaration.start_offset,
-                declaration.end_offset
-            )
-            .fetch_optional(&self.pool)
-            .await?;
+            declaration.symbol,
+            declaration.file_id,
+            declaration.start_offset,
+            declaration.end_offset
+        )
+        .fetch_optional(&self.pool)
+        .await?;
 
         if let Some(declaration) = rec {
             return Ok(declaration);
         }
 
         let rec = sqlx::query!(
-                r#"
+            r#"
                 INSERT INTO declarations (symbol, file_id, symbol_type, start_offset, end_offset)
                 VALUES (?, ?, ?, ?, ?)
                 RETURNING id
                 "#,
-                declaration.symbol,
-                declaration.file_id,
-                declaration.symbol_type,
-                declaration.start_offset,
-                declaration.end_offset
-            )
-            .fetch_one(&self.pool)
-            .await?;
+            declaration.symbol,
+            declaration.file_id,
+            declaration.symbol_type,
+            declaration.start_offset,
+            declaration.end_offset
+        )
+        .fetch_one(&self.pool)
+        .await?;
 
         let id: DeclarationId = rec.id.into();
 

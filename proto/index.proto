@@ -1,0 +1,55 @@
+syntax = "proto3";
+package askl.index;
+
+message IndexUpload {
+  string project_name = 1;
+  repeated Module modules = 2;
+}
+
+message Module {
+  int64 local_id = 1;           // Unique within project
+  string module_name = 2;
+  repeated File files = 3;
+  repeated Symbol symbols = 4;
+}
+
+message File {
+  int64 local_id = 1;           // Unique within project
+  string module_path = 2;
+  string filesystem_path = 3;   // Metadata only, never used for filesystem access
+  string filetype = 4;
+  bytes content = 5;            // File content (content_hash computed server-side)
+  repeated Declaration declarations = 6;  // Declarations in this file
+  repeated SymbolRef refs = 7;  // References from this file
+}
+
+message Symbol {
+  int64 local_id = 1;           // Unique within project
+  string name = 2;
+  SymbolScope scope = 3;
+}
+
+message Declaration {
+  int64 symbol_local_id = 1;    // References Symbol.local_id
+  SymbolType symbol_type = 2;
+  int32 start_offset = 3;
+  int32 end_offset = 4;
+}
+
+message SymbolRef {
+  int64 to_symbol_local_id = 1; // References Symbol.local_id (unique within project)
+  int32 from_offset_start = 2;
+  int32 from_offset_end = 3;
+}
+
+enum SymbolScope {
+  SYMBOL_SCOPE_UNSPECIFIED = 0;
+  LOCAL = 1;
+  GLOBAL = 2;
+}
+
+enum SymbolType {
+  SYMBOL_TYPE_UNSPECIFIED = 0;
+  DEFINITION = 1;
+  DECLARATION = 2;
+}

@@ -29,8 +29,14 @@ sqlx = {workspace = true}
 dotenv = "0.15.0"
 async-trait = "0.1.80"
 serde_stacker.workspace = true
-diesel = { workspace = true, features = ["returning_clauses_for_sqlite_3_35", "sqlite", "r2d2"] }
+diesel = { workspace = true, features = ["postgres", "r2d2"] }
 tempfile = "3.21.0"
 tracing-actix-web = "0.7.19"
 tracing = "0.1.41"
-diesel_migrations = { version = "2.2.0", features = ["sqlite"] }
+diesel_migrations = { version = "2.2.0", features = ["postgres"] }
+
+[features]
+legacy-sqlite = []
+
+[dev-dependencies]
+testcontainers = "0.15"
