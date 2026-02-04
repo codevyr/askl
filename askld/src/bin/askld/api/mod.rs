@@ -17,7 +17,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(auth::revoke_api_key)
         .service(auth::list_api_keys)
         .service(
-            web::resource("/v1/index/upload")
+            web::resource("/v1/index/projects")
                 .app_data(web::PayloadConfig::new(index::MAX_UPLOAD_BYTES))
                 .route(web::post().to(index::upload_index)),
         )

@@ -113,6 +113,46 @@ pub enum IndexCommand {
         #[clap(long, action)]
         json: bool,
     },
+    GetProject {
+        /// Project id to fetch
+        #[clap(long)]
+        id: Option<i32>,
+        /// Project name to fetch
+        #[clap(long)]
+        name: Option<String>,
+        /// askld base URL
+        #[clap(long, default_value = "http://127.0.0.1:80")]
+        url: String,
+        /// Bearer token (falls back to ASKL_TOKEN)
+        #[clap(long)]
+        token: Option<String>,
+        /// Request timeout in seconds (0 disables timeout)
+        #[clap(long, default_value = "30")]
+        timeout: u64,
+        /// Print JSON response only
+        #[clap(long, action)]
+        json: bool,
+    },
+    DeleteProject {
+        /// Project id to delete
+        #[clap(long)]
+        id: Option<i32>,
+        /// Project name to delete
+        #[clap(long)]
+        name: Option<String>,
+        /// askld base URL
+        #[clap(long, default_value = "http://127.0.0.1:80")]
+        url: String,
+        /// Bearer token (falls back to ASKL_TOKEN)
+        #[clap(long)]
+        token: Option<String>,
+        /// Request timeout in seconds (0 disables timeout)
+        #[clap(long, default_value = "30")]
+        timeout: u64,
+        /// Print JSON response only
+        #[clap(long, action)]
+        json: bool,
+    },
 }
 
 impl IndexCommand {
@@ -120,6 +160,8 @@ impl IndexCommand {
         match self {
             IndexCommand::Upload { .. } => "Failed to upload index",
             IndexCommand::ListProjects { .. } => "Failed to list projects",
+            IndexCommand::GetProject { .. } => "Failed to get project",
+            IndexCommand::DeleteProject { .. } => "Failed to delete project",
         }
     }
 }
