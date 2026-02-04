@@ -27,10 +27,10 @@ VALUES
         2
     );
 
-INSERT INTO declarations (id, symbol, file_id, symbol_type, start_offset, end_offset)
+INSERT INTO declarations (id, symbol, file_id, symbol_type, offset_range)
 VALUES
-    (1, 1, 1, 1, 0, 5),
-    (2, 2, 1, 1, 10, 15),
-    (3, 3, 1, 1, 20, 25),
-    (4, 4, 1, 1, 30, 35),
-    (5, 5, 1, 1, 40, 45);
+    (1, 1, 1, 1, int4range(0, 5)),
+    (2, 2, 1, 1, int4range(10, 15)),
+    (3, 3, 1, 1, int4range(20, 25)),
+    (4, 4, 1, 1, int4range(30, 35)),
+    (5, 5, 1, 1, int4range(40, 45));

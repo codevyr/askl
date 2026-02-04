@@ -31,14 +31,13 @@ impl Symbol {
     }
 }
 
-#[derive(Debug, sqlx::FromRow, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct Declaration {
     pub id: DeclarationId,
     pub symbol: SymbolId,
     pub file_id: FileId,
     pub symbol_type: SymbolType,
-    pub start_offset: i64,
-    pub end_offset: i64,
+    pub offset_range: (i32, i32),
 }
 
 impl Declaration {
@@ -53,8 +52,7 @@ impl Declaration {
             symbol,
             file_id,
             symbol_type,
-            start_offset: 0,
-            end_offset: 0,
+            offset_range: (0, 0),
         }
     }
 
@@ -72,8 +70,7 @@ impl Declaration {
             symbol,
             file_id,
             symbol_type,
-            start_offset: start_offset as i64,
-            end_offset: end_offset as i64,
+            offset_range: (start_offset as i32, end_offset as i32),
         })
     }
 
@@ -347,77 +344,80 @@ impl Index {
         return Ok(new_symbol);
     }
 
-    pub async fn add_declaration(&self, declaration: Declaration) -> Result<Declaration> {
-        let rec = sqlx::query_as!(
-            Declaration,
-            r#"
-                SELECT id, symbol, file_id, symbol_type, start_offset, end_offset
-                FROM declarations
-                WHERE symbol = ? AND file_id = ? AND start_offset = ? AND end_offset = ?
-                "#,
-            declaration.symbol,
-            declaration.file_id,
-            declaration.start_offset,
-            declaration.end_offset
-        )
-        .fetch_optional(&self.pool)
-        .await?;
+    pub async fn add_declaration(&self, _declaration: Declaration) -> Result<Declaration> {
+        unimplemented!();
+        // let rec = sqlx::query_as!(
+        //     Declaration,
+        //     r#"
+        //         SELECT id, symbol, file_id, symbol_type, start_offset, end_offset
+        //         FROM declarations
+        //         WHERE symbol = ? AND file_id = ? AND start_offset = ? AND end_offset = ?
+        //         "#,
+        //     declaration.symbol,
+        //     declaration.file_id,
+        //     declaration.offset_range.0.clone().into_inner().unwrap_or(0) as i64,
+        //     declaration.offset_range.1.clone().into_inner().unwrap_or(0) as i64
+        // )
+        // .fetch_optional(&self.pool)
+        // .await?;
 
-        if let Some(declaration) = rec {
-            return Ok(declaration);
-        }
+        // if let Some(declaration) = rec {
+        //     return Ok(declaration);
+        // }
 
-        let rec = sqlx::query!(
-            r#"
-                INSERT INTO declarations (symbol, file_id, symbol_type, start_offset, end_offset)
-                VALUES (?, ?, ?, ?, ?)
-                RETURNING id
-                "#,
-            declaration.symbol,
-            declaration.file_id,
-            declaration.symbol_type,
-            declaration.start_offset,
-            declaration.end_offset
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        // let rec = sqlx::query!(
+        //     r#"
+        //         INSERT INTO declarations (symbol, file_id, symbol_type, start_offset, end_offset)
+        //         VALUES (?, ?, ?, ?, ?)
+        //         RETURNING id
+        //         "#,
+        //     declaration.symbol,
+        //     declaration.file_id,
+        //     declaration.symbol_type,
+        //     declaration.start_offset,
+        //     declaration.end_offset
+        // )
+        // .fetch_one(&self.pool)
+        // .await?;
 
-        let id: DeclarationId = rec.id.into();
+        // let id: DeclarationId = rec.id.into();
 
-        Ok(declaration.with_id(id))
+        // Ok(declaration.with_id(id))
     }
 
     pub async fn add_reference(
         &self,
-        from_decl: DeclarationId,
-        to_symbol: SymbolId,
-        occurrence: &Occurrence,
+        _from_decl: DeclarationId,
+        _to_symbol: SymbolId,
+        _occurrence: &Occurrence,
     ) -> Result<()> {
-        let res = sqlx::query!(
-            r#"
-            INSERT OR IGNORE INTO symbol_refs (to_symbol, from_file, from_offset_start, from_offset_end)
-            VALUES (?, ?, ?, ?)
-            "#,
-            to_symbol,
-            occurrence.file,
-            occurrence.start_offset,
-            occurrence.end_offset
-        )
-        .execute(&self.pool)
-        .await;
+        unimplemented!();
 
-        if let Err(err) = &res {
-            log::error!(
-                "Failed to add reference {} {}->{} {:?}",
-                err,
-                from_decl,
-                to_symbol,
-                occurrence
-            );
-            res?;
-        }
+        // let res = sqlx::query!(
+        //     r#"
+        //     INSERT OR IGNORE INTO symbol_refs (to_symbol, from_file, from_offset_start, from_offset_end)
+        //     VALUES (?, ?, ?, ?)
+        //     "#,
+        //     to_symbol,
+        //     occurrence.file,
+        //     occurrence.start_offset,
+        //     occurrence.end_offset
+        // )
+        // .execute(&self.pool)
+        // .await;
 
-        Ok(())
+        // if let Err(err) = &res {
+        //     log::error!(
+        //         "Failed to add reference {} {}->{} {:?}",
+        //         err,
+        //         from_decl,
+        //         to_symbol,
+        //         occurrence
+        //     );
+        //     res?;
+        // }
+
+        // Ok(())
     }
 
     pub async fn all_symbols(&self) -> Result<Vec<Symbol>> {
@@ -435,33 +435,34 @@ impl Index {
     }
 
     pub async fn all_declarations(&self) -> Result<Vec<Declaration>> {
-        let declarations: Vec<Declaration> = sqlx::query_as!(
-            Declaration,
-            r#"
-            SELECT id, symbol, file_id, symbol_type, start_offset, end_offset
-            FROM declarations
-            "#
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        unimplemented!();
+        //     let declarations: Vec<Declaration> = sqlx::query_as!(
+        //         Declaration,
+        //         r#"
+        //         SELECT id, symbol, file_id, symbol_type, start_offset, end_offset
+        //         FROM declarations
+        //         "#
+        //     )
+        //     .fetch_all(&self.pool)
+        //     .await?;
 
-        Ok(declarations)
-    }
+        //     Ok(declarations)
+        // }
 
-    pub async fn symbol_declarations(&self, symbol_id: SymbolId) -> Result<Vec<Declaration>> {
-        let declarations: Vec<Declaration> = sqlx::query_as!(
-            Declaration,
-            r#"
-            SELECT id, symbol, file_id, symbol_type, start_offset, end_offset
-            FROM declarations
-            WHERE symbol = ?
-            "#,
-            symbol_id
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        // pub async fn symbol_declarations(&self, symbol_id: SymbolId) -> Result<Vec<Declaration>> {
+        //     let declarations: Vec<Declaration> = sqlx::query_as!(
+        //         Declaration,
+        //         r#"
+        //         SELECT id, symbol, file_id, symbol_type, start_offset, end_offset
+        //         FROM declarations
+        //         WHERE symbol = ?
+        //         "#,
+        //         symbol_id
+        //     )
+        //     .fetch_all(&self.pool)
+        //     .await?;
 
-        Ok(declarations)
+        //     Ok(declarations)
     }
 
     pub async fn all_modules(&self) -> Result<Vec<Module>> {

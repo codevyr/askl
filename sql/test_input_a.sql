@@ -20,27 +20,27 @@ VALUES
     (7,  'g',    1, 1),
     (42, 'main', 1, 1);
 
-INSERT INTO declarations (id, symbol, file_id, symbol_type, start_offset, end_offset)
+INSERT INTO declarations (id, symbol, file_id, symbol_type, offset_range)
 VALUES
-    (91,  1,  1, 1, 910, 919),
-    (92,  2,  1, 1, 920, 929),
-    (93,  3,  1, 1, 930, 939),
-    (94,  4,  1, 1, 940, 949),
-    (95,  5,  1, 1, 950, 959),
-    (96,  6,  1, 1, 960, 969),
-    (97,  7,  1, 1, 970, 979),
-    (942, 42, 1, 1, 9420, 9429);
+    (91,  1,  1, 1, int4range(910, 919)),
+    (92,  2,  1, 1, int4range(920, 929)),
+    (93,  3,  1, 1, int4range(930, 939)),
+    (94,  4,  1, 1, int4range(940, 949)),
+    (95,  5,  1, 1, int4range(950, 959)),
+    (96,  6,  1, 1, int4range(960, 969)),
+    (97,  7,  1, 1, int4range(970, 979)),
+    (942, 42, 1, 1, int4range(9420, 9429));
 
 INSERT INTO
-    symbol_refs(to_symbol, from_file, from_offset_start, from_offset_end)
+    symbol_refs(to_symbol, from_file, from_offset_range)
 VALUES
-    (2, 1, 911, 911),
-    (2, 1, 912, 912),
-    (5, 1, 941, 941),
-    (6, 1, 942, 942),
-    (7, 1, 961, 961),
-    (1, 1, 9421, 9421),
-    (2, 1, 9422, 9422);
+    (2, 1, int4range(911, 912)),
+    (2, 1, int4range(912, 913)),
+    (5, 1, int4range(941, 942)),
+    (6, 1, int4range(942, 943)),
+    (7, 1, int4range(961, 962)),
+    (1, 1, int4range(9421, 9422)),
+    (2, 1, int4range(9422, 9423));
 
 -- main -> {a b}
 -- a -> b

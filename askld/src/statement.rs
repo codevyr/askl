@@ -5,6 +5,7 @@ use crate::execution_state::{
     DependencyRole, ExecutionState, StatementDependency, StatementDependent,
 };
 use crate::hierarchy::Hierarchy;
+use crate::offset_range::range_bounds_to_offsets;
 use crate::parser::Rule;
 use crate::parser_context::ParserContext;
 use crate::scope::{build_scope, EmptyScope, Scope, StatementIter};
@@ -414,8 +415,8 @@ impl Statement {
 
                 let occurrence = Occurrence {
                     file: FileId::new(child.from_file.id),
-                    start_offset: child.symbol_ref.from_offset_start,
-                    end_offset: child.symbol_ref.from_offset_end,
+                    offset_range: range_bounds_to_offsets(&child.symbol_ref.from_offset_range)
+                        .unwrap(),
                 };
                 all_references.add_reference(
                     SymbolDeclId {
@@ -439,8 +440,8 @@ impl Statement {
 
                 let occurrence = Occurrence {
                     file: parent.from_declaration.file_id.into(),
-                    start_offset: parent.symbol_ref.from_offset_start,
-                    end_offset: parent.symbol_ref.from_offset_end,
+                    offset_range: range_bounds_to_offsets(&parent.symbol_ref.from_offset_range)
+                        .unwrap(),
                 };
                 all_references.add_reference(
                     SymbolDeclId {

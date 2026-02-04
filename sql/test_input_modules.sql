@@ -33,36 +33,36 @@ VALUES
     (142, 'main', 2, 1),
     (301, 'a',    3, 1);
 
-INSERT INTO declarations (id, symbol, file_id, symbol_type, start_offset, end_offset)
+INSERT INTO declarations (id, symbol, file_id, symbol_type, offset_range)
 VALUES
-    (91,  1,   1, 1, 910, 919),
-    (92,  2,   1, 1, 920, 929),
-    (93,  3,   1, 1, 930, 939),
-    (94,  4,   1, 1, 940, 949),
-    (95,  5,   1, 1, 950, 959),
-    (86,  6,   2, 1, 860, 869),
-    (96,  6,   1, 1, 960, 969),
-    (97,  7,   1, 1, 970, 979),
-    (942, 42,  1, 1, 9420, 9429),
-    (201, 101, 3, 1, 2010, 2019),
-    (202, 102, 3, 1, 2020, 2029),
-    (242, 142, 3, 1, 2420, 2429),
-    (301, 301, 4, 1, 3010, 3019);
+    (91,  1,   1, 1, int4range(910, 919)),
+    (92,  2,   1, 1, int4range(920, 929)),
+    (93,  3,   1, 1, int4range(930, 939)),
+    (94,  4,   1, 1, int4range(940, 949)),
+    (95,  5,   1, 1, int4range(950, 959)),
+    (86,  6,   2, 1, int4range(860, 869)),
+    (96,  6,   1, 1, int4range(960, 969)),
+    (97,  7,   1, 1, int4range(970, 979)),
+    (942, 42,  1, 1, int4range(9420, 9429)),
+    (201, 101, 3, 1, int4range(2010, 2019)),
+    (202, 102, 3, 1, int4range(2020, 2029)),
+    (242, 142, 3, 1, int4range(2420, 2429)),
+    (301, 301, 4, 1, int4range(3010, 3019));
 
 INSERT INTO
-    symbol_refs(to_symbol, from_file, from_offset_start, from_offset_end)
+    symbol_refs(to_symbol, from_file, from_offset_range)
 VALUES
-    (2,   1, 911, 911),
-    (4,   1, 921, 921),
-    (2,   1, 931, 931),
-    (5,   1, 941, 941),
-    (6,   1, 942, 942),
-    (6,   1, 951, 951),
-    (5,   1, 971, 971),
-    (1,   1, 9421, 9421),
-    (2,   1, 9422, 9422),
-    (102, 3, 2011, 2011),
-    (101, 3, 2421, 2421);
+    (2,   1, int4range(911, 912)),
+    (4,   1, int4range(921, 922)),
+    (2,   1, int4range(931, 932)),
+    (5,   1, int4range(941, 942)),
+    (6,   1, int4range(942, 943)),
+    (6,   1, int4range(951, 952)),
+    (5,   1, int4range(971, 972)),
+    (1,   1, int4range(9421, 9422)),
+    (2,   1, int4range(9422, 9423)),
+    (102, 3, int4range(2011, 2012)),
+    (101, 3, int4range(2421, 2422));
 
 -- Module "test" has the same layout as test_input_b.
 -- Module "other" mirrors a subset of the data to exercise module filtering.

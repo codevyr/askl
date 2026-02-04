@@ -22,10 +22,9 @@ impl FileHash {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
 pub struct Occurrence {
-    pub start_offset: i32,
-    pub end_offset: i32,
+    pub offset_range: (i32, i32),
     pub file: FileId,
 }
 
@@ -33,8 +32,7 @@ impl Occurrence {
     pub fn new(range: &Option<SourceRange>, file_id: FileId) -> Option<Self> {
         let (start_offset, end_offset) = Self::offsets_from_range(range)?;
         Some(Self {
-            start_offset,
-            end_offset,
+            offset_range: (start_offset, end_offset),
             file: file_id,
         })
     }
@@ -108,14 +106,13 @@ fn offset_from_line_col(content: &[u8], line: usize, col: usize) -> Option<i32> 
 impl From<db::Declaration> for Occurrence {
     fn from(symbol: db::Declaration) -> Self {
         Occurrence {
-            start_offset: symbol.start_offset as i32,
-            end_offset: symbol.end_offset as i32,
+            offset_range: symbol.offset_range,
             file: symbol.file_id,
         }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
 pub struct Reference {
     pub from: DeclarationId,
     pub to: SymbolId,

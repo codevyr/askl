@@ -1,13 +1,14 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    use diesel::sql_types::*;
+
     index.declarations (id) {
         id -> Integer,
         symbol -> Integer,
         file_id -> Integer,
         symbol_type -> Integer,
-        start_offset -> Integer,
-        end_offset -> Integer,
+        offset_range -> Int4range,
     }
 }
 
@@ -45,12 +46,13 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::*;
+
     index.symbol_refs (id) {
         id -> Integer,
         to_symbol -> Integer,
         from_file -> Integer,
-        from_offset_start -> Integer,
-        from_offset_end -> Integer,
+        from_offset_range -> Int4range,
     }
 }
 
