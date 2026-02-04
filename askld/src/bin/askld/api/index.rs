@@ -33,7 +33,9 @@ pub async fn upload_index(
     };
 
     match store.upload_index(upload).await {
-        Ok(project_id) => HttpResponse::Ok().json(IndexUploadResponse { project_id }),
+        Ok(project_id) => HttpResponse::Created()
+            .append_header((header::LOCATION, format!("/v1/index/projects/{}", project_id)))
+            .json(IndexUploadResponse { project_id }),
         Err(UploadError::Conflict) => HttpResponse::Conflict().body("Project already exists"),
         Err(UploadError::Invalid(message)) => HttpResponse::BadRequest().body(message),
         Err(UploadError::Storage(message)) => {
