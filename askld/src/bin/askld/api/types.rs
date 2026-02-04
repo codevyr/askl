@@ -1,7 +1,6 @@
 use askld::cfg::ControlFlowGraph;
 use askld::parser::Rule;
-use index::db;
-use index::symbols::{FileId, SymbolId};
+use index::symbols::{FileId, SymbolId, SymbolType};
 use serde::{Deserialize, Serialize, Serializer};
 
 pub struct AsklData {
@@ -16,15 +15,25 @@ where
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct NodeDeclaration {
+    pub id: String,
+    pub symbol: String,
+    pub file_id: String,
+    pub symbol_type: SymbolType,
+    pub start_offset: i32,
+    pub end_offset: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Node {
     #[serde(serialize_with = "symbolid_as_string")]
     id: SymbolId,
     label: String,
-    declarations: Vec<db::Declaration>,
+    declarations: Vec<NodeDeclaration>,
 }
 
 impl Node {
-    pub fn new(id: SymbolId, label: String, declarations: Vec<db::Declaration>) -> Self {
+    pub fn new(id: SymbolId, label: String, declarations: Vec<NodeDeclaration>) -> Self {
         Self {
             id,
             label,

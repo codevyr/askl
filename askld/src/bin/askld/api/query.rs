@@ -2,13 +2,12 @@ use actix_web::{get, post, web, HttpResponse, Responder};
 use askld::execution_context::ExecutionContext;
 use askld::offset_range::range_bounds_to_offsets;
 use askld::parser::parse;
-use index::db;
 use index::symbols::{DeclarationId, FileId, SymbolId, SymbolType};
 use log::{debug, info};
 use std::collections::{HashMap, HashSet};
 use tokio::time::{timeout, Duration};
 
-use super::types::{AsklData, Edge, ErrorResponse, Graph, Node};
+use super::types::{AsklData, Edge, ErrorResponse, Graph, Node, NodeDeclaration};
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -82,17 +81,22 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
             }
         }
 
-        let declarations: Vec<db::Declaration> = res
+        let declarations: Vec<NodeDeclaration> = res
             .nodes
             .0
             .iter()
             .filter(|d| d.declaration.symbol == symbol.id)
-            .map(|d| db::Declaration {
-                id: DeclarationId::new(d.declaration.id),
-                symbol: SymbolId(d.declaration.symbol),
-                file_id: FileId::new(d.file.id),
-                symbol_type: SymbolType::from(d.declaration.symbol_type),
-                offset_range: range_bounds_to_offsets(&d.declaration.offset_range).unwrap(),
+            .map(|d| {
+                let (start_offset, end_offset) =
+                    range_bounds_to_offsets(&d.declaration.offset_range).unwrap();
+                NodeDeclaration {
+                    id: DeclarationId::new(d.declaration.id).to_string(),
+                    symbol: SymbolId(d.declaration.symbol).to_string(),
+                    file_id: FileId::new(d.file.id).to_string(),
+                    symbol_type: SymbolType::from(d.declaration.symbol_type),
+                    start_offset,
+                    end_offset,
+                }
             })
             .collect();
 
