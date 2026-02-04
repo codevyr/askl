@@ -43,7 +43,6 @@ pub async fn upload_index(
     }
 }
 
-#[get("/v1/index/projects")]
 pub async fn list_index_projects(
     _identity: AuthIdentity,
     store: web::Data<IndexStore>,

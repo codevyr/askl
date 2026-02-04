@@ -19,9 +19,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(
             web::resource("/v1/index/projects")
                 .app_data(web::PayloadConfig::new(index::MAX_UPLOAD_BYTES))
+                .route(web::get().to(index::list_index_projects))
                 .route(web::post().to(index::upload_index)),
         )
-        .service(index::list_index_projects)
         .service(index::get_index_project)
         .service(index::delete_index_project)
         .service(query::query)
