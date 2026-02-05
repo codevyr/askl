@@ -15,10 +15,6 @@ use crate::symbols::{symbol_query_to_lquery, DeclarationId};
 use super::Connection;
 
 diesel::alias! {
-    pub const CHILDREN_SYMBOLS_ALIAS: Alias<ChildrenSymbolsAlias> =
-        index_schema::symbols as children_symbols;
-    pub const CHILDREN_DECLS_ALIAS: Alias<ChildrenDeclsAlias> =
-        index_schema::declarations as children_decls;
     pub const PARENT_SYMBOLS_ALIAS: Alias<ParentSymbolsAlias> =
         index_schema::symbols as parent_symbols;
     pub const PARENT_DECLS_ALIAS: Alias<ParentDeclsAlias> =
@@ -92,39 +88,10 @@ type ParentDeclOn = Eq<
     index_schema::symbol_refs::columns::from_file,
 >;
 
-type ChildSymbolOn = Eq<
-    AliasedField<ChildrenSymbolsAlias, index_schema::symbols::columns::id>,
-    index_schema::symbol_refs::columns::to_symbol,
->;
-
-type SymbolRefChildrenJoin = InnerJoinQuerySource<
-    index_schema::symbol_refs::table,
-    Alias<ChildrenSymbolsAlias>,
-    ChildSymbolOn,
->;
-
-type ChildActualSymbolOn =
-    Eq<index_schema::symbol_refs::columns::to_symbol, index_schema::symbols::columns::id>;
-
-type SymbolRefChildrenActualJoin =
-    InnerJoinQuerySource<SymbolRefChildrenJoin, index_schema::symbols::table, ChildActualSymbolOn>;
-
-type SymbolRefChildrenActualDeclarationJoin = InnerJoinQuerySource<
-    SymbolRefChildrenActualJoin,
-    index_schema::declarations::table,
-    Eq<index_schema::symbols::columns::id, index_schema::declarations::columns::symbol>,
->;
-
-type SymbolRefChildrenActualDeclarationParentDeclJoin = InnerJoinQuerySource<
-    SymbolRefChildrenActualDeclarationJoin,
-    Alias<ParentDeclsAlias>,
-    ParentDeclOn,
->;
-
 pub type ParentsQuery<'a> = BoxedSelectStatement<
     'a,
     ParentSelectionTuple,
-    FromClause<SymbolRefChildrenActualDeclarationParentDeclJoin>,
+    FromClause<SymbolRefSymbolDeclParentDeclJoin>,
     Pg,
 >;
 
@@ -243,7 +210,7 @@ impl SymbolSearchMixin for CompoundNameMixin {
         query: ParentsQuery<'a>,
     ) -> Result<ParentsQuery<'a>> {
         if let Some(lquery) = &self.lquery {
-            let filter_sql = ltree_filter_sql("children_symbols.symbol_path", lquery);
+            let filter_sql = ltree_filter_sql("symbols.symbol_path", lquery);
             Ok(query.filter(sql::<Bool>(&filter_sql)))
         } else {
             Ok(query)
