@@ -10,8 +10,7 @@ use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef
 use crate::symbols::FileId;
 
 use super::mixins::{
-    CompoundNameMixin, SymbolSearchMixin, CHILDREN_SYMBOLS_ALIAS, PARENT_DECLS_ALIAS,
-    PARENT_SYMBOLS_ALIAS,
+    CompoundNameMixin, SymbolSearchMixin, PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
 };
 use super::selection::{ChildReference, ParentReference, Selection, SelectionNode};
 use super::Connection;
@@ -181,11 +180,6 @@ impl Index {
             let _parents_span: tracing::span::EnteredSpan =
                 tracing::info_span!("select_parents").entered();
             let mut parents_query = symbol_refs::dsl::symbol_refs
-                .inner_join(
-                    CHILDREN_SYMBOLS_ALIAS.on(CHILDREN_SYMBOLS_ALIAS
-                        .field(symbols::dsl::id)
-                        .eq(symbol_refs::dsl::to_symbol)),
-                )
                 .inner_join(
                     symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::dsl::id)),
                 )

@@ -2,23 +2,19 @@ use anyhow::Result;
 use diesel::dsl::{sql, Eq};
 use diesel::helper_types::{AsSelect, InnerJoinQuerySource};
 use diesel::internal::table_macro::{BoxedSelectStatement, FromClause};
+use diesel::pg::Pg;
 use diesel::prelude::*;
 use diesel::query_source::{Alias, AliasedField};
-use diesel::pg::Pg;
 use diesel::sql_types::{Bool, Int4range, Integer, Text};
 
+use crate::ltree::Ltree;
 use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
 use crate::schema_diesel as index_schema;
-use crate::ltree::Ltree;
 use crate::symbols::{symbol_query_to_lquery, DeclarationId};
 
 use super::Connection;
 
 diesel::alias! {
-    pub const CHILDREN_SYMBOLS_ALIAS: Alias<ChildrenSymbolsAlias> =
-        index_schema::symbols as children_symbols;
-    pub const CHILDREN_DECLS_ALIAS: Alias<ChildrenDeclsAlias> =
-        index_schema::declarations as children_decls;
     pub const PARENT_SYMBOLS_ALIAS: Alias<ParentSymbolsAlias> =
         index_schema::symbols as parent_symbols;
     pub const PARENT_DECLS_ALIAS: Alias<ParentDeclsAlias> =
@@ -28,37 +24,25 @@ diesel::alias! {
 type SymbolDeclarationJoinSource = InnerJoinQuerySource<
     index_schema::symbols::table,
     index_schema::declarations::table,
-    Eq<
-        index_schema::symbols::columns::id,
-        index_schema::declarations::columns::symbol,
-    >,
+    Eq<index_schema::symbols::columns::id, index_schema::declarations::columns::symbol>,
 >;
 
 type SymbolDeclarationModuleJoinSource = InnerJoinQuerySource<
     SymbolDeclarationJoinSource,
     index_schema::modules::table,
-    Eq<
-        index_schema::symbols::columns::module,
-        index_schema::modules::columns::id,
-    >,
+    Eq<index_schema::symbols::columns::module, index_schema::modules::columns::id>,
 >;
 
 type SymbolDeclarationModuleProjectJoin = InnerJoinQuerySource<
     SymbolDeclarationModuleJoinSource,
     index_schema::projects::table,
-    Eq<
-        index_schema::projects::columns::id,
-        index_schema::modules::columns::project_id,
-    >,
+    Eq<index_schema::projects::columns::id, index_schema::modules::columns::project_id>,
 >;
 
 type SymbolDeclarationModuleProjectFileJoin = InnerJoinQuerySource<
     SymbolDeclarationModuleProjectJoin,
     index_schema::files::table,
-    Eq<
-        index_schema::files::columns::id,
-        index_schema::declarations::columns::file_id,
-    >,
+    Eq<index_schema::files::columns::id, index_schema::declarations::columns::file_id>,
 >;
 
 type SelectionTuple = (
@@ -90,19 +74,13 @@ type ParentSelectionTuple = (
 type SymbolRefSymbolJoin = InnerJoinQuerySource<
     index_schema::symbol_refs::table,
     index_schema::symbols::table,
-    Eq<
-        index_schema::symbol_refs::columns::to_symbol,
-        index_schema::symbols::columns::id,
-    >,
+    Eq<index_schema::symbol_refs::columns::to_symbol, index_schema::symbols::columns::id>,
 >;
 
 type SymbolRefSymbolDeclarationJoin = InnerJoinQuerySource<
     SymbolRefSymbolJoin,
     index_schema::declarations::table,
-    Eq<
-        index_schema::symbols::columns::id,
-        index_schema::declarations::columns::symbol,
-    >,
+    Eq<index_schema::symbols::columns::id, index_schema::declarations::columns::symbol>,
 >;
 
 type ParentDeclOn = Eq<
@@ -110,47 +88,10 @@ type ParentDeclOn = Eq<
     index_schema::symbol_refs::columns::from_file,
 >;
 
-type ChildSymbolOn = Eq<
-    AliasedField<ChildrenSymbolsAlias, index_schema::symbols::columns::id>,
-    index_schema::symbol_refs::columns::to_symbol,
->;
-
-type SymbolRefChildrenJoin = InnerJoinQuerySource<
-    index_schema::symbol_refs::table,
-    Alias<ChildrenSymbolsAlias>,
-    ChildSymbolOn,
->;
-
-type ChildActualSymbolOn = Eq<
-    index_schema::symbol_refs::columns::to_symbol,
-    index_schema::symbols::columns::id,
->;
-
-type SymbolRefChildrenActualJoin = InnerJoinQuerySource<
-    SymbolRefChildrenJoin,
-    index_schema::symbols::table,
-    ChildActualSymbolOn,
->;
-
-type SymbolRefChildrenActualDeclarationJoin = InnerJoinQuerySource<
-    SymbolRefChildrenActualJoin,
-    index_schema::declarations::table,
-    Eq<
-        index_schema::symbols::columns::id,
-        index_schema::declarations::columns::symbol,
-    >,
->;
-
-type SymbolRefChildrenActualDeclarationParentDeclJoin = InnerJoinQuerySource<
-    SymbolRefChildrenActualDeclarationJoin,
-    Alias<ParentDeclsAlias>,
-    ParentDeclOn,
->;
-
 pub type ParentsQuery<'a> = BoxedSelectStatement<
     'a,
     ParentSelectionTuple,
-    FromClause<SymbolRefChildrenActualDeclarationParentDeclJoin>,
+    FromClause<SymbolRefSymbolDeclParentDeclJoin>,
     Pg,
 >;
 
@@ -269,7 +210,7 @@ impl SymbolSearchMixin for CompoundNameMixin {
         query: ParentsQuery<'a>,
     ) -> Result<ParentsQuery<'a>> {
         if let Some(lquery) = &self.lquery {
-            let filter_sql = ltree_filter_sql("children_symbols.symbol_path", lquery);
+            let filter_sql = ltree_filter_sql("symbols.symbol_path", lquery);
             Ok(query.filter(sql::<Bool>(&filter_sql)))
         } else {
             Ok(query)
