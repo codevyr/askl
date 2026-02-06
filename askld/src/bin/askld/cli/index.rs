@@ -1,9 +1,13 @@
 use crate::args::IndexCommand;
 use anyhow::{anyhow, Result};
 use askld::proto::askl::index::IndexUpload;
+use bytes::Bytes;
+use futures::TryStreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use tokio::time::Duration;
+use tokio_util::codec::{BytesCodec, FramedRead};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProjectInfo {
@@ -42,6 +46,8 @@ enum ProjectSelector {
     Name(String),
 }
 
+const UPLOAD_CHUNK_SIZE: usize = 64 * 1024;
+
 fn normalize_base_url(url: &str) -> String {
     let mut base_url = url.trim().to_string();
     if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
@@ -51,11 +57,26 @@ fn normalize_base_url(url: &str) -> String {
 }
 
 fn build_client(timeout: u64) -> Result<reqwest::Client> {
-    let mut client_builder = reqwest::Client::builder();
+    let mut client_builder = reqwest::Client::builder().no_proxy();
     if timeout > 0 {
         client_builder = client_builder.timeout(Duration::from_secs(timeout));
     }
     Ok(client_builder.build()?)
+}
+
+fn build_progress_bar(total: u64, enabled: bool) -> Option<ProgressBar> {
+    if !enabled {
+        return None;
+    }
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{msg} {bar:40.cyan/blue} {bytes}/{total_bytes} ({bytes_per_sec}, {eta})",
+        )
+        .unwrap(),
+    );
+    pb.set_message("Uploading");
+    Some(pb)
 }
 
 fn resolve_token(token: Option<String>) -> Result<String> {
@@ -134,34 +155,73 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
 
             let token = resolve_token(token)?;
 
-            let payload = std::fs::read(&file_path)
-                .map_err(|err| anyhow!("Failed to read {}: {}", file_path, err))?;
-            if payload.is_empty() {
-                return Err(anyhow!("Payload file is empty: {}", file_path));
-            }
+            let base_url = normalize_base_url(&url);
+            let endpoint = format!("{}/v1/index/projects", base_url);
 
-            let payload = if let Some(project_name) = project {
+            let client = build_client(timeout)?;
+            let (body, content_len, progress) = if let Some(project_name) = project {
+                let payload = tokio::fs::read(&file_path)
+                    .await
+                    .map_err(|err| anyhow!("Failed to read {}: {}", file_path, err))?;
+                if payload.is_empty() {
+                    return Err(anyhow!("Payload file is empty: {}", file_path));
+                }
+
                 let mut upload = IndexUpload::decode(payload.as_slice())
                     .map_err(|err| anyhow!("Failed to decode protobuf payload: {}", err))?;
                 upload.project_name = project_name;
                 let mut buffer = Vec::with_capacity(upload.encoded_len());
                 upload.encode(&mut buffer)?;
-                buffer
+
+                let total = buffer.len() as u64;
+                let progress = build_progress_bar(total, !json);
+                let progress_handle = progress.clone();
+                let chunks: Vec<Bytes> = buffer
+                    .chunks(UPLOAD_CHUNK_SIZE)
+                    .map(Bytes::copy_from_slice)
+                    .collect();
+                let stream = futures::stream::iter(chunks.into_iter().map(move |chunk| {
+                    if let Some(ref pb) = progress_handle {
+                        pb.inc(chunk.len() as u64);
+                    }
+                    Ok::<Bytes, std::io::Error>(chunk)
+                }));
+                (reqwest::Body::wrap_stream(stream), total, progress)
             } else {
-                payload
+                let file = tokio::fs::File::open(&file_path)
+                    .await
+                    .map_err(|err| anyhow!("Failed to open {}: {}", file_path, err))?;
+                let metadata = file
+                    .metadata()
+                    .await
+                    .map_err(|err| anyhow!("Failed to read {} metadata: {}", file_path, err))?;
+                if metadata.len() == 0 {
+                    return Err(anyhow!("Payload file is empty: {}", file_path));
+                }
+                let total = metadata.len();
+                let progress = build_progress_bar(total, !json);
+                let progress_handle = progress.clone();
+                let stream = FramedRead::new(file, BytesCodec::new()).map_ok(move |bytes| {
+                    if let Some(ref pb) = progress_handle {
+                        pb.inc(bytes.len() as u64);
+                    }
+                    bytes.freeze()
+                });
+                (reqwest::Body::wrap_stream(stream), total, progress)
             };
 
-            let base_url = normalize_base_url(&url);
-            let endpoint = format!("{}/v1/index/projects", base_url);
-
-            let client = build_client(timeout)?;
             let response = client
                 .post(endpoint)
                 .header(reqwest_header::CONTENT_TYPE, "application/x-protobuf")
                 .header(reqwest_header::AUTHORIZATION, format!("Bearer {}", token))
-                .body(payload)
+                .header(reqwest_header::CONTENT_LENGTH, content_len)
+                .body(body)
                 .send()
                 .await?;
+
+            if let Some(progress) = progress {
+                progress.finish_and_clear();
+            }
 
             if !response.status().is_success() {
                 let status = response.status();
