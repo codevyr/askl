@@ -4,8 +4,16 @@ mod cli;
 mod server;
 
 use clap::Parser;
+use anyhow::Error;
 
 use args::{Args, Command};
+
+fn print_error_chain(context: &str, err: &Error) {
+    eprintln!("{}: {}", context, err);
+    for cause in err.chain().skip(1) {
+        eprintln!("  caused by: {}", cause);
+    }
+}
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -14,7 +22,7 @@ async fn main() -> std::io::Result<()> {
     match args.command {
         Command::Auth(auth_args) => {
             if let Err(err) = cli::run_auth_command(auth_args.port, auth_args.command).await {
-                eprintln!("Failed to create API key: {}", err);
+                print_error_chain("Failed to create API key", &err);
                 std::process::exit(1);
             }
             Ok(())
@@ -23,7 +31,7 @@ async fn main() -> std::io::Result<()> {
             let command = index_args.command;
             let error_context = command.error_context();
             if let Err(err) = cli::run_index_command(command).await {
-                eprintln!("{}: {}", error_context, err);
+                print_error_chain(error_context, &err);
                 std::process::exit(1);
             }
             Ok(())
