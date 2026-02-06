@@ -27,6 +27,7 @@ shell-words = {workspace = true}
 clang-ast = {workspace = true}
 futures = {workspace = true}
 actix-web = {workspace = true}
+actix-cors = "0.7"
 index = { path = "../index" }
 async-trait = "0.1.80"
 tracing-chrome = "0.7.2"

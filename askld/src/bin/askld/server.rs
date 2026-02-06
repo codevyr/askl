@@ -1,3 +1,4 @@
+use actix_cors::Cors;
 use actix_web::{dev::Service, web, App, HttpServer};
 use askld::auth::{self, AuthStore};
 use askld::cfg::ControlFlowGraph;
@@ -13,6 +14,32 @@ use tracing_subscriber::util::SubscriberInitExt;
 use crate::api;
 use crate::api::types::AsklData;
 use crate::args::ServeArgs;
+
+fn build_cors() -> Cors {
+    let mut cors = Cors::default()
+        .allowed_methods(vec!["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+        .allow_any_header()
+        .max_age(3600);
+
+    match std::env::var("ASKL_CORS_ORIGINS") {
+        Ok(origins) => {
+            let mut added = false;
+            for origin in origins.split(',') {
+                let origin = origin.trim();
+                if origin.is_empty() {
+                    continue;
+                }
+                cors = cors.allowed_origin(origin);
+                added = true;
+            }
+            if !added {
+                cors = cors.allow_any_origin();
+            }
+            cors
+        }
+        Err(_) => cors.allow_any_origin(),
+    }
+}
 
 pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
     let _guard = if let Some(trace_dir) = &serve_args.trace {
@@ -63,6 +90,7 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
+            .wrap(build_cors())
             .wrap(tracing_actix_web::TracingLogger::default())
             .wrap_fn(|mut req, srv| {
                 auth::redact_auth_headers(&mut req);
