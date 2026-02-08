@@ -27,6 +27,9 @@ shell-words = {workspace = true}
 clang-ast = {workspace = true}
 futures = {workspace = true}
 actix-web = {workspace = true}
+actix-cors = "0.7"
+bytes = "1.5"
+tokio-util = { version = "0.7", features = ["codec"] }
 index = { path = "../index" }
 async-trait = "0.1.80"
 tracing-chrome = "0.7.2"
@@ -36,7 +39,7 @@ chrono = "0.4.41"
 tracing-actix-web = "0.7.19"
 argon2 = "0.5"
 base64 = "0.22"
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 uuid = { version = "1.10", features = ["v4"] }
 diesel = { workspace = true, features = ["postgres", "r2d2", "chrono", "uuid"] }
 diesel_migrations = { version = "2.2", features = ["postgres"] }
