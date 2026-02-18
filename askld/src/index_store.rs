@@ -8,7 +8,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::task;
 
-use crate::proto::askl::index::{IndexUpload, Module as UploadModule};
+use crate::proto::askl::index::{File as UploadFile, Module as UploadModule, Project as UploadProject};
 use index::schema_diesel as index_schema;
 
 const MAX_INSERT_ROWS: usize = 1000;
@@ -34,6 +34,7 @@ pub enum StoreError {
 pub struct ProjectInfo {
     pub id: i32,
     pub project_name: String,
+    pub root_path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +47,7 @@ pub struct ProjectModule {
 pub struct ProjectDetails {
     pub id: i32,
     pub project_name: String,
+    pub root_path: String,
     pub modules: Vec<ProjectModule>,
     pub file_count: i64,
     pub symbol_count: i64,
@@ -55,6 +57,7 @@ pub struct ProjectDetails {
 #[diesel(table_name = index_schema::projects)]
 struct NewProject {
     project_name: String,
+    root_path: String,
 }
 
 #[derive(Insertable, Clone)]
@@ -67,7 +70,8 @@ struct NewModule {
 #[derive(Insertable, Clone)]
 #[diesel(table_name = index_schema::files)]
 struct NewFile {
-    module: i32,
+    project_id: i32,
+    module: Option<i32>,
     module_path: String,
     filesystem_path: String,
     filetype: String,
@@ -123,7 +127,7 @@ impl IndexStore {
         Self { pool }
     }
 
-    pub async fn upload_index(&self, upload: IndexUpload) -> Result<i32, UploadError> {
+    pub async fn upload_index(&self, upload: UploadProject) -> Result<i32, UploadError> {
         let pool = self.pool.clone();
         task::spawn_blocking(move || {
             let mut conn = pool
@@ -137,9 +141,17 @@ impl IndexStore {
                     ));
                 }
 
+                let root_path = upload.root_path.trim();
+                if root_path.is_empty() {
+                    return Err(UploadError::Invalid(
+                        "root_path is required".to_string(),
+                    ));
+                }
+
                 let project_id: Option<i32> = diesel::insert_into(index_schema::projects::table)
                     .values(NewProject {
                         project_name: project_name.to_string(),
+                        root_path: root_path.to_string(),
                     })
                     .on_conflict(index_schema::projects::project_name)
                     .do_nothing()
@@ -155,16 +167,16 @@ impl IndexStore {
                 let module_inserts = build_modules(project_id, &upload.modules)?;
                 let module_map = insert_modules(conn, module_inserts)?;
 
-                let file_inserts = build_files(&upload.modules, &module_map)?;
+                let file_inserts = build_files(project_id, &upload.files, &module_map)?;
                 let file_map = insert_files(conn, &file_inserts)?;
 
                 let symbol_inserts = build_symbols(&upload.modules, &module_map)?;
                 let symbol_map = insert_symbols(conn, symbol_inserts)?;
 
-                let declaration_rows = build_declarations(&upload.modules, &file_map, &symbol_map)?;
+                let declaration_rows = build_declarations(&upload.files, &file_map, &symbol_map)?;
                 insert_declarations(conn, &declaration_rows)?;
 
-                let symbol_ref_rows = build_symbol_refs(&upload.modules, &file_map, &symbol_map)?;
+                let symbol_ref_rows = build_symbol_refs(&upload.files, &file_map, &symbol_map)?;
                 insert_symbol_refs(conn, &symbol_ref_rows)?;
 
                 Ok(project_id)
@@ -180,13 +192,21 @@ impl IndexStore {
             let mut conn = pool
                 .get()
                 .map_err(|err| StoreError::Storage(err.to_string()))?;
-            let rows: Vec<(i32, String)> = index_schema::projects::table
-                .select((index_schema::projects::id, index_schema::projects::project_name))
+            let rows: Vec<(i32, String, String)> = index_schema::projects::table
+                .select((
+                    index_schema::projects::id,
+                    index_schema::projects::project_name,
+                    index_schema::projects::root_path,
+                ))
                 .order(index_schema::projects::id)
                 .load(&mut conn)?;
             Ok(rows
                 .into_iter()
-                .map(|(id, project_name)| ProjectInfo { id, project_name })
+                .map(|(id, project_name, root_path)| ProjectInfo {
+                    id,
+                    project_name,
+                    root_path,
+                })
                 .collect())
         })
         .await
@@ -203,13 +223,17 @@ impl IndexStore {
                 .get()
                 .map_err(|err| StoreError::Storage(err.to_string()))?;
 
-            let project_row: Option<(i32, String)> = index_schema::projects::table
+            let project_row: Option<(i32, String, String)> = index_schema::projects::table
                 .filter(index_schema::projects::id.eq(project_id))
-                .select((index_schema::projects::id, index_schema::projects::project_name))
+                .select((
+                    index_schema::projects::id,
+                    index_schema::projects::project_name,
+                    index_schema::projects::root_path,
+                ))
                 .first(&mut conn)
                 .optional()?;
 
-            let (id, project_name) = match project_row {
+            let (id, project_name, root_path) = match project_row {
                 Some(row) => row,
                 None => return Ok(None),
             };
@@ -226,11 +250,7 @@ impl IndexStore {
                 .collect();
 
             let file_count: i64 = index_schema::files::table
-                .inner_join(
-                    index_schema::modules::table
-                        .on(index_schema::files::module.eq(index_schema::modules::id)),
-                )
-                .filter(index_schema::modules::project_id.eq(project_id))
+                .filter(index_schema::files::project_id.eq(project_id))
                 .count()
                 .get_result(&mut conn)?;
 
@@ -246,6 +266,7 @@ impl IndexStore {
             Ok(Some(ProjectDetails {
                 id,
                 project_name,
+                root_path,
                 modules,
                 file_count,
                 symbol_count,
@@ -333,37 +354,43 @@ fn insert_modules(
 }
 
 fn build_files(
-    modules: &[UploadModule],
+    project_id: i32,
+    files: &[UploadFile],
     module_map: &HashMap<i64, i32>,
 ) -> Result<Vec<FileInsert>, UploadError> {
     let mut seen = HashSet::new();
     let mut inserts = Vec::new();
-    for module in modules {
-        let module_id = module_map.get(&module.local_id).ok_or_else(|| {
-            UploadError::Invalid(format!(
-                "missing module mapping for local_id {}",
-                module.local_id
-            ))
-        })?;
-        for file in &module.files {
-            if !seen.insert(file.local_id) {
-                return Err(UploadError::Invalid(format!(
-                    "duplicate file local_id {}",
-                    file.local_id
-                )));
-            }
-            inserts.push(FileInsert {
-                local_id: file.local_id,
-                content: file.content.clone(),
-                row: NewFile {
-                    module: *module_id,
-                    module_path: file.module_path.clone(),
-                    filesystem_path: file.filesystem_path.clone(),
-                    filetype: file.filetype.clone(),
-                    content_hash: hash_bytes(&file.content),
-                },
-            });
+    for file in files {
+        if !seen.insert(file.local_id) {
+            return Err(UploadError::Invalid(format!(
+                "duplicate file local_id {}",
+                file.local_id
+            )));
         }
+        let module_id = match file.module_id {
+            Some(local_id) => {
+                let mapped = module_map.get(&local_id).ok_or_else(|| {
+                    UploadError::Invalid(format!(
+                        "missing module mapping for local_id {}",
+                        local_id
+                    ))
+                })?;
+                Some(*mapped)
+            }
+            None => None,
+        };
+        inserts.push(FileInsert {
+            local_id: file.local_id,
+            content: file.content.clone(),
+            row: NewFile {
+                project_id,
+                module: module_id,
+                module_path: file.module_path.clone(),
+                filesystem_path: file.filesystem_path.clone(),
+                filetype: file.filetype.clone(),
+                content_hash: hash_bytes(&file.content),
+            },
+        });
     }
     Ok(inserts)
 }
@@ -458,65 +485,61 @@ fn insert_symbols(
 }
 
 fn build_declarations(
-    modules: &[UploadModule],
+    files: &[UploadFile],
     file_map: &HashMap<i64, i32>,
     symbol_map: &HashMap<i64, i32>,
 ) -> Result<Vec<NewDeclaration>, UploadError> {
     let mut rows = Vec::new();
-    for module in modules {
-        for file in &module.files {
-            let file_id = file_map.get(&file.local_id).ok_or_else(|| {
+    for file in files {
+        let file_id = file_map.get(&file.local_id).ok_or_else(|| {
+            UploadError::Invalid(format!(
+                "missing file mapping for local_id {}",
+                file.local_id
+            ))
+        })?;
+        for declaration in &file.declarations {
+            let symbol_id = symbol_map.get(&declaration.symbol_local_id).ok_or_else(|| {
                 UploadError::Invalid(format!(
-                    "missing file mapping for local_id {}",
-                    file.local_id
+                    "unknown symbol local_id {}",
+                    declaration.symbol_local_id
                 ))
             })?;
-            for declaration in &file.declarations {
-                let symbol_id = symbol_map.get(&declaration.symbol_local_id).ok_or_else(|| {
-                    UploadError::Invalid(format!(
-                        "unknown symbol local_id {}",
-                        declaration.symbol_local_id
-                    ))
-                })?;
-                rows.push(NewDeclaration {
-                    symbol: *symbol_id,
-                    file_id: *file_id,
-                    symbol_type: declaration.symbol_type,
-                    offset_range: declaration.start_offset..declaration.end_offset,
-                });
-            }
+            rows.push(NewDeclaration {
+                symbol: *symbol_id,
+                file_id: *file_id,
+                symbol_type: declaration.symbol_type,
+                offset_range: declaration.start_offset..declaration.end_offset,
+            });
         }
     }
     Ok(rows)
 }
 
 fn build_symbol_refs(
-    modules: &[UploadModule],
+    files: &[UploadFile],
     file_map: &HashMap<i64, i32>,
     symbol_map: &HashMap<i64, i32>,
 ) -> Result<Vec<NewSymbolRef>, UploadError> {
     let mut rows = Vec::new();
-    for module in modules {
-        for file in &module.files {
-            let file_id = file_map.get(&file.local_id).ok_or_else(|| {
+    for file in files {
+        let file_id = file_map.get(&file.local_id).ok_or_else(|| {
+            UploadError::Invalid(format!(
+                "missing file mapping for local_id {}",
+                file.local_id
+            ))
+        })?;
+        for reference in &file.refs {
+            let symbol_id = symbol_map.get(&reference.to_symbol_local_id).ok_or_else(|| {
                 UploadError::Invalid(format!(
-                    "missing file mapping for local_id {}",
-                    file.local_id
+                    "unknown symbol local_id {}",
+                    reference.to_symbol_local_id
                 ))
             })?;
-            for reference in &file.refs {
-                let symbol_id = symbol_map.get(&reference.to_symbol_local_id).ok_or_else(|| {
-                    UploadError::Invalid(format!(
-                        "unknown symbol local_id {}",
-                        reference.to_symbol_local_id
-                    ))
-                })?;
-                rows.push(NewSymbolRef {
-                    to_symbol: *symbol_id,
-                    from_file: *file_id,
-                    from_offset_range: reference.from_offset_start..reference.from_offset_end,
-                });
-            }
+            rows.push(NewSymbolRef {
+                to_symbol: *symbol_id,
+                from_file: *file_id,
+                from_offset_range: reference.from_offset_start..reference.from_offset_end,
+            });
         }
     }
     Ok(rows)

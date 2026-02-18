@@ -1,13 +1,13 @@
 SET search_path TO index, public;
 
-INSERT INTO projects (id, project_name)
-VALUES (1, 'test_project');
+INSERT INTO projects (id, project_name, root_path)
+VALUES (1, 'test_project', '/test_project');
 
 INSERT INTO modules (id, module_name, project_id)
 VALUES (1, 'test_module', 1);
 
-INSERT INTO files (id, module, module_path, filesystem_path, filetype, content_hash)
-VALUES (1, 1, 'kube.go', 'kube.go', 'go', 'hash');
+INSERT INTO files (id, project_id, module, module_path, filesystem_path, filetype, content_hash)
+VALUES (1, 1, 1, 'kube.go', 'kube.go', 'go', 'hash');
 
 INSERT INTO symbols (id, name, module, symbol_scope)
 VALUES

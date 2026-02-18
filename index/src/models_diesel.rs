@@ -16,10 +16,12 @@ pub struct Declaration {
 #[derive(Clone, Queryable, Selectable, Identifiable, Associations, Debug, PartialEq, Eq, Hash)]
 #[diesel(table_name = crate::schema_diesel::files)]
 #[diesel(belongs_to(Module, foreign_key = module))]
+#[diesel(belongs_to(Project, foreign_key = project_id))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct File {
     pub id: i32,
-    pub module: i32,
+    pub project_id: i32,
+    pub module: Option<i32>,
     pub module_path: String,
     pub filesystem_path: String,
     pub filetype: String,
@@ -42,6 +44,7 @@ pub struct Module {
 pub struct Project {
     pub id: i32,
     pub project_name: String,
+    pub root_path: String,
 }
 
 #[derive(

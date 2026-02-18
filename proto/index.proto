@@ -1,26 +1,30 @@
 syntax = "proto3";
 package askl.index;
 
-message IndexUpload {
+option go_package = "github.com/planetA/askl-golang-indexer/pkg/indexpb;indexpb";
+
+message Project {
   string project_name = 1;
-  repeated Module modules = 2;
+  string root_path = 2;
+  repeated Module modules = 3;
+  repeated File files = 4;
 }
 
 message Module {
   int64 local_id = 1;           // Unique within project
   string module_name = 2;
-  repeated File files = 3;
-  repeated Symbol symbols = 4;
+  repeated Symbol symbols = 3;
 }
 
 message File {
   int64 local_id = 1;           // Unique within project
-  string module_path = 2;
-  string filesystem_path = 3;   // Metadata only, never used for filesystem access
-  string filetype = 4;
-  bytes content = 5;            // File content (content_hash computed server-side)
-  repeated Declaration declarations = 6;  // Declarations in this file
-  repeated SymbolRef refs = 7;  // References from this file
+  optional int64 module_id = 2; // References Module.local_id when set
+  string module_path = 3;
+  string filesystem_path = 4;   // Metadata only, never used for filesystem access
+  string filetype = 5;
+  bytes content = 6;            // File content (content_hash computed server-side)
+  repeated Declaration declarations = 7;  // Declarations in this file
+  repeated SymbolRef refs = 8;  // References from this file
 }
 
 message Symbol {

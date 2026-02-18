@@ -6,7 +6,8 @@ CREATE EXTENSION IF NOT EXISTS ltree;
 CREATE TABLE IF NOT EXISTS index.projects
 (
     id SERIAL PRIMARY KEY,
-    project_name TEXT NOT NULL UNIQUE
+    project_name TEXT NOT NULL UNIQUE,
+    root_path TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS index.modules
@@ -19,13 +20,18 @@ CREATE TABLE IF NOT EXISTS index.modules
 CREATE TABLE IF NOT EXISTS index.files
 (
     id SERIAL PRIMARY KEY,
-    module INTEGER NOT NULL REFERENCES index.modules(id) ON DELETE CASCADE,
+    project_id INTEGER NOT NULL REFERENCES index.projects(id) ON DELETE CASCADE,
+    module INTEGER REFERENCES index.modules(id) ON DELETE CASCADE,
     module_path TEXT NOT NULL,
     filesystem_path TEXT NOT NULL,
     filetype TEXT NOT NULL,
     content_hash TEXT NOT NULL,
-    UNIQUE (module, filesystem_path)
+    UNIQUE (project_id, module, filesystem_path)
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS files_project_path_no_module_idx
+    ON index.files (project_id, filesystem_path)
+    WHERE module IS NULL;
 
 CREATE TABLE IF NOT EXISTS index.symbols
 (

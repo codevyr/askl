@@ -1,7 +1,7 @@
 use actix_web::{delete, get, http::header, web, HttpRequest, HttpResponse, Responder};
 use askld::auth::AuthIdentity;
 use askld::index_store::{IndexStore, StoreError, UploadError};
-use askld::proto::askl::index::IndexUpload;
+use askld::proto::askl::index::Project;
 use log::error;
 use prost::Message;
 
@@ -24,7 +24,7 @@ pub async fn upload_index(
         return HttpResponse::UnsupportedMediaType().body("Expected application/x-protobuf");
     }
 
-    let upload = match IndexUpload::decode(body.as_ref()) {
+    let upload = match Project::decode(body.as_ref()) {
         Ok(upload) => upload,
         Err(err) => {
             return HttpResponse::BadRequest()
