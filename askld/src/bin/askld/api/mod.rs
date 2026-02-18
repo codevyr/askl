@@ -24,6 +24,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         )
         .service(index::get_index_project)
         .service(index::delete_index_project)
+        .service(index::get_project_tree)
+        .service(index::resolve_project_path)
+        .service(index::get_project_source)
         .service(query::query)
         .service(query::file);
 }

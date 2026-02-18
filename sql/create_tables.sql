@@ -33,6 +33,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS files_project_path_no_module_idx
     ON index.files (project_id, filesystem_path)
     WHERE module IS NULL;
 
+CREATE INDEX IF NOT EXISTS files_project_path_idx
+    ON index.files (project_id, filesystem_path);
+
 CREATE TABLE IF NOT EXISTS index.symbols
 (
     id SERIAL PRIMARY KEY,

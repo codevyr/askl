@@ -53,6 +53,21 @@ pub struct ProjectDetails {
     pub symbol_count: i64,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct ProjectTreeNode {
+    pub name: String,
+    pub path: String,
+    pub node_type: String,
+    pub has_children: bool,
+    pub file_id: Option<i32>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ProjectResolveNode {
+    pub name: String,
+    pub path: String,
+}
+
 #[derive(Insertable, Clone)]
 #[diesel(table_name = index_schema::projects)]
 struct NewProject {
@@ -108,6 +123,12 @@ struct NewSymbolRef {
     to_symbol: i32,
     from_file: i32,
     from_offset_range: std::ops::Range<i32>,
+}
+
+#[derive(Debug, Queryable)]
+struct ProjectFileRow {
+    id: i32,
+    filesystem_path: String,
 }
 
 impl From<diesel::result::Error> for UploadError {
@@ -291,6 +312,234 @@ impl IndexStore {
         .await
         .map_err(|err| StoreError::Storage(err.to_string()))?
     }
+
+    pub async fn list_project_tree(
+        &self,
+        project_id: i32,
+        path: &str,
+        depth: u32,
+    ) -> Result<Option<Vec<ProjectTreeNode>>, StoreError> {
+        let pool = self.pool.clone();
+        let path = path.to_string();
+        let depth = depth.max(1);
+        task::spawn_blocking(move || {
+            let mut conn = pool
+                .get()
+                .map_err(|err| StoreError::Storage(err.to_string()))?;
+
+            let exists = index_schema::projects::table
+                .filter(index_schema::projects::id.eq(project_id))
+                .select(index_schema::projects::id)
+                .first::<i32>(&mut conn)
+                .optional()?;
+            if exists.is_none() {
+                return Ok(None);
+            }
+
+            let normalized = normalize_full_path(&path);
+            let files = load_project_files_by_prefix(&mut conn, project_id, &normalized)?;
+            let nodes = build_tree_nodes(&files, &normalized, depth);
+            Ok(Some(nodes))
+        })
+        .await
+        .map_err(|err| StoreError::Storage(err.to_string()))?
+    }
+
+    pub async fn resolve_project_path(
+        &self,
+        project_id: i32,
+        file_id: Option<i32>,
+        path: Option<&str>,
+    ) -> Result<Option<Vec<ProjectResolveNode>>, StoreError> {
+        let pool = self.pool.clone();
+        let path = path.map(|value| value.to_string());
+        task::spawn_blocking(move || {
+            let mut conn = pool
+                .get()
+                .map_err(|err| StoreError::Storage(err.to_string()))?;
+
+            let full_path = match (file_id, path.as_deref()) {
+                (Some(file_id), None) => index_schema::files::table
+                    .filter(index_schema::files::project_id.eq(project_id))
+                    .filter(index_schema::files::id.eq(file_id))
+                    .select(index_schema::files::filesystem_path)
+                    .first::<String>(&mut conn)
+                    .optional()?
+                    .map(|value| normalize_full_path(&value)),
+                (None, Some(path)) => {
+                    let normalized = normalize_full_path(path);
+                    index_schema::files::table
+                        .filter(index_schema::files::project_id.eq(project_id))
+                        .filter(index_schema::files::filesystem_path.eq(&normalized))
+                        .select(index_schema::files::filesystem_path)
+                        .first::<String>(&mut conn)
+                        .optional()?
+                        .map(|value| normalize_full_path(&value))
+                }
+                _ => return Ok(None),
+            };
+
+            let full_path = match full_path {
+                Some(full_path) => full_path,
+                None => return Ok(None),
+            };
+            let nodes = build_resolve_nodes(&full_path);
+            Ok(Some(nodes))
+        })
+        .await
+        .map_err(|err| StoreError::Storage(err.to_string()))?
+    }
+
+    pub async fn get_project_file_contents_by_path(
+        &self,
+        project_id: i32,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let pool = self.pool.clone();
+        let path = path.to_string();
+        task::spawn_blocking(move || {
+            let mut conn = pool
+                .get()
+                .map_err(|err| StoreError::Storage(err.to_string()))?;
+
+            let normalized = normalize_full_path(&path);
+            let content = index_schema::file_contents::table
+                .inner_join(
+                    index_schema::files::table
+                        .on(index_schema::file_contents::file_id.eq(index_schema::files::id)),
+                )
+                .filter(index_schema::files::project_id.eq(project_id))
+                .filter(index_schema::files::filesystem_path.eq(normalized))
+                .select(index_schema::file_contents::content)
+                .first::<Vec<u8>>(&mut conn)
+                .optional()?;
+
+            Ok(content)
+        })
+        .await
+        .map_err(|err| StoreError::Storage(err.to_string()))?
+    }
+}
+
+fn load_project_files_by_prefix(
+    conn: &mut PgConnection,
+    project_id: i32,
+    prefix: &str,
+) -> Result<Vec<ProjectFileRow>, StoreError> {
+    let prefix = if prefix == "/" {
+        "/".to_string()
+    } else {
+        format!("{}/", prefix.trim_end_matches('/'))
+    };
+    let like_pattern = format!("{}%", prefix);
+    let files = index_schema::files::table
+        .filter(index_schema::files::project_id.eq(project_id))
+        .filter(index_schema::files::filesystem_path.like(like_pattern))
+        .select((index_schema::files::id, index_schema::files::filesystem_path))
+        .load::<ProjectFileRow>(conn)?;
+    Ok(files)
+}
+
+fn normalize_posix(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+fn normalize_full_path(path: &str) -> String {
+    let mut normalized = normalize_posix(path);
+    let has_leading = normalized.starts_with('/');
+    let parts: Vec<&str> = normalized.split('/').filter(|p| !p.is_empty()).collect();
+    normalized = parts.join("/");
+    if has_leading {
+        normalized.insert(0, '/');
+    }
+    if normalized.is_empty() && has_leading {
+        normalized.push('/');
+    }
+    normalized
+}
+
+fn build_tree_nodes(
+    files: &[ProjectFileRow],
+    request_path: &str,
+    depth: u32,
+) -> Vec<ProjectTreeNode> {
+    let depth = depth.max(1) as usize;
+    let request_path = normalize_full_path(request_path);
+    let request_prefix = if request_path == "/" {
+        "/".to_string()
+    } else {
+        format!("{}/", request_path.trim_end_matches('/'))
+    };
+    let mut nodes: HashMap<String, ProjectTreeNode> = HashMap::new();
+
+    for row in files {
+        let full_path = normalize_full_path(&row.filesystem_path);
+        if full_path.is_empty() {
+            continue;
+        }
+
+        let remainder = if request_path == "/" {
+            full_path.trim_start_matches('/')
+        } else {
+            match full_path.strip_prefix(&request_prefix) {
+                Some(stripped) => stripped,
+                None => continue,
+            }
+        };
+
+        let segments: Vec<&str> = remainder.split('/').filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            continue;
+        }
+
+        let max_depth = depth.min(segments.len());
+        for idx in 0..max_depth {
+            let sub_path = segments[..=idx].join("/");
+            let rel = if request_path == "/" {
+                format!("/{}", sub_path)
+            } else {
+                format!("{}/{}", request_path.trim_end_matches('/'), sub_path)
+            };
+            let is_file = idx + 1 == segments.len();
+            let has_children = idx + 1 < segments.len();
+            let entry = nodes.entry(rel.clone()).or_insert_with(|| ProjectTreeNode {
+                name: segments[idx].to_string(),
+                path: rel.clone(),
+                node_type: if has_children { "dir".to_string() } else { "file".to_string() },
+                has_children,
+                file_id: if is_file { Some(row.id) } else { None },
+            });
+
+            if has_children {
+                entry.has_children = true;
+                entry.node_type = "dir".to_string();
+                entry.file_id = None;
+            } else if is_file && entry.file_id.is_none() {
+                entry.file_id = Some(row.id);
+                entry.node_type = "file".to_string();
+            }
+        }
+    }
+
+    let mut values: Vec<ProjectTreeNode> = nodes.into_values().collect();
+    values.sort_by(|a, b| a.path.cmp(&b.path));
+    values
+}
+
+fn build_resolve_nodes(full_path: &str) -> Vec<ProjectResolveNode> {
+    let mut nodes = Vec::new();
+    let mut current = String::new();
+    let normalized = normalize_full_path(full_path);
+    let segments: Vec<&str> = normalized.trim_start_matches('/').split('/').collect();
+    for segment in segments.into_iter().filter(|s| !s.is_empty()) {
+        current.push('/');
+        current.push_str(segment);
+        nodes.push(ProjectResolveNode {
+            name: segment.to_string(),
+            path: current.clone(),
+        });
+    }
+    nodes
 }
 
 struct ModuleInsert {

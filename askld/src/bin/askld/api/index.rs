@@ -4,6 +4,7 @@ use askld::index_store::{IndexStore, StoreError, UploadError};
 use askld::proto::askl::index::Project;
 use log::error;
 use prost::Message;
+use serde::Deserialize;
 
 use super::types::{IndexDeleteResponse, IndexUploadResponse};
 
@@ -91,4 +92,138 @@ pub async fn delete_index_project(
             HttpResponse::InternalServerError().body("Failed to delete project")
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TreeQuery {
+    path: Option<String>,
+    depth: Option<u32>,
+}
+
+#[get("/v1/index/projects/{project_id}/tree")]
+pub async fn get_project_tree(
+    _identity: AuthIdentity,
+    store: web::Data<IndexStore>,
+    project_id: web::Path<i32>,
+    query: web::Query<TreeQuery>,
+) -> impl Responder {
+    let mut path = query.path.clone().unwrap_or_else(|| "/".to_string());
+    if path.is_empty() {
+        path = "/".to_string();
+    }
+    if !path.starts_with('/') {
+        return HttpResponse::BadRequest().body("path must be an absolute path");
+    }
+    let depth = query.depth.unwrap_or(1);
+    match store.list_project_tree(*project_id, &path, depth).await {
+        Ok(Some(nodes)) => HttpResponse::Ok().json(nodes),
+        Ok(None) => HttpResponse::NotFound().body("Project not found"),
+        Err(StoreError::Storage(message)) => {
+            error!(
+                "Failed to load project tree {}: {}",
+                project_id, message
+            );
+            HttpResponse::InternalServerError().body("Failed to load project tree")
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResolveQuery {
+    file_id: Option<i32>,
+    path: Option<String>,
+}
+
+#[get("/v1/index/projects/{project_id}/resolve")]
+pub async fn resolve_project_path(
+    _identity: AuthIdentity,
+    store: web::Data<IndexStore>,
+    project_id: web::Path<i32>,
+    query: web::Query<ResolveQuery>,
+) -> impl Responder {
+    if query.file_id.is_some() == query.path.is_some() {
+        return HttpResponse::BadRequest().body("Provide either file_id or path");
+    }
+    if let Some(path) = query.path.as_deref() {
+        if !path.starts_with('/') {
+            return HttpResponse::BadRequest().body("path must be an absolute path");
+        }
+    }
+
+    match store
+        .resolve_project_path(*project_id, query.file_id, query.path.as_deref())
+        .await
+    {
+        Ok(Some(nodes)) => HttpResponse::Ok().json(nodes),
+        Ok(None) => HttpResponse::NotFound().body("File not found"),
+        Err(StoreError::Storage(message)) => {
+            error!(
+                "Failed to resolve project path {}: {}",
+                project_id, message
+            );
+            HttpResponse::InternalServerError().body("Failed to resolve project path")
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SourceQuery {
+    path: String,
+    start_offset: Option<i64>,
+    end_offset: Option<i64>,
+}
+
+#[get("/v1/index/projects/{project_id}/source")]
+pub async fn get_project_source(
+    _identity: AuthIdentity,
+    store: web::Data<IndexStore>,
+    project_id: web::Path<i32>,
+    query: web::Query<SourceQuery>,
+) -> impl Responder {
+    let path = query.path.trim();
+    if path.is_empty() {
+        return HttpResponse::BadRequest().body("path is required");
+    }
+    if !path.starts_with('/') {
+        return HttpResponse::BadRequest().body("path must be an absolute path");
+    }
+
+    let content = match store
+        .get_project_file_contents_by_path(*project_id, path)
+        .await
+    {
+        Ok(Some(content)) => content,
+        Ok(None) => return HttpResponse::NotFound().body("File not found"),
+        Err(StoreError::Storage(message)) => {
+            error!(
+                "Failed to load project source {}: {}",
+                project_id, message
+            );
+            return HttpResponse::InternalServerError().body("Failed to load project source");
+        }
+    };
+
+    match slice_content(content, query.start_offset, query.end_offset) {
+        Ok(slice) => HttpResponse::Ok().body(slice),
+        Err(response) => response,
+    }
+}
+
+fn slice_content(
+    content: Vec<u8>,
+    start_offset: Option<i64>,
+    end_offset: Option<i64>,
+) -> Result<Vec<u8>, HttpResponse> {
+    let len = content.len();
+    let start = start_offset.unwrap_or(0);
+    let end = end_offset.unwrap_or(len as i64);
+    if start < 0 || end < 0 {
+        return Err(HttpResponse::BadRequest().body("Offsets must be non-negative"));
+    }
+    let start = start as usize;
+    let end = end as usize;
+    if start > end || end > len {
+        return Err(HttpResponse::BadRequest().body("Invalid offset range"));
+    }
+    Ok(content[start..end].to_vec())
 }
