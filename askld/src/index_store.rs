@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use tokio::task;
 
 use crate::proto::askl::index::{File as UploadFile, Module as UploadModule, Project as UploadProject};
+use index::symbols::FileId;
 use index::schema_diesel as index_schema;
 
 const MAX_INSERT_ROWS: usize = 1000;
@@ -55,12 +56,23 @@ pub struct ProjectDetails {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct ProjectTreeNode {
-    pub name: String,
     pub path: String,
     pub node_type: String,
-    pub has_children: bool,
-    pub file_id: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_children: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<FileId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub filetype: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compact_path: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum ProjectTreeResult {
+    ProjectNotFound,
+    NotDirectory,
+    Nodes(Vec<ProjectTreeNode>),
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -319,11 +331,9 @@ impl IndexStore {
         &self,
         project_id: i32,
         path: &str,
-        depth: u32,
-    ) -> Result<Option<Vec<ProjectTreeNode>>, StoreError> {
+    ) -> Result<ProjectTreeResult, StoreError> {
         let pool = self.pool.clone();
         let path = path.to_string();
-        let depth = depth.max(1);
         task::spawn_blocking(move || {
             let mut conn = pool
                 .get()
@@ -335,13 +345,27 @@ impl IndexStore {
                 .first::<i32>(&mut conn)
                 .optional()?;
             if exists.is_none() {
-                return Ok(None);
+                return Ok(ProjectTreeResult::ProjectNotFound);
             }
 
             let normalized = normalize_full_path(&path);
+            if normalized != "/" {
+                let file_exists = index_schema::files::table
+                    .filter(index_schema::files::project_id.eq(project_id))
+                    .filter(index_schema::files::filesystem_path.eq(&normalized))
+                    .select(index_schema::files::id)
+                    .first::<i32>(&mut conn)
+                    .optional()?;
+                if file_exists.is_some() {
+                    return Ok(ProjectTreeResult::NotDirectory);
+                }
+            }
             let files = load_project_files_by_prefix(&mut conn, project_id, &normalized)?;
-            let nodes = build_tree_nodes(&files, &normalized, depth);
-            Ok(Some(nodes))
+            if normalized != "/" && files.is_empty() {
+                return Ok(ProjectTreeResult::NotDirectory);
+            }
+            let nodes = build_tree_nodes(&files, &normalized);
+            Ok(ProjectTreeResult::Nodes(nodes))
         })
         .await
         .map_err(|err| StoreError::Storage(err.to_string()))?
@@ -464,79 +488,148 @@ fn normalize_full_path(path: &str) -> String {
     normalized
 }
 
+#[derive(Debug, Default)]
+struct DirInfo {
+    child_dirs: HashSet<String>,
+    file_names: HashSet<String>,
+}
+
+impl DirInfo {
+    fn new() -> Self {
+        Self {
+            child_dirs: HashSet::new(),
+            file_names: HashSet::new(),
+        }
+    }
+
+    fn has_children(&self) -> bool {
+        !self.child_dirs.is_empty() || !self.file_names.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FileEntry {
+    id: FileId,
+    filetype: String,
+}
+
+fn compute_compact_path(
+    start_path: &str,
+    dir_map: &HashMap<String, DirInfo>,
+) -> Option<String> {
+    let mut current = start_path.to_string();
+    let mut last = None;
+    loop {
+        let info = match dir_map.get(&current) {
+            Some(info) => info,
+            None => break,
+        };
+        if !info.file_names.is_empty() {
+            break;
+        }
+        if info.child_dirs.len() == 1 {
+            let child = info.child_dirs.iter().next().cloned()?;
+            last = Some(child.clone());
+            current = child;
+            continue;
+        }
+        break;
+    }
+    last
+}
+
 fn build_tree_nodes(
     files: &[ProjectFileRow],
     request_path: &str,
-    depth: u32,
 ) -> Vec<ProjectTreeNode> {
-    let depth = depth.max(1) as usize;
     let request_path = normalize_full_path(request_path);
-    let request_prefix = if request_path == "/" {
-        "/".to_string()
-    } else {
-        format!("{}/", request_path.trim_end_matches('/'))
-    };
-    let mut nodes: HashMap<String, ProjectTreeNode> = HashMap::new();
+    let mut dir_map: HashMap<String, DirInfo> = HashMap::new();
+    let mut file_map: HashMap<String, FileEntry> = HashMap::new();
 
     for row in files {
         let full_path = normalize_full_path(&row.filesystem_path);
         if full_path.is_empty() {
             continue;
         }
+        file_map.insert(
+            full_path.clone(),
+            FileEntry {
+                id: FileId::new(row.id),
+                filetype: row.filetype.clone(),
+            },
+        );
 
-        let remainder = if request_path == "/" {
-            full_path.trim_start_matches('/')
-        } else {
-            match full_path.strip_prefix(&request_prefix) {
-                Some(stripped) => stripped,
-                None => continue,
-            }
-        };
-
-        let segments: Vec<&str> = remainder.split('/').filter(|s| !s.is_empty()).collect();
+        let mut parent = "/".to_string();
+        let segments: Vec<&str> = full_path.trim_start_matches('/').split('/').collect();
         if segments.is_empty() {
             continue;
         }
-
-        let max_depth = depth.min(segments.len());
-        for idx in 0..max_depth {
-            let sub_path = segments[..=idx].join("/");
-            let rel = if request_path == "/" {
-                format!("/{}", sub_path)
-            } else {
-                format!("{}/{}", request_path.trim_end_matches('/'), sub_path)
-            };
-            let is_file = idx + 1 == segments.len();
-            let has_children = idx + 1 < segments.len();
-            let entry = nodes.entry(rel.clone()).or_insert_with(|| ProjectTreeNode {
-                name: segments[idx].to_string(),
-                path: rel.clone(),
-                node_type: if has_children { "dir".to_string() } else { "file".to_string() },
-                has_children,
-                file_id: if is_file { Some(row.id) } else { None },
-                filetype: if is_file {
-                    Some(row.filetype.clone())
-                } else {
-                    None
-                },
-            });
-
-            if has_children {
-                entry.has_children = true;
-                entry.node_type = "dir".to_string();
-                entry.file_id = None;
-                entry.filetype = None;
-            } else if is_file && entry.file_id.is_none() {
-                entry.file_id = Some(row.id);
-                entry.node_type = "file".to_string();
-                entry.filetype = Some(row.filetype.clone());
+        for (idx, segment) in segments.iter().enumerate() {
+            let is_last = idx + 1 == segments.len();
+            if is_last {
+                let info = dir_map.entry(parent.clone()).or_insert_with(DirInfo::new);
+                info.file_names.insert(segment.to_string());
+                break;
             }
+
+            let child_dir = if parent == "/" {
+                format!("/{}", segment)
+            } else {
+                format!("{}/{}", parent.trim_end_matches('/'), segment)
+            };
+            let info = dir_map.entry(parent.clone()).or_insert_with(DirInfo::new);
+            info.child_dirs.insert(child_dir.clone());
+            dir_map.entry(child_dir.clone()).or_insert_with(DirInfo::new);
+            parent = child_dir;
         }
     }
 
-    let mut values: Vec<ProjectTreeNode> = nodes.into_values().collect();
-    values.sort_by(|a, b| a.path.cmp(&b.path));
-    values
+    let request_info = match dir_map.get(&request_path) {
+        Some(info) => info,
+        None => return Vec::new(),
+    };
+    let mut nodes = Vec::new();
+
+    for child_dir in request_info.child_dirs.iter() {
+        let info = dir_map.get(child_dir);
+        let has_children = info.map(|dir| dir.has_children()).unwrap_or(false);
+        let compact_path = compute_compact_path(child_dir, &dir_map);
+        nodes.push(ProjectTreeNode {
+            path: child_dir.clone(),
+            node_type: "dir".to_string(),
+            has_children: Some(has_children),
+            file_id: None,
+            filetype: None,
+            compact_path,
+        });
+    }
+
+    for file_name in request_info.file_names.iter() {
+        let file_path = if request_path == "/" {
+            format!("/{}", file_name)
+        } else {
+            format!("{}/{}", request_path.trim_end_matches('/'), file_name)
+        };
+        let entry = match file_map.get(&file_path) {
+            Some(entry) => entry,
+            None => continue,
+        };
+        nodes.push(ProjectTreeNode {
+            path: file_path,
+            node_type: "file".to_string(),
+            has_children: None,
+            file_id: Some(entry.id),
+            filetype: Some(entry.filetype.clone()),
+            compact_path: None,
+        });
+    }
+
+    nodes.sort_by(|a, b| {
+        let a_is_dir = a.node_type == "dir";
+        let b_is_dir = b.node_type == "dir";
+        b_is_dir.cmp(&a_is_dir).then_with(|| a.path.cmp(&b.path))
+    });
+    nodes
 }
 
 fn build_resolve_nodes(full_path: &str) -> Vec<ProjectResolveNode> {

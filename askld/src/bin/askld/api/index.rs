@@ -1,6 +1,6 @@
 use actix_web::{delete, get, http::header, web, HttpRequest, HttpResponse, Responder};
 use askld::auth::AuthIdentity;
-use askld::index_store::{IndexStore, StoreError, UploadError};
+use askld::index_store::{IndexStore, ProjectTreeResult, StoreError, UploadError};
 use askld::proto::askl::index::Project;
 use log::error;
 use prost::Message;
@@ -95,7 +95,6 @@ pub async fn delete_index_project(
 #[derive(Debug, Deserialize)]
 pub struct TreeQuery {
     path: Option<String>,
-    depth: Option<u32>,
 }
 
 #[get("/v1/index/projects/{project_id}/tree")]
@@ -111,10 +110,14 @@ pub async fn get_project_tree(
     if !path.starts_with('/') {
         return HttpResponse::BadRequest().body("path must be an absolute path");
     }
-    let depth = query.depth.unwrap_or(1);
-    match store.list_project_tree(*project_id, &path, depth).await {
-        Ok(Some(nodes)) => HttpResponse::Ok().json(nodes),
-        Ok(None) => HttpResponse::NotFound().body("Project not found"),
+    match store.list_project_tree(*project_id, &path).await {
+        Ok(ProjectTreeResult::Nodes(nodes)) => HttpResponse::Ok().json(nodes),
+        Ok(ProjectTreeResult::ProjectNotFound) => {
+            HttpResponse::NotFound().body("Project not found")
+        }
+        Ok(ProjectTreeResult::NotDirectory) => {
+            HttpResponse::BadRequest().body("path is not a directory")
+        }
         Err(StoreError::Storage(message)) => {
             error!(
                 "Failed to load project tree {}: {}",
