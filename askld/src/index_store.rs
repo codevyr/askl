@@ -8,9 +8,11 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::task;
 
-use crate::proto::askl::index::{File as UploadFile, Module as UploadModule, Project as UploadProject};
-use index::symbols::FileId;
+use crate::proto::askl::index::{
+    File as UploadFile, Module as UploadModule, Project as UploadProject,
+};
 use index::schema_diesel as index_schema;
+use index::symbols::FileId;
 
 const MAX_INSERT_ROWS: usize = 1000;
 
@@ -193,16 +195,12 @@ impl IndexStore {
             conn.transaction::<_, UploadError, _>(|conn| {
                 let project_name = upload.project_name.trim();
                 if project_name.is_empty() {
-                    return Err(UploadError::Invalid(
-                        "project_name is required".to_string(),
-                    ));
+                    return Err(UploadError::Invalid("project_name is required".to_string()));
                 }
 
                 let root_path = upload.root_path.trim();
                 if root_path.is_empty() {
-                    return Err(UploadError::Invalid(
-                        "root_path is required".to_string(),
-                    ));
+                    return Err(UploadError::Invalid("root_path is required".to_string()));
                 }
 
                 let project_id: Option<i32> = diesel::insert_into(index_schema::projects::table)
@@ -301,7 +299,10 @@ impl IndexStore {
 
             let module_rows: Vec<(i32, String)> = index_schema::modules::table
                 .filter(index_schema::modules::project_id.eq(project_id))
-                .select((index_schema::modules::id, index_schema::modules::module_name))
+                .select((
+                    index_schema::modules::id,
+                    index_schema::modules::module_name,
+                ))
                 .order(index_schema::modules::id)
                 .load(&mut conn)?;
 
@@ -383,25 +384,11 @@ impl IndexStore {
                 .optional()?;
             let directory_id = match directory_id {
                 Some(id) => id,
-                None => {
-                    let file_exists = index_schema::files::table
-                        .filter(index_schema::files::project_id.eq(project_id))
-                        .filter(index_schema::files::filesystem_path.eq(&normalized))
-                        .select(index_schema::files::id)
-                        .first::<i32>(&mut conn)
-                        .optional()?;
-                    if file_exists.is_some() {
-                        return Ok(ProjectTreeResult::NotDirectory);
-                    }
-                    return Ok(ProjectTreeResult::NotDirectory);
-                }
+                None => return Ok(ProjectTreeResult::NotDirectory),
             };
 
-            let directories = load_directory_children_with_compact(
-                &mut conn,
-                project_id,
-                directory_id,
-            )?;
+            let directories =
+                load_directory_children_with_compact(&mut conn, project_id, directory_id)?;
             let files = load_file_children(&mut conn, directory_id)?;
 
             let mut nodes = Vec::with_capacity(directories.len() + files.len());
@@ -651,7 +638,10 @@ struct SymbolInsert {
     row: NewSymbol,
 }
 
-fn build_modules(project_id: i32, modules: &[UploadModule]) -> Result<Vec<ModuleInsert>, UploadError> {
+fn build_modules(
+    project_id: i32,
+    modules: &[UploadModule],
+) -> Result<Vec<ModuleInsert>, UploadError> {
     let mut seen = HashSet::new();
     let mut inserts = Vec::new();
     for module in modules {
@@ -934,12 +924,14 @@ fn build_declarations(
             ))
         })?;
         for declaration in &file.declarations {
-            let symbol_id = symbol_map.get(&declaration.symbol_local_id).ok_or_else(|| {
-                UploadError::Invalid(format!(
-                    "unknown symbol local_id {}",
-                    declaration.symbol_local_id
-                ))
-            })?;
+            let symbol_id = symbol_map
+                .get(&declaration.symbol_local_id)
+                .ok_or_else(|| {
+                    UploadError::Invalid(format!(
+                        "unknown symbol local_id {}",
+                        declaration.symbol_local_id
+                    ))
+                })?;
             rows.push(NewDeclaration {
                 symbol: *symbol_id,
                 file_id: *file_id,
@@ -965,12 +957,14 @@ fn build_symbol_refs(
             ))
         })?;
         for reference in &file.refs {
-            let symbol_id = symbol_map.get(&reference.to_symbol_local_id).ok_or_else(|| {
-                UploadError::Invalid(format!(
-                    "unknown symbol local_id {}",
-                    reference.to_symbol_local_id
-                ))
-            })?;
+            let symbol_id = symbol_map
+                .get(&reference.to_symbol_local_id)
+                .ok_or_else(|| {
+                    UploadError::Invalid(format!(
+                        "unknown symbol local_id {}",
+                        reference.to_symbol_local_id
+                    ))
+                })?;
             rows.push(NewSymbolRef {
                 to_symbol: *symbol_id,
                 from_file: *file_id,
