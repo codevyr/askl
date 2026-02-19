@@ -100,10 +100,19 @@ struct NewModule {
 struct NewFile {
     project_id: i32,
     module: Option<i32>,
+    directory_id: i32,
     module_path: String,
     filesystem_path: String,
     filetype: String,
     content_hash: String,
+}
+
+#[derive(Insertable, Clone)]
+#[diesel(table_name = index_schema::directories)]
+struct NewDirectory {
+    project_id: i32,
+    parent_id: Option<i32>,
+    path: String,
 }
 
 #[derive(Insertable, Clone)]
@@ -138,10 +147,23 @@ struct NewSymbolRef {
     from_offset_range: std::ops::Range<i32>,
 }
 
-#[derive(Debug, Queryable)]
-struct ProjectFileRow {
+#[derive(Debug, QueryableByName)]
+struct DirectoryChildRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    path: String,
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    has_children: bool,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    compact_path: Option<String>,
+}
+
+#[derive(Debug, QueryableByName)]
+struct FileChildRow {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
     id: i32,
-    filesystem_path: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    path: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
     filetype: String,
 }
 
@@ -202,7 +224,11 @@ impl IndexStore {
                 let module_inserts = build_modules(project_id, &upload.modules)?;
                 let module_map = insert_modules(conn, module_inserts)?;
 
-                let file_inserts = build_files(project_id, &upload.files, &module_map)?;
+                let directory_paths = collect_directory_paths(&upload.files);
+                let directory_map = insert_directories(conn, project_id, &directory_paths)?;
+
+                let file_inserts =
+                    build_files(project_id, &upload.files, &module_map, &directory_map)?;
                 let file_map = insert_files(conn, &file_inserts)?;
 
                 let symbol_inserts = build_symbols(&upload.modules, &module_map)?;
@@ -349,22 +375,63 @@ impl IndexStore {
             }
 
             let normalized = normalize_full_path(&path);
-            if normalized != "/" {
-                let file_exists = index_schema::files::table
-                    .filter(index_schema::files::project_id.eq(project_id))
-                    .filter(index_schema::files::filesystem_path.eq(&normalized))
-                    .select(index_schema::files::id)
-                    .first::<i32>(&mut conn)
-                    .optional()?;
-                if file_exists.is_some() {
+            let directory_id = index_schema::directories::table
+                .filter(index_schema::directories::project_id.eq(project_id))
+                .filter(index_schema::directories::path.eq(&normalized))
+                .select(index_schema::directories::id)
+                .first::<i32>(&mut conn)
+                .optional()?;
+            let directory_id = match directory_id {
+                Some(id) => id,
+                None => {
+                    let file_exists = index_schema::files::table
+                        .filter(index_schema::files::project_id.eq(project_id))
+                        .filter(index_schema::files::filesystem_path.eq(&normalized))
+                        .select(index_schema::files::id)
+                        .first::<i32>(&mut conn)
+                        .optional()?;
+                    if file_exists.is_some() {
+                        return Ok(ProjectTreeResult::NotDirectory);
+                    }
                     return Ok(ProjectTreeResult::NotDirectory);
                 }
+            };
+
+            let directories = load_directory_children_with_compact(
+                &mut conn,
+                project_id,
+                directory_id,
+            )?;
+            let files = load_file_children(&mut conn, directory_id)?;
+
+            let mut nodes = Vec::with_capacity(directories.len() + files.len());
+            for row in directories {
+                nodes.push(ProjectTreeNode {
+                    path: row.path,
+                    node_type: "dir".to_string(),
+                    has_children: Some(row.has_children),
+                    file_id: None,
+                    filetype: None,
+                    compact_path: row.compact_path,
+                });
             }
-            let files = load_project_files_by_prefix(&mut conn, project_id, &normalized)?;
-            if normalized != "/" && files.is_empty() {
-                return Ok(ProjectTreeResult::NotDirectory);
+
+            for row in files {
+                nodes.push(ProjectTreeNode {
+                    path: row.path,
+                    node_type: "file".to_string(),
+                    has_children: None,
+                    file_id: Some(FileId::new(row.id)),
+                    filetype: Some(row.filetype),
+                    compact_path: None,
+                });
             }
-            let nodes = build_tree_nodes(&files, &normalized);
+
+            nodes.sort_by(|a, b| {
+                let a_is_dir = a.node_type == "dir";
+                let b_is_dir = b.node_type == "dir";
+                b_is_dir.cmp(&a_is_dir).then_with(|| a.path.cmp(&b.path))
+            });
             Ok(ProjectTreeResult::Nodes(nodes))
         })
         .await
@@ -447,27 +514,91 @@ impl IndexStore {
     }
 }
 
-fn load_project_files_by_prefix(
+fn load_directory_children_with_compact(
     conn: &mut PgConnection,
     project_id: i32,
-    prefix: &str,
-) -> Result<Vec<ProjectFileRow>, StoreError> {
-    let prefix = if prefix == "/" {
-        "/".to_string()
-    } else {
-        format!("{}/", prefix.trim_end_matches('/'))
-    };
-    let like_pattern = format!("{}%", prefix);
-    let files = index_schema::files::table
-        .filter(index_schema::files::project_id.eq(project_id))
-        .filter(index_schema::files::filesystem_path.like(like_pattern))
-        .select((
-            index_schema::files::id,
-            index_schema::files::filesystem_path,
-            index_schema::files::filetype,
-        ))
-        .load::<ProjectFileRow>(conn)?;
-    Ok(files)
+    directory_id: i32,
+) -> Result<Vec<DirectoryChildRow>, StoreError> {
+    let query = r#"
+        WITH dir_stats AS (
+            SELECT
+                d.id,
+                d.path,
+                d.parent_id,
+                COUNT(DISTINCT c.id) AS child_dir_count,
+                COUNT(DISTINCT f.id) AS file_count
+            FROM index.directories d
+            LEFT JOIN index.directories c ON c.parent_id = d.id
+            LEFT JOIN index.files f ON f.directory_id = d.id
+            WHERE d.project_id = $1
+            GROUP BY d.id
+        ),
+        children AS (
+            SELECT d.id, d.path
+            FROM index.directories d
+            WHERE d.parent_id = $2
+        )
+        SELECT
+            c.path,
+            (ds.child_dir_count > 0 OR ds.file_count > 0) AS has_children,
+            chain.compact_path
+        FROM children c
+        JOIN dir_stats ds ON ds.id = c.id
+        LEFT JOIN LATERAL (
+            WITH RECURSIVE walk AS (
+                SELECT
+                    ds2.id,
+                    ds2.path,
+                    ds2.child_dir_count,
+                    ds2.file_count,
+                    0 AS depth
+                FROM dir_stats ds2
+                WHERE ds2.id = c.id
+
+                UNION ALL
+
+                SELECT
+                    child.id,
+                    child.path,
+                    child.child_dir_count,
+                    child.file_count,
+                    w.depth + 1
+                FROM walk w
+                JOIN dir_stats child ON child.parent_id = w.id
+                WHERE w.file_count = 0
+                  AND w.child_dir_count = 1
+            )
+            SELECT CASE
+                WHEN max(depth) > 0 THEN (SELECT path FROM walk ORDER BY depth DESC LIMIT 1)
+                ELSE NULL
+            END AS compact_path
+            FROM walk
+        ) chain ON true
+        ORDER BY c.path
+    "#;
+
+    let rows = diesel::sql_query(query)
+        .bind::<diesel::sql_types::Integer, _>(project_id)
+        .bind::<diesel::sql_types::Integer, _>(directory_id)
+        .load::<DirectoryChildRow>(conn)?;
+    Ok(rows)
+}
+
+fn load_file_children(
+    conn: &mut PgConnection,
+    directory_id: i32,
+) -> Result<Vec<FileChildRow>, StoreError> {
+    let query = r#"
+        SELECT id, filesystem_path AS path, filetype
+        FROM index.files
+        WHERE directory_id = $1
+        ORDER BY filesystem_path
+    "#;
+
+    let rows = diesel::sql_query(query)
+        .bind::<diesel::sql_types::Integer, _>(directory_id)
+        .load::<FileChildRow>(conn)?;
+    Ok(rows)
 }
 
 fn normalize_posix(path: &str) -> String {
@@ -486,150 +617,6 @@ fn normalize_full_path(path: &str) -> String {
         normalized.push('/');
     }
     normalized
-}
-
-#[derive(Debug, Default)]
-struct DirInfo {
-    child_dirs: HashSet<String>,
-    file_names: HashSet<String>,
-}
-
-impl DirInfo {
-    fn new() -> Self {
-        Self {
-            child_dirs: HashSet::new(),
-            file_names: HashSet::new(),
-        }
-    }
-
-    fn has_children(&self) -> bool {
-        !self.child_dirs.is_empty() || !self.file_names.is_empty()
-    }
-}
-
-#[derive(Debug, Clone)]
-struct FileEntry {
-    id: FileId,
-    filetype: String,
-}
-
-fn compute_compact_path(
-    start_path: &str,
-    dir_map: &HashMap<String, DirInfo>,
-) -> Option<String> {
-    let mut current = start_path.to_string();
-    let mut last = None;
-    loop {
-        let info = match dir_map.get(&current) {
-            Some(info) => info,
-            None => break,
-        };
-        if !info.file_names.is_empty() {
-            break;
-        }
-        if info.child_dirs.len() == 1 {
-            let child = info.child_dirs.iter().next().cloned()?;
-            last = Some(child.clone());
-            current = child;
-            continue;
-        }
-        break;
-    }
-    last
-}
-
-fn build_tree_nodes(
-    files: &[ProjectFileRow],
-    request_path: &str,
-) -> Vec<ProjectTreeNode> {
-    let request_path = normalize_full_path(request_path);
-    let mut dir_map: HashMap<String, DirInfo> = HashMap::new();
-    let mut file_map: HashMap<String, FileEntry> = HashMap::new();
-
-    for row in files {
-        let full_path = normalize_full_path(&row.filesystem_path);
-        if full_path.is_empty() {
-            continue;
-        }
-        file_map.insert(
-            full_path.clone(),
-            FileEntry {
-                id: FileId::new(row.id),
-                filetype: row.filetype.clone(),
-            },
-        );
-
-        let mut parent = "/".to_string();
-        let segments: Vec<&str> = full_path.trim_start_matches('/').split('/').collect();
-        if segments.is_empty() {
-            continue;
-        }
-        for (idx, segment) in segments.iter().enumerate() {
-            let is_last = idx + 1 == segments.len();
-            if is_last {
-                let info = dir_map.entry(parent.clone()).or_insert_with(DirInfo::new);
-                info.file_names.insert(segment.to_string());
-                break;
-            }
-
-            let child_dir = if parent == "/" {
-                format!("/{}", segment)
-            } else {
-                format!("{}/{}", parent.trim_end_matches('/'), segment)
-            };
-            let info = dir_map.entry(parent.clone()).or_insert_with(DirInfo::new);
-            info.child_dirs.insert(child_dir.clone());
-            dir_map.entry(child_dir.clone()).or_insert_with(DirInfo::new);
-            parent = child_dir;
-        }
-    }
-
-    let request_info = match dir_map.get(&request_path) {
-        Some(info) => info,
-        None => return Vec::new(),
-    };
-    let mut nodes = Vec::new();
-
-    for child_dir in request_info.child_dirs.iter() {
-        let info = dir_map.get(child_dir);
-        let has_children = info.map(|dir| dir.has_children()).unwrap_or(false);
-        let compact_path = compute_compact_path(child_dir, &dir_map);
-        nodes.push(ProjectTreeNode {
-            path: child_dir.clone(),
-            node_type: "dir".to_string(),
-            has_children: Some(has_children),
-            file_id: None,
-            filetype: None,
-            compact_path,
-        });
-    }
-
-    for file_name in request_info.file_names.iter() {
-        let file_path = if request_path == "/" {
-            format!("/{}", file_name)
-        } else {
-            format!("{}/{}", request_path.trim_end_matches('/'), file_name)
-        };
-        let entry = match file_map.get(&file_path) {
-            Some(entry) => entry,
-            None => continue,
-        };
-        nodes.push(ProjectTreeNode {
-            path: file_path,
-            node_type: "file".to_string(),
-            has_children: None,
-            file_id: Some(entry.id),
-            filetype: Some(entry.filetype.clone()),
-            compact_path: None,
-        });
-    }
-
-    nodes.sort_by(|a, b| {
-        let a_is_dir = a.node_type == "dir";
-        let b_is_dir = b.node_type == "dir";
-        b_is_dir.cmp(&a_is_dir).then_with(|| a.path.cmp(&b.path))
-    });
-    nodes
 }
 
 fn build_resolve_nodes(full_path: &str) -> Vec<ProjectResolveNode> {
@@ -708,10 +695,95 @@ fn insert_modules(
     Ok(module_map)
 }
 
+fn collect_directory_paths(files: &[UploadFile]) -> HashSet<String> {
+    let mut paths = HashSet::new();
+    paths.insert("/".to_string());
+    for file in files {
+        let filesystem_path = normalize_full_path(&file.filesystem_path);
+        let mut dir_path = parent_dir(&filesystem_path);
+        loop {
+            paths.insert(dir_path.clone());
+            if dir_path == "/" {
+                break;
+            }
+            dir_path = parent_dir(&dir_path);
+        }
+    }
+    paths
+}
+
+fn path_depth(path: &str) -> usize {
+    if path == "/" {
+        return 0;
+    }
+    path.trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .count()
+}
+
+fn parent_dir(path: &str) -> String {
+    let normalized = normalize_full_path(path);
+    if normalized == "/" {
+        return "/".to_string();
+    }
+    let trimmed = normalized.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(0) | None => "/".to_string(),
+        Some(idx) => trimmed[..idx].to_string(),
+    }
+}
+
+fn insert_directories(
+    conn: &mut PgConnection,
+    project_id: i32,
+    directory_paths: &HashSet<String>,
+) -> Result<HashMap<String, i32>, UploadError> {
+    use index_schema::directories;
+
+    let mut paths: Vec<String> = directory_paths.iter().cloned().collect();
+    paths.sort_by_key(|path| path_depth(path));
+
+    let mut mapping = HashMap::new();
+    for path in paths {
+        let parent_id = if path == "/" {
+            None
+        } else {
+            let parent_path = parent_dir(&path);
+            mapping.get(&parent_path).cloned()
+        };
+
+        let inserted: Option<i32> = diesel::insert_into(directories::table)
+            .values(NewDirectory {
+                project_id,
+                parent_id,
+                path: path.clone(),
+            })
+            .on_conflict((directories::project_id, directories::path))
+            .do_nothing()
+            .returning(directories::id)
+            .get_result(conn)
+            .optional()?;
+
+        let directory_id = match inserted {
+            Some(id) => id,
+            None => directories::table
+                .filter(directories::project_id.eq(project_id))
+                .filter(directories::path.eq(&path))
+                .select(directories::id)
+                .first::<i32>(conn)?,
+        };
+        mapping.insert(path, directory_id);
+    }
+
+    Ok(mapping)
+}
+
 fn build_files(
     project_id: i32,
     files: &[UploadFile],
     module_map: &HashMap<i64, i32>,
+    directory_map: &HashMap<String, i32>,
 ) -> Result<Vec<FileInsert>, UploadError> {
     let mut seen = HashSet::new();
     let mut inserts = Vec::new();
@@ -734,14 +806,23 @@ fn build_files(
             }
             None => None,
         };
+        let filesystem_path = normalize_full_path(&file.filesystem_path);
+        let directory_path = parent_dir(&filesystem_path);
+        let directory_id = directory_map.get(&directory_path).ok_or_else(|| {
+            UploadError::Invalid(format!(
+                "missing directory mapping for path {}",
+                directory_path
+            ))
+        })?;
         inserts.push(FileInsert {
             local_id: file.local_id,
             content: file.content.clone(),
             row: NewFile {
                 project_id,
                 module: module_id,
+                directory_id: *directory_id,
                 module_path: file.module_path.clone(),
-                filesystem_path: file.filesystem_path.clone(),
+                filesystem_path,
                 filetype: file.filetype.clone(),
                 content_hash: hash_bytes(&file.content),
             },

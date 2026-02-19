@@ -8,9 +8,12 @@ INSERT INTO modules (id, module_name, project_id)
 VALUES
     (1, 'test', 1);
 
-INSERT INTO files (id, project_id, module, module_path, filesystem_path, filetype, content_hash)
+INSERT INTO directories (id, project_id, parent_id, path)
+VALUES (1, 1, NULL, '/');
+
+INSERT INTO files (id, project_id, module, directory_id, module_path, filesystem_path, filetype, content_hash)
 VALUES
-    (1, 1, 1, 'main.c', '/main.c', 'cc', '');
+    (1, 1, 1, 1, 'main.c', '/main.c', 'cc', '');
 
 INSERT INTO symbols (id, name, module, symbol_scope)
 VALUES

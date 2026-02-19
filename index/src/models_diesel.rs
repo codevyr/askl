@@ -22,6 +22,7 @@ pub struct File {
     pub id: i32,
     pub project_id: i32,
     pub module: Option<i32>,
+    pub directory_id: i32,
     pub module_path: String,
     pub filesystem_path: String,
     pub filetype: String,

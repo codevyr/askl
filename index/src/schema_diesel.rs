@@ -26,10 +26,20 @@ diesel::table! {
         id -> Integer,
         project_id -> Integer,
         module -> Nullable<Integer>,
+        directory_id -> Integer,
         module_path -> Text,
         filesystem_path -> Text,
         filetype -> Text,
         content_hash -> Text,
+    }
+}
+
+diesel::table! {
+    index.directories (id) {
+        id -> Integer,
+        project_id -> Integer,
+        parent_id -> Nullable<Integer>,
+        path -> Text,
     }
 }
 
@@ -76,14 +86,17 @@ diesel::table! {
 diesel::joinable!(declarations -> files (file_id));
 diesel::joinable!(declarations -> symbols (symbol));
 diesel::joinable!(file_contents -> files (file_id));
+diesel::joinable!(files -> directories (directory_id));
 diesel::joinable!(files -> modules (module));
 diesel::joinable!(files -> projects (project_id));
+diesel::joinable!(directories -> projects (project_id));
 diesel::joinable!(modules -> projects (project_id));
 diesel::joinable!(symbol_refs -> symbols (to_symbol));
 diesel::joinable!(symbols -> modules (module));
 
 diesel::allow_tables_to_appear_in_same_query!(
     declarations,
+    directories,
     file_contents,
     files,
     modules,
