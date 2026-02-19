@@ -1,5 +1,4 @@
 use actix_web::{get, web, HttpResponse, Responder};
-use askld::auth::AuthIdentity;
 
 pub mod auth;
 pub mod index;
@@ -7,7 +6,7 @@ pub mod query;
 pub mod types;
 
 #[get("/version")]
-async fn version(_identity: AuthIdentity) -> impl Responder {
+async fn version() -> impl Responder {
     HttpResponse::Ok().body(env!("CARGO_PKG_VERSION"))
 }
 

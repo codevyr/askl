@@ -47,7 +47,6 @@ pub async fn upload_index(
 }
 
 pub async fn list_index_projects(
-    _identity: AuthIdentity,
     store: web::Data<IndexStore>,
 ) -> impl Responder {
     match store.list_projects().await {
@@ -61,7 +60,6 @@ pub async fn list_index_projects(
 
 #[get("/v1/index/projects/{project_id}")]
 pub async fn get_index_project(
-    _identity: AuthIdentity,
     store: web::Data<IndexStore>,
     project_id: web::Path<i32>,
 ) -> impl Responder {
@@ -102,7 +100,6 @@ pub struct TreeQuery {
 
 #[get("/v1/index/projects/{project_id}/tree")]
 pub async fn get_project_tree(
-    _identity: AuthIdentity,
     store: web::Data<IndexStore>,
     project_id: web::Path<i32>,
     query: web::Query<TreeQuery>,
@@ -136,7 +133,6 @@ pub struct ResolveQuery {
 
 #[get("/v1/index/projects/{project_id}/resolve")]
 pub async fn resolve_project_path(
-    _identity: AuthIdentity,
     store: web::Data<IndexStore>,
     project_id: web::Path<i32>,
     query: web::Query<ResolveQuery>,
@@ -175,7 +171,6 @@ pub struct SourceQuery {
 
 #[get("/v1/index/projects/{project_id}/source")]
 pub async fn get_project_source(
-    _identity: AuthIdentity,
     store: web::Data<IndexStore>,
     project_id: web::Path<i32>,
     query: web::Query<SourceQuery>,

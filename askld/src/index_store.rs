@@ -60,6 +60,7 @@ pub struct ProjectTreeNode {
     pub node_type: String,
     pub has_children: bool,
     pub file_id: Option<i32>,
+    pub filetype: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -129,6 +130,7 @@ struct NewSymbolRef {
 struct ProjectFileRow {
     id: i32,
     filesystem_path: String,
+    filetype: String,
 }
 
 impl From<diesel::result::Error> for UploadError {
@@ -435,7 +437,11 @@ fn load_project_files_by_prefix(
     let files = index_schema::files::table
         .filter(index_schema::files::project_id.eq(project_id))
         .filter(index_schema::files::filesystem_path.like(like_pattern))
-        .select((index_schema::files::id, index_schema::files::filesystem_path))
+        .select((
+            index_schema::files::id,
+            index_schema::files::filesystem_path,
+            index_schema::files::filetype,
+        ))
         .load::<ProjectFileRow>(conn)?;
     Ok(files)
 }
@@ -508,15 +514,22 @@ fn build_tree_nodes(
                 node_type: if has_children { "dir".to_string() } else { "file".to_string() },
                 has_children,
                 file_id: if is_file { Some(row.id) } else { None },
+                filetype: if is_file {
+                    Some(row.filetype.clone())
+                } else {
+                    None
+                },
             });
 
             if has_children {
                 entry.has_children = true;
                 entry.node_type = "dir".to_string();
                 entry.file_id = None;
+                entry.filetype = None;
             } else if is_file && entry.file_id.is_none() {
                 entry.file_id = Some(row.id);
                 entry.node_type = "file".to_string();
+                entry.filetype = Some(row.filetype.clone());
             }
         }
     }
