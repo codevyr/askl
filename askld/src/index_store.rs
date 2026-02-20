@@ -178,6 +178,14 @@ struct DirectoryWalkRow {
 }
 
 #[derive(Debug, QueryableByName)]
+struct DirectoryPathRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    path: String,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    id: i32,
+}
+
+#[derive(Debug, QueryableByName)]
 struct FileChildRow {
     #[diesel(sql_type = diesel::sql_types::Integer)]
     id: i32,
@@ -746,23 +754,14 @@ fn insert_directories(
 ) -> Result<HashMap<String, i32>, UploadError> {
     use index_schema::directories;
 
-    let mut paths: Vec<String> = directory_paths.iter().cloned().collect();
-    paths.sort_by_key(|path| path_depth(path));
-
     let mut mapping = HashMap::new();
-    for path in paths {
-        let parent_id = if path == "/" {
-            None
-        } else {
-            let parent_path = parent_dir(&path);
-            mapping.get(&parent_path).cloned()
-        };
 
+    if directory_paths.contains("/") {
         let inserted: Option<i32> = diesel::insert_into(directories::table)
             .values(NewDirectory {
                 project_id,
-                parent_id,
-                path: path.clone(),
+                parent_id: None,
+                path: "/".to_string(),
             })
             .on_conflict((directories::project_id, directories::path))
             .do_nothing()
@@ -770,18 +769,107 @@ fn insert_directories(
             .get_result(conn)
             .optional()?;
 
-        let directory_id = match inserted {
+        let root_id = match inserted {
             Some(id) => id,
             None => directories::table
                 .filter(directories::project_id.eq(project_id))
-                .filter(directories::path.eq(&path))
+                .filter(directories::path.eq("/"))
                 .select(directories::id)
                 .first::<i32>(conn)?,
         };
-        mapping.insert(path, directory_id);
+        mapping.insert("/".to_string(), root_id);
+    }
+
+    let mut entries = Vec::new();
+    for path in directory_paths {
+        if path == "/" {
+            continue;
+        }
+        entries.push(DirectoryEntry {
+            path: path.clone(),
+            parent_path: parent_dir(path),
+            depth: path_depth(path),
+        });
+    }
+    entries.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.path.cmp(&b.path)));
+
+    let mut index = 0;
+    while index < entries.len() {
+        let depth = entries[index].depth;
+        let mut end_index = index + 1;
+        while end_index < entries.len() && entries[end_index].depth == depth {
+            end_index += 1;
+        }
+
+        for chunk in entries[index..end_index].chunks(MAX_INSERT_ROWS) {
+            insert_directory_batch(conn, project_id, chunk)?;
+            let paths: Vec<String> = chunk.iter().map(|entry| entry.path.clone()).collect();
+            for row in fetch_directory_ids(conn, project_id, &paths)? {
+                mapping.insert(row.path, row.id);
+            }
+        }
+
+        index = end_index;
     }
 
     Ok(mapping)
+}
+
+fn insert_directory_batch(
+    conn: &mut PgConnection,
+    project_id: i32,
+    entries: &[DirectoryEntry],
+) -> Result<(), UploadError> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let paths: Vec<String> = entries.iter().map(|entry| entry.path.clone()).collect();
+    let parent_paths: Vec<String> = entries
+        .iter()
+        .map(|entry| entry.parent_path.clone())
+        .collect();
+
+    let query = r#"
+        INSERT INTO index.directories (project_id, parent_id, path)
+        SELECT $1, parent.id, v.path
+        FROM unnest($2::text[], $3::text[]) AS v(path, parent_path)
+        JOIN index.directories parent
+          ON parent.project_id = $1 AND parent.path = v.parent_path
+        ON CONFLICT (project_id, path) DO NOTHING
+    "#;
+
+    diesel::sql_query(query)
+        .bind::<diesel::sql_types::Integer, _>(project_id)
+        .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(paths)
+        .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(parent_paths)
+        .execute(conn)?;
+    Ok(())
+}
+
+fn fetch_directory_ids(
+    conn: &mut PgConnection,
+    project_id: i32,
+    paths: &[String],
+) -> Result<Vec<DirectoryPathRow>, UploadError> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = diesel::sql_query(
+        "SELECT path, id FROM index.directories WHERE project_id = $1 AND path = ANY($2)",
+    )
+    .bind::<diesel::sql_types::Integer, _>(project_id)
+    .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(paths.to_vec())
+    .load::<DirectoryPathRow>(conn)?;
+    Ok(rows)
+}
+
+#[derive(Clone)]
+struct DirectoryEntry {
+    path: String,
+    parent_path: String,
+    depth: usize,
 }
 
 fn build_files(
