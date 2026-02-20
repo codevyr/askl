@@ -154,6 +154,30 @@ struct DirectoryChildRow {
 }
 
 #[derive(Debug, QueryableByName)]
+struct DirectoryChildStatsRow {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    id: i32,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    path: String,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    child_dir_count: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    file_count: i64,
+}
+
+#[derive(Debug, QueryableByName)]
+struct DirectoryWalkRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    child_dir_count: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    file_count: i64,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Integer>)]
+    child_id: Option<i32>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    child_path: Option<String>,
+}
+
+#[derive(Debug, QueryableByName)]
 struct FileChildRow {
     #[diesel(sql_type = diesel::sql_types::Integer)]
     id: i32,
@@ -195,6 +219,11 @@ impl IndexStore {
                 let root_path = upload.root_path.trim();
                 if root_path.is_empty() {
                     return Err(UploadError::Invalid("root_path is required".to_string()));
+                }
+                if !root_path.starts_with('/') {
+                    return Err(UploadError::Invalid(
+                        "root_path must be an absolute path".to_string(),
+                    ));
                 }
 
                 let project_id: Option<i32> = diesel::insert_into(index_schema::projects::table)
@@ -465,99 +494,99 @@ fn load_directory_children_with_compact(
     directory_id: i32,
     compact: bool,
 ) -> Result<Vec<DirectoryChildRow>, StoreError> {
-    let query = if compact {
+    let rows = diesel::sql_query(
         r#"
-        WITH dir_stats AS (
-            SELECT
-                d.id,
-                d.path,
-                d.parent_id,
-                COUNT(DISTINCT c.id) AS child_dir_count,
-                COUNT(DISTINCT f.id) AS file_count
-            FROM index.directories d
-            LEFT JOIN index.directories c ON c.parent_id = d.id
-            LEFT JOIN index.files f ON f.directory_id = d.id
-            WHERE d.project_id = $1
-            GROUP BY d.id
-        ),
-        children AS (
-            SELECT d.id, d.path
-            FROM index.directories d
-            WHERE d.parent_id = $2
-        )
         SELECT
-            c.path,
-            (ds.child_dir_count > 0 OR ds.file_count > 0) AS has_children,
-            chain.compact_path
-        FROM children c
-        JOIN dir_stats ds ON ds.id = c.id
-        LEFT JOIN LATERAL (
-            WITH RECURSIVE walk AS (
-                SELECT
-                    ds2.id,
-                    ds2.path,
-                    ds2.child_dir_count,
-                    ds2.file_count,
-                    0 AS depth
-                FROM dir_stats ds2
-                WHERE ds2.id = c.id
-
-                UNION ALL
-
-                SELECT
-                    child.id,
-                    child.path,
-                    child.child_dir_count,
-                    child.file_count,
-                    w.depth + 1
-                FROM walk w
-                JOIN dir_stats child ON child.parent_id = w.id
-                WHERE w.file_count = 0
-                  AND w.child_dir_count = 1
-            )
-            SELECT CASE
-                WHEN max(depth) > 0 THEN (SELECT path FROM walk ORDER BY depth DESC LIMIT 1)
-                ELSE NULL
-            END AS compact_path
-            FROM walk
-        ) chain ON true
-        ORDER BY c.path
-        "#
-    } else {
-        r#"
-        WITH dir_stats AS (
-            SELECT
-                d.id,
-                d.path,
-                d.parent_id,
-                COUNT(DISTINCT c.id) AS child_dir_count,
-                COUNT(DISTINCT f.id) AS file_count
-            FROM index.directories d
-            LEFT JOIN index.directories c ON c.parent_id = d.id
-            LEFT JOIN index.files f ON f.directory_id = d.id
-            WHERE d.project_id = $1
-            GROUP BY d.id
-        ),
-        children AS (
-            SELECT d.id, d.path
-            FROM index.directories d
-            WHERE d.parent_id = $2
-        )
-        SELECT
-            c.path,
-            (ds.child_dir_count > 0 OR ds.file_count > 0) AS has_children,
-            NULL::text AS compact_path
-        FROM children c
-        JOIN dir_stats ds ON ds.id = c.id
-        ORDER BY c.path
-        "#
-    };
-
-    let rows = diesel::sql_query(query)
+            d.id,
+            d.path,
+            COUNT(DISTINCT c.id) AS child_dir_count,
+            COUNT(DISTINCT f.id) AS file_count
+        FROM index.directories d
+        LEFT JOIN index.directories c ON c.parent_id = d.id
+        LEFT JOIN index.files f ON f.directory_id = d.id
+        WHERE d.project_id = $1 AND d.parent_id = $2
+        GROUP BY d.id
+        ORDER BY d.path
+        "#,
+    )
         .bind::<diesel::sql_types::Integer, _>(project_id)
         .bind::<diesel::sql_types::Integer, _>(directory_id)
-        .load::<DirectoryChildRow>(conn)?;
-    Ok(rows)
+        .load::<DirectoryChildStatsRow>(conn)?;
+
+    let mut children = Vec::with_capacity(rows.len());
+    for row in rows {
+        let has_children = row.child_dir_count > 0 || row.file_count > 0;
+        let compact_path = if compact && row.file_count == 0 && row.child_dir_count == 1 {
+            compute_compact_path(conn, project_id, row.id)?
+        } else {
+            None
+        };
+        children.push(DirectoryChildRow {
+            path: row.path,
+            has_children,
+            compact_path,
+        });
+    }
+
+    Ok(children)
+}
+
+fn compute_compact_path(
+    conn: &mut PgConnection,
+    project_id: i32,
+    start_id: i32,
+) -> Result<Option<String>, StoreError> {
+    let mut current_id = start_id;
+    let mut last_path = None;
+    loop {
+        let row = load_directory_walk_row(conn, project_id, current_id)?;
+        if row.file_count != 0 || row.child_dir_count != 1 {
+            break;
+        }
+        let child_id = match row.child_id {
+            Some(id) => id,
+            None => break,
+        };
+        let child_path = match row.child_path {
+            Some(path) => path,
+            None => break,
+        };
+        last_path = Some(child_path);
+        current_id = child_id;
+    }
+    Ok(last_path)
+}
+
+fn load_directory_walk_row(
+    conn: &mut PgConnection,
+    project_id: i32,
+    directory_id: i32,
+) -> Result<DirectoryWalkRow, StoreError> {
+    let query = r#"
+        SELECT
+            (SELECT COUNT(*)
+             FROM index.directories
+             WHERE project_id = $1 AND parent_id = $2) AS child_dir_count,
+            (SELECT COUNT(*)
+             FROM index.files
+             WHERE project_id = $1 AND directory_id = $2) AS file_count,
+            (SELECT id
+             FROM index.directories
+             WHERE project_id = $1 AND parent_id = $2
+             ORDER BY path
+             LIMIT 1) AS child_id,
+            (SELECT path
+             FROM index.directories
+             WHERE project_id = $1 AND parent_id = $2
+             ORDER BY path
+             LIMIT 1) AS child_path
+    "#;
+
+    let row = diesel::sql_query(query)
+        .bind::<diesel::sql_types::Integer, _>(project_id)
+        .bind::<diesel::sql_types::Integer, _>(directory_id)
+        .get_result::<DirectoryWalkRow>(conn)?;
+    Ok(row)
 }
 
 fn load_file_children(
@@ -770,6 +799,19 @@ fn build_files(
                 file.local_id
             )));
         }
+        let filesystem_path_raw = file.filesystem_path.trim();
+        if filesystem_path_raw.is_empty() {
+            return Err(UploadError::Invalid(format!(
+                "filesystem_path is required for file {}",
+                file.local_id
+            )));
+        }
+        if !filesystem_path_raw.starts_with('/') {
+            return Err(UploadError::Invalid(format!(
+                "filesystem_path must be an absolute path for file {}",
+                file.local_id
+            )));
+        }
         let module_id = match file.module_id {
             Some(local_id) => {
                 let mapped = module_map.get(&local_id).ok_or_else(|| {
@@ -782,7 +824,7 @@ fn build_files(
             }
             None => None,
         };
-        let filesystem_path = normalize_full_path(&file.filesystem_path);
+        let filesystem_path = normalize_full_path(filesystem_path_raw);
         let directory_path = parent_dir(&filesystem_path);
         let directory_id = directory_map.get(&directory_path).ok_or_else(|| {
             UploadError::Invalid(format!(

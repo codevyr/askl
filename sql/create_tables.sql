@@ -42,15 +42,8 @@ CREATE TABLE IF NOT EXISTS index.files
     filesystem_path TEXT NOT NULL,
     filetype TEXT NOT NULL,
     content_hash TEXT NOT NULL,
-    UNIQUE (project_id, module, filesystem_path)
+    UNIQUE (project_id, filesystem_path)
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS files_project_path_no_module_idx
-    ON index.files (project_id, filesystem_path)
-    WHERE module IS NULL;
-
-CREATE INDEX IF NOT EXISTS files_project_path_idx
-    ON index.files (project_id, filesystem_path);
 
 CREATE INDEX IF NOT EXISTS files_directory_idx
     ON index.files (directory_id);
