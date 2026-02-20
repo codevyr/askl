@@ -200,43 +200,6 @@ struct TreeResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ResolveQuery {
-    file_id: Option<i32>,
-    path: Option<String>,
-}
-
-#[get("/v1/index/projects/{project_id}/resolve")]
-pub async fn resolve_project_path(
-    store: web::Data<IndexStore>,
-    project_id: web::Path<i32>,
-    query: web::Query<ResolveQuery>,
-) -> impl Responder {
-    if query.file_id.is_some() == query.path.is_some() {
-        return HttpResponse::BadRequest().body("Provide either file_id or path");
-    }
-    if let Some(path) = query.path.as_deref() {
-        if !path.starts_with('/') {
-            return HttpResponse::BadRequest().body("path must be an absolute path");
-        }
-    }
-
-    match store
-        .resolve_project_path(*project_id, query.file_id, query.path.as_deref())
-        .await
-    {
-        Ok(Some(nodes)) => HttpResponse::Ok().json(nodes),
-        Ok(None) => HttpResponse::NotFound().body("File not found"),
-        Err(StoreError::Storage(message)) => {
-            error!(
-                "Failed to resolve project path {}: {}",
-                project_id, message
-            );
-            HttpResponse::InternalServerError().body("Failed to resolve project path")
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
 pub struct SourceQuery {
     path: String,
     start_offset: Option<i64>,

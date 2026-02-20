@@ -77,12 +77,6 @@ pub enum ProjectTreeResult {
     Nodes(Vec<ProjectTreeNode>),
 }
 
-#[derive(Debug, Serialize, Clone)]
-pub struct ProjectResolveNode {
-    pub name: String,
-    pub path: String,
-}
-
 #[derive(Insertable, Clone)]
 #[diesel(table_name = index_schema::projects)]
 struct NewProject {
@@ -434,51 +428,6 @@ impl IndexStore {
         .map_err(|err| StoreError::Storage(err.to_string()))?
     }
 
-    pub async fn resolve_project_path(
-        &self,
-        project_id: i32,
-        file_id: Option<i32>,
-        path: Option<&str>,
-    ) -> Result<Option<Vec<ProjectResolveNode>>, StoreError> {
-        let pool = self.pool.clone();
-        let path = path.map(|value| value.to_string());
-        task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(|err| StoreError::Storage(err.to_string()))?;
-
-            let full_path = match (file_id, path.as_deref()) {
-                (Some(file_id), None) => index_schema::files::table
-                    .filter(index_schema::files::project_id.eq(project_id))
-                    .filter(index_schema::files::id.eq(file_id))
-                    .select(index_schema::files::filesystem_path)
-                    .first::<String>(&mut conn)
-                    .optional()?
-                    .map(|value| normalize_full_path(&value)),
-                (None, Some(path)) => {
-                    let normalized = normalize_full_path(path);
-                    index_schema::files::table
-                        .filter(index_schema::files::project_id.eq(project_id))
-                        .filter(index_schema::files::filesystem_path.eq(&normalized))
-                        .select(index_schema::files::filesystem_path)
-                        .first::<String>(&mut conn)
-                        .optional()?
-                        .map(|value| normalize_full_path(&value))
-                }
-                _ => return Ok(None),
-            };
-
-            let full_path = match full_path {
-                Some(full_path) => full_path,
-                None => return Ok(None),
-            };
-            let nodes = build_resolve_nodes(&full_path);
-            Ok(Some(nodes))
-        })
-        .await
-        .map_err(|err| StoreError::Storage(err.to_string()))?
-    }
-
     pub async fn get_project_file_contents_by_path(
         &self,
         project_id: i32,
@@ -657,22 +606,6 @@ fn path_basename(path: &str) -> String {
         .next()
         .unwrap_or("/")
         .to_string()
-}
-
-fn build_resolve_nodes(full_path: &str) -> Vec<ProjectResolveNode> {
-    let mut nodes = Vec::new();
-    let mut current = String::new();
-    let normalized = normalize_full_path(full_path);
-    let segments: Vec<&str> = normalized.trim_start_matches('/').split('/').collect();
-    for segment in segments.into_iter().filter(|s| !s.is_empty()) {
-        current.push('/');
-        current.push_str(segment);
-        nodes.push(ProjectResolveNode {
-            name: segment.to_string(),
-            path: current.clone(),
-        });
-    }
-    nodes
 }
 
 struct ModuleInsert {
