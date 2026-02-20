@@ -4,7 +4,7 @@ use askld::index_store::{IndexStore, ProjectTreeResult, StoreError, UploadError}
 use askld::proto::askl::index::Project;
 use log::error;
 use prost::Message;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::types::{IndexDeleteResponse, IndexUploadResponse};
 
@@ -95,14 +95,34 @@ pub async fn delete_index_project(
 #[derive(Debug, Deserialize)]
 pub struct TreeQuery {
     path: Option<String>,
+    #[serde(default)]
+    expand: Vec<String>,
+    compact: Option<u8>,
 }
 
 #[get("/v1/index/projects/{project_id}/tree")]
 pub async fn get_project_tree(
     store: web::Data<IndexStore>,
     project_id: web::Path<i32>,
-    query: web::Query<TreeQuery>,
+    req: HttpRequest,
 ) -> impl Responder {
+    let query = if req.query_string().is_empty() {
+        TreeQuery {
+            path: None,
+            expand: Vec::new(),
+            compact: None,
+        }
+    } else {
+        let qs_config = serde_qs::Config::new(5, false);
+        match qs_config.deserialize_str::<TreeQuery>(req.query_string()) {
+            Ok(query) => query,
+            Err(err) => {
+                return HttpResponse::BadRequest()
+                    .body(format!("Query deserialize error: {}", err));
+            }
+        }
+    };
+
     let mut path = query.path.clone().unwrap_or_else(|| "/".to_string());
     if path.is_empty() {
         path = "/".to_string();
@@ -110,22 +130,73 @@ pub async fn get_project_tree(
     if !path.starts_with('/') {
         return HttpResponse::BadRequest().body("path must be an absolute path");
     }
-    match store.list_project_tree(*project_id, &path).await {
-        Ok(ProjectTreeResult::Nodes(nodes)) => HttpResponse::Ok().json(nodes),
+    let compact = match query.compact {
+        None => true,
+        Some(0) => false,
+        Some(1) => true,
+        Some(_) => return HttpResponse::BadRequest().body("compact must be 0 or 1"),
+    };
+    for expand_path in &query.expand {
+        if !expand_path.starts_with('/') {
+            return HttpResponse::BadRequest().body("expand must be absolute paths");
+        }
+    }
+
+    let base_nodes = match store.list_project_tree(*project_id, &path, compact).await {
+        Ok(ProjectTreeResult::Nodes(nodes)) => nodes,
         Ok(ProjectTreeResult::ProjectNotFound) => {
-            HttpResponse::NotFound().body("Project not found")
+            return HttpResponse::NotFound().body("Project not found");
         }
         Ok(ProjectTreeResult::NotDirectory) => {
-            HttpResponse::BadRequest().body("path is not a directory")
+            return HttpResponse::BadRequest().body("path is not a directory");
         }
         Err(StoreError::Storage(message)) => {
             error!(
                 "Failed to load project tree {}: {}",
                 project_id, message
             );
-            HttpResponse::InternalServerError().body("Failed to load project tree")
+            return HttpResponse::InternalServerError().body("Failed to load project tree");
         }
+    };
+
+    let mut expanded = std::collections::HashMap::new();
+    for expand_path in &query.expand {
+        let nodes = match store
+            .list_project_tree(*project_id, expand_path, compact)
+            .await
+        {
+            Ok(ProjectTreeResult::Nodes(nodes)) => nodes,
+            Ok(ProjectTreeResult::ProjectNotFound) => {
+                return HttpResponse::NotFound().body("Project not found");
+            }
+            Ok(ProjectTreeResult::NotDirectory) => {
+                return HttpResponse::BadRequest()
+                    .body(format!("expand path is not a directory: {}", expand_path));
+            }
+            Err(StoreError::Storage(message)) => {
+                error!(
+                    "Failed to load project tree {}: {}",
+                    project_id, message
+                );
+                return HttpResponse::InternalServerError().body("Failed to load project tree");
+            }
+        };
+        expanded.insert(expand_path.clone(), nodes);
     }
+
+    let response = TreeResponse {
+        base_path: path,
+        nodes: base_nodes,
+        expanded,
+    };
+    HttpResponse::Ok().json(response)
+}
+
+#[derive(Debug, Serialize)]
+struct TreeResponse {
+    base_path: String,
+    nodes: Vec<askld::index_store::ProjectTreeNode>,
+    expanded: std::collections::HashMap<String, Vec<askld::index_store::ProjectTreeNode>>,
 }
 
 #[derive(Debug, Deserialize)]

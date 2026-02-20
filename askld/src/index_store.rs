@@ -58,10 +58,10 @@ pub struct ProjectDetails {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct ProjectTreeNode {
+    pub name: String,
     pub path: String,
     pub node_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub has_children: Option<bool>,
+    pub has_children: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_id: Option<FileId>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -358,6 +358,7 @@ impl IndexStore {
         &self,
         project_id: i32,
         path: &str,
+        compact: bool,
     ) -> Result<ProjectTreeResult, StoreError> {
         let pool = self.pool.clone();
         let path = path.to_string();
@@ -387,27 +388,35 @@ impl IndexStore {
                 None => return Ok(ProjectTreeResult::NotDirectory),
             };
 
-            let directories =
-                load_directory_children_with_compact(&mut conn, project_id, directory_id)?;
+            let directories = load_directory_children_with_compact(
+                &mut conn,
+                project_id,
+                directory_id,
+                compact,
+            )?;
             let files = load_file_children(&mut conn, directory_id)?;
 
             let mut nodes = Vec::with_capacity(directories.len() + files.len());
             for row in directories {
+                let name = path_basename(&row.path);
                 nodes.push(ProjectTreeNode {
+                    name,
                     path: row.path,
                     node_type: "dir".to_string(),
-                    has_children: Some(row.has_children),
+                    has_children: row.has_children,
                     file_id: None,
                     filetype: None,
-                    compact_path: row.compact_path,
+                    compact_path: if compact { row.compact_path } else { None },
                 });
             }
 
             for row in files {
+                let name = path_basename(&row.path);
                 nodes.push(ProjectTreeNode {
+                    name,
                     path: row.path,
                     node_type: "file".to_string(),
-                    has_children: None,
+                    has_children: false,
                     file_id: Some(FileId::new(row.id)),
                     filetype: Some(row.filetype),
                     compact_path: None,
@@ -505,8 +514,10 @@ fn load_directory_children_with_compact(
     conn: &mut PgConnection,
     project_id: i32,
     directory_id: i32,
+    compact: bool,
 ) -> Result<Vec<DirectoryChildRow>, StoreError> {
-    let query = r#"
+    let query = if compact {
+        r#"
         WITH dir_stats AS (
             SELECT
                 d.id,
@@ -562,7 +573,36 @@ fn load_directory_children_with_compact(
             FROM walk
         ) chain ON true
         ORDER BY c.path
-    "#;
+        "#
+    } else {
+        r#"
+        WITH dir_stats AS (
+            SELECT
+                d.id,
+                d.path,
+                d.parent_id,
+                COUNT(DISTINCT c.id) AS child_dir_count,
+                COUNT(DISTINCT f.id) AS file_count
+            FROM index.directories d
+            LEFT JOIN index.directories c ON c.parent_id = d.id
+            LEFT JOIN index.files f ON f.directory_id = d.id
+            WHERE d.project_id = $1
+            GROUP BY d.id
+        ),
+        children AS (
+            SELECT d.id, d.path
+            FROM index.directories d
+            WHERE d.parent_id = $2
+        )
+        SELECT
+            c.path,
+            (ds.child_dir_count > 0 OR ds.file_count > 0) AS has_children,
+            NULL::text AS compact_path
+        FROM children c
+        JOIN dir_stats ds ON ds.id = c.id
+        ORDER BY c.path
+        "#
+    };
 
     let rows = diesel::sql_query(query)
         .bind::<diesel::sql_types::Integer, _>(project_id)
@@ -604,6 +644,19 @@ fn normalize_full_path(path: &str) -> String {
         normalized.push('/');
     }
     normalized
+}
+
+fn path_basename(path: &str) -> String {
+    let normalized = normalize_full_path(path);
+    if normalized == "/" {
+        return "/".to_string();
+    }
+    normalized
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("/")
+        .to_string()
 }
 
 fn build_resolve_nodes(full_path: &str) -> Vec<ProjectResolveNode> {
