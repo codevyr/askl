@@ -8,7 +8,7 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use tokio::time::{timeout, Duration};
 
-use super::types::{AsklData, Edge, ErrorResponse, Graph, Node, NodeDeclaration};
+use super::types::{AsklData, Edge, ErrorResponse, Graph, GraphFileEntry, Node, NodeDeclaration};
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -62,26 +62,35 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
 
     let mut result_graph = Graph::new();
 
-    for (from, to, loc) in res.edges.0 {
-        result_graph.add_edge(Edge::new(from.symbol_id, to.symbol_id, loc));
-    }
-
     let mut all_symbols = HashSet::new();
+    let mut file_projects = HashMap::new();
+    let mut result_files = HashMap::new();
     for declaration in res.nodes.0.iter() {
         all_symbols.insert(declaration.symbol.clone());
+        let file_id = FileId::new(declaration.file.id);
+        file_projects
+            .entry(file_id)
+            .or_insert(declaration.file.project_id);
+        result_files.entry(file_id).or_insert(GraphFileEntry {
+            file_id: file_id.to_string(),
+            path: declaration.file.filesystem_path.clone(),
+            project_id: declaration.file.project_id.to_string(),
+        });
     }
 
-    let mut result_files = HashMap::new();
-    for symbol in all_symbols {
-        for declaration in res.nodes.0.iter() {
-            if !result_files.contains_key(&FileId::new(declaration.file.id)) {
-                result_files.insert(
-                    FileId::new(declaration.file.id),
-                    declaration.file.filesystem_path.clone(),
-                );
-            }
-        }
+    for (from, to, loc) in res.edges.0 {
+        let from_project_id = loc
+            .as_ref()
+            .and_then(|occurrence| file_projects.get(&occurrence.file).map(|id| id.to_string()));
+        result_graph.add_edge(Edge::new(
+            from.symbol_id,
+            to.symbol_id,
+            loc,
+            from_project_id,
+        ));
+    }
 
+    for symbol in all_symbols {
         let declarations: Vec<NodeDeclaration> = res
             .nodes
             .0
@@ -94,6 +103,7 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
                     id: DeclarationId::new(d.declaration.id).to_string(),
                     symbol: SymbolId(d.declaration.symbol).to_string(),
                     file_id: FileId::new(d.file.id).to_string(),
+                    project_id: d.file.project_id.to_string(),
                     symbol_type: SymbolType::from(d.declaration.symbol_type),
                     start_offset,
                     end_offset,
@@ -109,7 +119,10 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
         ));
     }
 
-    result_graph.files = result_files.into_iter().collect();
+    result_graph.files = result_files
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect();
     result_graph.add_warnings(res.warnings);
 
     let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();
