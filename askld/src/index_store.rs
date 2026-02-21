@@ -215,10 +215,14 @@ impl IndexStore {
     pub async fn upload_index(&self, upload: UploadProject) -> Result<i32, UploadError> {
         let pool = self.pool.clone();
         task::spawn_blocking(move || {
+            let _upload_span: tracing::span::EnteredSpan =
+                tracing::info_span!("index_upload_store").entered();
             let mut conn = pool
                 .get()
                 .map_err(|err| UploadError::Storage(err.to_string()))?;
             conn.transaction::<_, UploadError, _>(|conn| {
+                let _txn_span: tracing::span::EnteredSpan =
+                    tracing::info_span!("index_upload_txn").entered();
                 let project_name = upload.project_name.trim();
                 if project_name.is_empty() {
                     return Err(UploadError::Invalid("project_name is required".to_string()));
@@ -234,40 +238,118 @@ impl IndexStore {
                     ));
                 }
 
-                let project_id: Option<i32> = diesel::insert_into(index_schema::projects::table)
-                    .values(NewProject {
-                        project_name: project_name.to_string(),
-                        root_path: root_path.to_string(),
-                    })
-                    .on_conflict(index_schema::projects::project_name)
-                    .do_nothing()
-                    .returning(index_schema::projects::id)
-                    .get_result(conn)
-                    .optional()?;
+                let project_id: Option<i32> = {
+                    let _span: tracing::span::EnteredSpan =
+                        tracing::info_span!("insert_project").entered();
+                    diesel::insert_into(index_schema::projects::table)
+                        .values(NewProject {
+                            project_name: project_name.to_string(),
+                            root_path: root_path.to_string(),
+                        })
+                        .on_conflict(index_schema::projects::project_name)
+                        .do_nothing()
+                        .returning(index_schema::projects::id)
+                        .get_result(conn)
+                        .optional()?
+                };
 
                 let project_id = match project_id {
                     Some(id) => id,
                     None => return Err(UploadError::Conflict),
                 };
 
-                let module_inserts = build_modules(project_id, &upload.modules)?;
-                let module_map = insert_modules(conn, module_inserts)?;
+                let module_inserts = {
+                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
+                        "build_modules",
+                        count = upload.modules.len()
+                    )
+                    .entered();
+                    build_modules(project_id, &upload.modules)?
+                };
+                let module_map = {
+                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
+                        "insert_modules",
+                        count = module_inserts.len()
+                    )
+                    .entered();
+                    insert_modules(conn, module_inserts)?
+                };
 
-                let directory_paths = collect_directory_paths(&upload.files);
-                let directory_map = insert_directories(conn, project_id, &directory_paths)?;
+                let directory_paths = {
+                    let _span: tracing::span::EnteredSpan =
+                        tracing::info_span!("collect_directory_paths").entered();
+                    collect_directory_paths(&upload.files)
+                };
+                let directory_map = {
+                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
+                        "insert_directories",
+                        count = directory_paths.len()
+                    )
+                    .entered();
+                    insert_directories(conn, project_id, &directory_paths)?
+                };
 
-                let file_inserts =
-                    build_files(project_id, &upload.files, &module_map, &directory_map)?;
-                let file_map = insert_files(conn, &file_inserts)?;
+                let file_inserts = {
+                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
+                        "build_files",
+                        count = upload.files.len()
+                    )
+                    .entered();
+                    build_files(project_id, &upload.files, &module_map, &directory_map)?
+                };
+                let file_map = {
+                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
+                        "insert_files",
+                        count = file_inserts.len()
+                    )
+                    .entered();
+                    insert_files(conn, &file_inserts)?
+                };
 
-                let symbol_inserts = build_symbols(&upload.modules, &module_map)?;
-                let symbol_map = insert_symbols(conn, symbol_inserts)?;
+                let symbol_inserts = {
+                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
+                        "build_symbols",
+                        count = upload.modules.len()
+                    )
+                    .entered();
+                    build_symbols(&upload.modules, &module_map)?
+                };
+                let symbol_map = {
+                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
+                        "insert_symbols",
+                        count = symbol_inserts.len()
+                    )
+                    .entered();
+                    insert_symbols(conn, symbol_inserts)?
+                };
 
-                let declaration_rows = build_declarations(&upload.files, &file_map, &symbol_map)?;
-                insert_declarations(conn, &declaration_rows)?;
+                let declaration_rows = {
+                    let _span: tracing::span::EnteredSpan =
+                        tracing::info_span!("build_declarations").entered();
+                    build_declarations(&upload.files, &file_map, &symbol_map)?
+                };
+                {
+                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
+                        "insert_declarations",
+                        count = declaration_rows.len()
+                    )
+                    .entered();
+                    insert_declarations(conn, &declaration_rows)?;
+                }
 
-                let symbol_ref_rows = build_symbol_refs(&upload.files, &file_map, &symbol_map)?;
-                insert_symbol_refs(conn, &symbol_ref_rows)?;
+                let symbol_ref_rows = {
+                    let _span: tracing::span::EnteredSpan =
+                        tracing::info_span!("build_symbol_refs").entered();
+                    build_symbol_refs(&upload.files, &file_map, &symbol_map)?
+                };
+                {
+                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
+                        "insert_symbol_refs",
+                        count = symbol_ref_rows.len()
+                    )
+                    .entered();
+                    insert_symbol_refs(conn, &symbol_ref_rows)?;
+                }
 
                 Ok(project_id)
             })

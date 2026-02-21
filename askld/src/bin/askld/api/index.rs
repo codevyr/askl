@@ -16,6 +16,8 @@ pub async fn upload_index(
     req: HttpRequest,
     body: web::Bytes,
 ) -> impl Responder {
+    let _upload_span: tracing::span::EnteredSpan =
+        tracing::info_span!("index_upload", bytes = body.len()).entered();
     let content_type = req
         .headers()
         .get(header::CONTENT_TYPE)
