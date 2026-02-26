@@ -1,6 +1,6 @@
 use crate::args::IndexCommand;
 use anyhow::{anyhow, Result};
-use askld::proto::askl::index::IndexUpload;
+use askld::proto::askl::index::Project;
 use bytes::Bytes;
 use futures::TryStreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -13,6 +13,7 @@ use tokio_util::codec::{BytesCodec, FramedRead};
 struct ProjectInfo {
     id: i32,
     project_name: String,
+    root_path: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -25,6 +26,7 @@ struct ProjectModule {
 struct ProjectDetails {
     id: i32,
     project_name: String,
+    root_path: String,
     modules: Vec<ProjectModule>,
     file_count: i64,
     symbol_count: i64,
@@ -167,7 +169,7 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
                     return Err(anyhow!("Payload file is empty: {}", file_path));
                 }
 
-                let mut upload = IndexUpload::decode(payload.as_slice())
+                let mut upload = Project::decode(payload.as_slice())
                     .map_err(|err| anyhow!("Failed to decode protobuf payload: {}", err))?;
                 upload.project_name = project_name;
                 let mut buffer = Vec::with_capacity(upload.encoded_len());

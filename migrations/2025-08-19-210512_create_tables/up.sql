@@ -6,7 +6,8 @@ CREATE EXTENSION IF NOT EXISTS ltree;
 CREATE TABLE IF NOT EXISTS index.projects
 (
     id SERIAL PRIMARY KEY,
-    project_name TEXT NOT NULL UNIQUE
+    project_name TEXT NOT NULL UNIQUE,
+    root_path TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS index.modules
@@ -16,16 +17,36 @@ CREATE TABLE IF NOT EXISTS index.modules
     project_id INTEGER NOT NULL REFERENCES index.projects(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS index.directories
+(
+    id SERIAL PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES index.projects(id) ON DELETE CASCADE,
+    parent_id INTEGER REFERENCES index.directories(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    UNIQUE (project_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS directories_project_parent_idx
+    ON index.directories (project_id, parent_id);
+
+CREATE INDEX IF NOT EXISTS directories_project_path_idx
+    ON index.directories (project_id, path);
+
 CREATE TABLE IF NOT EXISTS index.files
 (
     id SERIAL PRIMARY KEY,
-    module INTEGER NOT NULL REFERENCES index.modules(id) ON DELETE CASCADE,
+    project_id INTEGER NOT NULL REFERENCES index.projects(id) ON DELETE CASCADE,
+    module INTEGER REFERENCES index.modules(id) ON DELETE CASCADE,
+    directory_id INTEGER NOT NULL REFERENCES index.directories(id) ON DELETE CASCADE,
     module_path TEXT NOT NULL,
     filesystem_path TEXT NOT NULL,
     filetype TEXT NOT NULL,
     content_hash TEXT NOT NULL,
-    UNIQUE (module, filesystem_path)
+    UNIQUE (project_id, filesystem_path)
 );
+
+CREATE INDEX IF NOT EXISTS files_directory_idx
+    ON index.files (directory_id);
 
 CREATE TABLE IF NOT EXISTS index.symbols
 (

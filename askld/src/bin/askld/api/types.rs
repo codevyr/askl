@@ -19,6 +19,7 @@ pub struct NodeDeclaration {
     pub id: String,
     pub symbol: String,
     pub file_id: String,
+    pub project_id: String,
     pub symbol_type: SymbolType,
     pub start_offset: i32,
     pub end_offset: i32,
@@ -50,18 +51,25 @@ pub struct Edge {
     #[serde(serialize_with = "symbolid_as_string")]
     to: SymbolId,
     from_file: Option<FileId>,
+    from_project_id: Option<String>,
     from_offset_start: Option<i32>,
     from_offset_end: Option<i32>,
 }
 
 impl Edge {
-    pub fn new(from: SymbolId, to: SymbolId, occurrence: Option<index::symbols::Occurrence>) -> Self {
+    pub fn new(
+        from: SymbolId,
+        to: SymbolId,
+        occurrence: Option<index::symbols::Occurrence>,
+        from_project_id: Option<String>,
+    ) -> Self {
         let range = occurrence.as_ref().map(|o| o.offset_range.clone());
         Self {
             id: format!("{}-{}", from, to),
             from: from,
             to: to,
             from_file: occurrence.map(|o| o.file),
+            from_project_id,
             from_offset_start: range.map(|r| r.0),
             from_offset_end: range.map(|r| r.1),
         }
@@ -69,10 +77,17 @@ impl Edge {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct GraphFileEntry {
+    pub file_id: String,
+    pub path: String,
+    pub project_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Graph {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
-    pub files: Vec<(FileId, String)>,
+    pub files: Vec<GraphFileEntry>,
     pub warnings: Vec<ErrorResponse>,
 }
 

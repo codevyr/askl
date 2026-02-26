@@ -1,9 +1,9 @@
 SET search_path TO index, public;
 
-INSERT INTO projects (id, project_name)
+INSERT INTO projects (id, project_name, root_path)
 VALUES
-    (1, 'test_project'),
-    (2, 'other_project');
+    (1, 'test_project', '/test_project'),
+    (2, 'other_project', '/other_project');
 
 INSERT INTO modules (id, module_name, project_id)
 VALUES
@@ -11,12 +11,17 @@ VALUES
     (2, 'other', 1),
     (3, 'project_only', 2);
 
-INSERT INTO files (id, module, module_path, filesystem_path, filetype, content_hash)
+INSERT INTO directories (id, project_id, parent_id, path)
 VALUES
-    (1, 1, 'main.c', '/main.c', 'cc', ''),
-    (2, 1, 'bar.c', '/bar.c', 'cc', ''),
-    (3, 2, 'main.c', '/other_main.c', 'cc', ''),
-    (4, 3, 'main.c', '/project_only_main.c', 'cc', '');
+    (1, 1, NULL, '/'),
+    (2, 2, NULL, '/');
+
+INSERT INTO files (id, project_id, module, directory_id, module_path, filesystem_path, filetype, content_hash)
+VALUES
+    (1, 1, 1, 1, 'main.c', '/main.c', 'cc', ''),
+    (2, 1, 1, 1, 'bar.c', '/bar.c', 'cc', ''),
+    (3, 1, 2, 1, 'main.c', '/other_main.c', 'cc', ''),
+    (4, 2, 3, 2, 'main.c', '/project_only_main.c', 'cc', '');
 
 INSERT INTO symbols (id, name, module, symbol_scope)
 VALUES

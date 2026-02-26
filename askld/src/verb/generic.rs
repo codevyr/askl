@@ -8,8 +8,8 @@ use crate::statement::Statement;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    CompoundNameMixin, Index, ModuleFilterMixin, ParentReference, ProjectFilterMixin, Selection,
-    SymbolSearchMixin,
+    CompoundNameMixin, IgnoreFilterMixin, Index, ModuleFilterMixin, ParentReference,
+    ProjectFilterMixin, Selection, SymbolSearchMixin,
 };
 use index::models_diesel::SymbolRef;
 use index::symbols::{self, package_match};
@@ -392,6 +392,13 @@ impl Verb for IgnoreVerb {
 }
 
 impl Filter for IgnoreVerb {
+    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
+        vec![Box::new(IgnoreFilterMixin::new(
+            self.name.as_deref(),
+            self.package.as_deref(),
+        ))]
+    }
+
     fn filter_impl(&self, selection: &mut Selection) {
         selection.nodes.retain(|s| {
             let index_symbol: symbols::Symbol = symbols::Symbol {

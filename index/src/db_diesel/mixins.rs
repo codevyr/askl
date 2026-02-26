@@ -1,5 +1,6 @@
 use anyhow::Result;
 use diesel::dsl::{sql, Eq};
+use diesel::expression::SqlLiteral;
 use diesel::helper_types::{AsSelect, InnerJoinQuerySource};
 use diesel::internal::table_macro::{BoxedSelectStatement, FromClause};
 use diesel::pg::Pg;
@@ -10,7 +11,7 @@ use diesel::sql_types::{Bool, Int4range, Integer, Text};
 use crate::ltree::Ltree;
 use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
 use crate::schema_diesel as index_schema;
-use crate::symbols::{symbol_query_to_lquery, DeclarationId};
+use crate::symbols::{symbol_name_to_path, symbol_query_to_lquery, DeclarationId};
 
 use super::Connection;
 
@@ -166,6 +167,88 @@ pub trait SymbolSearchMixin: std::fmt::Debug {
         _connection: &mut Connection,
         query: ChildrenQuery<'a>,
     ) -> Result<ChildrenQuery<'a>> {
+        Ok(query)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IgnoreFilterMixin {
+    name_lquery: Option<String>,
+    package_path: Option<String>,
+}
+
+impl IgnoreFilterMixin {
+    pub fn new(name: Option<&str>, package: Option<&str>) -> Self {
+        let name_lquery = name.and_then(symbol_query_to_lquery);
+        let mut package_path = None;
+        if let Some(value) = package {
+            let path = symbol_name_to_path(value);
+            if path != "unknown" {
+                package_path = Some(path);
+            }
+        }
+        Self {
+            name_lquery,
+            package_path,
+        }
+    }
+
+    fn apply_filter<Q>(mut query: Q, column: &str, lquery: &Option<String>) -> Q
+    where
+        Q: diesel::query_dsl::methods::FilterDsl<SqlLiteral<Bool>, Output = Q>,
+    {
+        if let Some(lquery) = lquery {
+            let filter_sql = format!("NOT ({})", ltree_filter_sql(column, lquery));
+            query = diesel::query_dsl::methods::FilterDsl::filter(query, sql::<Bool>(&filter_sql));
+        }
+        query
+    }
+
+    fn apply_package_filter<Q>(mut query: Q, column: &str, base_path: &Option<String>) -> Q
+    where
+        Q: diesel::query_dsl::methods::FilterDsl<SqlLiteral<Bool>, Output = Q>,
+    {
+        if let Some(base_path) = base_path {
+            // Exclude descendants of the package path, but keep the exact match.
+            let filter_sql = format!(
+                "NOT (( '{}'::ltree @> {} ) AND ({} <> '{}'))",
+                base_path, column, column, base_path
+            );
+            query = diesel::query_dsl::methods::FilterDsl::filter(query, sql::<Bool>(&filter_sql));
+        }
+        query
+    }
+}
+
+impl SymbolSearchMixin for IgnoreFilterMixin {
+    fn filter_current<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: CurrentQuery<'a>,
+    ) -> Result<CurrentQuery<'a>> {
+        let query = Self::apply_filter(query, "symbols.symbol_path", &self.name_lquery);
+        let query = Self::apply_package_filter(query, "symbols.symbol_path", &self.package_path);
+        Ok(query)
+    }
+
+    fn filter_parents<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: ParentsQuery<'a>,
+    ) -> Result<ParentsQuery<'a>> {
+        let query = Self::apply_filter(query, "symbols.symbol_path", &self.name_lquery);
+        let query = Self::apply_package_filter(query, "symbols.symbol_path", &self.package_path);
+        Ok(query)
+    }
+
+    fn filter_children<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: ChildrenQuery<'a>,
+    ) -> Result<ChildrenQuery<'a>> {
+        let query = Self::apply_filter(query, "parent_symbols.symbol_path", &self.name_lquery);
+        let query =
+            Self::apply_package_filter(query, "parent_symbols.symbol_path", &self.package_path);
         Ok(query)
     }
 }

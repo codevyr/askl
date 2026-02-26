@@ -10,6 +10,7 @@ use log::info;
 use tracing_chrome::ChromeLayerBuilder;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::EnvFilter;
 
 use crate::api;
 use crate::api::types::AsklData;
@@ -54,7 +55,10 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
             .include_args(true)
             .trace_style(tracing_chrome::TraceStyle::Async)
             .build();
+        let filter =
+            EnvFilter::new("info,askld=trace,actix_http=off,actix_web=warn,tracing_actix_web=warn");
         tracing_subscriber::registry()
+            .with(filter)
             .with(tracing_subscriber::fmt::layer())
             .with(chrome_layer)
             .init();
