@@ -93,7 +93,7 @@ pub enum IndexCommand {
         #[clap(long)]
         project: Option<String>,
         /// Request timeout in seconds (0 disables timeout)
-        #[clap(long, default_value = "30")]
+        #[clap(long, default_value = "180")]
         timeout: u64,
         /// Print JSON response only
         #[clap(long, action)]
@@ -107,7 +107,7 @@ pub enum IndexCommand {
         #[clap(long)]
         token: Option<String>,
         /// Request timeout in seconds (0 disables timeout)
-        #[clap(long, default_value = "30")]
+        #[clap(long, default_value = "180")]
         timeout: u64,
         /// Print JSON response only
         #[clap(long, action)]
@@ -127,7 +127,7 @@ pub enum IndexCommand {
         #[clap(long)]
         token: Option<String>,
         /// Request timeout in seconds (0 disables timeout)
-        #[clap(long, default_value = "30")]
+        #[clap(long, default_value = "180")]
         timeout: u64,
         /// Print JSON response only
         #[clap(long, action)]
@@ -147,7 +147,7 @@ pub enum IndexCommand {
         #[clap(long)]
         token: Option<String>,
         /// Request timeout in seconds (0 disables timeout)
-        #[clap(long, default_value = "30")]
+        #[clap(long, default_value = "180")]
         timeout: u64,
         /// Print JSON response only
         #[clap(long, action)]
