@@ -2,13 +2,39 @@ use actix_web::{delete, get, http::header, web, HttpRequest, HttpResponse, Respo
 use askld::auth::AuthIdentity;
 use askld::index_store::{IndexStore, ProjectTreeResult, StoreError, UploadError};
 use askld::proto::askl::index::Project;
-use log::error;
+use log::{error, warn};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 
 use super::types::{IndexDeleteResponse, IndexUploadResponse};
 
 pub const MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
+const MAX_UPLOAD_ENV: &str = "ASKL_MAX_UPLOAD_BYTES";
+
+pub fn max_upload_bytes() -> usize {
+    match std::env::var(MAX_UPLOAD_ENV) {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(value) if value > 0 => match usize::try_from(value) {
+                Ok(value) => value,
+                Err(_) => {
+                    warn!(
+                        "{} is too large for this platform; using default {}",
+                        MAX_UPLOAD_ENV, MAX_UPLOAD_BYTES
+                    );
+                    MAX_UPLOAD_BYTES
+                }
+            },
+            _ => {
+                warn!(
+                    "Invalid {} value '{}'; using default {}",
+                    MAX_UPLOAD_ENV, raw, MAX_UPLOAD_BYTES
+                );
+                MAX_UPLOAD_BYTES
+            }
+        },
+        Err(_) => MAX_UPLOAD_BYTES,
+    }
+}
 
 pub async fn upload_index(
     _identity: AuthIdentity,
