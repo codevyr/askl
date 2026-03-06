@@ -2,6 +2,7 @@ use actix_web::{get, web, HttpResponse, Responder};
 
 pub mod auth;
 pub mod index;
+pub mod mcp;
 pub mod query;
 pub mod types;
 
@@ -26,5 +27,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(index::get_project_tree)
         .service(index::get_project_source)
         .service(query::query)
-        .service(query::file);
+        .service(query::file)
+        .service(mcp::mcp_post)
+        .service(mcp::mcp_get);
 }
