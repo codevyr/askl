@@ -178,3 +178,23 @@ pub struct IndexDeleteResponse {
     pub project_id: i32,
     pub deleted: bool,
 }
+
+/// Slice byte content by offset range. Used by both REST and MCP endpoints.
+pub fn slice_content(
+    content: Vec<u8>,
+    start_offset: Option<i64>,
+    end_offset: Option<i64>,
+) -> Result<Vec<u8>, String> {
+    let len = content.len();
+    let start = start_offset.unwrap_or(0);
+    let end = end_offset.unwrap_or(len as i64);
+    if start < 0 || end < 0 {
+        return Err("Offsets must be non-negative".to_string());
+    }
+    let start = start as usize;
+    let end = end as usize;
+    if start > end || end > len {
+        return Err("Invalid offset range".to_string());
+    }
+    Ok(content[start..end].to_vec())
+}

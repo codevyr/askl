@@ -1,29 +1,207 @@
-use actix_web::{get, post, web, HttpResponse, Responder};
+use actix_web::{web, HttpRequest, HttpResponse, Responder};
+use askld::auth::insecure_connections_allowed;
 use askld::index_store::{IndexStore, ProjectTreeResult, StoreError};
 use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
 use base64::Engine as _;
+use bytes::Bytes;
+use futures::stream;
 use index::symbols::FileId;
-use log::error;
+use log::{debug, error, info, warn};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::{json, Map, Number, Value};
+use serde_json::{json, Map, Value};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use uuid::Uuid;
 
 use super::query::{execute_query, QueryFailure};
-use super::types::{AsklData, ErrorResponse, Graph};
+use super::types::{slice_content, AsklData, ErrorResponse, Graph};
 
 const MCP_JSONRPC_VERSION: &str = "2.0";
 const MCP_DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
 
-const TOOL_ASKL_QUERY_RUN: &str = "askl_query_run";
-const TOOL_ASKL_PROJECTS_LIST: &str = "askl_projects_list";
-const TOOL_ASKL_PROJECT_DETAILS: &str = "askl_project_details";
-const TOOL_ASKL_TREE_LIST: &str = "askl_tree_list";
-const TOOL_ASKL_SOURCE_GET: &str = "askl_source_get";
+/// Maximum request body size for MCP endpoint (1MB)
+pub const MAX_MCP_REQUEST_BYTES: usize = 1024 * 1024;
 
-const PROJECT_SCOPE: [&str; 2] = ["kubernetes", "kueue"];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tool {
+    QueryRun,
+    ProjectsList,
+    ProjectDetails,
+    TreeList,
+    SourceGet,
+}
 
-#[post("/mcp")]
-pub async fn mcp_post(
+impl Tool {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Tool::QueryRun => "askl_query_run",
+            Tool::ProjectsList => "askl_projects_list",
+            Tool::ProjectDetails => "askl_project_details",
+            Tool::TreeList => "askl_tree_list",
+            Tool::SourceGet => "askl_source_get",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Tool> {
+        match s {
+            "askl_query_run" => Some(Tool::QueryRun),
+            "askl_projects_list" => Some(Tool::ProjectsList),
+            "askl_project_details" => Some(Tool::ProjectDetails),
+            "askl_tree_list" => Some(Tool::TreeList),
+            "askl_source_get" => Some(Tool::SourceGet),
+            _ => None,
+        }
+    }
+}
+
+/// SSE session state for MCP connections
+pub struct SseSession {
+    id: String,
+    responses: Arc<Mutex<Vec<Value>>>,
+}
+
+/// Global SSE session store
+pub type SseSessionStore = Arc<Mutex<HashMap<String, Arc<SseSession>>>>;
+
+/// Create a new SSE session store
+pub fn new_sse_session_store() -> SseSessionStore {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+fn is_secure_request(req: &HttpRequest) -> bool {
+    if req.connection_info().scheme().eq_ignore_ascii_case("https") {
+        return true;
+    }
+    if let Some(value) = req.headers().get("x-forwarded-proto") {
+        if let Ok(proto) = value.to_str() {
+            let proto = proto.split(',').next().unwrap_or("").trim();
+            if proto.eq_ignore_ascii_case("https") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// SSE endpoint for MCP transport
+/// Establishes an SSE connection and sends an endpoint event with the session-specific POST URL
+pub async fn mcp_sse_handler(
+    req: HttpRequest,
+    sessions: web::Data<SseSessionStore>,
+) -> impl Responder {
+    // Check security - require HTTPS unless insecure connections allowed
+    if !is_secure_request(&req) && !insecure_connections_allowed() {
+        return HttpResponse::Forbidden()
+            .body("SSE transport requires HTTPS (set ASKL_ALLOW_INSECURE_CONNECTIONS=true for local development)");
+    }
+
+    let session_id = Uuid::new_v4().to_string();
+    let session = Arc::new(SseSession {
+        id: session_id.clone(),
+        responses: Arc::new(Mutex::new(Vec::new())),
+    });
+
+    // Register session
+    {
+        let mut store = sessions.lock().unwrap();
+        store.insert(session_id.clone(), session.clone());
+    }
+
+    info!("MCP SSE session started: {}", session_id);
+
+    // Build the endpoint URL that the client should POST to
+    let host = req
+        .connection_info()
+        .host()
+        .to_string();
+    let scheme = if is_secure_request(&req) { "https" } else { "http" };
+    let endpoint_url = format!("{}://{}/mcp/session/{}", scheme, host, session_id);
+
+    // Send initial endpoint event
+    let endpoint_event = format!(
+        "event: endpoint\ndata: {}\n\n",
+        serde_json::to_string(&json!({ "uri": endpoint_url })).unwrap()
+    );
+
+    // Create SSE response stream
+    let stream = stream::once(async move { Ok::<_, std::io::Error>(Bytes::from(endpoint_event)) });
+
+    HttpResponse::Ok()
+        .content_type("text/event-stream")
+        .insert_header(("Cache-Control", "no-cache"))
+        .insert_header(("Connection", "keep-alive"))
+        .streaming(stream)
+}
+
+/// Session-specific MCP message handler (receives POSTs from SSE clients)
+pub async fn mcp_session_handler(
+    askl_data: web::Data<AsklData>,
+    index_store: web::Data<IndexStore>,
+    sessions: web::Data<SseSessionStore>,
+    path: web::Path<String>,
+    body: web::Bytes,
+) -> impl Responder {
+    let session_id = path.into_inner();
+
+    // Verify session exists
+    {
+        let store = sessions.lock().unwrap();
+        if !store.contains_key(&session_id) {
+            return HttpResponse::NotFound().body("Session not found");
+        }
+    }
+
+    debug!("MCP session message: {}", session_id);
+
+    // Process message using existing handler logic
+    let value: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(err) => {
+            return HttpResponse::BadRequest().json(jsonrpc_error_value(
+                Value::Null,
+                RpcError::parse_error(&err.to_string()),
+            ));
+        }
+    };
+
+    let is_batch = matches!(value, Value::Array(_));
+    let messages = match value {
+        Value::Array(messages) => {
+            if messages.is_empty() {
+                return HttpResponse::BadRequest().json(jsonrpc_error_value(
+                    Value::Null,
+                    RpcError::invalid_request("Invalid Request: empty batch"),
+                ));
+            }
+            messages
+        }
+        other => vec![other],
+    };
+
+    let mut responses = Vec::new();
+    for message in messages {
+        if let Some(response) = handle_message(&askl_data, &index_store, message).await {
+            responses.push(response);
+        }
+    }
+
+    if responses.is_empty() {
+        return HttpResponse::Accepted().finish();
+    }
+
+    let response_body = if is_batch {
+        Value::Array(responses)
+    } else {
+        responses.into_iter().next().unwrap_or_else(|| {
+            jsonrpc_error_value(Value::Null, RpcError::internal("Missing response"))
+        })
+    };
+
+    HttpResponse::Ok().json(response_body)
+}
+
+pub async fn mcp_handler(
     askl_data: web::Data<AsklData>,
     index_store: web::Data<IndexStore>,
     body: web::Bytes,
@@ -72,11 +250,6 @@ pub async fn mcp_post(
     };
 
     HttpResponse::Ok().json(response_body)
-}
-
-#[get("/mcp")]
-pub async fn mcp_get() -> impl Responder {
-    HttpResponse::MethodNotAllowed().finish()
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,10 +349,10 @@ impl RpcError {
         }
     }
 
-    fn invalid_params() -> Self {
+    fn invalid_params(details: &str) -> Self {
         Self {
             code: -32602,
-            message: "Invalid params".to_string(),
+            message: format!("Invalid params: {}", details),
             data: None,
         }
     }
@@ -281,9 +454,11 @@ async fn handle_message(
 }
 
 async fn handle_notification(method: &str) {
+    debug!("MCP notification: {}", method);
     if method == "notifications/initialized" {
         return;
     }
+    warn!("MCP unknown notification: {}", method);
 }
 
 async fn dispatch_method(
@@ -292,6 +467,7 @@ async fn dispatch_method(
     method: &str,
     params: Option<Value>,
 ) -> Result<Value, RpcError> {
+    info!("MCP request: {}", method);
     match method {
         "initialize" => {
             let params: InitializeParams = parse_params(params)?;
@@ -305,7 +481,9 @@ async fn dispatch_method(
                     version: env!("CARGO_PKG_VERSION").to_string(),
                 },
                 capabilities: ServerCapabilities {
-                    tools: Some(ToolsCapability { list_changed: Some(false) }),
+                    tools: Some(ToolsCapability {
+                        list_changed: Some(false),
+                    }),
                 },
             };
             serde_json::to_value(result)
@@ -320,18 +498,23 @@ async fn dispatch_method(
         }
         "tools/call" => {
             let call_params: ToolsCallParams = parse_params(params)?;
+            debug!("MCP tools/call: {}", call_params.name);
             let arguments = call_params.arguments.unwrap_or_else(|| json!({}));
-            let result = match call_params.name.as_str() {
-                TOOL_ASKL_QUERY_RUN => tool_askl_query_run(askl_data, arguments).await,
-                TOOL_ASKL_PROJECTS_LIST => tool_askl_projects_list(index_store).await,
-                TOOL_ASKL_PROJECT_DETAILS => {
-                    tool_askl_project_details(index_store, arguments).await
+            let tool = match Tool::from_str(&call_params.name) {
+                Some(t) => t,
+                None => {
+                    return Err(RpcError::invalid_params(&format!(
+                        "unknown tool: {}",
+                        call_params.name
+                    )))
                 }
-                TOOL_ASKL_TREE_LIST => tool_askl_tree_list(index_store, arguments).await,
-                TOOL_ASKL_SOURCE_GET => {
-                    tool_askl_source_get(askl_data, index_store, arguments).await
-                }
-                _ => return Err(RpcError::invalid_params()),
+            };
+            let result = match tool {
+                Tool::QueryRun => tool_askl_query_run(askl_data, arguments).await,
+                Tool::ProjectsList => tool_askl_projects_list(index_store).await,
+                Tool::ProjectDetails => tool_askl_project_details(index_store, arguments).await,
+                Tool::TreeList => tool_askl_tree_list(index_store, arguments).await,
+                Tool::SourceGet => tool_askl_source_get(askl_data, index_store, arguments).await,
             };
 
             let tool_result = match result {
@@ -348,13 +531,14 @@ async fn dispatch_method(
             serde_json::to_value(tool_result)
                 .map_err(|_| RpcError::internal("Failed to serialize tool result"))
         }
+        "ping" => Ok(json!({})),
         _ => Err(RpcError::method_not_found()),
     }
 }
 
 fn parse_params<T: DeserializeOwned>(params: Option<Value>) -> Result<T, RpcError> {
     let value = params.unwrap_or_else(|| json!({}));
-    serde_json::from_value(value).map_err(|_| RpcError::invalid_params())
+    serde_json::from_value(value).map_err(|err| RpcError::invalid_params(&err.to_string()))
 }
 
 fn value_to_text_content(value: Value) -> ContentBlock {
@@ -365,9 +549,29 @@ fn value_to_text_content(value: Value) -> ContentBlock {
 fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
-            name: TOOL_ASKL_QUERY_RUN,
-            description:
-                "Run an Askl semantic query over the indexed code graph and return graph results. Use for nontrivial code navigation, call chains, and architecture questions; narrow iteratively with follow-up queries.",
+            name: Tool::QueryRun.as_str(),
+            description: r#"Execute an Askl semantic query over the Go code graph. Returns nodes (functions/methods), edges (caller/callee relationships), and file locations.
+
+QUERY SYNTAX:
+- "symbol" — Select by name (e.g., "NewPodInformer", "pkg.Func")
+- "a" {} — Find callees of "a" (functions "a" calls)
+- {"a"} — Find callers of "a" (functions that call "a")
+- {{"a"}} — 2-hop callers; nest {} for more hops
+- "a" {{"b"}} — "a" and 2-hop path to "b"
+- "a"; "b" — Select both (semicolon separates statements)
+- !"symbol" — Force include even if no edges found
+
+DIRECTIVES (use with @preamble for global effect):
+- @project("name") — Filter to project (REQUIRED; use askl_projects_list to discover available projects)
+- @module("path") — Filter to Go module
+- @ignore("name") or @ignore(package="path") — Exclude matches
+
+EXAMPLES:
+- @project("myproject") "Handler" {} — Handler and its direct callees
+- @project("myproject") {"ProcessRequest"} — All callers of ProcessRequest
+- @preamble @project("myproject") @ignore(package="vendor/"); "main" {{}} — main's 2-hop callees, excluding vendor
+
+OUTPUT: {graph: {nodes[], edges[], files[]}, stats: {node_count, edge_count, file_count}, warnings[]}"#,
             input_schema: json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -375,74 +579,92 @@ fn tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Askl query string, include @preamble and @project(...)."
+                        "description": "Askl query. Start with @project(\"name\") (use askl_projects_list to find available projects), use \"symbol\" for selection, {} for callees, {\"x\"} for callers. Use @preamble for global directives."
                     }
                 }
             }),
         },
         ToolDefinition {
-            name: TOOL_ASKL_PROJECTS_LIST,
-            description: "List available indexed projects.",
+            name: Tool::ProjectsList.as_str(),
+            description: "List all indexed projects. Returns project_id (required for other tools), name, and indexing status. Use this first to discover available projects and their IDs.",
             input_schema: json!({
                 "type": "object",
                 "additionalProperties": false
             }),
         },
         ToolDefinition {
-            name: TOOL_ASKL_PROJECT_DETAILS,
-            description: "Fetch metadata for a single indexed project.",
+            name: Tool::ProjectDetails.as_str(),
+            description: "Get detailed metadata for a project: module paths, total file count, symbol count, and last indexed timestamp. Use after askl_projects_list to inspect a specific project.",
             input_schema: json!({
                 "type": "object",
                 "additionalProperties": false,
                 "required": ["project_id"],
                 "properties": {
-                    "project_id": { "type": "integer" }
+                    "project_id": {
+                        "type": "integer",
+                        "description": "Project ID from askl_projects_list"
+                    }
                 }
             }),
         },
         ToolDefinition {
-            name: TOOL_ASKL_TREE_LIST,
-            description: "List project tree nodes for a path.",
+            name: Tool::TreeList.as_str(),
+            description: "Browse project directory structure. Returns immediate children of path with type (file/dir) and file_id. Use to navigate before fetching source, or to understand package layout. Note: No pagination; large directories return all entries. Use specific subpaths for large projects.",
             input_schema: json!({
                 "type": "object",
                 "additionalProperties": false,
                 "required": ["project_id"],
                 "properties": {
-                    "project_id": { "type": "integer" },
-                    "path": { "type": "string", "description": "Absolute POSIX path (defaults to /)." },
+                    "project_id": {
+                        "type": "integer",
+                        "description": "Project ID from askl_projects_list"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute POSIX path to list (default: \"/\"). Example: \"/cmd/kubelet\""
+                    },
                     "expand": {
                         "type": "array",
-                        "items": { "type": "string" }
+                        "items": { "type": "string" },
+                        "description": "Additional absolute paths to expand in same request. Example: [\"/pkg/scheduler\", \"/pkg/api\"]"
                     },
-                    "compact": { "type": "boolean" }
+                    "compact": {
+                        "type": "boolean",
+                        "description": "When true (default), collapses single-child directory chains into one entry (e.g., \"/a/b/c\" instead of nested \"/a\", \"/b\", \"/c\")"
+                    }
                 }
             }),
         },
         ToolDefinition {
-            name: TOOL_ASKL_SOURCE_GET,
-            description: "Fetch file contents by project path or file_id with byte ranges.",
+            name: Tool::SourceGet.as_str(),
+            description: "Fetch file source code. Provide either file_id (from query results) OR project_id+path (from tree listing). Supports byte range slicing for large files. Returns content_text (UTF-8) and content_base64, plus range metadata.",
             input_schema: json!({
                 "type": "object",
                 "additionalProperties": false,
-                "oneOf": [
-                    {
-                        "required": ["file_id"],
-                        "properties": {
-                            "file_id": { "type": "integer" },
-                            "start_offset": { "type": "integer", "minimum": 0 },
-                            "end_offset": { "type": "integer", "minimum": 0 }
-                        }
+                "properties": {
+                    "file_id": {
+                        "type": "integer",
+                        "description": "File ID from query results (graph.files[].file_id). Use this OR project_id+path."
                     },
-                    {
-                        "required": ["project_id", "path"],
-                        "properties": {
-                            "project_id": { "type": "integer" },
-                            "path": { "type": "string" },
-                            "start_offset": { "type": "integer", "minimum": 0 },
-                            "end_offset": { "type": "integer", "minimum": 0 }
-                        }
+                    "project_id": {
+                        "type": "integer",
+                        "description": "Project ID. Required if using path instead of file_id."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute file path within project (e.g., \"/cmd/kubelet/app/server.go\"). Required if using project_id."
+                    },
+                    "start_offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Start byte offset for range request (inclusive, default: 0)"
+                    },
+                    "end_offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "End byte offset for range request (exclusive, default: end of file)"
                     }
-                ]
+                }
             }),
         },
     ]
@@ -475,12 +697,7 @@ async fn tool_askl_query_run(
             Some(err),
             started,
         )),
-        Err(QueryFailure::Timeout) => Err(wrap_tool_error(
-            408,
-            "Query timed out",
-            None,
-            started,
-        )),
+        Err(QueryFailure::Timeout) => Err(wrap_tool_error(408, "Query timed out", None, started)),
     }
 }
 
@@ -490,7 +707,12 @@ async fn tool_askl_projects_list(index_store: &web::Data<IndexStore>) -> Result<
         Ok(projects) => Ok(wrap_with_meta(json!({ "projects": projects }), started)),
         Err(StoreError::Storage(message)) => {
             error!("Failed to list projects: {}", message);
-            Err(wrap_tool_error(500, "Failed to list projects", None, started))
+            Err(wrap_tool_error(
+                500,
+                "Failed to list projects",
+                None,
+                started,
+            ))
         }
     }
 }
@@ -511,7 +733,12 @@ async fn tool_askl_project_details(
         Ok(None) => Err(wrap_tool_error(404, "Project not found", None, started)),
         Err(StoreError::Storage(message)) => {
             error!("Failed to load project {}: {}", args.project_id, message);
-            Err(wrap_tool_error(500, "Failed to load project", None, started))
+            Err(wrap_tool_error(
+                500,
+                "Failed to load project",
+                None,
+                started,
+            ))
         }
     }
 }
@@ -544,7 +771,12 @@ async fn tool_askl_tree_list(
         path = "/".to_string();
     }
     if !path.starts_with('/') {
-        return Err(wrap_tool_error(400, "path must be an absolute path", None, started));
+        return Err(wrap_tool_error(
+            400,
+            "path must be an absolute path",
+            None,
+            started,
+        ));
     }
     for expand_path in &args.expand {
         if !expand_path.starts_with('/') {
@@ -568,14 +800,24 @@ async fn tool_askl_tree_list(
             return Err(wrap_tool_error(404, "Project not found", None, started));
         }
         Ok(ProjectTreeResult::NotDirectory) => {
-            return Err(wrap_tool_error(400, "path is not a directory", None, started));
+            return Err(wrap_tool_error(
+                400,
+                "path is not a directory",
+                None,
+                started,
+            ));
         }
         Err(StoreError::Storage(message)) => {
             error!(
                 "Failed to load project tree {}: {}",
                 args.project_id, message
             );
-            return Err(wrap_tool_error(500, "Failed to load project tree", None, started));
+            return Err(wrap_tool_error(
+                500,
+                "Failed to load project tree",
+                None,
+                started,
+            ));
         }
     };
 
@@ -602,7 +844,12 @@ async fn tool_askl_tree_list(
                     "Failed to load project tree {}: {}",
                     args.project_id, message
                 );
-                return Err(wrap_tool_error(500, "Failed to load project tree", None, started));
+                return Err(wrap_tool_error(
+                    500,
+                    "Failed to load project tree",
+                    None,
+                    started,
+                ));
             }
         };
         expanded.insert(expand_path.clone(), nodes);
@@ -648,7 +895,12 @@ async fn tool_askl_source_get(
             return Err(wrap_tool_error(400, "path is required", None, started));
         }
         if !path.starts_with('/') {
-            return Err(wrap_tool_error(400, "path must be an absolute path", None, started));
+            return Err(wrap_tool_error(
+                400,
+                "path must be an absolute path",
+                None,
+                started,
+            ));
         }
         match index_store
             .get_project_file_contents_by_path(project_id, path)
@@ -657,11 +909,13 @@ async fn tool_askl_source_get(
             Ok(Some(content)) => content,
             Ok(None) => return Err(wrap_tool_error(404, "File not found", None, started)),
             Err(StoreError::Storage(message)) => {
-                error!(
-                    "Failed to load project source {}: {}",
-                    project_id, message
-                );
-                return Err(wrap_tool_error(500, "Failed to load project source", None, started));
+                error!("Failed to load project source {}: {}", project_id, message);
+                return Err(wrap_tool_error(
+                    500,
+                    "Failed to load project source",
+                    None,
+                    started,
+                ));
             }
         }
     } else {
@@ -683,65 +937,43 @@ async fn tool_askl_source_get(
     let start_offset = args.start_offset.unwrap_or(0);
     let end_offset = args.end_offset.unwrap_or(start_offset + slice.len() as i64);
 
-    let mut payload = json!({
-        "content_base64": encoded,
-        "content_encoding": "base64",
-        "range": {
+    let mut payload = Map::new();
+    payload.insert("content_base64".into(), json!(encoded));
+    payload.insert("content_encoding".into(), json!("base64"));
+    payload.insert(
+        "range".into(),
+        json!({
             "start_offset": start_offset,
             "end_offset": end_offset,
             "len": slice.len()
-        }
-    });
+        }),
+    );
 
     if let Some(text) = content_text {
-        if let Value::Object(ref mut map) = payload {
-            map.insert("content_text".to_string(), Value::String(text));
-        }
+        payload.insert("content_text".into(), json!(text));
     }
-
     if let Some(file_id) = args.file_id {
-        if let Value::Object(ref mut map) = payload {
-            map.insert("file_id".to_string(), Value::Number(Number::from(file_id)));
-        }
+        payload.insert("file_id".into(), json!(file_id));
     }
-
     if let Some(project_id) = args.project_id {
-        if let Value::Object(ref mut map) = payload {
-            map.insert("project_id".to_string(), Value::Number(Number::from(project_id)));
-        }
+        payload.insert("project_id".into(), json!(project_id));
     }
-
     if let Some(path) = args.path {
-        if let Value::Object(ref mut map) = payload {
-            map.insert("path".to_string(), Value::String(path));
-        }
+        payload.insert("path".into(), json!(path));
     }
 
-    Ok(wrap_with_meta(payload, started))
-}
-
-fn slice_content(
-    content: Vec<u8>,
-    start_offset: Option<i64>,
-    end_offset: Option<i64>,
-) -> Result<Vec<u8>, String> {
-    let len = content.len();
-    let start = start_offset.unwrap_or(0);
-    let end = end_offset.unwrap_or(len as i64);
-    if start < 0 || end < 0 {
-        return Err("Offsets must be non-negative".to_string());
-    }
-    let start = start as usize;
-    let end = end as usize;
-    if start > end || end > len {
-        return Err("Invalid offset range".to_string());
-    }
-    Ok(content[start..end].to_vec())
+    Ok(wrap_with_meta(Value::Object(payload), started))
 }
 
 fn parse_args<T: for<'de> Deserialize<'de>>(arguments: Value) -> Result<T, Value> {
-    serde_json::from_value::<T>(arguments)
-        .map_err(|_| wrap_tool_error(400, "Invalid arguments", None, Instant::now()))
+    serde_json::from_value::<T>(arguments).map_err(|err| {
+        wrap_tool_error(
+            400,
+            &format!("Invalid arguments: {}", err),
+            None,
+            Instant::now(),
+        )
+    })
 }
 
 fn graph_stats(graph: &Graph) -> Value {
@@ -781,31 +1013,14 @@ fn wrap_with_meta(payload: Value, started: Instant) -> Value {
     map.insert("limitations".to_string(), limitations_value());
     map.insert(
         "telemetry".to_string(),
-        json!({
-            "latency_ms": started.elapsed().as_millis(),
-            "bytes_out": 0
-        }),
+        json!({ "latency_ms": started.elapsed().as_millis() }),
     );
 
-    let mut result = Value::Object(map);
-    let bytes_out = serde_json::to_vec(&result)
-        .map(|data| data.len())
-        .unwrap_or(0);
-    if let Value::Object(ref mut map) = result {
-        if let Some(Value::Object(ref mut telemetry)) = map.get_mut("telemetry") {
-            telemetry.insert(
-                "bytes_out".to_string(),
-                Value::Number(Number::from(bytes_out as u64)),
-            );
-        }
-    }
-
-    result
+    Value::Object(map)
 }
 
 fn limitations_value() -> Value {
     json!({
-        "project_scope": PROJECT_SCOPE,
         "read_only": true,
         "graph_scope": "functions/methods with direct caller/callee edges",
         "language": "go",

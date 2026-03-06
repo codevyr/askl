@@ -15,6 +15,21 @@ use testcontainers::{clients, core::WaitFor, GenericImage};
 
 use api::types::AsklData;
 
+/// Helper to create MCP test request
+fn mcp_request(method: &str, id: Option<i32>, params: Option<Value>) -> Value {
+    let mut req = json!({
+        "jsonrpc": "2.0",
+        "method": method
+    });
+    if let Some(id) = id {
+        req["id"] = json!(id);
+    }
+    if let Some(params) = params {
+        req["params"] = params;
+    }
+    req
+}
+
 #[tokio::test]
 async fn mcp_tools_list_and_call_happy_path() {
     let docker = clients::Cli::default();
@@ -186,4 +201,252 @@ async fn mcp_source_get_respects_ranges() {
     assert_eq!(payload["content_text"].as_str().unwrap(), "hello");
     assert_eq!(payload["range"]["start_offset"].as_i64().unwrap(), 0);
     assert_eq!(payload["range"]["end_offset"].as_i64().unwrap(), 5);
+}
+
+#[tokio::test]
+async fn mcp_initialize_and_ping() {
+    let docker = clients::Cli::default();
+    let image = GenericImage::new("postgres", "15-alpine")
+        .with_env_var("POSTGRES_PASSWORD", "postgres")
+        .with_env_var("POSTGRES_USER", "postgres")
+        .with_env_var("POSTGRES_DB", "askl")
+        .with_wait_for(WaitFor::message_on_stdout(
+            "database system is ready to accept connections",
+        ));
+    let node = docker.run(image);
+    let port = node.get_host_port_ipv4(5432);
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{}/askl", port);
+
+    wait_for_postgres(&url).await.expect("wait for postgres");
+
+    let manager = ConnectionManager::<PgConnection>::new(&url);
+    let pool = Pool::builder()
+        .build(manager)
+        .expect("build database pool");
+
+    let auth_store = AuthStore::from_pool(pool.clone()).expect("init auth store");
+    let index_diesel = Index::from_pool(pool.clone()).expect("init index");
+    let index_store = IndexStore::from_pool(pool.clone());
+    let askl_data = web::Data::new(AsklData {
+        cfg: ControlFlowGraph::from_symbols(index_diesel),
+    });
+
+    let app = test::init_service(
+        App::new()
+            .app_data(askl_data.clone())
+            .app_data(web::Data::new(auth_store))
+            .app_data(web::Data::new(index_store))
+            .configure(api::configure),
+    )
+    .await;
+
+    // Test initialize
+    let init_req = test::TestRequest::post()
+        .uri("/mcp")
+        .set_json(mcp_request("initialize", Some(1), Some(json!({
+            "protocolVersion": "2024-11-05"
+        }))))
+        .to_request();
+    let init_resp = test::call_service(&app, init_req).await;
+    assert!(init_resp.status().is_success());
+
+    let init_body: Value = test::read_body_json(init_resp).await;
+    assert_eq!(init_body["result"]["protocolVersion"], "2024-11-05");
+    assert!(init_body["result"]["serverInfo"]["name"].as_str().is_some());
+    assert!(init_body["result"]["capabilities"]["tools"].is_object());
+
+    // Test ping
+    let ping_req = test::TestRequest::post()
+        .uri("/mcp")
+        .set_json(mcp_request("ping", Some(2), None))
+        .to_request();
+    let ping_resp = test::call_service(&app, ping_req).await;
+    assert!(ping_resp.status().is_success());
+
+    let ping_body: Value = test::read_body_json(ping_resp).await;
+    assert_eq!(ping_body["result"], json!({}));
+}
+
+#[tokio::test]
+async fn mcp_error_cases() {
+    let docker = clients::Cli::default();
+    let image = GenericImage::new("postgres", "15-alpine")
+        .with_env_var("POSTGRES_PASSWORD", "postgres")
+        .with_env_var("POSTGRES_USER", "postgres")
+        .with_env_var("POSTGRES_DB", "askl")
+        .with_wait_for(WaitFor::message_on_stdout(
+            "database system is ready to accept connections",
+        ));
+    let node = docker.run(image);
+    let port = node.get_host_port_ipv4(5432);
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{}/askl", port);
+
+    wait_for_postgres(&url).await.expect("wait for postgres");
+
+    let manager = ConnectionManager::<PgConnection>::new(&url);
+    let pool = Pool::builder()
+        .build(manager)
+        .expect("build database pool");
+
+    let auth_store = AuthStore::from_pool(pool.clone()).expect("init auth store");
+    let index_diesel = Index::from_pool(pool.clone()).expect("init index");
+    let index_store = IndexStore::from_pool(pool.clone());
+    let askl_data = web::Data::new(AsklData {
+        cfg: ControlFlowGraph::from_symbols(index_diesel),
+    });
+
+    let app = test::init_service(
+        App::new()
+            .app_data(askl_data.clone())
+            .app_data(web::Data::new(auth_store))
+            .app_data(web::Data::new(index_store))
+            .configure(api::configure),
+    )
+    .await;
+
+    // Test unknown tool
+    let unknown_tool_req = test::TestRequest::post()
+        .uri("/mcp")
+        .set_json(mcp_request("tools/call", Some(1), Some(json!({
+            "name": "nonexistent_tool",
+            "arguments": {}
+        }))))
+        .to_request();
+    let unknown_tool_resp = test::call_service(&app, unknown_tool_req).await;
+    assert!(unknown_tool_resp.status().is_success()); // JSON-RPC errors return 200
+
+    let unknown_tool_body: Value = test::read_body_json(unknown_tool_resp).await;
+    assert!(unknown_tool_body["error"]["message"].as_str().unwrap().contains("unknown tool"));
+
+    // Test unknown method
+    let unknown_method_req = test::TestRequest::post()
+        .uri("/mcp")
+        .set_json(mcp_request("nonexistent/method", Some(2), None))
+        .to_request();
+    let unknown_method_resp = test::call_service(&app, unknown_method_req).await;
+    assert!(unknown_method_resp.status().is_success());
+
+    let unknown_method_body: Value = test::read_body_json(unknown_method_resp).await;
+    assert_eq!(unknown_method_body["error"]["code"], -32601); // Method not found
+
+    // Test missing jsonrpc version
+    let missing_version_req = test::TestRequest::post()
+        .uri("/mcp")
+        .set_json(json!({
+            "id": 3,
+            "method": "ping"
+        }))
+        .to_request();
+    let missing_version_resp = test::call_service(&app, missing_version_req).await;
+    // This returns 400 for invalid request
+    let missing_version_body: Value = test::read_body_json(missing_version_resp).await;
+    assert!(missing_version_body["error"]["message"].as_str().unwrap().contains("missing jsonrpc"));
+}
+
+#[tokio::test]
+async fn mcp_batch_requests() {
+    let docker = clients::Cli::default();
+    let image = GenericImage::new("postgres", "15-alpine")
+        .with_env_var("POSTGRES_PASSWORD", "postgres")
+        .with_env_var("POSTGRES_USER", "postgres")
+        .with_env_var("POSTGRES_DB", "askl")
+        .with_wait_for(WaitFor::message_on_stdout(
+            "database system is ready to accept connections",
+        ));
+    let node = docker.run(image);
+    let port = node.get_host_port_ipv4(5432);
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{}/askl", port);
+
+    wait_for_postgres(&url).await.expect("wait for postgres");
+
+    let manager = ConnectionManager::<PgConnection>::new(&url);
+    let pool = Pool::builder()
+        .build(manager)
+        .expect("build database pool");
+
+    let auth_store = AuthStore::from_pool(pool.clone()).expect("init auth store");
+    let index_diesel = Index::from_pool(pool.clone()).expect("init index");
+    let index_store = IndexStore::from_pool(pool.clone());
+    let askl_data = web::Data::new(AsklData {
+        cfg: ControlFlowGraph::from_symbols(index_diesel),
+    });
+
+    let app = test::init_service(
+        App::new()
+            .app_data(askl_data.clone())
+            .app_data(web::Data::new(auth_store))
+            .app_data(web::Data::new(index_store))
+            .configure(api::configure),
+    )
+    .await;
+
+    // Test batch request
+    let batch_req = test::TestRequest::post()
+        .uri("/mcp")
+        .set_json(json!([
+            mcp_request("ping", Some(1), None),
+            mcp_request("tools/list", Some(2), None),
+            mcp_request("ping", Some(3), None)
+        ]))
+        .to_request();
+    let batch_resp = test::call_service(&app, batch_req).await;
+    assert!(batch_resp.status().is_success());
+
+    let batch_body: Value = test::read_body_json(batch_resp).await;
+    let responses = batch_body.as_array().expect("batch response should be array");
+    assert_eq!(responses.len(), 3);
+
+    // Check IDs match
+    let ids: Vec<i64> = responses.iter().filter_map(|r| r["id"].as_i64()).collect();
+    assert!(ids.contains(&1));
+    assert!(ids.contains(&2));
+    assert!(ids.contains(&3));
+}
+
+#[tokio::test]
+async fn mcp_notification_no_response() {
+    let docker = clients::Cli::default();
+    let image = GenericImage::new("postgres", "15-alpine")
+        .with_env_var("POSTGRES_PASSWORD", "postgres")
+        .with_env_var("POSTGRES_USER", "postgres")
+        .with_env_var("POSTGRES_DB", "askl")
+        .with_wait_for(WaitFor::message_on_stdout(
+            "database system is ready to accept connections",
+        ));
+    let node = docker.run(image);
+    let port = node.get_host_port_ipv4(5432);
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{}/askl", port);
+
+    wait_for_postgres(&url).await.expect("wait for postgres");
+
+    let manager = ConnectionManager::<PgConnection>::new(&url);
+    let pool = Pool::builder()
+        .build(manager)
+        .expect("build database pool");
+
+    let auth_store = AuthStore::from_pool(pool.clone()).expect("init auth store");
+    let index_diesel = Index::from_pool(pool.clone()).expect("init index");
+    let index_store = IndexStore::from_pool(pool.clone());
+    let askl_data = web::Data::new(AsklData {
+        cfg: ControlFlowGraph::from_symbols(index_diesel),
+    });
+
+    let app = test::init_service(
+        App::new()
+            .app_data(askl_data.clone())
+            .app_data(web::Data::new(auth_store))
+            .app_data(web::Data::new(index_store))
+            .configure(api::configure),
+    )
+    .await;
+
+    // Test notification (no id = no response expected)
+    let notification_req = test::TestRequest::post()
+        .uri("/mcp")
+        .set_json(mcp_request("notifications/initialized", None, None))
+        .to_request();
+    let notification_resp = test::call_service(&app, notification_req).await;
+
+    // Notifications should return 202 Accepted with no body
+    assert_eq!(notification_resp.status().as_u16(), 202);
 }

@@ -9,7 +9,9 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use tokio::time::{timeout, Duration};
 
-use super::types::{AsklData, Edge, ErrorResponse, Graph, GraphFileEntry, Node, NodeDeclaration};
+use super::types::{
+    slice_content, AsklData, Edge, ErrorResponse, Graph, GraphFileEntry, Node, NodeDeclaration,
+};
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -52,30 +54,11 @@ pub async fn file(
         let content = source.into_bytes();
         match slice_content(content, range.start_offset, range.end_offset) {
             Ok(slice) => HttpResponse::Ok().body(slice),
-            Err(response) => response,
+            Err(msg) => HttpResponse::BadRequest().body(msg),
         }
     } else {
         HttpResponse::NotFound().body("File not found")
     }
-}
-
-fn slice_content(
-    content: Vec<u8>,
-    start_offset: Option<i64>,
-    end_offset: Option<i64>,
-) -> Result<Vec<u8>, HttpResponse> {
-    let len = content.len();
-    let start = start_offset.unwrap_or(0);
-    let end = end_offset.unwrap_or(len as i64);
-    if start < 0 || end < 0 {
-        return Err(HttpResponse::BadRequest().body("Offsets must be non-negative"));
-    }
-    let start = start as usize;
-    let end = end as usize;
-    if start > end || end > len {
-        return Err(HttpResponse::BadRequest().body("Invalid offset range"));
-    }
-    Ok(content[start..end].to_vec())
 }
 
 #[derive(Debug)]
