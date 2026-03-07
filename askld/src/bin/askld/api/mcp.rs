@@ -56,6 +56,7 @@ impl Tool {
 }
 
 /// SSE session state for MCP connections
+#[allow(dead_code)]
 pub struct SseSession {
     id: String,
     responses: Arc<Mutex<Vec<Value>>>,
@@ -277,12 +278,110 @@ struct ServerInfo {
 struct ServerCapabilities {
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<ToolsCapability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resources: Option<ResourcesCapability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompts: Option<PromptsCapability>,
 }
 
 #[derive(Debug, Serialize)]
 struct ToolsCapability {
     #[serde(rename = "listChanged", skip_serializing_if = "Option::is_none")]
     list_changed: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResourcesCapability {
+    #[serde(rename = "listChanged", skip_serializing_if = "Option::is_none")]
+    list_changed: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct PromptsCapability {
+    #[serde(rename = "listChanged", skip_serializing_if = "Option::is_none")]
+    list_changed: Option<bool>,
+}
+
+// === Resources types ===
+
+#[derive(Debug, Serialize)]
+struct ResourcesListResult {
+    resources: Vec<ResourceDefinition>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResourceDefinition {
+    uri: &'static str,
+    name: &'static str,
+    description: &'static str,
+    #[serde(rename = "mimeType")]
+    mime_type: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResourceReadParams {
+    uri: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ResourceReadResult {
+    contents: Vec<ResourceContent>,
+}
+
+#[derive(Debug, Serialize)]
+struct ResourceContent {
+    uri: String,
+    #[serde(rename = "mimeType")]
+    mime_type: &'static str,
+    text: String,
+}
+
+// === Prompts types ===
+
+#[derive(Debug, Serialize)]
+struct PromptsListResult {
+    prompts: Vec<PromptDefinition>,
+}
+
+#[derive(Debug, Serialize)]
+struct PromptDefinition {
+    name: &'static str,
+    description: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arguments: Option<Vec<PromptArgument>>,
+}
+
+#[derive(Debug, Serialize)]
+struct PromptArgument {
+    name: &'static str,
+    description: &'static str,
+    required: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromptGetParams {
+    name: String,
+    #[serde(default)]
+    arguments: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PromptGetResult {
+    description: String,
+    messages: Vec<PromptMessage>,
+}
+
+#[derive(Debug, Serialize)]
+struct PromptMessage {
+    role: &'static str,
+    content: PromptContent,
+}
+
+#[derive(Debug, Serialize)]
+struct PromptContent {
+    #[serde(rename = "type")]
+    content_type: &'static str,
+    text: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -484,6 +583,12 @@ async fn dispatch_method(
                     tools: Some(ToolsCapability {
                         list_changed: Some(false),
                     }),
+                    resources: Some(ResourcesCapability {
+                        list_changed: Some(false),
+                    }),
+                    prompts: Some(PromptsCapability {
+                        list_changed: Some(false),
+                    }),
                 },
             };
             serde_json::to_value(result)
@@ -531,6 +636,37 @@ async fn dispatch_method(
             serde_json::to_value(tool_result)
                 .map_err(|_| RpcError::internal("Failed to serialize tool result"))
         }
+        "resources/list" => {
+            let result = ResourcesListResult {
+                resources: resource_definitions(),
+            };
+            serde_json::to_value(result)
+                .map_err(|_| RpcError::internal("Failed to serialize result"))
+        }
+        "resources/read" => {
+            let params: ResourceReadParams = parse_params(params)?;
+            let content = resource_content(&params.uri)
+                .ok_or_else(|| RpcError::invalid_params(&format!("unknown resource: {}", params.uri)))?;
+            let result = ResourceReadResult {
+                contents: vec![content],
+            };
+            serde_json::to_value(result)
+                .map_err(|_| RpcError::internal("Failed to serialize result"))
+        }
+        "prompts/list" => {
+            let result = PromptsListResult {
+                prompts: prompt_definitions(),
+            };
+            serde_json::to_value(result)
+                .map_err(|_| RpcError::internal("Failed to serialize result"))
+        }
+        "prompts/get" => {
+            let params: PromptGetParams = parse_params(params)?;
+            let result = prompt_content(&params.name, &params.arguments)
+                .ok_or_else(|| RpcError::invalid_params(&format!("unknown prompt: {}", params.name)))?;
+            serde_json::to_value(result)
+                .map_err(|_| RpcError::internal("Failed to serialize result"))
+        }
         "ping" => Ok(json!({})),
         _ => Err(RpcError::method_not_found()),
     }
@@ -550,28 +686,61 @@ fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: Tool::QueryRun.as_str(),
-            description: r#"Execute an Askl semantic query over the Go code graph. Returns nodes (functions/methods), edges (caller/callee relationships), and file locations.
+            description: r#"**USE THIS FIRST** for code exploration, architecture docs, and understanding call flow. Do NOT default to grep/file-reading for structural questions.
 
-QUERY SYNTAX:
-- "symbol" — Select by name (e.g., "NewPodInformer", "pkg.Func")
-- "a" {} — Find callees of "a" (functions "a" calls)
-- {"a"} — Find callers of "a" (functions that call "a")
-- {{"a"}} — 2-hop callers; nest {} for more hops
-- "a" {{"b"}} — "a" and 2-hop path to "b"
-- "a"; "b" — Select both (semicolon separates statements)
-- !"symbol" — Force include even if no edges found
+## When to Use (BEFORE grep)
 
-DIRECTIVES (use with @preamble for global effect):
-- @project("name") — Filter to project (REQUIRED; use askl_projects_list to discover available projects)
-- @module("path") — Filter to Go module
-- @ignore("name") or @ignore(package="path") — Exclude matches
+| Task | Use This Tool |
+|------|---------------|
+| Architecture/design docs | YES - map call graphs first |
+| "What calls X?" | `{"FunctionName"}` |
+| "What does X call?" | `"FunctionName" {}` |
+| "How does A reach B?" | `"A" {"B"}` or `"A" {{"B"}}` |
+| Understanding plugin/interface flow | YES - find implementers/callers |
+| Tracing execution paths | YES - multi-hop queries |
 
-EXAMPLES:
-- @project("myproject") "Handler" {} — Handler and its direct callees
-- @project("myproject") {"ProcessRequest"} — All callers of ProcessRequest
-- @preamble @project("myproject") @ignore(package="vendor/"); "main" {{}} — main's 2-hop callees, excluding vendor
+Only use grep AFTER askl for: type definitions, string literals, config values.
 
-OUTPUT: {graph: {nodes[], edges[], files[]}, stats: {node_count, edge_count, file_count}, warnings[]}"#,
+## Workflow for Architecture Docs
+
+1. **Start here**: `@project("name") "EntryPoint" {}` to map what functions call
+2. **Then expand**: `@project("name") {"TargetFunc"}` to see callers
+3. **Trace paths**: `@project("name") "A" {{"B"}}` for multi-hop
+4. **Only then**: grep for type definitions, askl_source_get for code
+
+## Query Syntax
+
+- `"symbol"` — Select by name (e.g., `"RunScorePlugins"`)
+- `"a" {}` — Callees: functions "a" calls
+- `{"a"}` — Callers: functions that call "a"
+- `{{"a"}}` — 2-hop callers (nest `{}` for more hops)
+- `"a" {{}}` — 2-hop callees from "a"
+- `"a" {{"b"}}` — Path from "a" to "b" (2 hops)
+- `"a"; "b"` — Select both (semicolon separates)
+- `!"symbol"` — Forced edge (for passed functions)
+
+## Required Directives
+
+- `@project("name")` — **REQUIRED**. Call askl_projects_list first.
+- `@ignore(package="path")` — Exclude noisy packages
+- `@preamble` — Apply directives to all statements
+
+## Examples
+
+```askl
+# Find all callers of Score method
+@project("kubernetes") {"Score"}
+
+# What does RunScorePlugins call?
+@project("kubernetes") "RunScorePlugins" {}
+
+# Trace from scheduleOne to Score (2 hops)
+@project("kubernetes") "scheduleOne" {{"Score"}}
+
+# Multi-hop with noise filtering
+@preamble @project("kubernetes") @ignore(package="fmt");
+"main" {{}}
+```"#,
             input_schema: json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -586,7 +755,7 @@ OUTPUT: {graph: {nodes[], edges[], files[]}, stats: {node_count, edge_count, fil
         },
         ToolDefinition {
             name: Tool::ProjectsList.as_str(),
-            description: "List all indexed projects. Returns project_id (required for other tools), name, and indexing status. Use this first to discover available projects and their IDs.",
+            description: "**CALL THIS FIRST** when starting code exploration. Returns available Go projects. You need the project name for askl_query_run's @project() directive. After this, use askl_query_run to explore call graphs BEFORE falling back to grep.",
             input_schema: json!({
                 "type": "object",
                 "additionalProperties": false
@@ -594,7 +763,7 @@ OUTPUT: {graph: {nodes[], edges[], files[]}, stats: {node_count, edge_count, fil
         },
         ToolDefinition {
             name: Tool::ProjectDetails.as_str(),
-            description: "Get detailed metadata for a project: module paths, total file count, symbol count, and last indexed timestamp. Use after askl_projects_list to inspect a specific project.",
+            description: "Get project metadata: Go module paths, file/symbol counts, last indexed time. Useful to verify a project is indexed and see its scope.",
             input_schema: json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -609,7 +778,7 @@ OUTPUT: {graph: {nodes[], edges[], files[]}, stats: {node_count, edge_count, fil
         },
         ToolDefinition {
             name: Tool::TreeList.as_str(),
-            description: "Browse project directory structure. Returns immediate children of path with type (file/dir) and file_id. Use to navigate before fetching source, or to understand package layout. Note: No pagination; large directories return all entries. Use specific subpaths for large projects.",
+            description: "Browse project directory tree. Use when you know the path but not the file_id, or to explore package structure before querying. Returns file_ids needed for askl_source_get.",
             input_schema: json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -637,7 +806,7 @@ OUTPUT: {graph: {nodes[], edges[], files[]}, stats: {node_count, edge_count, fil
         },
         ToolDefinition {
             name: Tool::SourceGet.as_str(),
-            description: "Fetch file source code. Provide either file_id (from query results) OR project_id+path (from tree listing). Supports byte range slicing for large files. Returns content_text (UTF-8) and content_base64, plus range metadata.",
+            description: "Fetch source code for files found via askl_query_run or askl_tree_list. Use file_id from query results, or project_id+path from tree listing. Supports byte offset ranges for extracting specific functions.",
             input_schema: json!({
                 "type": "object",
                 "additionalProperties": false,
@@ -1035,3 +1204,500 @@ struct ToolError {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<ErrorResponse>,
 }
+
+// === Resource definitions ===
+
+fn resource_definitions() -> Vec<ResourceDefinition> {
+    vec![
+        ResourceDefinition {
+            uri: "askl://workflow",
+            name: "Getting Started",
+            description: "READ THIS FIRST: When to use Askl tools vs grep/file reading, and the recommended workflow",
+            mime_type: "text/markdown",
+        },
+        ResourceDefinition {
+            uri: "askl://syntax",
+            name: "Askl Query Syntax",
+            description: "Complete reference for Askl query language syntax including selectors, operators, and directives",
+            mime_type: "text/markdown",
+        },
+        ResourceDefinition {
+            uri: "askl://limitations",
+            name: "Askl Limitations",
+            description: "Current limitations of the Askl semantic code graph: supported languages, scope, and known constraints",
+            mime_type: "text/markdown",
+        },
+    ]
+}
+
+fn resource_content(uri: &str) -> Option<ResourceContent> {
+    match uri {
+        "askl://workflow" => Some(ResourceContent {
+            uri: uri.to_string(),
+            mime_type: "text/markdown",
+            text: WORKFLOW_RESOURCE.to_string(),
+        }),
+        "askl://syntax" => Some(ResourceContent {
+            uri: uri.to_string(),
+            mime_type: "text/markdown",
+            text: SYNTAX_RESOURCE.to_string(),
+        }),
+        "askl://limitations" => Some(ResourceContent {
+            uri: uri.to_string(),
+            mime_type: "text/markdown",
+            text: LIMITATIONS_RESOURCE.to_string(),
+        }),
+        _ => None,
+    }
+}
+
+const WORKFLOW_RESOURCE: &str = r#"# Askl-First Workflow
+
+**CRITICAL: For architecture docs and code exploration, START with askl_query_run, not grep.**
+
+Grep finds text matches. Askl finds actual call relationships from static analysis.
+
+## Decision Tree
+
+```
+Task: Explore code / write architecture doc
+    ↓
+Step 1: askl_projects_list (get project name)
+    ↓
+Step 2: askl_query_run (map call graph)
+    - "EntryPoint" {}     → what it calls
+    - {"TargetFunc"}      → what calls it
+    - "A" {{"B"}}         → trace path A→B
+    ↓
+Step 3: ONLY THEN use grep for:
+    - Type/interface definitions
+    - Config values, constants
+    - String literals
+    ↓
+Step 4: askl_source_get for specific code
+```
+
+## Anti-Pattern to Avoid
+
+❌ **WRONG**: Start with `rg` and file reads, use askl occasionally
+✅ **RIGHT**: Start with askl_query_run, use grep only for definitions
+
+## Use Askl FIRST For:
+
+1. **Architecture/design docs** — Map call graphs before reading files
+2. **"What calls X?"** — `{"FunctionName"}` (not grep)
+3. **"What does X call?"** — `"FunctionName" {}` (not file reading)
+4. **"How does A reach B?"** — `"A" {{"B"}}` (not manual tracing)
+5. **Plugin/interface flow** — `{"Score"}` finds actual invocations
+6. **Entry-point tracing** — `"main" {{}}` for call tree
+
+## Use Grep ONLY For:
+
+- **WHERE is X defined?** → type/interface/struct definitions
+- String literals, comments, configuration values
+- Constants or struct field names
+- Non-Go code (Askl only supports Go)
+
+## Example: Wrong vs Right Approach
+
+### Task: "Document how Score plugins are invoked"
+
+❌ **Wrong approach** (what agents typically do):
+1. `rg "Score"` → finds 500+ matches
+2. Read framework.go → see some code
+3. `rg "RunScorePlugins"` → more matches
+4. Read schedule_one.go → more code
+5. Eventually try 1-2 askl queries
+
+✅ **Right approach**:
+1. `askl_projects_list` → "kubernetes"
+2. `askl_query_run: @project("kubernetes") {"Score"}` → see all callers
+3. `askl_query_run: @project("kubernetes") "RunScorePlugins" {}` → see what it calls
+4. `askl_query_run: @project("kubernetes") "scheduleOne" {{"Score"}}` → trace the path
+5. NOW grep for "type ScorePlugin interface" if needed
+6. askl_source_get for specific function code
+
+## Recommended Workflow
+
+```
+Step 1: Discover projects
+   askl_projects_list → returns project names and IDs
+
+Step 2: Locate files (if needed)
+   askl_tree_list → browse directory structure
+
+Step 3: Query the call graph
+   askl_query_run with @project("name") → returns functions and relationships
+
+Step 4: Read specific code
+   askl_source_get with file_id + offsets → returns source code
+   askl_source_get also accepts project_id + path
+```
+
+## Example: Tracing Kubelet Entry Path
+
+**Task:** "Trace the kubelet main function to cli.Run"
+
+```
+1. askl_projects_list
+   → Shows "kubernetes" is available
+
+2. askl_query_run:
+   @preamble @project("kubernetes");
+   "main" {
+     "cli.Run" {}
+   };
+
+   → Returns:
+   - k8s.io/kubernetes/cmd/kubelet.main → k8s.io/component-base/cli.Run
+   - k8s.io/component-base/cli.Run → k8s.io/component-base/cli.run
+   - k8s.io/kubernetes/cmd/kubelet.main → app.NewKubeletCommand
+
+3. askl_source_get: file_id from results, with start_offset + end_offset
+   → Returns the function source code
+```
+
+## Example: Architecture Doc for Scheduler Plugins
+
+**Task:** "Document how Score plugins are invoked in the scheduler"
+
+**Step 1: Find definitions (grep)**
+- Search "type ScorePlugin interface" → found in framework/interface.go
+- Search "KubeSchedulerConfiguration" → found in config/v1/types.go
+
+**Step 2: Understand call flow (askl_query_run)**
+```
+askl_query_run: @project("kubernetes") {"Score"}
+→ Shows: RunScorePlugins calls Score, framework orchestrates it
+
+askl_query_run: @project("kubernetes") "RunScorePlugins" {}
+→ Shows: What RunScorePlugins calls (parallelization, normalization)
+
+askl_query_run: @project("kubernetes") "PodTopologySpread.Score" {}
+→ Shows: What a real Score plugin depends on
+```
+
+**Step 3: Read specific code (askl_source_get)**
+- Use file_ids from query results to read implementation details
+
+**The pattern:** Grep finds WHERE → askl_query_run shows HOW → askl_source_get shows WHAT
+
+## Tips for Effective Queries
+
+- **Start broad, then narrow**: `"ScheduleOne" {}` for discovery, then add @ignore for noise
+- **Use package tokens**: `"pkg.scheduler"` matches all symbols under that package path
+- **Iterate multi-hop**: Graph shows direct edges only; expand one hop at a time
+- **Partial names work**: `"Run"` or `"Scheduler.Run"` — tokens are subset-matched
+
+## Common Patterns
+
+| Task | Query |
+|------|-------|
+| Find callers | `{"FunctionName"}` |
+| Find callees | `"FunctionName" {}` |
+| 2-hop callers | `{{"FunctionName"}}` |
+| Trace A→B | `"A" {"B"}` |
+| Multiple functions | `{"Foo"}; {"Bar"}` |
+| Package scope | `"pkg.scheduler" { "Sort" }` |
+| Forced reference | `!"pkg/path.Func"` (for passed functions) |
+| Exclude noise | `@preamble @ignore(package="fmt"); ...` |
+"#;
+
+const SYNTAX_RESOURCE: &str = r#"# Askl Query Syntax Reference
+
+Askl is a domain-specific language for querying Go code graphs. It finds functions, methods, and their caller/callee relationships.
+
+## Token Matching Rules
+
+- **Case-sensitive** — `"Run"` won't match `"run"`
+- **Subset matching** — Tokens are non-ASCII-separated, so you can use partial paths:
+  - `"Run"` matches any function named Run
+  - `"Scheduler.Run"` matches Run method on Scheduler
+  - `"pkg.scheduler"` matches symbols under `k8s.io/kubernetes/pkg/scheduler` and subpackages
+- **Package tokens** — `"pkg.scheduler" { "Sort" }` finds pkg/scheduler symbols that call Sort
+
+## Basic Selectors
+
+- `"symbol"` — Select functions/methods by name
+- `!"symbol"` — **Forced edge**: Include even if no call edges found
+
+## Forced Edges
+
+Graph edges represent direct function calls only. If a function is passed as a value (not called), it won't have an edge:
+
+```go
+// This is NOT a call edge - ScheduleOne is passed, not called
+wait.UntilWithContext(ctx, sched.ScheduleOne, 0)
+```
+
+Use forced edges to include function references: `!"pkg/path.Func"`
+
+## Edge Operators
+
+- `"a" {}` — Find callees: functions that "a" calls
+- `{"a"}` — Find callers: functions that call "a"
+- `{{"a"}}` — 2-hop callers (nest `{}` for more hops)
+- `"a" {{}}` — 2-hop callees from "a"
+- `"a" {{"b"}}` — Path from "a" to "b" with 2 hops
+
+## Statement Separator
+
+- `"a"; "b"` — Select both (semicolon separates independent statements)
+
+## Directives
+
+- `@project("name")` — **Required**: Filter to a specific project
+- `@module("path")` — Filter to a Go module path
+- `@ignore("name")` — Exclude symbols matching name
+- `@ignore(package="path")` — Exclude entire packages
+- `@preamble` — Apply following directives globally
+
+**Important**: `@preamble` blocks must contain ONLY directives (verbs), not selectors.
+
+```askl
+# CORRECT: preamble has only directives
+@preamble @project("kubernetes") @ignore(package="fmt");
+"main" {}
+
+# WRONG: selector in preamble
+@preamble @project("kubernetes") "main" {};
+```
+
+## Examples
+
+```askl
+# Find Handler and its direct callees
+@project("myproject") "Handler" {}
+
+# Find all callers of ProcessRequest
+@project("myproject") {"ProcessRequest"}
+
+# Multi-statement with nested calls
+@preamble @project("kubernetes");
+"main" {
+  "cli.Run" {}
+};
+
+# Package-scoped query
+@project("kubernetes") "pkg.scheduler" { "Sort" }
+```
+
+## Output Format
+
+Queries return:
+- `graph.nodes[]` — Functions/methods found
+- `graph.edges[]` — Caller/callee relationships
+- `graph.files[]` — Source file locations with file_id for askl_source_get
+- `stats` — Counts of nodes, edges, files
+- `warnings[]` — Any query warnings
+"#;
+
+const LIMITATIONS_RESOURCE: &str = r#"# Askl Limitations
+
+## Supported Languages
+- **Go only** — Other languages are not currently supported
+
+## Graph Scope
+- **Functions and methods only** — Variables, types, constants are not in the graph
+- **Direct caller/callee edges** — Transitive calls require explicit multi-hop queries (`{{}}`, `{{{}}}`, etc.)
+- **Static analysis** — Dynamic dispatch (interfaces, reflection) may miss some edges
+
+## Query Constraints
+- **Project required** — All queries must include `@project("name")`
+- **Timeout** — Queries time out after 1 second
+- **No pagination** — Large result sets return all matches
+
+## Index Limitations
+- **Read-only** — Cannot modify the code graph
+- **Point-in-time** — Reflects code at indexing time, not live changes
+- **Package-level granularity** — Cannot query individual statements within functions
+"#;
+
+// === Prompt definitions ===
+
+fn prompt_definitions() -> Vec<PromptDefinition> {
+    vec![
+        PromptDefinition {
+            name: "find_callers",
+            description: "Generate a query to find all callers of a function",
+            arguments: Some(vec![
+                PromptArgument {
+                    name: "function",
+                    description: "Name of the function to find callers for",
+                    required: true,
+                },
+                PromptArgument {
+                    name: "project",
+                    description: "Project name to search in",
+                    required: true,
+                },
+                PromptArgument {
+                    name: "depth",
+                    description: "Number of caller hops (1-3, default: 1)",
+                    required: false,
+                },
+            ]),
+        },
+        PromptDefinition {
+            name: "find_callees",
+            description: "Generate a query to find all functions called by a function",
+            arguments: Some(vec![
+                PromptArgument {
+                    name: "function",
+                    description: "Name of the function to find callees for",
+                    required: true,
+                },
+                PromptArgument {
+                    name: "project",
+                    description: "Project name to search in",
+                    required: true,
+                },
+                PromptArgument {
+                    name: "depth",
+                    description: "Number of callee hops (1-3, default: 1)",
+                    required: false,
+                },
+            ]),
+        },
+        PromptDefinition {
+            name: "trace_path",
+            description: "Generate a query to trace the call path between two functions",
+            arguments: Some(vec![
+                PromptArgument {
+                    name: "from",
+                    description: "Starting function name",
+                    required: true,
+                },
+                PromptArgument {
+                    name: "to",
+                    description: "Target function name",
+                    required: true,
+                },
+                PromptArgument {
+                    name: "project",
+                    description: "Project name to search in",
+                    required: true,
+                },
+            ]),
+        },
+        PromptDefinition {
+            name: "kubernetes_preamble",
+            description: "Standard preamble for Kubernetes codebase queries with common package ignores",
+            arguments: None,
+        },
+    ]
+}
+
+fn prompt_content(name: &str, arguments: &HashMap<String, String>) -> Option<PromptGetResult> {
+    match name {
+        "find_callers" => {
+            let function = arguments.get("function")?;
+            let project = arguments.get("project")?;
+            let depth = arguments
+                .get("depth")
+                .and_then(|d| d.parse::<u8>().ok())
+                .unwrap_or(1)
+                .min(3)
+                .max(1);
+            let braces = "{".repeat(depth as usize);
+            let braces_close = "}".repeat(depth as usize);
+            let query = format!(
+                r#"@project("{}") {}"{}"{})"#,
+                project, braces, function, braces_close
+            );
+            Some(PromptGetResult {
+                description: format!("Find {}-hop callers of {} in {}", depth, function, project),
+                messages: vec![PromptMessage {
+                    role: "user",
+                    content: PromptContent {
+                        content_type: "text",
+                        text: format!(
+                            "Run this Askl query to find callers of `{}`:\n\n```askl\n{}\n```",
+                            function, query
+                        ),
+                    },
+                }],
+            })
+        }
+        "find_callees" => {
+            let function = arguments.get("function")?;
+            let project = arguments.get("project")?;
+            let depth = arguments
+                .get("depth")
+                .and_then(|d| d.parse::<u8>().ok())
+                .unwrap_or(1)
+                .min(3)
+                .max(1);
+            let braces = "{}".repeat(depth as usize);
+            let query = format!(r#"@project("{}") "{}" {}"#, project, function, braces);
+            Some(PromptGetResult {
+                description: format!("Find {}-hop callees of {} in {}", depth, function, project),
+                messages: vec![PromptMessage {
+                    role: "user",
+                    content: PromptContent {
+                        content_type: "text",
+                        text: format!(
+                            "Run this Askl query to find functions called by `{}`:\n\n```askl\n{}\n```",
+                            function, query
+                        ),
+                    },
+                }],
+            })
+        }
+        "trace_path" => {
+            let from = arguments.get("from")?;
+            let to = arguments.get("to")?;
+            let project = arguments.get("project")?;
+            let query = format!(r#"@project("{}") "{}" {{"{}"}}"#, project, from, to);
+            Some(PromptGetResult {
+                description: format!("Trace call path from {} to {} in {}", from, to, project),
+                messages: vec![PromptMessage {
+                    role: "user",
+                    content: PromptContent {
+                        content_type: "text",
+                        text: format!(
+                            "Run this Askl query to trace the call path from `{}` to `{}`:\n\n```askl\n{}\n```\n\nIf no path is found with one hop, try adding more hops: `\"{}\" {{\"{}\"}}` (2 hops) or `\"{}\" {{{{\"{}\"}}}}` (3 hops).",
+                            from, to, query, from, to, from, to
+                        ),
+                    },
+                }],
+            })
+        }
+        "kubernetes_preamble" => Some(PromptGetResult {
+            description: "Standard preamble for querying the Kubernetes codebase".to_string(),
+            messages: vec![PromptMessage {
+                role: "user",
+                content: PromptContent {
+                    content_type: "text",
+                    text: KUBERNETES_PREAMBLE.to_string(),
+                },
+            }],
+        }),
+        _ => None,
+    }
+}
+
+const KUBERNETES_PREAMBLE: &str = r#"Use this preamble when querying the Kubernetes codebase to exclude common utility packages that add noise:
+
+```askl
+@preamble
+@ignore(package="builtin")
+@ignore(package="fmt")
+@ignore(package="context")
+@ignore(package="os")
+@ignore(package="log")
+@ignore(package="runtime")
+@ignore(package="internal")
+@ignore(package="ioutil")
+@ignore(package="golang")
+@ignore(package="k8s.io/klog");
+
+@preamble
+@project("kubernetes");
+```
+
+After this preamble, add your query. For example:
+- `"NewPodInformer" {}` — Find callees of NewPodInformer
+- `{"CreatePod"}` — Find callers of CreatePod
+- `"Scheduler" {{"Schedule"}}` — Trace from Scheduler to Schedule
+"#;

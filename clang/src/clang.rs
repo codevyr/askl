@@ -451,6 +451,7 @@ pub async fn run_clang_ast(clang: &str, c: CompileCommand) -> anyhow::Result<Par
 }
 
 #[derive(Debug, Deserialize, Clone, Eq, PartialEq, Hash)]
+#[allow(dead_code)]
 struct UnresolvedChild {
     from: SymbolId,
     to: SymbolId,
