@@ -392,7 +392,7 @@ impl FromRequest for AuthIdentity {
         let store = req.app_data::<web::Data<AuthStore>>().cloned();
         let token = extract_token(req);
         let secure_request = is_secure_request(req);
-        let allow_insecure = insecure_tokens_allowed();
+        let allow_insecure = insecure_connections_allowed();
 
         Box::pin(async move {
             let store = store.ok_or_else(|| ErrorInternalServerError("Auth store missing"))?;
@@ -427,14 +427,18 @@ pub fn bootstrap_allowed() -> bool {
     }
 }
 
-pub fn insecure_tokens_allowed() -> bool {
-    match std::env::var("ASKL_ALLOW_INSECURE_TOKENS") {
-        Ok(value) => matches!(
-            value.to_ascii_lowercase().as_str(),
-            "true" | "1" | "yes" | "on"
-        ),
-        Err(_) => false,
-    }
+/// Returns true if insecure connections are allowed (tokens over HTTP, SSE without TLS).
+/// Controlled by ASKL_ALLOW_INSECURE_CONNECTIONS env var (also accepts legacy ASKL_ALLOW_INSECURE_TOKENS).
+pub fn insecure_connections_allowed() -> bool {
+    // Check new env var first, fall back to legacy
+    let value = std::env::var("ASKL_ALLOW_INSECURE_CONNECTIONS")
+        .or_else(|_| std::env::var("ASKL_ALLOW_INSECURE_TOKENS"))
+        .unwrap_or_default();
+
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
 }
 
 fn is_secure_request(req: &HttpRequest) -> bool {

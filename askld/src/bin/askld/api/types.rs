@@ -23,14 +23,28 @@ pub struct NodeDeclaration {
     pub symbol_type: SymbolType,
     pub start_offset: i32,
     pub end_offset: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_start_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_end_line: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Node {
     #[serde(serialize_with = "symbolid_as_string")]
-    id: SymbolId,
-    label: String,
-    declarations: Vec<NodeDeclaration>,
+    pub id: SymbolId,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qualified_name: Option<String>,
+    pub declarations: Vec<NodeDeclaration>,
 }
 
 impl Node {
@@ -38,6 +52,8 @@ impl Node {
         Self {
             id,
             label,
+            name: None,
+            qualified_name: None,
             declarations,
         }
     }
@@ -45,15 +61,23 @@ impl Node {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Edge {
-    id: String,
+    pub id: String,
     #[serde(serialize_with = "symbolid_as_string")]
-    from: SymbolId,
+    pub from: SymbolId,
     #[serde(serialize_with = "symbolid_as_string")]
-    to: SymbolId,
-    from_file: Option<FileId>,
-    from_project_id: Option<String>,
-    from_offset_start: Option<i32>,
-    from_offset_end: Option<i32>,
+    pub to: SymbolId,
+    pub from_file: Option<FileId>,
+    pub from_project_id: Option<String>,
+    pub from_offset_start: Option<i32>,
+    pub from_offset_end: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_qualified: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callee: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callee_qualified: Option<String>,
 }
 
 impl Edge {
@@ -72,6 +96,10 @@ impl Edge {
             from_project_id,
             from_offset_start: range.map(|r| r.0),
             from_offset_end: range.map(|r| r.1),
+            caller: None,
+            caller_qualified: None,
+            callee: None,
+            callee_qualified: None,
         }
     }
 }
@@ -177,4 +205,24 @@ pub struct IndexUploadResponse {
 pub struct IndexDeleteResponse {
     pub project_id: i32,
     pub deleted: bool,
+}
+
+/// Slice byte content by offset range. Used by both REST and MCP endpoints.
+pub fn slice_content(
+    content: Vec<u8>,
+    start_offset: Option<i64>,
+    end_offset: Option<i64>,
+) -> Result<Vec<u8>, String> {
+    let len = content.len();
+    let start = start_offset.unwrap_or(0);
+    let end = end_offset.unwrap_or(len as i64);
+    if start < 0 || end < 0 {
+        return Err("Offsets must be non-negative".to_string());
+    }
+    let start = start as usize;
+    let end = end as usize;
+    if start > end || end > len {
+        return Err("Invalid offset range".to_string());
+    }
+    Ok(content[start..end].to_vec())
 }
