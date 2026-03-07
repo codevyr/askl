@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use super::query::{execute_query, QueryFailure};
 use super::types::{slice_content, AsklData, ErrorResponse, Graph};
+use index::symbols::normalize_symbol_tokens;
 
 const MCP_JSONRPC_VERSION: &str = "2.0";
 const MCP_DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
@@ -839,6 +840,80 @@ Only use grep AFTER askl for: type definitions, string literals, config values.
     ]
 }
 
+/// Extract short name and qualified name from a full Go symbol path.
+/// E.g., "(*sigs.k8s.io/kueue/pkg/scheduler.Scheduler).requeueAndUpdate"
+/// -> ("requeueAndUpdate", "Scheduler.requeueAndUpdate")
+fn shorten_name(label: &str) -> (String, String) {
+    let tokens = normalize_symbol_tokens(label);
+    if tokens.is_empty() {
+        return ("?".into(), "?".into());
+    }
+    let name = tokens.last().unwrap().clone();
+    let qualified = if tokens.len() >= 2 {
+        format!("{}.{}", tokens[tokens.len() - 2], name)
+    } else {
+        name.clone()
+    };
+    (name, qualified)
+}
+
+/// Convert byte offset to 1-indexed line number by counting newlines.
+fn offset_to_line(content: &str, offset: usize) -> u32 {
+    content[..offset.min(content.len())]
+        .bytes()
+        .filter(|&b| b == b'\n')
+        .count() as u32
+        + 1
+}
+
+/// Enrich graph nodes and edges with readable names and line numbers.
+async fn enrich_graph(graph: &mut Graph, cfg: &askld::cfg::ControlFlowGraph) {
+    // Build label lookup: node id -> label
+    let labels: HashMap<String, String> = graph
+        .nodes
+        .iter()
+        .map(|n| (format!("{}", n.id), n.label.clone()))
+        .collect();
+
+    // Fetch file contents for line number computation
+    let mut file_contents: HashMap<String, String> = HashMap::new();
+    for file in &graph.files {
+        if let Ok(file_id) = file.file_id.parse::<i64>() {
+            if let Ok(content) = cfg.index.get_file_contents(FileId::from(file_id)).await {
+                file_contents.insert(file.file_id.clone(), content);
+            }
+        }
+    }
+
+    // Enrich nodes with names and line numbers
+    for node in &mut graph.nodes {
+        let (name, qualified) = shorten_name(&node.label);
+        node.name = Some(name);
+        node.qualified_name = Some(qualified);
+
+        for decl in &mut node.declarations {
+            if let Some(content) = file_contents.get(&decl.file_id) {
+                decl.start_line = Some(offset_to_line(content, decl.start_offset as usize));
+                decl.end_line = Some(offset_to_line(content, decl.end_offset as usize));
+            }
+        }
+    }
+
+    // Enrich edges with caller/callee names
+    for edge in &mut graph.edges {
+        if let Some(label) = labels.get(&format!("{}", edge.from)) {
+            let (name, qualified) = shorten_name(label);
+            edge.caller = Some(name);
+            edge.caller_qualified = Some(qualified);
+        }
+        if let Some(label) = labels.get(&format!("{}", edge.to)) {
+            let (name, qualified) = shorten_name(label);
+            edge.callee = Some(name);
+            edge.callee_qualified = Some(qualified);
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct QueryRunArgs {
     query: String,
@@ -852,7 +927,8 @@ async fn tool_askl_query_run(
     let started = Instant::now();
     let result = execute_query(&askl_data.cfg, &args.query).await;
     match result {
-        Ok(graph) => {
+        Ok(mut graph) => {
+            enrich_graph(&mut graph, &askl_data.cfg).await;
             let stats = graph_stats(&graph);
             let payload = json!({
                 "graph": graph,

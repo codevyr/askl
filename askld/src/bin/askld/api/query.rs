@@ -158,6 +158,8 @@ pub async fn execute_query(
                     symbol_type: SymbolType::from(d.declaration.symbol_type),
                     start_offset,
                     end_offset,
+                    start_line: None,
+                    end_line: None,
                 }
             })
             .collect();

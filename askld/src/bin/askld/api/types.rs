@@ -23,14 +23,22 @@ pub struct NodeDeclaration {
     pub symbol_type: SymbolType,
     pub start_offset: i32,
     pub end_offset: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Node {
     #[serde(serialize_with = "symbolid_as_string")]
-    id: SymbolId,
-    label: String,
-    declarations: Vec<NodeDeclaration>,
+    pub id: SymbolId,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qualified_name: Option<String>,
+    pub declarations: Vec<NodeDeclaration>,
 }
 
 impl Node {
@@ -38,6 +46,8 @@ impl Node {
         Self {
             id,
             label,
+            name: None,
+            qualified_name: None,
             declarations,
         }
     }
@@ -45,15 +55,23 @@ impl Node {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Edge {
-    id: String,
+    pub id: String,
     #[serde(serialize_with = "symbolid_as_string")]
-    from: SymbolId,
+    pub from: SymbolId,
     #[serde(serialize_with = "symbolid_as_string")]
-    to: SymbolId,
-    from_file: Option<FileId>,
-    from_project_id: Option<String>,
-    from_offset_start: Option<i32>,
-    from_offset_end: Option<i32>,
+    pub to: SymbolId,
+    pub from_file: Option<FileId>,
+    pub from_project_id: Option<String>,
+    pub from_offset_start: Option<i32>,
+    pub from_offset_end: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_qualified: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callee: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callee_qualified: Option<String>,
 }
 
 impl Edge {
@@ -72,6 +90,10 @@ impl Edge {
             from_project_id,
             from_offset_start: range.map(|r| r.0),
             from_offset_end: range.map(|r| r.1),
+            caller: None,
+            caller_qualified: None,
+            callee: None,
+            callee_qualified: None,
         }
     }
 }
