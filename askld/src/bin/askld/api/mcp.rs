@@ -707,7 +707,16 @@ Only use grep AFTER askl for: type definitions, string literals, config values.
 1. **Start here**: `@project("name") "EntryPoint" {}` to map what functions call
 2. **Then expand**: `@project("name") {"TargetFunc"}` to see callers
 3. **Trace paths**: `@project("name") "A" {{"B"}}` for multi-hop
-4. **Only then**: grep for type definitions, askl_source_get for code
+4. **Only then**: grep for type definitions (query results already include source code)
+
+## Output: Source Code Included
+
+Each node's `declarations[]` includes:
+- `source`: The function source code with surrounding context (comments, etc.)
+- `context_start_line` / `context_end_line`: Line range of the included context
+- `start_line` / `end_line`: Exact declaration line range
+
+**No need to call askl_source_get** for functions in query results - the code is already there!
 
 ## Query Syntax
 
@@ -866,6 +875,61 @@ fn offset_to_line(content: &str, offset: usize) -> u32 {
         + 1
 }
 
+/// Find the byte offset of the start of the line containing `offset`.
+fn line_start(content: &str, offset: usize) -> usize {
+    content[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0)
+}
+
+/// Find the byte offset of the end of the line containing `offset` (after the newline).
+fn line_end(content: &str, offset: usize) -> usize {
+    content[offset..].find('\n').map(|i| offset + i + 1).unwrap_or(content.len())
+}
+
+/// Check if a line (given by start..end byte range) is empty or whitespace-only.
+fn is_empty_line(content: &str, start: usize, end: usize) -> bool {
+    content[start..end].trim().is_empty()
+}
+
+/// Find context boundaries by scanning for empty lines.
+/// Expands from declaration range to the nearest empty lines (or file boundaries).
+/// Returns (context_start_offset, context_end_offset).
+fn find_context_boundaries(content: &str, decl_start: usize, decl_end: usize) -> (usize, usize) {
+    const MAX_CONTEXT_LINES: usize = 5;
+
+    // Find context start: scan backward from the line containing decl_start
+    let mut ctx_start = line_start(content, decl_start);
+    for _ in 0..MAX_CONTEXT_LINES {
+        if ctx_start == 0 {
+            break;
+        }
+        // Look at previous line
+        let prev_line_end = ctx_start;  // Current ctx_start is right after previous line's \n
+        let prev_line_start = line_start(content, prev_line_end.saturating_sub(1));
+        if is_empty_line(content, prev_line_start, prev_line_end) {
+            break;  // Stop at empty line (don't include it)
+        }
+        ctx_start = prev_line_start;
+    }
+
+    // Find context end: scan forward from the line containing the LAST byte of declaration
+    // decl_end is exclusive, so decl_end-1 is the last byte
+    let mut ctx_end = line_end(content, decl_end.saturating_sub(1));
+    for _ in 0..MAX_CONTEXT_LINES {
+        if ctx_end >= content.len() {
+            break;
+        }
+        // Look at next line
+        let next_line_start = ctx_end;  // Current ctx_end is right after current line's \n
+        let next_line_end = line_end(content, next_line_start);
+        if is_empty_line(content, next_line_start, next_line_end) {
+            break;  // Stop at empty line (don't include it)
+        }
+        ctx_end = next_line_end;
+    }
+
+    (ctx_start, ctx_end)
+}
+
 /// Enrich graph nodes and edges with readable names and line numbers.
 async fn enrich_graph(graph: &mut Graph, cfg: &askld::cfg::ControlFlowGraph) {
     // Build label lookup: node id -> label
@@ -895,6 +959,17 @@ async fn enrich_graph(graph: &mut Graph, cfg: &askld::cfg::ControlFlowGraph) {
             if let Some(content) = file_contents.get(&decl.file_id) {
                 decl.start_line = Some(offset_to_line(content, decl.start_offset as usize));
                 decl.end_line = Some(offset_to_line(content, decl.end_offset as usize));
+
+                // Extract source with context
+                let start = decl.start_offset as usize;
+                let end = decl.end_offset as usize;
+                if start <= end && end <= content.len() {
+                    let (ctx_start, ctx_end) = find_context_boundaries(content, start, end);
+                    decl.source = Some(content[ctx_start..ctx_end].to_string());
+                    decl.context_start_line = Some(offset_to_line(content, ctx_start));
+                    // ctx_end is exclusive, so use ctx_end-1 for the last included character's line
+                    decl.context_end_line = Some(offset_to_line(content, ctx_end.saturating_sub(1)));
+                }
             }
         }
     }
@@ -1777,3 +1852,77 @@ After this preamble, add your query. For example:
 - `{"CreatePod"}` — Find callers of CreatePod
 - `"Scheduler" {{"Schedule"}}` — Trace from Scheduler to Schedule
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_context_stops_at_empty_line() {
+        let content = "func foo() {\n}\n\nfunc bar() {\n}";
+        // Declaration is "func foo() {\n}" which is bytes 0..14
+        let (start, end) = find_context_boundaries(content, 0, 14);
+        assert_eq!(&content[start..end], "func foo() {\n}\n");
+    }
+
+    #[test]
+    fn test_context_includes_preceding_comment() {
+        let content = "// Comment for foo\nfunc foo() {\n}\n\nfunc bar() {\n}";
+        // Declaration starts at "func foo()" which is at byte 19
+        let (start, end) = find_context_boundaries(content, 19, 33);
+        assert_eq!(&content[start..end], "// Comment for foo\nfunc foo() {\n}\n");
+    }
+
+    #[test]
+    fn test_context_at_file_start() {
+        let content = "func foo() {\n}";
+        let (start, end) = find_context_boundaries(content, 0, 14);
+        assert_eq!(start, 0);
+        assert_eq!(&content[start..end], "func foo() {\n}");
+    }
+
+    #[test]
+    fn test_context_at_file_end() {
+        let content = "\nfunc foo() {\n}";
+        // Declaration is "func foo() {\n}" which is bytes 1..15
+        let (start, end) = find_context_boundaries(content, 1, 15);
+        assert_eq!(&content[start..end], "func foo() {\n}");
+    }
+
+    #[test]
+    fn test_context_max_lines() {
+        // More than 5 lines before the declaration with no empty line
+        let content = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nfunc foo() {}";
+        // "func foo() {}" starts at byte 42
+        let (start, _end) = find_context_boundaries(content, 42, 55);
+        // Should expand at most 5 lines back, so should start at "line3"
+        assert!(content[start..].starts_with("line3"));
+    }
+
+    #[test]
+    fn test_line_start_helper() {
+        let content = "line1\nline2\nline3";
+        assert_eq!(line_start(content, 0), 0);   // Start of file
+        assert_eq!(line_start(content, 3), 0);   // Middle of first line
+        assert_eq!(line_start(content, 6), 6);   // Start of second line
+        assert_eq!(line_start(content, 8), 6);   // Middle of second line
+        assert_eq!(line_start(content, 12), 12); // Start of third line
+    }
+
+    #[test]
+    fn test_line_end_helper() {
+        let content = "line1\nline2\nline3";
+        assert_eq!(line_end(content, 0), 6);     // First line ends at 6 (after \n)
+        assert_eq!(line_end(content, 6), 12);    // Second line ends at 12
+        assert_eq!(line_end(content, 12), 17);   // Third line ends at EOF
+    }
+
+    #[test]
+    fn test_is_empty_line_helper() {
+        let content = "line1\n\n  \t  \nline2";
+        assert!(!is_empty_line(content, 0, 6));   // "line1\n" is not empty
+        assert!(is_empty_line(content, 6, 7));    // "\n" is empty
+        assert!(is_empty_line(content, 7, 13));   // "  \t  \n" is whitespace-only
+        assert!(!is_empty_line(content, 13, 18)); // "line2" is not empty
+    }
+}

@@ -160,6 +160,9 @@ pub async fn execute_query(
                     end_offset,
                     start_line: None,
                     end_line: None,
+                    source: None,
+                    context_start_line: None,
+                    context_end_line: None,
                 }
             })
             .collect();

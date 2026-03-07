@@ -27,6 +27,12 @@ pub struct NodeDeclaration {
     pub start_line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_start_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_end_line: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
