@@ -123,13 +123,13 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
         "Should have no parents for 'main'"
     );
 
-    // Verify that DeclarationFull is properly populated
+    // Verify that SymbolInstanceFull is properly populated
     for s in &selection.nodes {
         assert!(!s.symbol.name.is_empty(), "Symbol name should not be empty");
-        // The file field should be properly populated
+        // The object field should be properly populated
         assert!(
-            !s.file.filesystem_path.is_empty(),
-            "File path should not be empty"
+            !s.object.filesystem_path.is_empty(),
+            "Object path should not be empty"
         );
         assert!(
             !s.module.module_name.is_empty(),

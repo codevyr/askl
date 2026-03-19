@@ -2,23 +2,23 @@ use diesel::prelude::*;
 use std::collections::Bound;
 
 #[derive(Clone, Queryable, Selectable, Identifiable, Associations, Debug, PartialEq, Eq, Hash)]
-#[diesel(table_name = crate::schema_diesel::declarations)]
+#[diesel(table_name = crate::schema_diesel::symbol_instances)]
 #[diesel(belongs_to(Symbol, foreign_key = symbol))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct Declaration {
+pub struct SymbolInstance {
     pub id: i32,
     pub symbol: i32,
-    pub file_id: i32,
+    pub object_id: i32,
     pub symbol_type: i32,
     pub offset_range: (Bound<i32>, Bound<i32>),
 }
 
 #[derive(Clone, Queryable, Selectable, Identifiable, Associations, Debug, PartialEq, Eq, Hash)]
-#[diesel(table_name = crate::schema_diesel::files)]
+#[diesel(table_name = crate::schema_diesel::objects)]
 #[diesel(belongs_to(Module, foreign_key = module))]
 #[diesel(belongs_to(Project, foreign_key = project_id))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct File {
+pub struct Object {
     pub id: i32,
     pub project_id: i32,
     pub module: Option<i32>,
@@ -77,6 +77,6 @@ pub struct Symbol {
 pub struct SymbolRef {
     pub id: i32,
     pub to_symbol: i32,
-    pub from_file: i32,
+    pub from_object: i32,
     pub from_offset_range: (Bound<i32>, Bound<i32>),
 }

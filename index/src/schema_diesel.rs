@@ -3,18 +3,18 @@
 diesel::table! {
     use diesel::sql_types::*;
 
-    index.declarations (id) {
+    index.symbol_instances (id) {
         id -> Integer,
         symbol -> Integer,
-        file_id -> Integer,
+        object_id -> Integer,
         symbol_type -> Integer,
         offset_range -> Int4range,
     }
 }
 
 diesel::table! {
-    index.file_contents (file_id) {
-        file_id -> Integer,
+    index.object_contents (object_id) {
+        object_id -> Integer,
         content -> Binary,
     }
 }
@@ -22,7 +22,7 @@ diesel::table! {
 diesel::table! {
     use diesel::sql_types::*;
 
-    index.files (id) {
+    index.objects (id) {
         id -> Integer,
         project_id -> Integer,
         module -> Nullable<Integer>,
@@ -65,7 +65,7 @@ diesel::table! {
     index.symbol_refs (id) {
         id -> Integer,
         to_symbol -> Integer,
-        from_file -> Integer,
+        from_object -> Integer,
         from_offset_range -> Int4range,
     }
 }
@@ -83,22 +83,22 @@ diesel::table! {
     }
 }
 
-diesel::joinable!(declarations -> files (file_id));
-diesel::joinable!(declarations -> symbols (symbol));
-diesel::joinable!(file_contents -> files (file_id));
-diesel::joinable!(files -> directories (directory_id));
-diesel::joinable!(files -> modules (module));
-diesel::joinable!(files -> projects (project_id));
+diesel::joinable!(symbol_instances -> objects (object_id));
+diesel::joinable!(symbol_instances -> symbols (symbol));
+diesel::joinable!(object_contents -> objects (object_id));
+diesel::joinable!(objects -> directories (directory_id));
+diesel::joinable!(objects -> modules (module));
+diesel::joinable!(objects -> projects (project_id));
 diesel::joinable!(directories -> projects (project_id));
 diesel::joinable!(modules -> projects (project_id));
 diesel::joinable!(symbol_refs -> symbols (to_symbol));
 diesel::joinable!(symbols -> modules (module));
 
 diesel::allow_tables_to_appear_in_same_query!(
-    declarations,
+    symbol_instances,
     directories,
-    file_contents,
-    files,
+    object_contents,
+    objects,
     modules,
     projects,
     symbol_refs,

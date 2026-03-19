@@ -253,13 +253,13 @@ impl Selector for ForcedVerb {
             for child_node in normal_selection.nodes.iter() {
                 let reference = ParentReference {
                     to_symbol: child_node.symbol.clone(),
-                    to_declaration: child_node.declaration.clone(),
-                    from_declaration: parent_node.declaration.clone(),
+                    to_instance: child_node.symbol_instance.clone(),
+                    from_instance: parent_node.symbol_instance.clone(),
                     symbol_ref: SymbolRef {
                         id: 0,
                         to_symbol: child_node.symbol.id,
-                        from_file: parent_node.file.id,
-                        from_offset_range: parent_node.declaration.offset_range.clone(),
+                        from_object: parent_node.object.id,
+                        from_offset_range: parent_node.symbol_instance.offset_range.clone(),
                     },
                 };
                 fake_parent_references.push(reference);

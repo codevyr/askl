@@ -396,7 +396,7 @@ impl Statement {
         let all_nodes = HashSet::<DeclarationId>::from_iter(
             all_nodes
                 .iter()
-                .map(|node| DeclarationId::new(node.declaration.id)),
+                .map(|node| DeclarationId::new(node.symbol_instance.id)),
         );
 
         let mut all_references = EdgeList::new();
@@ -407,50 +407,50 @@ impl Statement {
                 continue;
             };
             for child in &current.children {
-                if !all_nodes.contains(&DeclarationId::new(child.from_declaration.id))
-                    || !all_nodes.contains(&DeclarationId::new(child.declaration.id))
+                if !all_nodes.contains(&DeclarationId::new(child.from_instance.id))
+                    || !all_nodes.contains(&DeclarationId::new(child.symbol_instance.id))
                 {
                     continue;
                 }
 
                 let occurrence = Occurrence {
-                    file: FileId::new(child.from_file.id),
+                    file: FileId::new(child.from_object.id),
                     offset_range: range_bounds_to_offsets(&child.symbol_ref.from_offset_range)
                         .unwrap(),
                 };
                 all_references.add_reference(
                     SymbolDeclId {
                         symbol_id: SymbolId::new(child.parent_symbol.id),
-                        declaration_id: DeclarationId::new(child.from_declaration.id),
+                        declaration_id: DeclarationId::new(child.from_instance.id),
                     },
                     SymbolDeclId {
                         symbol_id: SymbolId::new(child.symbol_ref.to_symbol),
-                        declaration_id: DeclarationId::new(child.declaration.id),
+                        declaration_id: DeclarationId::new(child.symbol_instance.id),
                     },
                     Some(occurrence),
                 );
             }
 
             for parent in &current.parents {
-                if !all_nodes.contains(&DeclarationId::new(parent.from_declaration.id))
-                    || !all_nodes.contains(&DeclarationId::new(parent.to_declaration.id))
+                if !all_nodes.contains(&DeclarationId::new(parent.from_instance.id))
+                    || !all_nodes.contains(&DeclarationId::new(parent.to_instance.id))
                 {
                     continue;
                 }
 
                 let occurrence = Occurrence {
-                    file: parent.from_declaration.file_id.into(),
+                    file: parent.from_instance.object_id.into(),
                     offset_range: range_bounds_to_offsets(&parent.symbol_ref.from_offset_range)
                         .unwrap(),
                 };
                 all_references.add_reference(
                     SymbolDeclId {
-                        symbol_id: SymbolId::new(parent.from_declaration.symbol),
-                        declaration_id: DeclarationId::new(parent.from_declaration.id),
+                        symbol_id: SymbolId::new(parent.from_instance.symbol),
+                        declaration_id: DeclarationId::new(parent.from_instance.id),
                     },
                     SymbolDeclId {
                         symbol_id: SymbolId::new(parent.to_symbol.id),
-                        declaration_id: DeclarationId::new(parent.to_declaration.id),
+                        declaration_id: DeclarationId::new(parent.to_instance.id),
                     },
                     Some(occurrence),
                 );

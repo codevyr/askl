@@ -11,7 +11,7 @@ VALUES
 INSERT INTO directories (id, project_id, parent_id, path)
 VALUES (1, 1, NULL, '/');
 
-INSERT INTO files (id, project_id, module, directory_id, module_path, filesystem_path, filetype, content_hash)
+INSERT INTO objects (id, project_id, module, directory_id, module_path, filesystem_path, filetype, content_hash)
 VALUES
     (1, 1, 1, 1, 'main.c', '/main.c', 'cc', '');
 
@@ -24,7 +24,7 @@ VALUES
     (5, 'sort.IsSorted', 1, 1),
     (6, 'sort.Sort', 1, 1);
 
-INSERT INTO declarations (id, symbol, file_id, symbol_type, offset_range)
+INSERT INTO symbol_instances (id, symbol, object_id, symbol_type, offset_range)
 VALUES
     (91, 1, 1, 1, int4range(910, 919)),
     (92, 2, 1, 1, int4range(920, 929)),
@@ -34,7 +34,7 @@ VALUES
     (96, 6, 1, 1, int4range(960, 969));
 
 INSERT INTO
-    symbol_refs(to_symbol, from_file, from_offset_range)
+    symbol_refs(to_symbol, from_object, from_offset_range)
 VALUES
     (2, 1, int4range(911, 912)),
     (2, 1, int4range(912, 913)),

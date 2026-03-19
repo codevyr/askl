@@ -240,7 +240,7 @@ impl SelectorState {
             parent
                 .children
                 .iter()
-                .any(|r| r.declaration.id == s.declaration.id)
+                .any(|r| r.symbol_instance.id == s.symbol_instance.id)
         });
     }
 
@@ -250,7 +250,7 @@ impl SelectorState {
             child
                 .parents
                 .iter()
-                .any(|r| r.from_declaration.id == s.declaration.id)
+                .any(|r| r.from_instance.id == s.symbol_instance.id)
         });
     }
 
@@ -260,7 +260,7 @@ impl SelectorState {
             owner
                 .nodes
                 .iter()
-                .any(|o| o.declaration.id == u.declaration.id)
+                .any(|o| o.symbol_instance.id == u.symbol_instance.id)
         });
     }
 
@@ -458,7 +458,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         let decl_ids = parent
             .children
             .iter()
-            .map(|p| DeclarationId::new(p.declaration.id))
+            .map(|p| DeclarationId::new(p.symbol_instance.id))
             .unique()
             .collect::<Vec<_>>();
 
@@ -483,7 +483,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         let decl_ids = child
             .parents
             .iter()
-            .map(|p| DeclarationId::new(p.from_declaration.id))
+            .map(|p| DeclarationId::new(p.from_instance.id))
             .unique()
             .collect::<Vec<_>>();
         let parent_selection = self

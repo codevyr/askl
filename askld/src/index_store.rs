@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use tokio::task;
 
 use crate::proto::askl::index::{
-    File as UploadFile, Module as UploadModule, Project as UploadProject,
+    Module as UploadModule, Object as UploadObject, Project as UploadProject,
 };
 use index::schema_diesel as index_schema;
 use index::symbols::FileId;
@@ -92,8 +92,8 @@ struct NewModule {
 }
 
 #[derive(Insertable, Clone)]
-#[diesel(table_name = index_schema::files)]
-struct NewFile {
+#[diesel(table_name = index_schema::objects)]
+struct NewObject {
     project_id: i32,
     module: Option<i32>,
     directory_id: i32,
@@ -112,9 +112,9 @@ struct NewDirectory {
 }
 
 #[derive(Insertable, Clone)]
-#[diesel(table_name = index_schema::file_contents)]
-struct NewFileContent {
-    file_id: i32,
+#[diesel(table_name = index_schema::object_contents)]
+struct NewObjectContent {
+    object_id: i32,
     content: Vec<u8>,
 }
 
@@ -127,10 +127,10 @@ struct NewSymbol {
 }
 
 #[derive(Insertable, Clone)]
-#[diesel(table_name = index_schema::declarations)]
-struct NewDeclaration {
+#[diesel(table_name = index_schema::symbol_instances)]
+struct NewSymbolInstance {
     symbol: i32,
-    file_id: i32,
+    object_id: i32,
     symbol_type: i32,
     offset_range: std::ops::Range<i32>,
 }
@@ -139,7 +139,7 @@ struct NewDeclaration {
 #[diesel(table_name = index_schema::symbol_refs)]
 struct NewSymbolRef {
     to_symbol: i32,
-    from_file: i32,
+    from_object: i32,
     from_offset_range: std::ops::Range<i32>,
 }
 
@@ -278,7 +278,7 @@ impl IndexStore {
                 let directory_paths = {
                     let _span: tracing::span::EnteredSpan =
                         tracing::info_span!("collect_directory_paths").entered();
-                    collect_directory_paths(&upload.files)
+                    collect_directory_paths(&upload.objects)
                 };
                 let directory_map = {
                     let _span: tracing::span::EnteredSpan = tracing::info_span!(
@@ -289,21 +289,21 @@ impl IndexStore {
                     insert_directories(conn, project_id, &directory_paths)?
                 };
 
-                let file_inserts = {
+                let object_inserts = {
                     let _span: tracing::span::EnteredSpan = tracing::info_span!(
-                        "build_files",
-                        count = upload.files.len()
+                        "build_objects",
+                        count = upload.objects.len()
                     )
                     .entered();
-                    build_files(project_id, &upload.files, &module_map, &directory_map)?
+                    build_objects(project_id, &upload.objects, &module_map, &directory_map)?
                 };
-                let file_map = {
+                let object_map = {
                     let _span: tracing::span::EnteredSpan = tracing::info_span!(
-                        "insert_files",
-                        count = file_inserts.len()
+                        "insert_objects",
+                        count = object_inserts.len()
                     )
                     .entered();
-                    insert_files(conn, &file_inserts)?
+                    insert_objects(conn, &object_inserts)?
                 };
 
                 let symbol_inserts = {
@@ -323,24 +323,24 @@ impl IndexStore {
                     insert_symbols(conn, symbol_inserts)?
                 };
 
-                let declaration_rows = {
+                let symbol_instance_rows = {
                     let _span: tracing::span::EnteredSpan =
-                        tracing::info_span!("build_declarations").entered();
-                    build_declarations(&upload.files, &file_map, &symbol_map)?
+                        tracing::info_span!("build_symbol_instances").entered();
+                    build_symbol_instances(&upload.objects, &object_map, &symbol_map)?
                 };
                 {
                     let _span: tracing::span::EnteredSpan = tracing::info_span!(
-                        "insert_declarations",
-                        count = declaration_rows.len()
+                        "insert_symbol_instances",
+                        count = symbol_instance_rows.len()
                     )
                     .entered();
-                    insert_declarations(conn, &declaration_rows)?;
+                    insert_symbol_instances(conn, &symbol_instance_rows)?;
                 }
 
                 let symbol_ref_rows = {
                     let _span: tracing::span::EnteredSpan =
                         tracing::info_span!("build_symbol_refs").entered();
-                    build_symbol_refs(&upload.files, &file_map, &symbol_map)?
+                    build_symbol_refs(&upload.objects, &object_map, &symbol_map)?
                 };
                 {
                     let _span: tracing::span::EnteredSpan = tracing::info_span!(
@@ -424,8 +424,8 @@ impl IndexStore {
                 .map(|(id, module_name)| ProjectModule { id, module_name })
                 .collect();
 
-            let file_count: i64 = index_schema::files::table
-                .filter(index_schema::files::project_id.eq(project_id))
+            let file_count: i64 = index_schema::objects::table
+                .filter(index_schema::objects::project_id.eq(project_id))
                 .count()
                 .get_result(&mut conn)?;
 
@@ -560,14 +560,14 @@ impl IndexStore {
                 .map_err(|err| StoreError::Storage(err.to_string()))?;
 
             let normalized = normalize_full_path(&path);
-            let content = index_schema::file_contents::table
+            let content = index_schema::object_contents::table
                 .inner_join(
-                    index_schema::files::table
-                        .on(index_schema::file_contents::file_id.eq(index_schema::files::id)),
+                    index_schema::objects::table
+                        .on(index_schema::object_contents::object_id.eq(index_schema::objects::id)),
                 )
-                .filter(index_schema::files::project_id.eq(project_id))
-                .filter(index_schema::files::filesystem_path.eq(normalized))
-                .select(index_schema::file_contents::content)
+                .filter(index_schema::objects::project_id.eq(project_id))
+                .filter(index_schema::objects::filesystem_path.eq(normalized))
+                .select(index_schema::object_contents::content)
                 .first::<Vec<u8>>(&mut conn)
                 .optional()?;
 
@@ -685,7 +685,7 @@ fn load_file_children(
 ) -> Result<Vec<FileChildRow>, StoreError> {
     let query = r#"
         SELECT id, filesystem_path AS path, filetype
-        FROM index.files
+        FROM index.objects
         WHERE directory_id = $1
         ORDER BY filesystem_path
     "#;
@@ -732,10 +732,10 @@ struct ModuleInsert {
     row: NewModule,
 }
 
-struct FileInsert {
+struct ObjectInsert {
     local_id: i64,
     content: Vec<u8>,
-    row: NewFile,
+    row: NewObject,
 }
 
 struct SymbolInsert {
@@ -790,11 +790,11 @@ fn insert_modules(
     Ok(module_map)
 }
 
-fn collect_directory_paths(files: &[UploadFile]) -> HashSet<String> {
+fn collect_directory_paths(objects: &[UploadObject]) -> HashSet<String> {
     let mut paths = HashSet::new();
     paths.insert("/".to_string());
-    for file in files {
-        let filesystem_path = normalize_full_path(&file.filesystem_path);
+    for object in objects {
+        let filesystem_path = normalize_full_path(&object.filesystem_path);
         let mut dir_path = parent_dir(&filesystem_path);
         loop {
             paths.insert(dir_path.clone());
@@ -954,35 +954,35 @@ struct DirectoryEntry {
     depth: usize,
 }
 
-fn build_files(
+fn build_objects(
     project_id: i32,
-    files: &[UploadFile],
+    objects: &[UploadObject],
     module_map: &HashMap<i64, i32>,
     directory_map: &HashMap<String, i32>,
-) -> Result<Vec<FileInsert>, UploadError> {
+) -> Result<Vec<ObjectInsert>, UploadError> {
     let mut seen = HashSet::new();
     let mut inserts = Vec::new();
-    for file in files {
-        if !seen.insert(file.local_id) {
+    for object in objects {
+        if !seen.insert(object.local_id) {
             return Err(UploadError::Invalid(format!(
-                "duplicate file local_id {}",
-                file.local_id
+                "duplicate object local_id {}",
+                object.local_id
             )));
         }
-        let filesystem_path_raw = file.filesystem_path.trim();
+        let filesystem_path_raw = object.filesystem_path.trim();
         if filesystem_path_raw.is_empty() {
             return Err(UploadError::Invalid(format!(
-                "filesystem_path is required for file {}",
-                file.local_id
+                "filesystem_path is required for object {}",
+                object.local_id
             )));
         }
         if !filesystem_path_raw.starts_with('/') {
             return Err(UploadError::Invalid(format!(
-                "filesystem_path must be an absolute path for file {}",
-                file.local_id
+                "filesystem_path must be an absolute path for object {}",
+                object.local_id
             )));
         }
-        let module_id = match file.module_id {
+        let module_id = match object.module_id {
             Some(local_id) => {
                 let mapped = module_map.get(&local_id).ok_or_else(|| {
                     UploadError::Invalid(format!(
@@ -1002,54 +1002,54 @@ fn build_files(
                 directory_path
             ))
         })?;
-        inserts.push(FileInsert {
-            local_id: file.local_id,
-            content: file.content.clone(),
-            row: NewFile {
+        inserts.push(ObjectInsert {
+            local_id: object.local_id,
+            content: object.content.clone(),
+            row: NewObject {
                 project_id,
                 module: module_id,
                 directory_id: *directory_id,
-                module_path: file.module_path.clone(),
+                module_path: object.module_path.clone(),
                 filesystem_path,
-                filetype: file.filetype.clone(),
-                content_hash: hash_bytes(&file.content),
+                filetype: object.filetype.clone(),
+                content_hash: hash_bytes(&object.content),
             },
         });
     }
     Ok(inserts)
 }
 
-fn insert_files(
+fn insert_objects(
     conn: &mut PgConnection,
-    inserts: &[FileInsert],
+    inserts: &[ObjectInsert],
 ) -> Result<HashMap<i64, i32>, UploadError> {
     if inserts.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let mut file_map = HashMap::new();
+    let mut object_map = HashMap::new();
     for chunk in inserts.chunks(MAX_INSERT_ROWS) {
-        let rows: Vec<NewFile> = chunk.iter().map(|entry| entry.row.clone()).collect();
-        let ids: Vec<i32> = diesel::insert_into(index_schema::files::table)
+        let rows: Vec<NewObject> = chunk.iter().map(|entry| entry.row.clone()).collect();
+        let ids: Vec<i32> = diesel::insert_into(index_schema::objects::table)
             .values(&rows)
-            .returning(index_schema::files::id)
+            .returning(index_schema::objects::id)
             .get_results(conn)?;
 
-        let mut file_contents = Vec::with_capacity(ids.len());
+        let mut object_contents = Vec::with_capacity(ids.len());
         for (entry, id) in chunk.iter().zip(ids.iter()) {
-            file_map.insert(entry.local_id, *id);
-            file_contents.push(NewFileContent {
-                file_id: *id,
+            object_map.insert(entry.local_id, *id);
+            object_contents.push(NewObjectContent {
+                object_id: *id,
                 content: entry.content.clone(),
             });
         }
 
-        diesel::insert_into(index_schema::file_contents::table)
-            .values(&file_contents)
+        diesel::insert_into(index_schema::object_contents::table)
+            .values(&object_contents)
             .execute(conn)?;
     }
 
-    Ok(file_map)
+    Ok(object_map)
 }
 
 fn build_symbols(
@@ -1108,33 +1108,33 @@ fn insert_symbols(
     Ok(symbol_map)
 }
 
-fn build_declarations(
-    files: &[UploadFile],
-    file_map: &HashMap<i64, i32>,
+fn build_symbol_instances(
+    objects: &[UploadObject],
+    object_map: &HashMap<i64, i32>,
     symbol_map: &HashMap<i64, i32>,
-) -> Result<Vec<NewDeclaration>, UploadError> {
+) -> Result<Vec<NewSymbolInstance>, UploadError> {
     let mut rows = Vec::new();
-    for file in files {
-        let file_id = file_map.get(&file.local_id).ok_or_else(|| {
+    for object in objects {
+        let object_id = object_map.get(&object.local_id).ok_or_else(|| {
             UploadError::Invalid(format!(
-                "missing file mapping for local_id {}",
-                file.local_id
+                "missing object mapping for local_id {}",
+                object.local_id
             ))
         })?;
-        for declaration in &file.declarations {
+        for instance in &object.symbol_instances {
             let symbol_id = symbol_map
-                .get(&declaration.symbol_local_id)
+                .get(&instance.symbol_local_id)
                 .ok_or_else(|| {
                     UploadError::Invalid(format!(
                         "unknown symbol local_id {}",
-                        declaration.symbol_local_id
+                        instance.symbol_local_id
                     ))
                 })?;
-            rows.push(NewDeclaration {
+            rows.push(NewSymbolInstance {
                 symbol: *symbol_id,
-                file_id: *file_id,
-                symbol_type: declaration.symbol_type,
-                offset_range: declaration.start_offset..declaration.end_offset,
+                object_id: *object_id,
+                symbol_type: instance.symbol_type,
+                offset_range: instance.start_offset..instance.end_offset,
             });
         }
     }
@@ -1142,19 +1142,19 @@ fn build_declarations(
 }
 
 fn build_symbol_refs(
-    files: &[UploadFile],
-    file_map: &HashMap<i64, i32>,
+    objects: &[UploadObject],
+    object_map: &HashMap<i64, i32>,
     symbol_map: &HashMap<i64, i32>,
 ) -> Result<Vec<NewSymbolRef>, UploadError> {
     let mut rows = Vec::new();
-    for file in files {
-        let file_id = file_map.get(&file.local_id).ok_or_else(|| {
+    for object in objects {
+        let object_id = object_map.get(&object.local_id).ok_or_else(|| {
             UploadError::Invalid(format!(
-                "missing file mapping for local_id {}",
-                file.local_id
+                "missing object mapping for local_id {}",
+                object.local_id
             ))
         })?;
-        for reference in &file.refs {
+        for reference in &object.refs {
             let symbol_id = symbol_map
                 .get(&reference.to_symbol_local_id)
                 .ok_or_else(|| {
@@ -1165,7 +1165,7 @@ fn build_symbol_refs(
                 })?;
             rows.push(NewSymbolRef {
                 to_symbol: *symbol_id,
-                from_file: *file_id,
+                from_object: *object_id,
                 from_offset_range: reference.from_offset_start..reference.from_offset_end,
             });
         }
@@ -1173,12 +1173,12 @@ fn build_symbol_refs(
     Ok(rows)
 }
 
-fn insert_declarations(
+fn insert_symbol_instances(
     conn: &mut PgConnection,
-    rows: &[NewDeclaration],
+    rows: &[NewSymbolInstance],
 ) -> Result<(), UploadError> {
     for chunk in rows.chunks(MAX_INSERT_ROWS) {
-        diesel::insert_into(index_schema::declarations::table)
+        diesel::insert_into(index_schema::symbol_instances::table)
             .values(chunk)
             .execute(conn)?;
     }

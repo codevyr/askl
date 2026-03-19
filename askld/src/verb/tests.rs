@@ -54,21 +54,21 @@ async fn test_select_matching_name() {
             .await
             .unwrap();
 
-        let mut got_declarations: Vec<DeclarationId> = result
+        let mut got_symbol_instances: Vec<DeclarationId> = result
             .unwrap()
             .nodes
             .into_iter()
-            .map(|s| DeclarationId::new(s.declaration.id))
+            .map(|s| DeclarationId::new(s.symbol_instance.id))
             .collect();
-        got_declarations.sort();
+        got_symbol_instances.sort();
 
-        let expected_declarations: Vec<DeclarationId> = expected_ids
+        let expected_symbol_instances: Vec<DeclarationId> = expected_ids
             .into_iter()
             .map(|i| DeclarationId::new(i))
             .collect();
 
         assert_eq!(
-            got_declarations, expected_declarations,
+            got_symbol_instances, expected_symbol_instances,
             "Failed for name: {}",
             name
         );
