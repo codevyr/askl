@@ -14,8 +14,8 @@ pub use mixins::{
     ProjectFilterMixin, SymbolSearchMixin,
 };
 pub use selection::{
-    ChildReference, DeclarationFullDiesel, FileFullDiesel, ModuleFullDiesel, ParentReference,
-    ReferenceFullDiesel, ReferenceResult, Selection, SelectionNode,
+    ChildReference, ModuleFullDiesel, ObjectFullDiesel, ParentReference,
+    ReferenceFullDiesel, ReferenceResult, Selection, SelectionNode, SymbolInstanceFullDiesel,
 };
 
 pub type Connection = PooledConnection<ConnectionManager<PgConnection>>;

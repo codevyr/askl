@@ -9,7 +9,7 @@ VALUES (1, 'test', 1);
 INSERT INTO directories (id, project_id, parent_id, path)
 VALUES (1, 1, NULL, '/');
 
-INSERT INTO files (id, project_id, module, directory_id, module_path, filesystem_path, filetype, content_hash)
+INSERT INTO objects (id, project_id, module, directory_id, module_path, filesystem_path, filetype, content_hash)
 VALUES (1, 1, 1, 1, 'main.c', '/main.c', 'cc', '');
 
 INSERT INTO symbols (id, name, module, symbol_scope)
@@ -23,7 +23,7 @@ VALUES
     (7,  'g',    1, 1),
     (42, 'main', 1, 1);
 
-INSERT INTO declarations (id, symbol, file_id, symbol_type, offset_range)
+INSERT INTO symbol_instances (id, symbol, object_id, symbol_type, offset_range)
 VALUES
     (91,  1,  1, 1, int4range(910, 919)),
     (92,  2,  1, 1, int4range(920, 929)),
@@ -35,7 +35,7 @@ VALUES
     (942, 42, 1, 1, int4range(9420, 9429));
 
 INSERT INTO
-    symbol_refs(to_symbol, from_file, from_offset_range)
+    symbol_refs(to_symbol, from_object, from_offset_range)
 VALUES
     (2, 1, int4range(911, 912)),
     (2, 1, int4range(912, 913)),

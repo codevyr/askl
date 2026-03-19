@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
+use crate::models_diesel::{Module, Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::symbols::{
     DeclarationId, FileId, ModuleId, Occurrence, SymbolId, SymbolScope, SymbolType,
 };
@@ -12,7 +12,7 @@ pub struct ModuleFullDiesel {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct FileFullDiesel {
+pub struct ObjectFullDiesel {
     pub id: FileId,
     pub module: ModuleFullDiesel,
     pub module_path: String,
@@ -29,12 +29,12 @@ pub struct ReferenceFullDiesel {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct DeclarationFullDiesel {
+pub struct SymbolInstanceFullDiesel {
     pub id: DeclarationId,
     pub symbol: SymbolId,
     pub name: String,
     pub symbol_scope: SymbolScope,
-    pub file: FileFullDiesel,
+    pub object: ObjectFullDiesel,
     pub symbol_type: SymbolType,
     pub occurrence: Occurrence,
 
@@ -45,9 +45,9 @@ pub struct DeclarationFullDiesel {
 #[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub struct SelectionNode {
     pub symbol: Symbol,
-    pub declaration: Declaration,
+    pub symbol_instance: SymbolInstance,
     pub module: Module,
-    pub file: File,
+    pub object: Object,
     pub project: Project,
 }
 
@@ -55,10 +55,10 @@ pub struct SelectionNode {
 pub struct ReferenceResult {
     pub parent_symbol: Symbol,
     pub symbol: Symbol,
-    pub declaration: Declaration,
-    pub from_declaration: Declaration,
+    pub symbol_instance: SymbolInstance,
+    pub from_instance: SymbolInstance,
     pub symbol_ref: SymbolRef,
-    pub from_file: File,
+    pub from_object: Object,
 }
 
 pub type ChildReference = ReferenceResult;
@@ -66,8 +66,8 @@ pub type ChildReference = ReferenceResult;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParentReference {
     pub to_symbol: Symbol,
-    pub to_declaration: Declaration,
-    pub from_declaration: Declaration,
+    pub to_instance: SymbolInstance,
+    pub from_instance: SymbolInstance,
     pub symbol_ref: SymbolRef,
 }
 
@@ -98,24 +98,24 @@ impl Selection {
     }
 
     pub fn get_decl_ids(&self) -> Vec<i32> {
-        self.nodes.iter().map(|node| node.declaration.id).collect()
+        self.nodes.iter().map(|node| node.symbol_instance.id).collect()
     }
 
-    /// Remove any references to declarations that are no longer in the selection
+    /// Remove any references to symbol instances that are no longer in the selection
     pub fn prune_references(&mut self) {
         let selection = self;
 
-        let node_declaration_ids: HashSet<_> = selection
+        let node_instance_ids: HashSet<_> = selection
             .nodes
             .iter()
-            .map(|s| DeclarationId::new(s.declaration.id))
+            .map(|s| DeclarationId::new(s.symbol_instance.id))
             .collect();
         selection
             .parents
-            .retain(|c| node_declaration_ids.contains(&DeclarationId::new(c.to_declaration.id)));
+            .retain(|c| node_instance_ids.contains(&DeclarationId::new(c.to_instance.id)));
         selection
             .children
-            .retain(|c| node_declaration_ids.contains(&DeclarationId::new(c.from_declaration.id)));
+            .retain(|c| node_instance_ids.contains(&DeclarationId::new(c.from_instance.id)));
     }
 }
 
@@ -135,7 +135,7 @@ impl std::fmt::Debug for Selection {
                 &self
                     .parents
                     .iter()
-                    .map(|p| p.from_declaration.id)
+                    .map(|p| p.from_instance.id)
                     .collect::<Vec<_>>(),
             )
             .field(

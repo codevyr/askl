@@ -24,7 +24,7 @@ impl NodeList {
         let mut res: Vec<_> = self
             .0
             .iter()
-            .map(|n| DeclarationId::new(n.declaration.id))
+            .map(|n| DeclarationId::new(n.symbol_instance.id))
             .collect();
         res.sort();
         res

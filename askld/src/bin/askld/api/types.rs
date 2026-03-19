@@ -15,10 +15,10 @@ where
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct NodeDeclaration {
+pub struct NodeSymbolInstance {
     pub id: String,
     pub symbol: String,
-    pub file_id: String,
+    pub object_id: String,
     pub project_id: String,
     pub symbol_type: SymbolType,
     pub start_offset: i32,
@@ -30,15 +30,15 @@ pub struct Node {
     #[serde(serialize_with = "symbolid_as_string")]
     id: SymbolId,
     label: String,
-    declarations: Vec<NodeDeclaration>,
+    symbol_instances: Vec<NodeSymbolInstance>,
 }
 
 impl Node {
-    pub fn new(id: SymbolId, label: String, declarations: Vec<NodeDeclaration>) -> Self {
+    pub fn new(id: SymbolId, label: String, symbol_instances: Vec<NodeSymbolInstance>) -> Self {
         Self {
             id,
             label,
-            declarations,
+            symbol_instances,
         }
     }
 }
@@ -50,7 +50,7 @@ pub struct Edge {
     from: SymbolId,
     #[serde(serialize_with = "symbolid_as_string")]
     to: SymbolId,
-    from_file: Option<FileId>,
+    from_object: Option<FileId>,
     from_project_id: Option<String>,
     from_offset_start: Option<i32>,
     from_offset_end: Option<i32>,
@@ -68,7 +68,7 @@ impl Edge {
             id: format!("{}-{}", from, to),
             from: from,
             to: to,
-            from_file: occurrence.map(|o| o.file),
+            from_object: occurrence.map(|o| o.file),
             from_project_id,
             from_offset_start: range.map(|r| r.0),
             from_offset_end: range.map(|r| r.1),
@@ -77,8 +77,8 @@ impl Edge {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct GraphFileEntry {
-    pub file_id: String,
+pub struct GraphObjectEntry {
+    pub object_id: String,
     pub path: String,
     pub project_id: String,
 }
@@ -87,7 +87,7 @@ pub struct GraphFileEntry {
 pub struct Graph {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
-    pub files: Vec<GraphFileEntry>,
+    pub objects: Vec<GraphObjectEntry>,
     pub warnings: Vec<ErrorResponse>,
 }
 
@@ -96,7 +96,7 @@ impl Graph {
         Self {
             nodes: vec![],
             edges: vec![],
-            files: vec![],
+            objects: vec![],
             warnings: vec![],
         }
     }

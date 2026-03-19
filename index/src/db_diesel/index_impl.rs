@@ -6,7 +6,7 @@ use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgRangeExpressionMethods;
 use diesel_migrations::MigrationHarness;
 
-use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
+use crate::models_diesel::{Module, Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::symbols::FileId;
 
 use super::mixins::{
@@ -100,7 +100,7 @@ impl Index {
         Ok(())
     }
 
-    pub async fn get_file_contents(&self, file_id: FileId) -> Result<String> {
+    pub async fn get_file_contents(&self, object_id: FileId) -> Result<String> {
         use crate::schema_diesel::*;
 
         let connection = &mut self
@@ -108,18 +108,18 @@ impl Index {
             .get()
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
-        let file_id: i32 = file_id.into();
-        let result = file_contents::dsl::file_contents
-            .filter(file_contents::dsl::file_id.eq(file_id))
-            .select(file_contents::dsl::content)
+        let object_id: i32 = object_id.into();
+        let result = object_contents::dsl::object_contents
+            .filter(object_contents::dsl::object_id.eq(object_id))
+            .select(object_contents::dsl::content)
             .first::<Vec<u8>>(connection)
             .optional()
             .map_err(|e| anyhow::anyhow!("Failed to query file contents: {}", e))?;
 
         if result.is_none() {
             return Err(anyhow::anyhow!(
-                "File contents not found for file_id {}",
-                file_id
+                "File contents not found for object_id {}",
+                object_id
             ));
         }
 
@@ -147,19 +147,19 @@ impl Index {
 
             let mut joined_query = symbols::dsl::symbols
                 .inner_join(
-                    declarations::dsl::declarations
-                        .on(symbols::dsl::id.eq(declarations::dsl::symbol)),
+                    symbol_instances::dsl::symbol_instances
+                        .on(symbols::dsl::id.eq(symbol_instances::dsl::symbol)),
                 )
                 .inner_join(modules::dsl::modules.on(symbols::dsl::module.eq(modules::dsl::id)))
                 .inner_join(
                     projects::dsl::projects.on(projects::dsl::id.eq(modules::dsl::project_id)),
                 )
-                .inner_join(files::dsl::files.on(files::dsl::id.eq(declarations::dsl::file_id)))
+                .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(symbol_instances::dsl::object_id)))
                 .select((
                     Symbol::as_select(),
-                    Declaration::as_select(),
+                    SymbolInstance::as_select(),
                     Module::as_select(),
-                    File::as_select(),
+                    Object::as_select(),
                     Project::as_select(),
                 ))
                 .into_boxed::<Pg>();
@@ -169,7 +169,7 @@ impl Index {
             }
 
             joined_query
-                .load::<(Symbol, Declaration, Module, File, Project)>(connection)
+                .load::<(Symbol, SymbolInstance, Module, Object, Project)>(connection)
                 .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?
         };
 
@@ -184,24 +184,24 @@ impl Index {
                     symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::dsl::id)),
                 )
                 .inner_join(
-                    declarations::dsl::declarations
-                        .on(symbols::dsl::id.eq(declarations::dsl::symbol)),
+                    symbol_instances::dsl::symbol_instances
+                        .on(symbols::dsl::id.eq(symbol_instances::dsl::symbol)),
                 )
                 .inner_join(
                     parent_decls.on(parent_decls
-                        .field(declarations::dsl::file_id)
-                        .eq(symbol_refs::dsl::from_file)),
+                        .field(symbol_instances::dsl::object_id)
+                        .eq(symbol_refs::dsl::from_object)),
                 )
                 .filter(
                     parent_decls
-                        .field(declarations::dsl::offset_range)
+                        .field(symbol_instances::dsl::offset_range)
                         .contains_range(symbol_refs::dsl::from_offset_range),
                 )
                 .select((
                     SymbolRef::as_select(),
                     Symbol::as_select(),
-                    Declaration::as_select(),
-                    parent_decls.fields(crate::schema_diesel::declarations::all_columns),
+                    SymbolInstance::as_select(),
+                    parent_decls.fields(crate::schema_diesel::symbol_instances::all_columns),
                 ))
                 .into_boxed::<Pg>();
 
@@ -210,7 +210,7 @@ impl Index {
             }
 
             parents_query
-                .load::<(SymbolRef, Symbol, Declaration, Declaration)>(connection)
+                .load::<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)>(connection)
                 .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
         };
 
@@ -221,34 +221,34 @@ impl Index {
             let mut children_query = symbol_refs::dsl::symbol_refs
                 .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::id)))
                 .inner_join(
-                    declarations::dsl::declarations.on(symbols::dsl::id.eq(declarations::symbol)),
+                    symbol_instances::dsl::symbol_instances.on(symbols::dsl::id.eq(symbol_instances::symbol)),
                 )
                 .inner_join(
                     parent_decls.on(parent_decls
-                        .field(declarations::dsl::file_id)
-                        .eq(symbol_refs::dsl::from_file)),
+                        .field(symbol_instances::dsl::object_id)
+                        .eq(symbol_refs::dsl::from_object)),
                 )
                 .filter(
                     parent_decls
-                        .field(declarations::dsl::offset_range)
+                        .field(symbol_instances::dsl::offset_range)
                         .contains_range(symbol_refs::dsl::from_offset_range),
                 )
                 .inner_join(
                     parent_symbols.on(parent_symbols
                         .field(symbols::dsl::id)
-                        .eq(parent_decls.field(declarations::dsl::symbol))),
+                        .eq(parent_decls.field(symbol_instances::dsl::symbol))),
                 )
                 .inner_join(
-                    files::dsl::files
-                        .on(files::dsl::id.eq(parent_decls.field(declarations::dsl::file_id))),
+                    objects::dsl::objects
+                        .on(objects::dsl::id.eq(parent_decls.field(symbol_instances::dsl::object_id))),
                 )
                 .select((
                     parent_symbols.fields(crate::schema_diesel::symbols::all_columns),
                     Symbol::as_select(),
-                    Declaration::as_select(),
-                    parent_decls.fields(crate::schema_diesel::declarations::all_columns),
+                    SymbolInstance::as_select(),
+                    parent_decls.fields(crate::schema_diesel::symbol_instances::all_columns),
                     SymbolRef::as_select(),
-                    File::as_select(),
+                    Object::as_select(),
                 ))
                 .into_boxed::<Pg>();
 
@@ -257,7 +257,7 @@ impl Index {
             }
 
             children_query
-                .load::<(Symbol, Symbol, Declaration, Declaration, SymbolRef, File)>(connection)
+                .load::<(Symbol, Symbol, SymbolInstance, SymbolInstance, SymbolRef, Object)>(connection)
                 .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
         };
 
@@ -267,11 +267,11 @@ impl Index {
 
             let nodes: Vec<_> = current
                 .into_iter()
-                .map(|(sym, decl, module, file, project)| SelectionNode {
+                .map(|(sym, instance, module, object, project)| SelectionNode {
                     symbol: sym,
-                    declaration: decl,
+                    symbol_instance: instance,
                     module,
-                    file,
+                    object,
                     project,
                 })
                 .collect();
@@ -279,11 +279,11 @@ impl Index {
             let parents: Vec<_> = parents
                 .into_iter()
                 .map(
-                    |(symbol_ref, to_symbol, to_declaration, from_declaration)| ParentReference {
+                    |(symbol_ref, to_symbol, to_instance, from_instance)| ParentReference {
                         symbol_ref,
                         to_symbol,
-                        to_declaration,
-                        from_declaration,
+                        to_instance,
+                        from_instance,
                     },
                 )
                 .collect();
@@ -291,20 +291,20 @@ impl Index {
             let mut children: Vec<_> = children
                 .into_iter()
                 .map(
-                    |(parent_symbol, sym, decl, from_declaration, sym_ref, from_file)| {
+                    |(parent_symbol, sym, instance, from_instance, sym_ref, from_object)| {
                         ChildReference {
                             parent_symbol,
                             symbol: sym,
-                            declaration: decl,
-                            from_declaration,
+                            symbol_instance: instance,
+                            from_instance,
                             symbol_ref: sym_ref,
-                            from_file,
+                            from_object,
                         }
                     },
                 )
                 .collect();
 
-            children.sort_by_key(|child| (child.from_declaration.id, child.declaration.id));
+            children.sort_by_key(|child| (child.from_instance.id, child.symbol_instance.id));
 
             println!(
                 "Found {} current, {} parents, {} children",

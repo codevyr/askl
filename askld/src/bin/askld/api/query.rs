@@ -8,7 +8,7 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use tokio::time::{timeout, Duration};
 
-use super::types::{AsklData, Edge, ErrorResponse, Graph, GraphFileEntry, Node, NodeDeclaration};
+use super::types::{AsklData, Edge, ErrorResponse, Graph, GraphObjectEntry, Node, NodeSymbolInstance};
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -63,25 +63,25 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
     let mut result_graph = Graph::new();
 
     let mut all_symbols = HashSet::new();
-    let mut file_projects = HashMap::new();
-    let mut result_files = HashMap::new();
-    for declaration in res.nodes.0.iter() {
-        all_symbols.insert(declaration.symbol.clone());
-        let file_id = FileId::new(declaration.file.id);
-        file_projects
-            .entry(file_id)
-            .or_insert(declaration.file.project_id);
-        result_files.entry(file_id).or_insert(GraphFileEntry {
-            file_id: file_id.to_string(),
-            path: declaration.file.filesystem_path.clone(),
-            project_id: declaration.file.project_id.to_string(),
+    let mut object_projects = HashMap::new();
+    let mut result_objects = HashMap::new();
+    for node in res.nodes.0.iter() {
+        all_symbols.insert(node.symbol.clone());
+        let object_id = FileId::new(node.object.id);
+        object_projects
+            .entry(object_id)
+            .or_insert(node.object.project_id);
+        result_objects.entry(object_id).or_insert(GraphObjectEntry {
+            object_id: object_id.to_string(),
+            path: node.object.filesystem_path.clone(),
+            project_id: node.object.project_id.to_string(),
         });
     }
 
     for (from, to, loc) in res.edges.0 {
         let from_project_id = loc
             .as_ref()
-            .and_then(|occurrence| file_projects.get(&occurrence.file).map(|id| id.to_string()));
+            .and_then(|occurrence| object_projects.get(&occurrence.file).map(|id| id.to_string()));
         result_graph.add_edge(Edge::new(
             from.symbol_id,
             to.symbol_id,
@@ -91,35 +91,35 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
     }
 
     for symbol in all_symbols {
-        let declarations: Vec<NodeDeclaration> = res
+        let symbol_instances: Vec<NodeSymbolInstance> = res
             .nodes
             .0
             .iter()
-            .filter(|d| d.declaration.symbol == symbol.id)
-            .map(|d| {
+            .filter(|n| n.symbol_instance.symbol == symbol.id)
+            .map(|n| {
                 let (start_offset, end_offset) =
-                    range_bounds_to_offsets(&d.declaration.offset_range).unwrap();
-                NodeDeclaration {
-                    id: DeclarationId::new(d.declaration.id).to_string(),
-                    symbol: SymbolId(d.declaration.symbol).to_string(),
-                    file_id: FileId::new(d.file.id).to_string(),
-                    project_id: d.file.project_id.to_string(),
-                    symbol_type: SymbolType::from(d.declaration.symbol_type),
+                    range_bounds_to_offsets(&n.symbol_instance.offset_range).unwrap();
+                NodeSymbolInstance {
+                    id: DeclarationId::new(n.symbol_instance.id).to_string(),
+                    symbol: SymbolId(n.symbol_instance.symbol).to_string(),
+                    object_id: FileId::new(n.object.id).to_string(),
+                    project_id: n.object.project_id.to_string(),
+                    symbol_type: SymbolType::from(n.symbol_instance.symbol_type),
                     start_offset,
                     end_offset,
                 }
             })
             .collect();
 
-        println!("Declarations for symbol {}: {:?}", symbol.id, declarations);
+        println!("Symbol instances for symbol {}: {:?}", symbol.id, symbol_instances);
         result_graph.add_node(Node::new(
             SymbolId(symbol.id),
             symbol.name.clone(),
-            declarations,
+            symbol_instances,
         ));
     }
 
-    result_graph.files = result_files
+    result_graph.objects = result_objects
         .into_iter()
         .map(|(_, value)| value)
         .collect();

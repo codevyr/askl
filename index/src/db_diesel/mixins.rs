@@ -9,7 +9,7 @@ use diesel::query_source::{Alias, AliasedField};
 use diesel::sql_types::{Bool, Int4range, Integer, Text};
 
 use crate::ltree::Ltree;
-use crate::models_diesel::{Declaration, File, Module, Project, Symbol, SymbolRef};
+use crate::models_diesel::{Module, Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::schema_diesel as index_schema;
 use crate::symbols::{symbol_name_to_path, symbol_query_to_lquery, DeclarationId};
 
@@ -19,57 +19,57 @@ diesel::alias! {
     pub const PARENT_SYMBOLS_ALIAS: Alias<ParentSymbolsAlias> =
         index_schema::symbols as parent_symbols;
     pub const PARENT_DECLS_ALIAS: Alias<ParentDeclsAlias> =
-        index_schema::declarations as parent_decls;
+        index_schema::symbol_instances as parent_decls;
 }
 
-type SymbolDeclarationJoinSource = InnerJoinQuerySource<
+type SymbolInstanceJoinSource = InnerJoinQuerySource<
     index_schema::symbols::table,
-    index_schema::declarations::table,
-    Eq<index_schema::symbols::columns::id, index_schema::declarations::columns::symbol>,
+    index_schema::symbol_instances::table,
+    Eq<index_schema::symbols::columns::id, index_schema::symbol_instances::columns::symbol>,
 >;
 
-type SymbolDeclarationModuleJoinSource = InnerJoinQuerySource<
-    SymbolDeclarationJoinSource,
+type SymbolInstanceModuleJoinSource = InnerJoinQuerySource<
+    SymbolInstanceJoinSource,
     index_schema::modules::table,
     Eq<index_schema::symbols::columns::module, index_schema::modules::columns::id>,
 >;
 
-type SymbolDeclarationModuleProjectJoin = InnerJoinQuerySource<
-    SymbolDeclarationModuleJoinSource,
+type SymbolInstanceModuleProjectJoin = InnerJoinQuerySource<
+    SymbolInstanceModuleJoinSource,
     index_schema::projects::table,
     Eq<index_schema::projects::columns::id, index_schema::modules::columns::project_id>,
 >;
 
-type SymbolDeclarationModuleProjectFileJoin = InnerJoinQuerySource<
-    SymbolDeclarationModuleProjectJoin,
-    index_schema::files::table,
-    Eq<index_schema::files::columns::id, index_schema::declarations::columns::file_id>,
+type SymbolInstanceModuleProjectObjectJoin = InnerJoinQuerySource<
+    SymbolInstanceModuleProjectJoin,
+    index_schema::objects::table,
+    Eq<index_schema::objects::columns::id, index_schema::symbol_instances::columns::object_id>,
 >;
 
 type SelectionTuple = (
     AsSelect<Symbol, Pg>,
-    AsSelect<Declaration, Pg>,
+    AsSelect<SymbolInstance, Pg>,
     AsSelect<Module, Pg>,
-    AsSelect<File, Pg>,
+    AsSelect<Object, Pg>,
     AsSelect<Project, Pg>,
 );
 
 pub type CurrentQuery<'a> = BoxedSelectStatement<
     'a,
     SelectionTuple,
-    FromClause<SymbolDeclarationModuleProjectFileJoin>,
+    FromClause<SymbolInstanceModuleProjectObjectJoin>,
     Pg,
 >;
 
-type DeclarationColumnsSqlType = (Integer, Integer, Integer, Integer, Int4range);
+type SymbolInstanceColumnsSqlType = (Integer, Integer, Integer, Integer, Int4range);
 
 type SymbolColumnsSqlType = (Integer, Text, Ltree, Integer, Integer);
 
 type ParentSelectionTuple = (
     AsSelect<SymbolRef, Pg>,
     AsSelect<Symbol, Pg>,
-    AsSelect<Declaration, Pg>,
-    DeclarationColumnsSqlType, // We cannot use AsSelect<Declaration, Pg> here due to ambiguity
+    AsSelect<SymbolInstance, Pg>,
+    SymbolInstanceColumnsSqlType, // We cannot use AsSelect<SymbolInstance, Pg> here due to ambiguity
 );
 
 type SymbolRefSymbolJoin = InnerJoinQuerySource<
@@ -78,62 +78,62 @@ type SymbolRefSymbolJoin = InnerJoinQuerySource<
     Eq<index_schema::symbol_refs::columns::to_symbol, index_schema::symbols::columns::id>,
 >;
 
-type SymbolRefSymbolDeclarationJoin = InnerJoinQuerySource<
+type SymbolRefSymbolInstanceJoin = InnerJoinQuerySource<
     SymbolRefSymbolJoin,
-    index_schema::declarations::table,
-    Eq<index_schema::symbols::columns::id, index_schema::declarations::columns::symbol>,
+    index_schema::symbol_instances::table,
+    Eq<index_schema::symbols::columns::id, index_schema::symbol_instances::columns::symbol>,
 >;
 
 type ParentDeclOn = Eq<
-    AliasedField<ParentDeclsAlias, index_schema::declarations::columns::file_id>,
-    index_schema::symbol_refs::columns::from_file,
+    AliasedField<ParentDeclsAlias, index_schema::symbol_instances::columns::object_id>,
+    index_schema::symbol_refs::columns::from_object,
 >;
 
 pub type ParentsQuery<'a> = BoxedSelectStatement<
     'a,
     ParentSelectionTuple,
-    FromClause<SymbolRefSymbolDeclParentDeclJoin>,
+    FromClause<SymbolRefSymbolInstanceParentInstanceJoin>,
     Pg,
 >;
 
 type ChildSelectionTuple = (
     SymbolColumnsSqlType,
     AsSelect<Symbol, Pg>,
-    AsSelect<Declaration, Pg>,
-    DeclarationColumnsSqlType,
+    AsSelect<SymbolInstance, Pg>,
+    SymbolInstanceColumnsSqlType,
     AsSelect<SymbolRef, Pg>,
-    AsSelect<File, Pg>,
+    AsSelect<Object, Pg>,
 );
 
 type ParentSymbolOn = Eq<
     AliasedField<ParentSymbolsAlias, index_schema::symbols::columns::id>,
-    AliasedField<ParentDeclsAlias, index_schema::declarations::columns::symbol>,
+    AliasedField<ParentDeclsAlias, index_schema::symbol_instances::columns::symbol>,
 >;
 
-type ParentFileOn = Eq<
-    index_schema::files::columns::id,
-    AliasedField<ParentDeclsAlias, index_schema::declarations::columns::file_id>,
+type ParentObjectOn = Eq<
+    index_schema::objects::columns::id,
+    AliasedField<ParentDeclsAlias, index_schema::symbol_instances::columns::object_id>,
 >;
 
-type SymbolRefSymbolDeclParentDeclJoin =
-    InnerJoinQuerySource<SymbolRefSymbolDeclarationJoin, Alias<ParentDeclsAlias>, ParentDeclOn>;
+type SymbolRefSymbolInstanceParentInstanceJoin =
+    InnerJoinQuerySource<SymbolRefSymbolInstanceJoin, Alias<ParentDeclsAlias>, ParentDeclOn>;
 
-type SymbolRefSymbolDeclParentDeclParentSymbolJoin = InnerJoinQuerySource<
-    SymbolRefSymbolDeclParentDeclJoin,
+type SymbolRefSymbolInstanceParentInstanceParentSymbolJoin = InnerJoinQuerySource<
+    SymbolRefSymbolInstanceParentInstanceJoin,
     Alias<ParentSymbolsAlias>,
     ParentSymbolOn,
 >;
 
-type SymbolRefSymbolDeclParentDeclParentSymbolFileJoin = InnerJoinQuerySource<
-    SymbolRefSymbolDeclParentDeclParentSymbolJoin,
-    index_schema::files::table,
-    ParentFileOn,
+type SymbolRefSymbolInstanceParentInstanceParentSymbolObjectJoin = InnerJoinQuerySource<
+    SymbolRefSymbolInstanceParentInstanceParentSymbolJoin,
+    index_schema::objects::table,
+    ParentObjectOn,
 >;
 
 pub type ChildrenQuery<'a> = BoxedSelectStatement<
     'a,
     ChildSelectionTuple,
-    FromClause<SymbolRefSymbolDeclParentDeclParentSymbolFileJoin>,
+    FromClause<SymbolRefSymbolInstanceParentInstanceParentSymbolObjectJoin>,
     Pg,
 >;
 
@@ -338,9 +338,9 @@ impl SymbolSearchMixin for DeclarationIdMixin {
         _connection: &mut Connection,
         query: CurrentQuery<'a>,
     ) -> Result<CurrentQuery<'a>> {
-        use crate::schema_diesel::declarations;
+        use crate::schema_diesel::symbol_instances;
 
-        Ok(query.filter(declarations::dsl::id.eq_any(self.decl_ids.clone())))
+        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.decl_ids.clone())))
     }
 
     fn filter_parents<'a>(
@@ -348,9 +348,9 @@ impl SymbolSearchMixin for DeclarationIdMixin {
         _connection: &mut Connection,
         query: ParentsQuery<'a>,
     ) -> Result<ParentsQuery<'a>> {
-        use crate::schema_diesel::declarations;
+        use crate::schema_diesel::symbol_instances;
 
-        Ok(query.filter(declarations::dsl::id.eq_any(self.decl_ids.clone())))
+        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.decl_ids.clone())))
     }
 
     fn filter_children<'a>(
@@ -358,11 +358,11 @@ impl SymbolSearchMixin for DeclarationIdMixin {
         _connection: &mut Connection,
         query: ChildrenQuery<'a>,
     ) -> Result<ChildrenQuery<'a>> {
-        use crate::schema_diesel::declarations;
+        use crate::schema_diesel::symbol_instances;
 
         Ok(query.filter(
             PARENT_DECLS_ALIAS
-                .field(declarations::dsl::id)
+                .field(symbol_instances::dsl::id)
                 .eq_any(self.decl_ids.clone()),
         ))
     }
