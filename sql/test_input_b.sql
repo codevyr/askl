@@ -3,19 +3,16 @@ SET search_path TO index, public;
 INSERT INTO projects (id, project_name, root_path)
 VALUES (1, 'test_project', '/test_project');
 
-INSERT INTO modules (id, module_name, project_id)
-VALUES (1, 'test', 1);
-
 INSERT INTO directories (id, project_id, parent_id, path)
 VALUES (1, 1, NULL, '/');
 
-INSERT INTO objects (id, project_id, module, directory_id, module_path, filesystem_path, filetype, content_hash)
+INSERT INTO objects (id, project_id, directory_id, module_path, filesystem_path, filetype, content_hash)
 VALUES
-    (1, 1, 1, 1, 'main.c', '/main.c', 'cc', ''),
-    (2, 1, 1, 1, 'bar.c', '/bar.c', 'cc', '');
+    (1, 1, 1, 'main.c', '/main.c', 'cc', ''),
+    (2, 1, 1, 'bar.c', '/bar.c', 'cc', '');
 
 
-INSERT INTO symbols (id, name, module, symbol_type, symbol_scope)
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
 VALUES
     (1,  'a',    1, 1, 1),
     (2,  'b',    1, 1, 1),

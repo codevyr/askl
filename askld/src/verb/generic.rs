@@ -8,7 +8,7 @@ use crate::statement::Statement;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    CompoundNameMixin, IgnoreFilterMixin, Index, ModuleFilterMixin, ParentReference,
+    CompoundNameMixin, IgnoreFilterMixin, Index, ParentReference,
     ProjectFilterMixin, Selection, SymbolSearchMixin,
 };
 use index::models_diesel::SymbolRef;
@@ -502,6 +502,7 @@ impl Display for ProjectFilter {
     }
 }
 
+// ModuleFilter - now filters by module symbol name since modules are symbols with type=MODULE
 #[derive(Debug)]
 pub(super) struct ModuleFilter {
     span: Span,
@@ -556,7 +557,9 @@ impl Verb for ModuleFilter {
 
 impl Filter for ModuleFilter {
     fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
-        vec![Box::new(ModuleFilterMixin::new(&self.module))]
+        // Modules are now symbols - use name matching to filter by module name
+        // This matches symbols whose name contains the module name
+        vec![Box::new(CompoundNameMixin::new(&self.module))]
     }
 }
 

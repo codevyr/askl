@@ -6,7 +6,7 @@ use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgRangeExpressionMethods;
 use diesel_migrations::MigrationHarness;
 
-use crate::models_diesel::{Module, Object, Project, Symbol, SymbolInstance, SymbolRef};
+use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::symbols::FileId;
 
 use super::mixins::{
@@ -150,15 +150,13 @@ impl Index {
                     symbol_instances::dsl::symbol_instances
                         .on(symbols::dsl::id.eq(symbol_instances::dsl::symbol)),
                 )
-                .inner_join(modules::dsl::modules.on(symbols::dsl::module.eq(modules::dsl::id)))
                 .inner_join(
-                    projects::dsl::projects.on(projects::dsl::id.eq(modules::dsl::project_id)),
+                    projects::dsl::projects.on(symbols::dsl::project_id.eq(projects::dsl::id)),
                 )
                 .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(symbol_instances::dsl::object_id)))
                 .select((
                     Symbol::as_select(),
                     SymbolInstance::as_select(),
-                    Module::as_select(),
                     Object::as_select(),
                     Project::as_select(),
                 ))
@@ -169,7 +167,7 @@ impl Index {
             }
 
             joined_query
-                .load::<(Symbol, SymbolInstance, Module, Object, Project)>(connection)
+                .load::<(Symbol, SymbolInstance, Object, Project)>(connection)
                 .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?
         };
 
@@ -267,10 +265,9 @@ impl Index {
 
             let nodes: Vec<_> = current
                 .into_iter()
-                .map(|(sym, instance, module, object, project)| SelectionNode {
+                .map(|(sym, instance, object, project)| SelectionNode {
                     symbol: sym,
                     symbol_instance: instance,
-                    module,
                     object,
                     project,
                 })

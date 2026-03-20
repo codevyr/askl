@@ -131,10 +131,6 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
             !s.object.filesystem_path.is_empty(),
             "Object path should not be empty"
         );
-        assert!(
-            !s.module.module_name.is_empty(),
-            "Module name should not be empty"
-        );
     }
 
     // Test compound name search

@@ -1,20 +1,13 @@
 use std::collections::HashSet;
 
-use crate::models_diesel::{Module, Object, Project, Symbol, SymbolInstance, SymbolRef};
+use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::symbols::{
-    DeclarationId, FileId, ModuleId, Occurrence, SymbolId, SymbolScope, SymbolType,
+    DeclarationId, FileId, Occurrence, SymbolId, SymbolScope, SymbolType,
 };
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct ModuleFullDiesel {
-    pub id: ModuleId,
-    pub module_name: String,
-}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ObjectFullDiesel {
     pub id: FileId,
-    pub module: ModuleFullDiesel,
     pub module_path: String,
     pub filesystem_path: String,
     pub filetype: String,
@@ -46,7 +39,6 @@ pub struct SymbolInstanceFullDiesel {
 pub struct SelectionNode {
     pub symbol: Symbol,
     pub symbol_instance: SymbolInstance,
-    pub module: Module,
     pub object: Object,
     pub project: Project,
 }

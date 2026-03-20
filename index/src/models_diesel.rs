@@ -23,28 +23,16 @@ pub struct SymbolInstance {
 
 #[derive(Clone, Queryable, Selectable, Identifiable, Associations, Debug, PartialEq, Eq, Hash)]
 #[diesel(table_name = crate::schema_diesel::objects)]
-#[diesel(belongs_to(Module, foreign_key = module))]
 #[diesel(belongs_to(Project, foreign_key = project_id))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Object {
     pub id: i32,
     pub project_id: i32,
-    pub module: Option<i32>,
     pub directory_id: i32,
     pub module_path: String,
     pub filesystem_path: String,
     pub filetype: String,
     pub content_hash: String,
-}
-
-#[derive(Clone, Queryable, Selectable, Identifiable, Debug, PartialEq, Eq, Hash)]
-#[diesel(table_name = crate::schema_diesel::modules)]
-#[diesel(belongs_to(Project, foreign_key = project_id))]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct Module {
-    pub id: i32,
-    pub module_name: String,
-    pub project_id: i32,
 }
 
 #[derive(Clone, Queryable, Selectable, Identifiable, Debug, PartialEq, Eq, Hash)]
@@ -69,13 +57,13 @@ pub struct Project {
     Hash,
 )]
 #[diesel(table_name = crate::schema_diesel::symbols)]
-#[diesel(belongs_to(Module, foreign_key = module))]
+#[diesel(belongs_to(Project, foreign_key = project_id))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Symbol {
     pub id: i32,
     pub name: String,
     pub symbol_path: String,
-    pub module: i32,
+    pub project_id: i32,
     pub symbol_type: i32,
     pub symbol_scope: Option<i32>,
 }

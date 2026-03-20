@@ -3,16 +3,13 @@ SET search_path TO index, public;
 INSERT INTO projects (id, project_name, root_path)
 VALUES (1, 'test_project', '/test_project');
 
-INSERT INTO modules (id, module_name, project_id)
-VALUES (1, 'test_module', 1);
-
 INSERT INTO directories (id, project_id, parent_id, path)
 VALUES (1, 1, NULL, '/');
 
-INSERT INTO objects (id, project_id, module, directory_id, module_path, filesystem_path, filetype, content_hash)
-VALUES (1, 1, 1, 1, 'kube.go', '/kube.go', 'go', 'hash');
+INSERT INTO objects (id, project_id, directory_id, module_path, filesystem_path, filetype, content_hash)
+VALUES (1, 1, 1, 'kube.go', '/kube.go', 'go', 'hash');
 
-INSERT INTO symbols (id, name, module, symbol_type, symbol_scope)
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
 VALUES
     (
         1,
