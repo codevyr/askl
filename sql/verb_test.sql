@@ -15,23 +15,23 @@ INSERT INTO objects (id, project_id, module, directory_id, module_path, filesyst
 VALUES
     (1, 1, 1, 1, 'main.c', '/main.c', 'cc', '');
 
-INSERT INTO symbols (id, name, module, symbol_scope)
+INSERT INTO symbols (id, name, module, symbol_type, symbol_scope)
 VALUES
-    (1, 'foo', 1, 1),
-    (2, 'foo.bar', 1, 1),
-    (3, 'foobar', 1, 1),
-    (4, 'tar', 1, 1),
-    (5, 'sort.IsSorted', 1, 1),
-    (6, 'sort.Sort', 1, 1);
+    (1, 'foo', 1, 1, 1),
+    (2, 'foo.bar', 1, 1, 1),
+    (3, 'foobar', 1, 1, 1),
+    (4, 'tar', 1, 1, 1),
+    (5, 'sort.IsSorted', 1, 1, 1),
+    (6, 'sort.Sort', 1, 1, 1);
 
-INSERT INTO symbol_instances (id, symbol, object_id, symbol_type, offset_range)
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
 VALUES
-    (91, 1, 1, 1, int4range(910, 919)),
-    (92, 2, 1, 1, int4range(920, 929)),
-    (93, 3, 1, 1, int4range(930, 939)),
-    (94, 4, 1, 1, int4range(940, 949)),
-    (95, 5, 1, 1, int4range(950, 959)),
-    (96, 6, 1, 1, int4range(960, 969));
+    (91, 1, 1, int4range(910, 919)),
+    (92, 2, 1, int4range(920, 929)),
+    (93, 3, 1, int4range(930, 939)),
+    (94, 4, 1, int4range(940, 949)),
+    (95, 5, 1, int4range(950, 959)),
+    (96, 6, 1, int4range(960, 969));
 
 INSERT INTO
     symbol_refs(to_symbol, from_object, from_offset_range)

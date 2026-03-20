@@ -31,11 +31,12 @@ message Symbol {
   int64 local_id = 1;           // Unique within project
   string name = 2;
   SymbolScope scope = 3;
+  SymbolType type = 4;          // Function, File, Module, or Directory
 }
 
 message SymbolInstance {
   int64 symbol_local_id = 1;    // References Symbol.local_id
-  SymbolType symbol_type = 2;
+  reserved 2;                   // was symbol_type (now on Symbol)
   int32 start_offset = 3;
   int32 end_offset = 4;
 }
@@ -54,6 +55,8 @@ enum SymbolScope {
 
 enum SymbolType {
   SYMBOL_TYPE_UNSPECIFIED = 0;
-  DEFINITION = 1;
-  DECLARATION = 2;
+  FUNCTION = 1;
+  FILE = 2;
+  MODULE = 3;
+  DIRECTORY = 4;
 }

@@ -123,7 +123,8 @@ struct NewObjectContent {
 struct NewSymbol {
     name: String,
     module: i32,
-    symbol_scope: i32,
+    symbol_type: i32,
+    symbol_scope: Option<i32>,
 }
 
 #[derive(Insertable, Clone)]
@@ -131,7 +132,6 @@ struct NewSymbol {
 struct NewSymbolInstance {
     symbol: i32,
     object_id: i32,
-    symbol_type: i32,
     offset_range: std::ops::Range<i32>,
 }
 
@@ -727,6 +727,18 @@ fn path_basename(path: &str) -> String {
         .to_string()
 }
 
+/// Validates proto symbol type and returns it as-is since proto enum values
+/// match database IDs: FUNCTION=1, FILE=2, MODULE=3, DIRECTORY=4
+fn validate_symbol_type(proto_type: i32) -> Result<i32, UploadError> {
+    match proto_type {
+        1..=4 => Ok(proto_type),
+        _ => Err(UploadError::Invalid(format!(
+            "invalid symbol type {}",
+            proto_type
+        ))),
+    }
+}
+
 struct ModuleInsert {
     local_id: i64,
     row: NewModule,
@@ -1072,12 +1084,20 @@ fn build_symbols(
                     symbol.local_id
                 )));
             }
+            let symbol_type = validate_symbol_type(symbol.r#type)?;
+            // symbol_scope is only meaningful for function types
+            let symbol_scope = if symbol.scope != 0 {
+                Some(symbol.scope)
+            } else {
+                None
+            };
             inserts.push(SymbolInsert {
                 local_id: symbol.local_id,
                 row: NewSymbol {
                     name: symbol.name.clone(),
                     module: *module_id,
-                    symbol_scope: symbol.scope,
+                    symbol_type,
+                    symbol_scope,
                 },
             });
         }
@@ -1133,7 +1153,6 @@ fn build_symbol_instances(
             rows.push(NewSymbolInstance {
                 symbol: *symbol_id,
                 object_id: *object_id,
-                symbol_type: instance.symbol_type,
                 offset_range: instance.start_offset..instance.end_offset,
             });
         }

@@ -1,6 +1,15 @@
 use diesel::prelude::*;
 use std::collections::Bound;
 
+#[derive(Clone, Queryable, Selectable, Identifiable, Debug, PartialEq, Eq, Hash)]
+#[diesel(table_name = crate::schema_diesel::symbol_types)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct SymbolType {
+    pub id: i32,
+    pub name: String,
+    pub level: i32,
+}
+
 #[derive(Clone, Queryable, Selectable, Identifiable, Associations, Debug, PartialEq, Eq, Hash)]
 #[diesel(table_name = crate::schema_diesel::symbol_instances)]
 #[diesel(belongs_to(Symbol, foreign_key = symbol))]
@@ -9,7 +18,6 @@ pub struct SymbolInstance {
     pub id: i32,
     pub symbol: i32,
     pub object_id: i32,
-    pub symbol_type: i32,
     pub offset_range: (Bound<i32>, Bound<i32>),
 }
 
@@ -68,7 +76,8 @@ pub struct Symbol {
     pub name: String,
     pub symbol_path: String,
     pub module: i32,
-    pub symbol_scope: i32,
+    pub symbol_type: i32,
+    pub symbol_scope: Option<i32>,
 }
 
 #[derive(Clone, Queryable, Selectable, Debug, PartialEq)]
