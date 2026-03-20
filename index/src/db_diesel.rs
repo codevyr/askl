@@ -10,11 +10,11 @@ mod selection;
 
 pub use index_impl::Index;
 pub use mixins::{
-    CompoundNameMixin, DeclarationIdMixin, IgnoreFilterMixin, ModuleFilterMixin,
+    CompoundNameMixin, DeclarationIdMixin, IgnoreFilterMixin,
     ProjectFilterMixin, SymbolSearchMixin,
 };
 pub use selection::{
-    ChildReference, ModuleFullDiesel, ObjectFullDiesel, ParentReference,
+    ChildReference, ObjectFullDiesel, ParentReference,
     ReferenceFullDiesel, ReferenceResult, Selection, SelectionNode, SymbolInstanceFullDiesel,
 };
 

@@ -9,7 +9,7 @@ use diesel::query_source::{Alias, AliasedField};
 use diesel::sql_types::{Bool, Int4range, Integer, Text};
 
 use crate::ltree::Ltree;
-use crate::models_diesel::{Module, Object, Project, Symbol, SymbolInstance, SymbolRef};
+use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::schema_diesel as index_schema;
 use crate::symbols::{symbol_name_to_path, symbol_query_to_lquery, DeclarationId};
 
@@ -28,20 +28,14 @@ type SymbolInstanceJoinSource = InnerJoinQuerySource<
     Eq<index_schema::symbols::columns::id, index_schema::symbol_instances::columns::symbol>,
 >;
 
-type SymbolInstanceModuleJoinSource = InnerJoinQuerySource<
+type SymbolInstanceProjectJoinSource = InnerJoinQuerySource<
     SymbolInstanceJoinSource,
-    index_schema::modules::table,
-    Eq<index_schema::symbols::columns::module, index_schema::modules::columns::id>,
->;
-
-type SymbolInstanceModuleProjectJoin = InnerJoinQuerySource<
-    SymbolInstanceModuleJoinSource,
     index_schema::projects::table,
-    Eq<index_schema::projects::columns::id, index_schema::modules::columns::project_id>,
+    Eq<index_schema::symbols::columns::project_id, index_schema::projects::columns::id>,
 >;
 
-type SymbolInstanceModuleProjectObjectJoin = InnerJoinQuerySource<
-    SymbolInstanceModuleProjectJoin,
+type SymbolInstanceProjectObjectJoin = InnerJoinQuerySource<
+    SymbolInstanceProjectJoinSource,
     index_schema::objects::table,
     Eq<index_schema::objects::columns::id, index_schema::symbol_instances::columns::object_id>,
 >;
@@ -49,7 +43,6 @@ type SymbolInstanceModuleProjectObjectJoin = InnerJoinQuerySource<
 type SelectionTuple = (
     AsSelect<Symbol, Pg>,
     AsSelect<SymbolInstance, Pg>,
-    AsSelect<Module, Pg>,
     AsSelect<Object, Pg>,
     AsSelect<Project, Pg>,
 );
@@ -57,13 +50,13 @@ type SelectionTuple = (
 pub type CurrentQuery<'a> = BoxedSelectStatement<
     'a,
     SelectionTuple,
-    FromClause<SymbolInstanceModuleProjectObjectJoin>,
+    FromClause<SymbolInstanceProjectObjectJoin>,
     Pg,
 >;
 
 type SymbolInstanceColumnsSqlType = (Integer, Integer, Integer, Int4range);
 
-type SymbolColumnsSqlType = (Integer, Text, Ltree, Integer, Integer, diesel::sql_types::Nullable<Integer>);  // (id, name, symbol_path, module, symbol_type, symbol_scope)
+type SymbolColumnsSqlType = (Integer, Text, Ltree, Integer, Integer, diesel::sql_types::Nullable<Integer>);  // (id, name, symbol_path, project_id, symbol_type, symbol_scope)
 
 type ParentSelectionTuple = (
     AsSelect<SymbolRef, Pg>,
@@ -368,30 +361,8 @@ impl SymbolSearchMixin for DeclarationIdMixin {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ModuleFilterMixin {
-    pub module_name: String,
-}
-
-impl ModuleFilterMixin {
-    pub fn new(module_name: &str) -> Self {
-        Self {
-            module_name: module_name.to_string(),
-        }
-    }
-}
-
-impl SymbolSearchMixin for ModuleFilterMixin {
-    fn filter_current<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: CurrentQuery<'a>,
-    ) -> Result<CurrentQuery<'a>> {
-        use crate::schema_diesel::modules;
-
-        Ok(query.filter(modules::dsl::module_name.eq(self.module_name.clone())))
-    }
-}
+// ModuleFilterMixin removed - modules are now symbols with type=MODULE
+// Use symbol name filtering to find module symbols instead
 
 #[derive(Debug, Clone)]
 pub struct ProjectFilterMixin {

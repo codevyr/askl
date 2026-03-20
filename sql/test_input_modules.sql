@@ -1,42 +1,41 @@
 SET search_path TO index, public;
 
+-- With modules as symbols, we test project filtering by having multiple projects.
+-- Module filtering now works by symbol name matching (modules are symbols with type=MODULE).
+
 INSERT INTO projects (id, project_name, root_path)
 VALUES
     (1, 'test_project', '/test_project'),
     (2, 'other_project', '/other_project');
-
-INSERT INTO modules (id, module_name, project_id)
-VALUES
-    (1, 'test', 1),
-    (2, 'other', 1),
-    (3, 'project_only', 2);
 
 INSERT INTO directories (id, project_id, parent_id, path)
 VALUES
     (1, 1, NULL, '/'),
     (2, 2, NULL, '/');
 
-INSERT INTO objects (id, project_id, module, directory_id, module_path, filesystem_path, filetype, content_hash)
+INSERT INTO objects (id, project_id, directory_id, module_path, filesystem_path, filetype, content_hash)
 VALUES
-    (1, 1, 1, 1, 'main.c', '/main.c', 'cc', ''),
-    (2, 1, 1, 1, 'bar.c', '/bar.c', 'cc', ''),
-    (3, 1, 2, 1, 'main.c', '/other_main.c', 'cc', ''),
-    (4, 2, 3, 2, 'main.c', '/project_only_main.c', 'cc', '');
+    (1, 1, 1, 'main.c', '/main.c', 'cc', ''),
+    (2, 1, 1, 'bar.c', '/bar.c', 'cc', ''),
+    (3, 1, 1, 'main.c', '/other_main.c', 'cc', ''),
+    (4, 2, 2, 'main.c', '/project_only_main.c', 'cc', '');
 
-INSERT INTO symbols (id, name, module, symbol_type, symbol_scope)
+-- Symbols are now project-scoped. For the "module filter" tests, we use symbol names
+-- that include a module-like prefix (e.g., "test.a", "other.a") to simulate modules.
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
 VALUES
-    (1,   'a',    1, 1, 1),
-    (2,   'b',    1, 1, 1),
-    (3,   'c',    1, 1, 1),
-    (4,   'd',    1, 1, 1),
-    (5,   'e',    1, 1, 1),
-    (6,   'f',    1, 1, 1),
-    (7,   'g',    1, 1, 1),
-    (42,  'main', 1, 1, 1),
-    (101, 'a',    2, 1, 1),
-    (102, 'b',    2, 1, 1),
-    (142, 'main', 2, 1, 1),
-    (301, 'a',    3, 1, 1);
+    (1,   'test.a',    1, 1, 1),
+    (2,   'test.b',    1, 1, 1),
+    (3,   'test.c',    1, 1, 1),
+    (4,   'test.d',    1, 1, 1),
+    (5,   'test.e',    1, 1, 1),
+    (6,   'test.f',    1, 1, 1),
+    (7,   'test.g',    1, 1, 1),
+    (42,  'test.main', 1, 1, 1),
+    (101, 'other.a',    1, 1, 1),
+    (102, 'other.b',    1, 1, 1),
+    (142, 'other.main', 1, 1, 1),
+    (301, 'project_only.a',    2, 1, 1);
 
 INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
 VALUES
@@ -69,6 +68,6 @@ VALUES
     (102, 3, int4range(2011, 2012)),
     (101, 3, int4range(2421, 2422));
 
--- Module "test" has the same layout as test_input_b.
--- Module "other" mirrors a subset of the data to exercise module filtering.
--- Module "project_only" belongs to a separate project to exercise project filtering.
+-- "test" symbols has the same layout as test_input_b.
+-- "other" symbols mirrors a subset of the data to exercise module-like filtering.
+-- "project_only" symbols belongs to a separate project to exercise project filtering.

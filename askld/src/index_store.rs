@@ -8,9 +8,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::task;
 
-use crate::proto::askl::index::{
-    Module as UploadModule, Object as UploadObject, Project as UploadProject,
-};
+use crate::proto::askl::index::{Object as UploadObject, Project as UploadProject, Symbol as UploadSymbol};
 use index::schema_diesel as index_schema;
 use index::symbols::FileId;
 
@@ -41,17 +39,10 @@ pub struct ProjectInfo {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ProjectModule {
-    pub id: i32,
-    pub module_name: String,
-}
-
-#[derive(Debug, Serialize)]
 pub struct ProjectDetails {
     pub id: i32,
     pub project_name: String,
     pub root_path: String,
-    pub modules: Vec<ProjectModule>,
     pub file_count: i64,
     pub symbol_count: i64,
 }
@@ -85,17 +76,9 @@ struct NewProject {
 }
 
 #[derive(Insertable, Clone)]
-#[diesel(table_name = index_schema::modules)]
-struct NewModule {
-    module_name: String,
-    project_id: i32,
-}
-
-#[derive(Insertable, Clone)]
 #[diesel(table_name = index_schema::objects)]
 struct NewObject {
     project_id: i32,
-    module: Option<i32>,
     directory_id: i32,
     module_path: String,
     filesystem_path: String,
@@ -122,7 +105,7 @@ struct NewObjectContent {
 #[diesel(table_name = index_schema::symbols)]
 struct NewSymbol {
     name: String,
-    module: i32,
+    project_id: i32,
     symbol_type: i32,
     symbol_scope: Option<i32>,
 }
@@ -258,23 +241,6 @@ impl IndexStore {
                     None => return Err(UploadError::Conflict),
                 };
 
-                let module_inserts = {
-                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
-                        "build_modules",
-                        count = upload.modules.len()
-                    )
-                    .entered();
-                    build_modules(project_id, &upload.modules)?
-                };
-                let module_map = {
-                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
-                        "insert_modules",
-                        count = module_inserts.len()
-                    )
-                    .entered();
-                    insert_modules(conn, module_inserts)?
-                };
-
                 let directory_paths = {
                     let _span: tracing::span::EnteredSpan =
                         tracing::info_span!("collect_directory_paths").entered();
@@ -295,7 +261,7 @@ impl IndexStore {
                         count = upload.objects.len()
                     )
                     .entered();
-                    build_objects(project_id, &upload.objects, &module_map, &directory_map)?
+                    build_objects(project_id, &upload.objects, &directory_map)?
                 };
                 let object_map = {
                     let _span: tracing::span::EnteredSpan = tracing::info_span!(
@@ -309,10 +275,10 @@ impl IndexStore {
                 let symbol_inserts = {
                     let _span: tracing::span::EnteredSpan = tracing::info_span!(
                         "build_symbols",
-                        count = upload.modules.len()
+                        count = upload.symbols.len()
                     )
                     .entered();
-                    build_symbols(&upload.modules, &module_map)?
+                    build_symbols(project_id, &upload.symbols)?
                 };
                 let symbol_map = {
                     let _span: tracing::span::EnteredSpan = tracing::info_span!(
@@ -410,31 +376,13 @@ impl IndexStore {
                 None => return Ok(None),
             };
 
-            let module_rows: Vec<(i32, String)> = index_schema::modules::table
-                .filter(index_schema::modules::project_id.eq(project_id))
-                .select((
-                    index_schema::modules::id,
-                    index_schema::modules::module_name,
-                ))
-                .order(index_schema::modules::id)
-                .load(&mut conn)?;
-
-            let modules = module_rows
-                .into_iter()
-                .map(|(id, module_name)| ProjectModule { id, module_name })
-                .collect();
-
             let file_count: i64 = index_schema::objects::table
                 .filter(index_schema::objects::project_id.eq(project_id))
                 .count()
                 .get_result(&mut conn)?;
 
             let symbol_count: i64 = index_schema::symbols::table
-                .inner_join(
-                    index_schema::modules::table
-                        .on(index_schema::symbols::module.eq(index_schema::modules::id)),
-                )
-                .filter(index_schema::modules::project_id.eq(project_id))
+                .filter(index_schema::symbols::project_id.eq(project_id))
                 .count()
                 .get_result(&mut conn)?;
 
@@ -442,7 +390,6 @@ impl IndexStore {
                 id,
                 project_name,
                 root_path,
-                modules,
                 file_count,
                 symbol_count,
             }))
@@ -739,11 +686,6 @@ fn validate_symbol_type(proto_type: i32) -> Result<i32, UploadError> {
     }
 }
 
-struct ModuleInsert {
-    local_id: i64,
-    row: NewModule,
-}
-
 struct ObjectInsert {
     local_id: i64,
     content: Vec<u8>,
@@ -753,53 +695,6 @@ struct ObjectInsert {
 struct SymbolInsert {
     local_id: i64,
     row: NewSymbol,
-}
-
-fn build_modules(
-    project_id: i32,
-    modules: &[UploadModule],
-) -> Result<Vec<ModuleInsert>, UploadError> {
-    let mut seen = HashSet::new();
-    let mut inserts = Vec::new();
-    for module in modules {
-        if !seen.insert(module.local_id) {
-            return Err(UploadError::Invalid(format!(
-                "duplicate module local_id {}",
-                module.local_id
-            )));
-        }
-        inserts.push(ModuleInsert {
-            local_id: module.local_id,
-            row: NewModule {
-                module_name: module.module_name.clone(),
-                project_id,
-            },
-        });
-    }
-    Ok(inserts)
-}
-
-fn insert_modules(
-    conn: &mut PgConnection,
-    inserts: Vec<ModuleInsert>,
-) -> Result<HashMap<i64, i32>, UploadError> {
-    if inserts.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let mut module_map = HashMap::new();
-    for chunk in inserts.chunks(MAX_INSERT_ROWS) {
-        let rows: Vec<NewModule> = chunk.iter().map(|entry| entry.row.clone()).collect();
-        let ids: Vec<i32> = diesel::insert_into(index_schema::modules::table)
-            .values(&rows)
-            .returning(index_schema::modules::id)
-            .get_results(conn)?;
-        for (entry, id) in chunk.iter().zip(ids) {
-            module_map.insert(entry.local_id, id);
-        }
-    }
-
-    Ok(module_map)
 }
 
 fn collect_directory_paths(objects: &[UploadObject]) -> HashSet<String> {
@@ -969,7 +864,6 @@ struct DirectoryEntry {
 fn build_objects(
     project_id: i32,
     objects: &[UploadObject],
-    module_map: &HashMap<i64, i32>,
     directory_map: &HashMap<String, i32>,
 ) -> Result<Vec<ObjectInsert>, UploadError> {
     let mut seen = HashSet::new();
@@ -994,18 +888,6 @@ fn build_objects(
                 object.local_id
             )));
         }
-        let module_id = match object.module_id {
-            Some(local_id) => {
-                let mapped = module_map.get(&local_id).ok_or_else(|| {
-                    UploadError::Invalid(format!(
-                        "missing module mapping for local_id {}",
-                        local_id
-                    ))
-                })?;
-                Some(*mapped)
-            }
-            None => None,
-        };
         let filesystem_path = normalize_full_path(filesystem_path_raw);
         let directory_path = parent_dir(&filesystem_path);
         let directory_id = directory_map.get(&directory_path).ok_or_else(|| {
@@ -1019,7 +901,6 @@ fn build_objects(
             content: object.content.clone(),
             row: NewObject {
                 project_id,
-                module: module_id,
                 directory_id: *directory_id,
                 module_path: object.module_path.clone(),
                 filesystem_path,
@@ -1065,42 +946,34 @@ fn insert_objects(
 }
 
 fn build_symbols(
-    modules: &[UploadModule],
-    module_map: &HashMap<i64, i32>,
+    project_id: i32,
+    symbols: &[UploadSymbol],
 ) -> Result<Vec<SymbolInsert>, UploadError> {
     let mut seen = HashSet::new();
     let mut inserts = Vec::new();
-    for module in modules {
-        let module_id = module_map.get(&module.local_id).ok_or_else(|| {
-            UploadError::Invalid(format!(
-                "missing module mapping for local_id {}",
-                module.local_id
-            ))
-        })?;
-        for symbol in &module.symbols {
-            if !seen.insert(symbol.local_id) {
-                return Err(UploadError::Invalid(format!(
-                    "duplicate symbol local_id {}",
-                    symbol.local_id
-                )));
-            }
-            let symbol_type = validate_symbol_type(symbol.r#type)?;
-            // symbol_scope is only meaningful for function types
-            let symbol_scope = if symbol.scope != 0 {
-                Some(symbol.scope)
-            } else {
-                None
-            };
-            inserts.push(SymbolInsert {
-                local_id: symbol.local_id,
-                row: NewSymbol {
-                    name: symbol.name.clone(),
-                    module: *module_id,
-                    symbol_type,
-                    symbol_scope,
-                },
-            });
+    for symbol in symbols {
+        if !seen.insert(symbol.local_id) {
+            return Err(UploadError::Invalid(format!(
+                "duplicate symbol local_id {}",
+                symbol.local_id
+            )));
         }
+        let symbol_type = validate_symbol_type(symbol.r#type)?;
+        // symbol_scope is only meaningful for function types
+        let symbol_scope = if symbol.scope != 0 {
+            Some(symbol.scope)
+        } else {
+            None
+        };
+        inserts.push(SymbolInsert {
+            local_id: symbol.local_id,
+            row: NewSymbol {
+                name: symbol.name.clone(),
+                project_id,
+                symbol_type,
+                symbol_scope,
+            },
+        });
     }
     Ok(inserts)
 }

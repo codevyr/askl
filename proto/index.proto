@@ -6,19 +6,16 @@ option go_package = "github.com/planetA/askl-golang-indexer/pkg/indexpb;indexpb"
 message Project {
   string project_name = 1;
   string root_path = 2;
-  repeated Module modules = 3;
+  reserved 3;  // was modules - now symbols are project-level
   repeated Object objects = 4;
+  repeated Symbol symbols = 5;  // All symbols including modules
 }
 
-message Module {
-  int64 local_id = 1;           // Unique within project
-  string module_name = 2;
-  repeated Symbol symbols = 3;
-}
+// Module message removed - modules are now symbols with type=MODULE
 
 message Object {
   int64 local_id = 1;           // Unique within project
-  optional int64 module_id = 2; // References Module.local_id when set
+  reserved 2;                   // was module_id - removed
   string module_path = 3;
   string filesystem_path = 4;   // Metadata only, never used for filesystem access
   string filetype = 5;
