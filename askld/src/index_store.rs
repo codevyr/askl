@@ -593,7 +593,7 @@ fn load_directory_children_with_compact(
             COUNT(DISTINCT f.id) AS file_count
         FROM index.directories d
         LEFT JOIN index.directories c ON c.parent_id = d.id
-        LEFT JOIN index.files f ON f.directory_id = d.id
+        LEFT JOIN index.objects f ON f.directory_id = d.id
         WHERE d.project_id = $1 AND d.parent_id = $2
         GROUP BY d.id
         ORDER BY d.path
@@ -658,7 +658,7 @@ fn load_directory_walk_row(
              FROM index.directories
              WHERE project_id = $1 AND parent_id = $2) AS child_dir_count,
             (SELECT COUNT(*)
-             FROM index.files
+             FROM index.objects
              WHERE project_id = $1 AND directory_id = $2) AS file_count,
             (SELECT id
              FROM index.directories
