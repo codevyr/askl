@@ -1,13 +1,20 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    index.symbol_types (id) {
+        id -> Integer,
+        name -> Text,
+        level -> Integer,
+    }
+}
+
+diesel::table! {
     use diesel::sql_types::*;
 
     index.symbol_instances (id) {
         id -> Integer,
         symbol -> Integer,
         object_id -> Integer,
-        symbol_type -> Integer,
         offset_range -> Int4range,
     }
 }
@@ -79,7 +86,8 @@ diesel::table! {
         name -> Text,
         symbol_path -> Ltree,
         module -> Integer,
-        symbol_scope -> Integer,
+        symbol_type -> Integer,
+        symbol_scope -> Nullable<Integer>,
     }
 }
 
@@ -94,8 +102,11 @@ diesel::joinable!(modules -> projects (project_id));
 diesel::joinable!(symbol_refs -> symbols (to_symbol));
 diesel::joinable!(symbols -> modules (module));
 
+diesel::joinable!(symbols -> symbol_types (symbol_type));
+
 diesel::allow_tables_to_appear_in_same_query!(
     symbol_instances,
+    symbol_types,
     directories,
     object_contents,
     objects,

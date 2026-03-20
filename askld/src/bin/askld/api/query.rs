@@ -104,7 +104,7 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
                     symbol: SymbolId(n.symbol_instance.symbol).to_string(),
                     object_id: FileId::new(n.object.id).to_string(),
                     project_id: n.object.project_id.to_string(),
-                    symbol_type: SymbolType::from(n.symbol_instance.symbol_type),
+                    symbol_type: SymbolType::from(symbol.symbol_type),
                     start_offset,
                     end_offset,
                 }

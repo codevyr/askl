@@ -61,9 +61,9 @@ pub type CurrentQuery<'a> = BoxedSelectStatement<
     Pg,
 >;
 
-type SymbolInstanceColumnsSqlType = (Integer, Integer, Integer, Integer, Int4range);
+type SymbolInstanceColumnsSqlType = (Integer, Integer, Integer, Int4range);
 
-type SymbolColumnsSqlType = (Integer, Text, Ltree, Integer, Integer);
+type SymbolColumnsSqlType = (Integer, Text, Ltree, Integer, Integer, diesel::sql_types::Nullable<Integer>);  // (id, name, symbol_path, module, symbol_type, symbol_scope)
 
 type ParentSelectionTuple = (
     AsSelect<SymbolRef, Pg>,

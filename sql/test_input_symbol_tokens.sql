@@ -12,28 +12,30 @@ VALUES (1, 1, NULL, '/');
 INSERT INTO objects (id, project_id, module, directory_id, module_path, filesystem_path, filetype, content_hash)
 VALUES (1, 1, 1, 1, 'kube.go', '/kube.go', 'go', 'hash');
 
-INSERT INTO symbols (id, name, module, symbol_scope)
+INSERT INTO symbols (id, name, module, symbol_type, symbol_scope)
 VALUES
     (
         1,
         'kubelet.aaaaaaaaaaa.run',
         1,
+        1,
         2
     ),
-    (2, 'kubernetes.run', 1, 2),
-    (3, 'kubeleter.run', 1, 2),
-    (4, 'Kubelet.run', 1, 2),
+    (2, 'kubernetes.run', 1, 1, 2),
+    (3, 'kubeleter.run', 1, 1, 2),
+    (4, 'Kubelet.run', 1, 1, 2),
     (
         5,
         '(*k8s.io/kubernetes/pkg/kubelet.Kubelet).Run',
         1,
+        1,
         2
     );
 
-INSERT INTO symbol_instances (id, symbol, object_id, symbol_type, offset_range)
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
 VALUES
-    (1, 1, 1, 1, int4range(0, 5)),
-    (2, 2, 1, 1, int4range(10, 15)),
-    (3, 3, 1, 1, int4range(20, 25)),
-    (4, 4, 1, 1, int4range(30, 35)),
-    (5, 5, 1, 1, int4range(40, 45));
+    (1, 1, 1, int4range(0, 5)),
+    (2, 2, 1, int4range(10, 15)),
+    (3, 3, 1, int4range(20, 25)),
+    (4, 4, 1, int4range(30, 35)),
+    (5, 5, 1, int4range(40, 45));

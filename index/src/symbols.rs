@@ -435,8 +435,10 @@ impl serde::Serialize for DeclarationId {
 #[derive(sqlx::Type, Debug, PartialEq, Eq, Copy, Clone, Serialize, Deserialize)]
 #[repr(i32)]
 pub enum SymbolType {
-    Definition = 1,
-    Declaration = 2,
+    Function = 1,
+    File = 2,
+    Module = 3,
+    Directory = 4,
 }
 
 impl SymbolType {
@@ -448,8 +450,10 @@ impl SymbolType {
 impl From<i64> for SymbolType {
     fn from(value: i64) -> Self {
         match value {
-            x if x == SymbolType::Definition as i64 => SymbolType::Definition,
-            x if x == SymbolType::Declaration as i64 => SymbolType::Declaration,
+            x if x == SymbolType::Function as i64 => SymbolType::Function,
+            x if x == SymbolType::File as i64 => SymbolType::File,
+            x if x == SymbolType::Module as i64 => SymbolType::Module,
+            x if x == SymbolType::Directory as i64 => SymbolType::Directory,
             _ => panic!("Invalid symbol type value {}", value),
         }
     }
@@ -458,8 +462,10 @@ impl From<i64> for SymbolType {
 impl From<i32> for SymbolType {
     fn from(value: i32) -> Self {
         match value {
-            x if x == SymbolType::Definition as i32 => SymbolType::Definition,
-            x if x == SymbolType::Declaration as i32 => SymbolType::Declaration,
+            x if x == SymbolType::Function as i32 => SymbolType::Function,
+            x if x == SymbolType::File as i32 => SymbolType::File,
+            x if x == SymbolType::Module as i32 => SymbolType::Module,
+            x if x == SymbolType::Directory as i32 => SymbolType::Directory,
             _ => panic!("Invalid symbol type value {}", value),
         }
     }

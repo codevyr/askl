@@ -149,15 +149,15 @@ async fn create_state() {
     let did = DeclarationId::invalid();
     let fid = FileId::new(1);
     let expected_declarations = [
-        Declaration::new_nolines(did, SymbolId::new(1), fid, SymbolType::Declaration), // foo
-        Declaration::new_nolines(did, SymbolId::new(1), fid, SymbolType::Definition),  // foo
-        Declaration::new_nolines(did, SymbolId::new(2), fid, SymbolType::Definition),  // bar
-        Declaration::new_nolines(did, SymbolId::new(3), fid, SymbolType::Declaration), // zar
-        Declaration::new_nolines(did, SymbolId::new(4), fid, SymbolType::Definition),  // main
-        Declaration::new_nolines(did, SymbolId::new(5), fid, SymbolType::Declaration), // tar
-        Declaration::new_nolines(did, SymbolId::new(5), fid, SymbolType::Declaration), // tar
-        Declaration::new_nolines(did, SymbolId::new(5), fid, SymbolType::Definition),  // tar
-        Declaration::new_nolines(did, SymbolId::new(3), fid, SymbolType::Definition),  // zar
+        Declaration::new_nolines(did, SymbolId::new(1), fid, SymbolType::Function), // foo
+        Declaration::new_nolines(did, SymbolId::new(1), fid, SymbolType::Function), // foo
+        Declaration::new_nolines(did, SymbolId::new(2), fid, SymbolType::Function), // bar
+        Declaration::new_nolines(did, SymbolId::new(3), fid, SymbolType::Function), // zar
+        Declaration::new_nolines(did, SymbolId::new(4), fid, SymbolType::Function), // main
+        Declaration::new_nolines(did, SymbolId::new(5), fid, SymbolType::Function), // tar
+        Declaration::new_nolines(did, SymbolId::new(5), fid, SymbolType::Function), // tar
+        Declaration::new_nolines(did, SymbolId::new(5), fid, SymbolType::Function), // tar
+        Declaration::new_nolines(did, SymbolId::new(3), fid, SymbolType::Function), // zar
     ];
     for (i, o) in declarations.iter().enumerate() {
         assert_eq!(mask_declaration(o), expected_declarations[i]);

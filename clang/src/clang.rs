@@ -107,8 +107,8 @@ impl FunctionDecl {
             .collect();
 
         match compound_stmt.len() {
-            0 => SymbolType::Declaration,
-            1 => SymbolType::Definition,
+            0 => SymbolType::Function, // Was Declaration in old model
+            1 => SymbolType::Function, // Was Definition in old model
             _ => panic!("Do not expect multiple compound statements"),
         }
     }
@@ -175,7 +175,7 @@ impl FunctionDecl {
                                 let name = f.name.as_ref().unwrap();
                                 let symbol_scope = SymbolScope::Global;
                                 // Implicit symbol declaration
-                                let symbol_type = SymbolType::Declaration;
+                                let symbol_type = SymbolType::Function;
 
                                 let symbol = state
                                     .index

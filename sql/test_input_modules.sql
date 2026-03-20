@@ -23,36 +23,36 @@ VALUES
     (3, 1, 2, 1, 'main.c', '/other_main.c', 'cc', ''),
     (4, 2, 3, 2, 'main.c', '/project_only_main.c', 'cc', '');
 
-INSERT INTO symbols (id, name, module, symbol_scope)
+INSERT INTO symbols (id, name, module, symbol_type, symbol_scope)
 VALUES
-    (1,   'a',    1, 1),
-    (2,   'b',    1, 1),
-    (3,   'c',    1, 1),
-    (4,   'd',    1, 1),
-    (5,   'e',    1, 1),
-    (6,   'f',    1, 1),
-    (7,   'g',    1, 1),
-    (42,  'main', 1, 1),
-    (101, 'a',    2, 1),
-    (102, 'b',    2, 1),
-    (142, 'main', 2, 1),
-    (301, 'a',    3, 1);
+    (1,   'a',    1, 1, 1),
+    (2,   'b',    1, 1, 1),
+    (3,   'c',    1, 1, 1),
+    (4,   'd',    1, 1, 1),
+    (5,   'e',    1, 1, 1),
+    (6,   'f',    1, 1, 1),
+    (7,   'g',    1, 1, 1),
+    (42,  'main', 1, 1, 1),
+    (101, 'a',    2, 1, 1),
+    (102, 'b',    2, 1, 1),
+    (142, 'main', 2, 1, 1),
+    (301, 'a',    3, 1, 1);
 
-INSERT INTO symbol_instances (id, symbol, object_id, symbol_type, offset_range)
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
 VALUES
-    (91,  1,   1, 1, int4range(910, 919)),
-    (92,  2,   1, 1, int4range(920, 929)),
-    (93,  3,   1, 1, int4range(930, 939)),
-    (94,  4,   1, 1, int4range(940, 949)),
-    (95,  5,   1, 1, int4range(950, 959)),
-    (86,  6,   2, 1, int4range(860, 869)),
-    (96,  6,   1, 1, int4range(960, 969)),
-    (97,  7,   1, 1, int4range(970, 979)),
-    (942, 42,  1, 1, int4range(9420, 9429)),
-    (201, 101, 3, 1, int4range(2010, 2019)),
-    (202, 102, 3, 1, int4range(2020, 2029)),
-    (242, 142, 3, 1, int4range(2420, 2429)),
-    (301, 301, 4, 1, int4range(3010, 3019));
+    (91,  1,   1, int4range(910, 919)),
+    (92,  2,   1, int4range(920, 929)),
+    (93,  3,   1, int4range(930, 939)),
+    (94,  4,   1, int4range(940, 949)),
+    (95,  5,   1, int4range(950, 959)),
+    (86,  6,   2, int4range(860, 869)),
+    (96,  6,   1, int4range(960, 969)),
+    (97,  7,   1, int4range(970, 979)),
+    (942, 42,  1, int4range(9420, 9429)),
+    (201, 101, 3, int4range(2010, 2019)),
+    (202, 102, 3, int4range(2020, 2029)),
+    (242, 142, 3, int4range(2420, 2429)),
+    (301, 301, 4, int4range(3010, 3019));
 
 INSERT INTO
     symbol_refs(to_symbol, from_object, from_offset_range)
