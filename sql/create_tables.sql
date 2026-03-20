@@ -32,7 +32,7 @@ CREATE INDEX IF NOT EXISTS directories_project_parent_idx
 CREATE INDEX IF NOT EXISTS directories_project_path_idx
     ON index.directories (project_id, path);
 
-CREATE TABLE IF NOT EXISTS index.files
+CREATE TABLE IF NOT EXISTS index.objects
 (
     id SERIAL PRIMARY KEY,
     project_id INTEGER NOT NULL REFERENCES index.projects(id) ON DELETE CASCADE,
@@ -45,8 +45,8 @@ CREATE TABLE IF NOT EXISTS index.files
     UNIQUE (project_id, filesystem_path)
 );
 
-CREATE INDEX IF NOT EXISTS files_directory_idx
-    ON index.files (directory_id);
+CREATE INDEX IF NOT EXISTS objects_directory_idx
+    ON index.objects (directory_id);
 
 CREATE TABLE IF NOT EXISTS index.symbols
 (
@@ -96,38 +96,38 @@ BEFORE INSERT OR UPDATE OF name ON index.symbols
 FOR EACH ROW
 EXECUTE FUNCTION index.set_symbol_path();
 
-CREATE TABLE IF NOT EXISTS index.declarations
+CREATE TABLE IF NOT EXISTS index.symbol_instances
 (
     id SERIAL PRIMARY KEY,
     symbol INTEGER NOT NULL REFERENCES index.symbols(id) ON DELETE CASCADE,
-    file_id INTEGER NOT NULL REFERENCES index.files(id) ON DELETE CASCADE,
+    object_id INTEGER NOT NULL REFERENCES index.objects(id) ON DELETE CASCADE,
     symbol_type INTEGER NOT NULL,
     offset_range INT4RANGE NOT NULL,
-    UNIQUE (symbol, file_id, offset_range)
+    UNIQUE (symbol, object_id, offset_range)
 );
 
 CREATE TABLE IF NOT EXISTS index.symbol_refs
 (
     id SERIAL PRIMARY KEY,
     to_symbol INTEGER NOT NULL REFERENCES index.symbols(id) ON DELETE CASCADE,
-    from_file INTEGER NOT NULL REFERENCES index.files(id) ON DELETE CASCADE,
+    from_object INTEGER NOT NULL REFERENCES index.objects(id) ON DELETE CASCADE,
     from_offset_range INT4RANGE NOT NULL,
-    UNIQUE (to_symbol, from_file, from_offset_range)
+    UNIQUE (to_symbol, from_object, from_offset_range)
 );
 
 CREATE INDEX IF NOT EXISTS symbol_refs_to_symbol_idx ON index.symbol_refs(to_symbol);
 
-CREATE INDEX IF NOT EXISTS declarations_offset_range_idx
-    ON index.declarations USING GIST (offset_range);
+CREATE INDEX IF NOT EXISTS symbol_instances_offset_range_idx
+    ON index.symbol_instances USING GIST (offset_range);
 
-CREATE INDEX IF NOT EXISTS symbol_refs_from_file_idx
-    ON index.symbol_refs(from_file);
+CREATE INDEX IF NOT EXISTS symbol_refs_from_object_idx
+    ON index.symbol_refs(from_object);
 
 CREATE INDEX IF NOT EXISTS symbol_refs_from_offset_range_idx
     ON index.symbol_refs USING GIST (from_offset_range);
 
-CREATE TABLE IF NOT EXISTS index.file_contents
+CREATE TABLE IF NOT EXISTS index.object_contents
 (
-    file_id INTEGER PRIMARY KEY REFERENCES index.files(id) ON DELETE CASCADE,
+    object_id INTEGER PRIMARY KEY REFERENCES index.objects(id) ON DELETE CASCADE,
     content BYTEA NOT NULL
 );
