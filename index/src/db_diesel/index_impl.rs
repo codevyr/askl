@@ -11,8 +11,10 @@ use crate::symbols::FileId;
 
 use super::mixins::{
     CompoundNameMixin, SymbolSearchMixin, PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
+    CONTAINER_INSTANCE_ALIAS, CONTAINER_SYMBOL_ALIAS, CONTAINER_TYPE_ALIAS,
+    CONTAINED_INSTANCE_ALIAS, CONTAINED_SYMBOL_ALIAS, CONTAINED_TYPE_ALIAS,
 };
-use super::selection::{ChildReference, ParentReference, Selection, SelectionNode};
+use super::selection::{ChildReference, HasChildReference, HasParentReference, ParentReference, Selection, SelectionNode};
 use super::Connection;
 
 pub struct Index {
@@ -50,6 +52,7 @@ impl Index {
     pub const TEST_INPUT_B: &'static str = "test_input_b.sql";
     pub const TEST_INPUT_MODULES: &'static str = "test_input_modules.sql";
     pub const TEST_INPUT_SYMBOL_TOKENS: &'static str = "test_input_symbol_tokens.sql";
+    pub const TEST_INPUT_CONTAINMENT: &'static str = "test_input_containment.sql";
 
     pub async fn load_test_input(&self, input_path: &str) -> Result<()> {
         let connection = &mut self.pool.get().unwrap();
@@ -91,6 +94,12 @@ impl Index {
             "verb_test.sql" => {
                 connection
                     .batch_execute(include_str!("../../../sql/verb_test.sql"))
+                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
+                    .unwrap();
+            }
+            "test_input_containment.sql" => {
+                connection
+                    .batch_execute(include_str!("../../../sql/test_input_containment.sql"))
                     .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
                     .unwrap();
             }
@@ -250,13 +259,143 @@ impl Index {
                 ))
                 .into_boxed::<Pg>();
 
-            for mixin in mixins {
+            for mixin in mixins.iter_mut() {
                 children_query = mixin.filter_children(connection, children_query)?;
             }
 
             children_query
                 .load::<(Symbol, Symbol, SymbolInstance, SymbolInstance, SymbolRef, Object)>(connection)
                 .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
+        };
+
+        // Query for containment: find containers (parents that contain current symbols)
+        // A container contains the current symbol if:
+        // 1. They share the same object_id
+        // 2. Container's offset_range @> current's offset_range
+        // 3. Container's type level > current's type level
+        let container_instance = CONTAINER_INSTANCE_ALIAS;
+        let container_symbol = CONTAINER_SYMBOL_ALIAS;
+        let container_type = CONTAINER_TYPE_ALIAS;
+
+        let has_parents = {
+            let _has_parents_span: tracing::span::EnteredSpan =
+                tracing::info_span!("select_has_parents").entered();
+
+            // For each current symbol instance, find container instances
+            // that have: same object_id, container.offset_range @> current.offset_range,
+            // container.type.level > current.type.level
+            let mut has_parents_query = symbol_instances::dsl::symbol_instances
+                .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
+                .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
+                .inner_join(
+                    container_instance.on(
+                        container_instance.field(symbol_instances::dsl::object_id)
+                            .eq(symbol_instances::dsl::object_id)
+                    ),
+                )
+                .inner_join(
+                    container_symbol.on(
+                        container_symbol.field(symbols::dsl::id)
+                            .eq(container_instance.field(symbol_instances::dsl::symbol))
+                    ),
+                )
+                .inner_join(
+                    container_type.on(
+                        container_type.field(symbol_types::dsl::id)
+                            .eq(container_symbol.field(symbols::dsl::symbol_type))
+                    ),
+                )
+                .filter(
+                    // Container's range contains current's range
+                    diesel::dsl::sql::<diesel::sql_types::Bool>(
+                        "container_instances.offset_range @> symbol_instances.offset_range"
+                    )
+                )
+                .filter(
+                    // Container's type level > current's type level
+                    container_type.field(symbol_types::dsl::level)
+                        .gt(symbol_types::dsl::level)
+                )
+                .select((
+                    Symbol::as_select(),                    // child_symbol (current)
+                    SymbolInstance::as_select(),            // child_instance (current)
+                    container_symbol.fields(crate::schema_diesel::symbols::all_columns),  // parent_symbol
+                    container_instance.fields(crate::schema_diesel::symbol_instances::all_columns), // parent_instance
+                ))
+                .into_boxed::<Pg>();
+
+            // Apply mixin filters to constrain to current symbols
+            for mixin in mixins.iter_mut() {
+                has_parents_query = mixin.filter_has_parents(connection, has_parents_query)?;
+            }
+
+            has_parents_query
+                .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance)>(connection)
+                .map_err(|e| anyhow::anyhow!("Failed to load containment parents: {}", e))?
+        };
+
+        // Query for containment: find contained symbols (children that are contained by current symbols)
+        let contained_instance = CONTAINED_INSTANCE_ALIAS;
+        let contained_symbol = CONTAINED_SYMBOL_ALIAS;
+        let contained_type = CONTAINED_TYPE_ALIAS;
+
+        let has_children = {
+            let _has_children_span: tracing::span::EnteredSpan =
+                tracing::info_span!("select_has_children").entered();
+
+            // For each current symbol instance (parent), find contained instances (children)
+            // that have: same object_id, current.offset_range @> contained.offset_range,
+            // current.type.level > contained.type.level
+            let mut has_children_query = symbol_instances::dsl::symbol_instances
+                .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
+                .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
+                .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(symbol_instances::dsl::object_id)))
+                .inner_join(
+                    contained_instance.on(
+                        contained_instance.field(symbol_instances::dsl::object_id)
+                            .eq(symbol_instances::dsl::object_id)
+                    ),
+                )
+                .inner_join(
+                    contained_symbol.on(
+                        contained_symbol.field(symbols::dsl::id)
+                            .eq(contained_instance.field(symbol_instances::dsl::symbol))
+                    ),
+                )
+                .inner_join(
+                    contained_type.on(
+                        contained_type.field(symbol_types::dsl::id)
+                            .eq(contained_symbol.field(symbols::dsl::symbol_type))
+                    ),
+                )
+                .filter(
+                    // Current's range contains contained's range
+                    diesel::dsl::sql::<diesel::sql_types::Bool>(
+                        "symbol_instances.offset_range @> contained_instances.offset_range"
+                    )
+                )
+                .filter(
+                    // Current's type level > contained's type level
+                    symbol_types::dsl::level
+                        .gt(contained_type.field(symbol_types::dsl::level))
+                )
+                .select((
+                    Symbol::as_select(),                    // parent_symbol (current)
+                    SymbolInstance::as_select(),            // parent_instance (current)
+                    contained_symbol.fields(crate::schema_diesel::symbols::all_columns),  // child_symbol
+                    contained_instance.fields(crate::schema_diesel::symbol_instances::all_columns), // child_instance
+                    Object::as_select(),                    // parent_object
+                ))
+                .into_boxed::<Pg>();
+
+            // Apply mixin filters to constrain to current symbols
+            for mixin in mixins.iter_mut() {
+                has_children_query = mixin.filter_has_children(connection, has_children_query)?;
+            }
+
+            has_children_query
+                .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(connection)
+                .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?
         };
 
         let selection = {
@@ -303,17 +442,39 @@ impl Index {
 
             children.sort_by_key(|child| (child.from_instance.id, child.symbol_instance.id));
 
-            println!(
-                "Found {} current, {} parents, {} children",
-                nodes.len(),
-                parents.len(),
-                children.len()
-            );
+            let has_parents: Vec<_> = has_parents
+                .into_iter()
+                .map(|(child_symbol, child_instance, parent_symbol, parent_instance)| {
+                    HasParentReference {
+                        child_symbol,
+                        child_instance,
+                        parent_symbol,
+                        parent_instance,
+                    }
+                })
+                .collect();
+
+            let mut has_children: Vec<_> = has_children
+                .into_iter()
+                .map(|(parent_symbol, parent_instance, child_symbol, child_instance, parent_object)| {
+                    HasChildReference {
+                        parent_symbol,
+                        parent_instance,
+                        child_symbol,
+                        child_instance,
+                        parent_object,
+                    }
+                })
+                .collect();
+
+            has_children.sort_by_key(|child| (child.parent_instance.id, child.child_instance.id));
 
             Ok(Selection {
                 nodes,
                 parents,
                 children,
+                has_parents,
+                has_children,
             })
         };
 

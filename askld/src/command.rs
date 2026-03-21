@@ -1,6 +1,6 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
-use crate::execution_state::DependencyRole;
+use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::Rule;
 use crate::span::Span;
 use crate::statement::Statement;
@@ -99,6 +99,7 @@ impl Command {
         index: &Index,
         notifier: &Statement,
         role: DependencyRole,
+        receiver_rel_type: RelationshipType,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         // Collect filters so we can iterate over them multiple times while notifying selectors.
         let mut changed = false;
@@ -106,7 +107,7 @@ impl Command {
         let selector_filters: Vec<&dyn Filter> = self.filters().collect();
         for selector in self.selectors() {
             let res = selector
-                .accept_notification(ctx, index, &selector_filters, notifier, role)
+                .accept_notification(ctx, index, &selector_filters, notifier, role, receiver_rel_type)
                 .await?;
             changed |= res.changed;
             warnings.extend(res.warnings);

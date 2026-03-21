@@ -1,8 +1,11 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
-use crate::execution_state::DependencyRole;
+use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::{Identifier, NamedArgument, PositionalArgument, Rule};
-use crate::parser_context::ParserContext;
+use crate::parser_context::{
+    ParserContext, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FILE, SYMBOL_TYPE_FUNCTION,
+    SYMBOL_TYPE_MODULE,
+};
 use crate::span::Span;
 use crate::statement::Statement;
 use anyhow::{anyhow, bail, Result};
@@ -73,12 +76,17 @@ pub(crate) fn build_generic_verb(
         NameSelector::NAME => NameSelector::new(verb_span, &positional, &named),
         IgnoreVerb::NAME => IgnoreVerb::new(verb_span, &positional, &named),
         ProjectFilter::NAME => ProjectFilter::new(verb_span, &positional, &named),
-        ModuleFilter::NAME => ModuleFilter::new(verb_span, &positional, &named),
         ForcedVerb::NAME => ForcedVerb::new(verb_span, &positional, &named),
         IsolatedScope::NAME => IsolatedScope::new(verb_span, &positional, &named),
         LabelVerb::NAME => LabelVerb::new(verb_span, &positional, &named),
         UserVerb::NAME => UserVerb::new(verb_span, &positional, &named),
         PreambleVerb::NAME => PreambleVerb::new(verb_span, &positional, &named),
+        HasModifier::NAME => HasModifier::new(verb_span, &positional, &named),
+        RefsModifier::NAME => RefsModifier::new(verb_span, &positional, &named),
+        TypeSelector::NAME_FUNCTION => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FUNCTION),
+        TypeSelector::NAME_FILE => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FILE),
+        TypeSelector::NAME_MODULE => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_MODULE),
+        TypeSelector::NAME_DIRECTORY => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_DIRECTORY),
         unknown => Err(anyhow!("unknown verb : {}", unknown)),
     };
 
@@ -223,7 +231,7 @@ impl Selector for ForcedVerb {
         Ok(None)
     }
 
-    async fn derive_from_parent(
+    async fn derive_from_ref_parent(
         &self,
         ctx: &mut ExecutionContext,
         _index: &Index,
@@ -502,73 +510,6 @@ impl Display for ProjectFilter {
     }
 }
 
-// ModuleFilter - now filters by module symbol name since modules are symbols with type=MODULE
-#[derive(Debug)]
-pub(super) struct ModuleFilter {
-    span: Span,
-    module: String,
-}
-
-impl ModuleFilter {
-    pub(super) const NAME: &'static str = "module";
-
-    pub fn new(
-        span: Span,
-        positional: &Vec<String>,
-        _named: &HashMap<String, String>,
-    ) -> Result<Arc<dyn Verb>> {
-        let filter = if let Some(module) = positional.iter().next() {
-            Arc::new(Self {
-                span,
-                module: module.clone(),
-            })
-        } else {
-            bail!("Expected a positional argument");
-        };
-        Ok(filter)
-    }
-}
-
-impl Verb for ModuleFilter {
-    fn name(&self) -> &str {
-        ModuleFilter::NAME
-    }
-
-    fn span(&self) -> pest::Span<'_> {
-        self.span.as_pest_span()
-    }
-
-    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
-        Ok(self)
-    }
-
-    fn derive_method(&self) -> DeriveMethod {
-        DeriveMethod::Clone
-    }
-
-    fn get_tag(&self) -> Option<VerbTag> {
-        Some(VerbTag::ModuleFilter)
-    }
-
-    fn add_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
-        self.replace_verb(existing_verbs)
-    }
-}
-
-impl Filter for ModuleFilter {
-    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
-        // Modules are now symbols - use name matching to filter by module name
-        // This matches symbols whose name contains the module name
-        vec![Box::new(CompoundNameMixin::new(&self.module))]
-    }
-}
-
-impl Display for ModuleFilter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ModuleFilter(module={})", self.module)
-    }
-}
-
 #[derive(Debug)]
 pub(super) struct IsolatedScope {
     span: Span,
@@ -639,5 +580,341 @@ impl Selector for IsolatedScope {
 impl Display for IsolatedScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "IsolatedScope")
+    }
+}
+
+/// HasModifier - sets the relationship type to Has (containment) for child scopes
+#[derive(Debug)]
+pub(super) struct HasModifier {
+    span: Span,
+}
+
+impl HasModifier {
+    pub(super) const NAME: &'static str = "has";
+
+    pub fn new(
+        span: Span,
+        _positional: &Vec<String>,
+        _named: &HashMap<String, String>,
+    ) -> Result<Arc<dyn Verb>> {
+        Ok(Arc::new(Self { span }))
+    }
+}
+
+impl Verb for HasModifier {
+    fn name(&self) -> &str {
+        HasModifier::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Skip
+    }
+
+    /// The @has verb consumes itself by setting the relationship type in the parser context
+    fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
+        ctx.set_relationship_type(RelationshipType::Has);
+        Ok(true) // consumed - don't add to command
+    }
+}
+
+impl Display for HasModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HasModifier")
+    }
+}
+
+/// RefsModifier - explicitly sets the relationship type to Refs (reference/call-based)
+/// This is the default, but can be used to override an inherited @has
+#[derive(Debug)]
+pub(super) struct RefsModifier {
+    span: Span,
+}
+
+impl RefsModifier {
+    pub(super) const NAME: &'static str = "refs";
+
+    pub fn new(
+        span: Span,
+        _positional: &Vec<String>,
+        _named: &HashMap<String, String>,
+    ) -> Result<Arc<dyn Verb>> {
+        Ok(Arc::new(Self { span }))
+    }
+}
+
+impl Verb for RefsModifier {
+    fn name(&self) -> &str {
+        RefsModifier::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Skip
+    }
+
+    /// The @refs verb consumes itself by setting the relationship type in the parser context
+    fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
+        ctx.set_relationship_type(RelationshipType::Refs);
+        Ok(true) // consumed - don't add to command
+    }
+}
+
+impl Display for RefsModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RefsModifier")
+    }
+}
+
+/// TypeSelector - selects symbols by type (@function, @file, @module, @directory)
+/// Optionally filters by name pattern
+#[derive(Debug)]
+pub(super) struct TypeSelector {
+    span: Span,
+    symbol_type_id: i32,
+    name_pattern: Option<String>,
+}
+
+impl TypeSelector {
+    pub(super) const NAME_FUNCTION: &'static str = "function";
+    pub(super) const NAME_FILE: &'static str = "file";
+    pub(super) const NAME_MODULE: &'static str = "module";
+    pub(super) const NAME_DIRECTORY: &'static str = "directory";
+
+    pub fn new(
+        span: Span,
+        positional: &Vec<String>,
+        _named: &HashMap<String, String>,
+        symbol_type_id: i32,
+    ) -> Result<Arc<dyn Verb>> {
+        let name_pattern = positional.first().cloned();
+        Ok(Arc::new(Self {
+            span,
+            symbol_type_id,
+            name_pattern,
+        }))
+    }
+}
+
+impl Verb for TypeSelector {
+    fn name(&self) -> &str {
+        match self.symbol_type_id {
+            SYMBOL_TYPE_FUNCTION => TypeSelector::NAME_FUNCTION,
+            SYMBOL_TYPE_FILE => TypeSelector::NAME_FILE,
+            SYMBOL_TYPE_MODULE => TypeSelector::NAME_MODULE,
+            SYMBOL_TYPE_DIRECTORY => TypeSelector::NAME_DIRECTORY,
+            _ => "type_selector",
+        }
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
+        Ok(self)
+    }
+
+    /// Set default symbol types for child scopes.
+    /// When @module is used, children should include both module and function types by default.
+    fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
+        use crate::parser_context::SYMBOL_TYPE_FUNCTION;
+
+        // Set default types for children: parent's type + function
+        let mut default_types = vec![self.symbol_type_id];
+        if self.symbol_type_id != SYMBOL_TYPE_FUNCTION {
+            default_types.push(SYMBOL_TYPE_FUNCTION);
+        }
+        ctx.set_default_symbol_types(default_types);
+
+        // Don't consume - still add this verb to the command
+        Ok(false)
+    }
+}
+
+#[async_trait(?Send)]
+impl Selector for TypeSelector {
+    async fn select_from_all_impl(
+        &self,
+        _ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+    ) -> Result<Option<Selection>> {
+        let mut search_mixins = search_mixins;
+        search_mixins.push(Box::new(SymbolTypeMixin::new(self.symbol_type_id)));
+        if let Some(ref name) = self.name_pattern {
+            search_mixins.push(Box::new(CompoundNameMixin::new(name)));
+        }
+        let selection = cfg.index.find_symbol(&mut search_mixins).await?;
+        Ok(Some(selection))
+    }
+}
+
+impl Display for TypeSelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.symbol_type_id {
+            SYMBOL_TYPE_FUNCTION => write!(f, "TypeSelector(function)"),
+            SYMBOL_TYPE_FILE => write!(f, "TypeSelector(file)"),
+            SYMBOL_TYPE_MODULE => write!(f, "TypeSelector(module)"),
+            SYMBOL_TYPE_DIRECTORY => write!(f, "TypeSelector(directory)"),
+            _ => write!(f, "TypeSelector({})", self.symbol_type_id),
+        }
+    }
+}
+
+/// SymbolTypeMixin - filters symbols by type ID
+#[derive(Debug, Clone)]
+pub struct SymbolTypeMixin {
+    pub symbol_type_id: i32,
+}
+
+impl SymbolTypeMixin {
+    pub fn new(symbol_type_id: i32) -> Self {
+        Self { symbol_type_id }
+    }
+}
+
+impl SymbolSearchMixin for SymbolTypeMixin {
+    fn filter_current<'a>(
+        &self,
+        _connection: &mut index::db_diesel::Connection,
+        query: index::db_diesel::CurrentQuery<'a>,
+    ) -> anyhow::Result<index::db_diesel::CurrentQuery<'a>> {
+        use diesel::prelude::*;
+        use index::schema_diesel::symbols;
+
+        Ok(query.filter(symbols::dsl::symbol_type.eq(self.symbol_type_id)))
+    }
+
+    fn filter_has_parents<'a>(
+        &self,
+        _connection: &mut index::db_diesel::Connection,
+        query: index::db_diesel::mixins::HasParentsQuery<'a>,
+    ) -> anyhow::Result<index::db_diesel::mixins::HasParentsQuery<'a>> {
+        use diesel::prelude::*;
+        use index::schema_diesel::symbols;
+
+        // Filter on the child/current symbol's type
+        Ok(query.filter(symbols::dsl::symbol_type.eq(self.symbol_type_id)))
+    }
+
+    fn filter_has_children<'a>(
+        &self,
+        _connection: &mut index::db_diesel::Connection,
+        query: index::db_diesel::mixins::HasChildrenQuery<'a>,
+    ) -> anyhow::Result<index::db_diesel::mixins::HasChildrenQuery<'a>> {
+        use diesel::prelude::*;
+        use index::schema_diesel::symbols;
+
+        // Filter on the parent/current symbol's type
+        Ok(query.filter(symbols::dsl::symbol_type.eq(self.symbol_type_id)))
+    }
+}
+
+/// DefaultTypeFilter - filters symbols by multiple types (OR).
+/// Used when a child scope inherits default types from parent without explicit type selector.
+#[derive(Debug)]
+pub struct DefaultTypeFilter {
+    span: Span,
+    pub symbol_type_ids: Vec<i32>,
+}
+
+impl DefaultTypeFilter {
+    pub fn new(span: Span, symbol_type_ids: Vec<i32>) -> Arc<dyn Verb> {
+        Arc::new(Self {
+            span,
+            symbol_type_ids,
+        })
+    }
+}
+
+impl Verb for DefaultTypeFilter {
+    fn name(&self) -> &str {
+        "default_type_filter"
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
+        Ok(self)
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        // Don't inherit to children - each level decides its own default types
+        DeriveMethod::Skip
+    }
+}
+
+impl Filter for DefaultTypeFilter {
+    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
+        vec![Box::new(DefaultSymbolTypeMixin::new(
+            self.symbol_type_ids.clone(),
+        ))]
+    }
+}
+
+impl Display for DefaultTypeFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DefaultTypeFilter({:?})", self.symbol_type_ids)
+    }
+}
+
+/// DefaultSymbolTypeMixin - filters symbols by multiple type IDs (OR condition)
+#[derive(Debug, Clone)]
+pub struct DefaultSymbolTypeMixin {
+    pub symbol_type_ids: Vec<i32>,
+}
+
+impl DefaultSymbolTypeMixin {
+    pub fn new(symbol_type_ids: Vec<i32>) -> Self {
+        Self { symbol_type_ids }
+    }
+}
+
+impl SymbolSearchMixin for DefaultSymbolTypeMixin {
+    fn filter_current<'a>(
+        &self,
+        _connection: &mut index::db_diesel::Connection,
+        query: index::db_diesel::CurrentQuery<'a>,
+    ) -> anyhow::Result<index::db_diesel::CurrentQuery<'a>> {
+        use diesel::prelude::*;
+        use index::schema_diesel::symbols;
+
+        // Clone to avoid lifetime issues with eq_any
+        let types = self.symbol_type_ids.clone();
+        // Filter by any of the symbol types (OR condition)
+        Ok(query.filter(symbols::dsl::symbol_type.eq_any(types)))
+    }
+
+    fn filter_has_parents<'a>(
+        &self,
+        _connection: &mut index::db_diesel::Connection,
+        query: index::db_diesel::mixins::HasParentsQuery<'a>,
+    ) -> anyhow::Result<index::db_diesel::mixins::HasParentsQuery<'a>> {
+        use diesel::prelude::*;
+        use index::schema_diesel::symbols;
+
+        let types = self.symbol_type_ids.clone();
+        Ok(query.filter(symbols::dsl::symbol_type.eq_any(types)))
+    }
+
+    fn filter_has_children<'a>(
+        &self,
+        _connection: &mut index::db_diesel::Connection,
+        query: index::db_diesel::mixins::HasChildrenQuery<'a>,
+    ) -> anyhow::Result<index::db_diesel::mixins::HasChildrenQuery<'a>> {
+        use diesel::prelude::*;
+        use index::schema_diesel::symbols;
+
+        let types = self.symbol_type_ids.clone();
+        Ok(query.filter(symbols::dsl::symbol_type.eq_any(types)))
     }
 }

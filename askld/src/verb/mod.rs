@@ -1,7 +1,7 @@
 use crate::cfg::ControlFlowGraph;
 use crate::command::NotificationResult;
 use crate::execution_context::{selector_state_with, ExecutionContext};
-use crate::execution_state::DependencyRole;
+use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::Rule;
 use crate::parser_context::ParserContext;
 use crate::span::Span;
@@ -24,7 +24,7 @@ mod generic;
 mod labels;
 mod preamble;
 
-pub use self::generic::{NameSelector, UnitVerb};
+pub use self::generic::{DefaultTypeFilter, NameSelector, UnitVerb};
 
 use self::generic::{build_generic_verb, ForcedVerb};
 
@@ -114,9 +114,7 @@ pub enum DeriveMethod {
 #[derive(Debug, PartialEq, Eq)]
 pub enum VerbTag {
     ProjectFilter,
-    ModuleFilter,
     NameSelector,
-    ChildrenSelector,
 }
 
 pub fn add_verb(existing_verbs: Vec<Arc<dyn Verb>>, new_verb: Arc<dyn Verb>) -> Vec<Arc<dyn Verb>> {
@@ -208,7 +206,12 @@ impl SelectorState {
         Self { selection: None }
     }
 
-    pub fn constrain_selection(&mut self, dependency: &Selection, role: DependencyRole) -> bool {
+    pub fn constrain_selection(
+        &mut self,
+        dependency: &Selection,
+        role: DependencyRole,
+        rel_type: RelationshipType,
+    ) -> bool {
         if self.selection.is_none() {
             return false;
         }
@@ -216,14 +219,20 @@ impl SelectorState {
         let len_before = self.selection.as_ref().unwrap().nodes.len();
 
         if let Some(_) = &mut self.selection {
-            match role {
-                DependencyRole::Parent => {
-                    self.constrain_by_child(dependency);
+            match (role, rel_type) {
+                (DependencyRole::Parent, RelationshipType::Refs) => {
+                    self.constrain_by_ref_child(dependency);
                 }
-                DependencyRole::Child => {
-                    self.constrain_by_parent(dependency);
+                (DependencyRole::Child, RelationshipType::Refs) => {
+                    self.constrain_by_ref_parent(dependency);
                 }
-                DependencyRole::User => {
+                (DependencyRole::Parent, RelationshipType::Has) => {
+                    self.constrain_by_has_child(dependency);
+                }
+                (DependencyRole::Child, RelationshipType::Has) => {
+                    self.constrain_by_has_parent(dependency);
+                }
+                (DependencyRole::User, _) => {
                     self.constrain_by_owner(dependency);
                 }
             }
@@ -234,7 +243,8 @@ impl SelectorState {
         len_before != len_after
     }
 
-    fn constrain_by_parent(&mut self, parent: &Selection) {
+    /// Constrain by reference-based parent (I am a child, parent calls me)
+    fn constrain_by_ref_parent(&mut self, parent: &Selection) {
         let selection = self.selection.as_mut().unwrap();
         selection.nodes.retain(|s| {
             parent
@@ -244,13 +254,36 @@ impl SelectorState {
         });
     }
 
-    fn constrain_by_child(&mut self, child: &Selection) {
+    /// Constrain by reference-based child (I am a parent, child is called by me)
+    fn constrain_by_ref_child(&mut self, child: &Selection) {
         let selection = self.selection.as_mut().unwrap();
         selection.nodes.retain(|s| {
             child
                 .parents
                 .iter()
                 .any(|r| r.from_instance.id == s.symbol_instance.id)
+        });
+    }
+
+    /// Constrain by containment-based parent (I am contained by parent)
+    fn constrain_by_has_parent(&mut self, parent: &Selection) {
+        let selection = self.selection.as_mut().unwrap();
+        selection.nodes.retain(|s| {
+            parent
+                .has_children
+                .iter()
+                .any(|r| r.child_instance.id == s.symbol_instance.id)
+        });
+    }
+
+    /// Constrain by containment-based child (I contain the child)
+    fn constrain_by_has_child(&mut self, child: &Selection) {
+        let selection = self.selection.as_mut().unwrap();
+        selection.nodes.retain(|s| {
+            child
+                .has_parents
+                .iter()
+                .any(|r| r.parent_instance.id == s.symbol_instance.id)
         });
     }
 
@@ -337,6 +370,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         selector_filters: &[&dyn Filter],
         notifier: &Statement,
         role: DependencyRole,
+        receiver_rel_type: RelationshipType,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         if !notifier.command().has_selectors() {
             return Ok(NotificationResult::new(false, vec![]));
@@ -367,10 +401,21 @@ pub trait Selector: std::fmt::Debug + Verb {
             }
         }
 
+        // Determine the relationship type based on role:
+        // - role=Child (I'm a child, notifier is parent): use receiver's (my) relationship_type
+        //   This is how I relate to my parent
+        // - role=Parent (I'm a parent, notifier is child): use notifier's (child's) relationship_type
+        //   This is how the child relates to me
+        let rel_type = match role {
+            DependencyRole::Child => receiver_rel_type,
+            DependencyRole::Parent => notifier.get_relationship_type(),
+            DependencyRole::User => notifier.get_relationship_type(),
+        };
+
         let mut changed = false;
         let (constrained, warnings) = selector_state_with(&mut ctx.registry, self, |state| {
             if state.selection.is_some() {
-                changed = state.constrain_selection(&dependency, role);
+                changed = state.constrain_selection(&dependency, role, rel_type);
                 let mut warnings = vec![];
                 if changed && state.selection.as_ref().unwrap().nodes.is_empty() {
                     warnings.push(Error::new_from_span(
@@ -394,7 +439,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         }
 
         let mut selection = self
-            .derive_selection(ctx, index, selector_filters, notifier, role)
+            .derive_selection(ctx, index, selector_filters, notifier, role, rel_type)
             .await
             .map_err(|e| {
                 Error::new_from_span(
@@ -425,17 +470,26 @@ pub trait Selector: std::fmt::Debug + Verb {
         selector_filters: &[&dyn Filter],
         notifier: &Statement,
         role: DependencyRole,
+        rel_type: RelationshipType,
     ) -> Result<Option<Selection>> {
-        let selection = match role {
-            DependencyRole::Child => {
-                self.derive_from_parent(ctx, index, selector_filters, notifier)
+        let selection = match (role, rel_type) {
+            (DependencyRole::Child, RelationshipType::Refs) => {
+                self.derive_from_ref_parent(ctx, index, selector_filters, notifier)
                     .await?
             }
-            DependencyRole::Parent => {
-                self.derive_from_child(ctx, index, selector_filters, notifier)
+            (DependencyRole::Parent, RelationshipType::Refs) => {
+                self.derive_from_ref_child(ctx, index, selector_filters, notifier)
                     .await?
             }
-            DependencyRole::User => {
+            (DependencyRole::Child, RelationshipType::Has) => {
+                self.derive_from_has_parent(ctx, index, selector_filters, notifier)
+                    .await?
+            }
+            (DependencyRole::Parent, RelationshipType::Has) => {
+                self.derive_from_has_child(ctx, index, selector_filters, notifier)
+                    .await?
+            }
+            (DependencyRole::User, _) => {
                 self.derive_from_provider(ctx, index, selector_filters, notifier)
                     .await?
             }
@@ -444,7 +498,8 @@ pub trait Selector: std::fmt::Debug + Verb {
         Ok(selection)
     }
 
-    async fn derive_from_parent(
+    /// Derive from reference-based parent (I am a child, get children that parent calls)
+    async fn derive_from_ref_parent(
         &self,
         ctx: &mut ExecutionContext,
         index: &Index,
@@ -469,7 +524,8 @@ pub trait Selector: std::fmt::Debug + Verb {
         Ok(Some(children_selection))
     }
 
-    async fn derive_from_child(
+    /// Derive from reference-based child (I am a parent, get parents that call child)
+    async fn derive_from_ref_child(
         &self,
         ctx: &mut ExecutionContext,
         index: &Index,
@@ -484,6 +540,59 @@ pub trait Selector: std::fmt::Debug + Verb {
             .parents
             .iter()
             .map(|p| DeclarationId::new(p.from_instance.id))
+            .unique()
+            .collect::<Vec<_>>();
+        let parent_selection = self
+            .find_symbol_by_declid(index, selector_filters, &decl_ids)
+            .await?;
+
+        Ok(Some(parent_selection))
+    }
+
+    /// Derive from containment-based parent (I am contained, get contained symbols from container)
+    async fn derive_from_has_parent(
+        &self,
+        ctx: &mut ExecutionContext,
+        index: &Index,
+        selector_filters: &[&dyn Filter],
+        parent: &Statement,
+    ) -> Result<Option<Selection>> {
+        let parent = match parent.get_selection(&ctx) {
+            Some(selection) => selection,
+            None => return Ok(None),
+        };
+        // Get the child instance IDs from the parent's has_children
+        let decl_ids = parent
+            .has_children
+            .iter()
+            .map(|p| DeclarationId::new(p.child_instance.id))
+            .unique()
+            .collect::<Vec<_>>();
+
+        let children_selection = self
+            .find_symbol_by_declid(index, selector_filters, &decl_ids)
+            .await?;
+
+        Ok(Some(children_selection))
+    }
+
+    /// Derive from containment-based child (I am a container, get containers of child)
+    async fn derive_from_has_child(
+        &self,
+        ctx: &mut ExecutionContext,
+        index: &Index,
+        selector_filters: &[&dyn Filter],
+        child: &Statement,
+    ) -> Result<Option<Selection>> {
+        let child = match child.get_selection(&ctx) {
+            Some(selection) => selection,
+            None => return Ok(None),
+        };
+        // Get the parent instance IDs from the child's has_parents
+        let decl_ids = child
+            .has_parents
+            .iter()
+            .map(|p| DeclarationId::new(p.parent_instance.id))
             .unique()
             .collect::<Vec<_>>();
         let parent_selection = self

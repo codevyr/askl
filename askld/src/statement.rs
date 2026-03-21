@@ -2,7 +2,7 @@ use crate::cfg::{ControlFlowGraph, EdgeList, NodeList, SymbolDeclId};
 use crate::command::{Command, LabeledStatements};
 use crate::execution_context::ExecutionContext;
 use crate::execution_state::{
-    DependencyRole, ExecutionState, StatementDependency, StatementDependent,
+    DependencyRole, ExecutionState, RelationshipType, StatementDependency, StatementDependent,
 };
 use crate::hierarchy::Hierarchy;
 use crate::offset_range::range_bounds_to_offsets;
@@ -10,7 +10,7 @@ use crate::parser::Rule;
 use crate::parser_context::ParserContext;
 use crate::scope::{build_scope, EmptyScope, Scope, StatementIter};
 use crate::span::Span;
-use crate::verb::build_verb;
+use crate::verb::{build_verb, DefaultTypeFilter};
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::Selection;
@@ -28,13 +28,33 @@ pub fn build_statement<'a>(
     let mut iter = pair.into_inner();
     let sub_ctx = ParserContext::derive(ctx, statement_span.clone());
     let mut scope: Rc<dyn Scope> = Rc::new(EmptyScope::new());
+    // Track relationship type BEFORE any verbs run
+    let inherited_rel_type = sub_ctx.get_relationship_type();
+    // Track inherited default symbol types
+    let inherited_default_types = sub_ctx.get_default_symbol_types();
+
     for pair in iter.by_ref() {
         match pair.as_rule() {
             Rule::verb => {
                 build_verb(sub_ctx.clone(), pair)?;
             }
             Rule::scope => {
+                // Capture the relationship_type AFTER verbs run - this is for children
+                let child_rel_type = sub_ctx.get_relationship_type();
+
+                // Check if relationship_type was changed by a verb (like @has or @refs)
+                if child_rel_type == inherited_rel_type {
+                    // No relationship modifier in this statement's verbs
+                    // Reset to Refs for the scope's children
+                    sub_ctx.set_relationship_type(RelationshipType::Refs);
+                }
+                // else: @has/@refs set it, keep the new value for children
+
                 scope = build_scope(sub_ctx.clone(), pair)?;
+
+                // Restore this statement's own relationship_type (how it relates to its parent)
+                // This is the INHERITED value, not the value after @has/@refs modified it
+                sub_ctx.set_relationship_type(inherited_rel_type);
                 break;
             }
             _ => Err(Error::new_from_span(
@@ -56,8 +76,20 @@ pub fn build_statement<'a>(
         ));
     }
 
+    // If we inherited default symbol types and no explicit type selector was used,
+    // add a DefaultTypeFilter to filter by those types
+    if let Some(default_types) = inherited_default_types {
+        // Check if the current command has a type selector
+        // This happens after all verbs are processed
+        let has_type_selector = sub_ctx.has_type_selector();
+        if !has_type_selector && !default_types.is_empty() {
+            sub_ctx.extend_verb(DefaultTypeFilter::new(statement_span.clone(), default_types));
+        }
+    }
+
     let command = sub_ctx.command(statement_span);
-    let statement = Statement::new(command, scope.clone());
+    let relationship_type = sub_ctx.get_relationship_type();
+    let statement = Statement::new_with_relationship(command, scope.clone(), relationship_type);
     scope.set_parent(Rc::downgrade(&statement));
 
     Ok(statement)
@@ -66,8 +98,20 @@ pub fn build_statement<'a>(
 pub fn build_empty_statement(ctx: Rc<ParserContext>, span: Span) -> Rc<Statement> {
     let scope: Rc<dyn Scope> = Rc::new(EmptyScope::new());
     let sub_ctx = ParserContext::derive(ctx, span.clone());
+    // An empty statement (like {}) should use Refs, not inherit @has from parent
+    sub_ctx.set_relationship_type(RelationshipType::Refs);
+
+    // If we inherited default symbol types, add a DefaultTypeFilter
+    // (empty statements have no explicit type selector)
+    if let Some(default_types) = sub_ctx.get_default_symbol_types() {
+        if !default_types.is_empty() {
+            sub_ctx.extend_verb(DefaultTypeFilter::new(span.clone(), default_types));
+        }
+    }
+
     let command = sub_ctx.command(span);
-    let statement = Statement::new(command, scope.clone());
+    let relationship_type = sub_ctx.get_relationship_type();
+    let statement = Statement::new_with_relationship(command, scope.clone(), relationship_type);
     scope.set_parent(Rc::downgrade(&statement));
     return statement;
 }
@@ -98,16 +142,33 @@ pub struct Statement {
     pub scope: Rc<dyn Scope>,
     pub parent: RefCell<Option<Weak<Statement>>>,
     pub execution_state: RefCell<ExecutionState>,
+    /// The relationship type for this statement's relationship to its parent.
+    /// - Refs (default): Reference-based traversal (calls)
+    /// - Has: Containment-based traversal (composition)
+    pub relationship_type: RelationshipType,
 }
 
 impl Statement {
     pub fn new(command: Command, scope: Rc<dyn Scope>) -> Rc<Statement> {
+        Statement::new_with_relationship(command, scope, RelationshipType::Refs)
+    }
+
+    pub fn new_with_relationship(
+        command: Command,
+        scope: Rc<dyn Scope>,
+        relationship_type: RelationshipType,
+    ) -> Rc<Statement> {
         Rc::new(Statement {
             command: command,
             scope: scope,
             parent: RefCell::new(None),
             execution_state: RefCell::new(ExecutionState::new()),
+            relationship_type,
         })
+    }
+
+    pub fn get_relationship_type(&self) -> RelationshipType {
+        self.relationship_type
     }
 
     pub fn command(&self) -> &Command {
@@ -400,6 +461,12 @@ impl Statement {
         );
 
         let mut all_references = EdgeList::new();
+        // Track seen edges to deduplicate before returning.
+        // Key: (from_symbol_id, to_symbol_id, occurrence)
+        // This prevents duplicate edges when target symbol has multiple instances
+        // (e.g., module with 15 files creates 15 identical-looking edges for one import)
+        let mut seen_edges: HashSet<(SymbolId, SymbolId, Option<Occurrence>)> = HashSet::new();
+
         for statement in &statements {
             let current = if let Some(current) = statement.get_selection(ctx) {
                 current
@@ -418,13 +485,22 @@ impl Statement {
                     offset_range: range_bounds_to_offsets(&child.symbol_ref.from_offset_range)
                         .unwrap(),
                 };
+
+                // Deduplicate edges that would appear identical in output
+                let from_symbol = SymbolId::new(child.parent_symbol.id);
+                let to_symbol = SymbolId::new(child.symbol_ref.to_symbol);
+                let edge_key = (from_symbol.clone(), to_symbol.clone(), Some(occurrence.clone()));
+                if !seen_edges.insert(edge_key) {
+                    continue; // Already seen this edge
+                }
+
                 all_references.add_reference(
                     SymbolDeclId {
-                        symbol_id: SymbolId::new(child.parent_symbol.id),
+                        symbol_id: from_symbol,
                         declaration_id: DeclarationId::new(child.from_instance.id),
                     },
                     SymbolDeclId {
-                        symbol_id: SymbolId::new(child.symbol_ref.to_symbol),
+                        symbol_id: to_symbol,
                         declaration_id: DeclarationId::new(child.symbol_instance.id),
                     },
                     Some(occurrence),
@@ -443,13 +519,22 @@ impl Statement {
                     offset_range: range_bounds_to_offsets(&parent.symbol_ref.from_offset_range)
                         .unwrap(),
                 };
+
+                // Deduplicate edges that would appear identical in output
+                let from_symbol = SymbolId::new(parent.from_instance.symbol);
+                let to_symbol = SymbolId::new(parent.to_symbol.id);
+                let edge_key = (from_symbol.clone(), to_symbol.clone(), Some(occurrence.clone()));
+                if !seen_edges.insert(edge_key) {
+                    continue; // Already seen this edge
+                }
+
                 all_references.add_reference(
                     SymbolDeclId {
-                        symbol_id: SymbolId::new(parent.from_instance.symbol),
+                        symbol_id: from_symbol,
                         declaration_id: DeclarationId::new(parent.from_instance.id),
                     },
                     SymbolDeclId {
-                        symbol_id: SymbolId::new(parent.to_symbol.id),
+                        symbol_id: to_symbol,
                         declaration_id: DeclarationId::new(parent.to_instance.id),
                     },
                     Some(occurrence),
@@ -474,10 +559,11 @@ impl Statement {
     ) -> Result<(), pest::error::Error<Rule>> {
         let _update_dependency: tracing::span::EnteredSpan =
             tracing::info_span!("notify").entered();
+        let receiver_rel_type = dependent.statement.get_relationship_type();
         let res = dependent
             .statement
             .command()
-            .accept_notification(ctx, &cfg.index, self, dependent.dependency_role)
+            .accept_notification(ctx, &cfg.index, self, dependent.dependency_role, receiver_rel_type)
             .await?;
 
         if res.changed {
