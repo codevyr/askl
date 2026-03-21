@@ -20,6 +20,19 @@ diesel::alias! {
         index_schema::symbols as parent_symbols;
     pub const PARENT_DECLS_ALIAS: Alias<ParentDeclsAlias> =
         index_schema::symbol_instances as parent_decls;
+    // Aliases for containment queries
+    pub const CONTAINER_INSTANCE_ALIAS: Alias<ContainerInstanceAlias> =
+        index_schema::symbol_instances as container_instances;
+    pub const CONTAINER_SYMBOL_ALIAS: Alias<ContainerSymbolAlias> =
+        index_schema::symbols as container_symbols;
+    pub const CONTAINER_TYPE_ALIAS: Alias<ContainerTypeAlias> =
+        index_schema::symbol_types as container_types;
+    pub const CONTAINED_INSTANCE_ALIAS: Alias<ContainedInstanceAlias> =
+        index_schema::symbol_instances as contained_instances;
+    pub const CONTAINED_SYMBOL_ALIAS: Alias<ContainedSymbolAlias> =
+        index_schema::symbols as contained_symbols;
+    pub const CONTAINED_TYPE_ALIAS: Alias<ContainedTypeAlias> =
+        index_schema::symbol_types as contained_types;
 }
 
 type SymbolInstanceJoinSource = InnerJoinQuerySource<
@@ -130,6 +143,136 @@ pub type ChildrenQuery<'a> = BoxedSelectStatement<
     Pg,
 >;
 
+// ============================================================================
+// Containment query types (has_parents, has_children)
+// ============================================================================
+
+// has_parents: find containers of current symbols
+// Query structure: symbol_instances -> symbols -> symbol_types -> container_instances -> container_symbols -> container_types
+type HasParentsSelectionTuple = (
+    AsSelect<Symbol, Pg>,           // child_symbol (current)
+    AsSelect<SymbolInstance, Pg>,   // child_instance (current)
+    SymbolColumnsSqlType,           // parent_symbol (container)
+    SymbolInstanceColumnsSqlType,   // parent_instance (container)
+);
+
+// Join type for symbol_instances -> symbols
+type InstanceSymbolJoin = InnerJoinQuerySource<
+    index_schema::symbol_instances::table,
+    index_schema::symbols::table,
+    Eq<index_schema::symbol_instances::columns::symbol, index_schema::symbols::columns::id>,
+>;
+
+// Join type for symbol_instances -> symbols -> symbol_types
+type InstanceSymbolTypeJoin = InnerJoinQuerySource<
+    InstanceSymbolJoin,
+    index_schema::symbol_types::table,
+    Eq<index_schema::symbols::columns::symbol_type, index_schema::symbol_types::columns::id>,
+>;
+
+// Join type for ... -> container_instances
+type ContainerInstanceOn = Eq<
+    AliasedField<ContainerInstanceAlias, index_schema::symbol_instances::columns::object_id>,
+    index_schema::symbol_instances::columns::object_id,
+>;
+
+type InstanceSymbolTypeContainerInstanceJoin = InnerJoinQuerySource<
+    InstanceSymbolTypeJoin,
+    Alias<ContainerInstanceAlias>,
+    ContainerInstanceOn,
+>;
+
+// Join type for ... -> container_symbols
+type ContainerSymbolOn = Eq<
+    AliasedField<ContainerSymbolAlias, index_schema::symbols::columns::id>,
+    AliasedField<ContainerInstanceAlias, index_schema::symbol_instances::columns::symbol>,
+>;
+
+type InstanceSymbolTypeContainerInstanceSymbolJoin = InnerJoinQuerySource<
+    InstanceSymbolTypeContainerInstanceJoin,
+    Alias<ContainerSymbolAlias>,
+    ContainerSymbolOn,
+>;
+
+// Join type for ... -> container_types
+type ContainerTypeOn = Eq<
+    AliasedField<ContainerTypeAlias, index_schema::symbol_types::columns::id>,
+    AliasedField<ContainerSymbolAlias, index_schema::symbols::columns::symbol_type>,
+>;
+
+type HasParentsJoinSource = InnerJoinQuerySource<
+    InstanceSymbolTypeContainerInstanceSymbolJoin,
+    Alias<ContainerTypeAlias>,
+    ContainerTypeOn,
+>;
+
+pub type HasParentsQuery<'a> = BoxedSelectStatement<
+    'a,
+    HasParentsSelectionTuple,
+    FromClause<HasParentsJoinSource>,
+    Pg,
+>;
+
+// has_children: find symbols contained by current symbols
+// Query structure: symbol_instances -> symbols -> symbol_types -> objects -> contained_instances -> contained_symbols -> contained_types
+type HasChildrenSelectionTuple = (
+    AsSelect<Symbol, Pg>,           // parent_symbol (current)
+    AsSelect<SymbolInstance, Pg>,   // parent_instance (current)
+    SymbolColumnsSqlType,           // child_symbol (contained)
+    SymbolInstanceColumnsSqlType,   // child_instance (contained)
+    AsSelect<Object, Pg>,           // parent_object
+);
+
+// Join type for ... -> objects
+type InstanceSymbolTypeObjectJoin = InnerJoinQuerySource<
+    InstanceSymbolTypeJoin,
+    index_schema::objects::table,
+    Eq<index_schema::objects::columns::id, index_schema::symbol_instances::columns::object_id>,
+>;
+
+// Join type for ... -> contained_instances
+type ContainedInstanceOn = Eq<
+    AliasedField<ContainedInstanceAlias, index_schema::symbol_instances::columns::object_id>,
+    index_schema::symbol_instances::columns::object_id,
+>;
+
+type InstanceSymbolTypeObjectContainedInstanceJoin = InnerJoinQuerySource<
+    InstanceSymbolTypeObjectJoin,
+    Alias<ContainedInstanceAlias>,
+    ContainedInstanceOn,
+>;
+
+// Join type for ... -> contained_symbols
+type ContainedSymbolOn = Eq<
+    AliasedField<ContainedSymbolAlias, index_schema::symbols::columns::id>,
+    AliasedField<ContainedInstanceAlias, index_schema::symbol_instances::columns::symbol>,
+>;
+
+type InstanceSymbolTypeObjectContainedInstanceSymbolJoin = InnerJoinQuerySource<
+    InstanceSymbolTypeObjectContainedInstanceJoin,
+    Alias<ContainedSymbolAlias>,
+    ContainedSymbolOn,
+>;
+
+// Join type for ... -> contained_types
+type ContainedTypeOn = Eq<
+    AliasedField<ContainedTypeAlias, index_schema::symbol_types::columns::id>,
+    AliasedField<ContainedSymbolAlias, index_schema::symbols::columns::symbol_type>,
+>;
+
+type HasChildrenJoinSource = InnerJoinQuerySource<
+    InstanceSymbolTypeObjectContainedInstanceSymbolJoin,
+    Alias<ContainedTypeAlias>,
+    ContainedTypeOn,
+>;
+
+pub type HasChildrenQuery<'a> = BoxedSelectStatement<
+    'a,
+    HasChildrenSelectionTuple,
+    FromClause<HasChildrenJoinSource>,
+    Pg,
+>;
+
 fn ltree_filter_sql(column: &str, lquery: &str) -> String {
     format!("{} ~ '{}'::lquery", column, lquery)
 }
@@ -160,6 +303,26 @@ pub trait SymbolSearchMixin: std::fmt::Debug {
         _connection: &mut Connection,
         query: ChildrenQuery<'a>,
     ) -> Result<ChildrenQuery<'a>> {
+        Ok(query)
+    }
+
+    /// Filter has_parents query (find containers of current symbols)
+    /// The "current" symbol is the child in the containment relationship.
+    fn filter_has_parents<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: HasParentsQuery<'a>,
+    ) -> Result<HasParentsQuery<'a>> {
+        Ok(query)
+    }
+
+    /// Filter has_children query (find symbols contained by current symbols)
+    /// The "current" symbol is the parent in the containment relationship.
+    fn filter_has_children<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: HasChildrenQuery<'a>,
+    ) -> Result<HasChildrenQuery<'a>> {
         Ok(query)
     }
 }
@@ -305,6 +468,34 @@ impl SymbolSearchMixin for CompoundNameMixin {
             Ok(query)
         }
     }
+
+    fn filter_has_parents<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: HasParentsQuery<'a>,
+    ) -> Result<HasParentsQuery<'a>> {
+        // Filter on the child/current symbol (symbols.symbol_path)
+        if let Some(lquery) = &self.lquery {
+            let filter_sql = ltree_filter_sql("symbols.symbol_path", lquery);
+            Ok(query.filter(sql::<Bool>(&filter_sql)))
+        } else {
+            Ok(query)
+        }
+    }
+
+    fn filter_has_children<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: HasChildrenQuery<'a>,
+    ) -> Result<HasChildrenQuery<'a>> {
+        // Filter on the parent/current symbol (symbols.symbol_path)
+        if let Some(lquery) = &self.lquery {
+            let filter_sql = ltree_filter_sql("symbols.symbol_path", lquery);
+            Ok(query.filter(sql::<Bool>(&filter_sql)))
+        } else {
+            Ok(query)
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -358,6 +549,28 @@ impl SymbolSearchMixin for DeclarationIdMixin {
                 .field(symbol_instances::dsl::id)
                 .eq_any(self.decl_ids.clone()),
         ))
+    }
+
+    fn filter_has_parents<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: HasParentsQuery<'a>,
+    ) -> Result<HasParentsQuery<'a>> {
+        use crate::schema_diesel::symbol_instances;
+
+        // Filter on the child/current symbol instance
+        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.decl_ids.clone())))
+    }
+
+    fn filter_has_children<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: HasChildrenQuery<'a>,
+    ) -> Result<HasChildrenQuery<'a>> {
+        use crate::schema_diesel::symbol_instances;
+
+        // Filter on the parent/current symbol instance
+        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.decl_ids.clone())))
     }
 }
 

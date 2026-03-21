@@ -5,16 +5,16 @@ use diesel_migrations::{embed_migrations, EmbeddedMigrations};
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("../migrations");
 
 mod index_impl;
-mod mixins;
+pub mod mixins;
 mod selection;
 
 pub use index_impl::Index;
 pub use mixins::{
-    CompoundNameMixin, DeclarationIdMixin, IgnoreFilterMixin,
+    CompoundNameMixin, CurrentQuery, DeclarationIdMixin, IgnoreFilterMixin,
     ProjectFilterMixin, SymbolSearchMixin,
 };
 pub use selection::{
-    ChildReference, ObjectFullDiesel, ParentReference,
+    ChildReference, HasChildReference, HasParentReference, ObjectFullDiesel, ParentReference,
     ReferenceFullDiesel, ReferenceResult, Selection, SelectionNode, SymbolInstanceFullDiesel,
 };
 

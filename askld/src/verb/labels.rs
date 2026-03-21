@@ -1,6 +1,6 @@
 use crate::{
     command::NotificationResult, execution_context::selector_state_with,
-    execution_state::DependencyRole, parser::Rule, span::Span,
+    execution_state::{DependencyRole, RelationshipType}, parser::Rule, span::Span,
 };
 use anyhow::{bail, Result};
 use async_trait::async_trait;
@@ -204,7 +204,7 @@ impl Selector for UserVerb {
         return Ok(None);
     }
 
-    async fn derive_from_parent(
+    async fn derive_from_ref_parent(
         &self,
         ctx: &mut ExecutionContext,
         _index: &Index,
@@ -256,7 +256,7 @@ impl Selector for UserVerb {
         Ok(Some(normal_selection))
     }
 
-    async fn derive_from_child(
+    async fn derive_from_ref_child(
         &self,
         ctx: &mut ExecutionContext,
         _index: &Index,
@@ -291,6 +291,7 @@ impl Selector for UserVerb {
         selector_filters: &[&dyn Filter],
         notifier: &Statement,
         role: DependencyRole,
+        receiver_rel_type: RelationshipType,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         if !notifier.command().has_selectors() {
             return Ok(NotificationResult::new(false, vec![]));
@@ -312,12 +313,19 @@ impl Selector for UserVerb {
             }
         }
 
+        // Determine the relationship type based on role
+        let rel_type = match role {
+            DependencyRole::Child => receiver_rel_type,
+            DependencyRole::Parent => notifier.get_relationship_type(),
+            DependencyRole::User => notifier.get_relationship_type(),
+        };
+
         // For forced parent dependencies, we always derive fake selection.
         if !self.forced || role != DependencyRole::Child {
             let mut changed = false;
             let constrained = selector_state_with(&mut ctx.registry, self, |state| {
                 if state.selection.is_some() {
-                    changed = state.constrain_selection(&dependency, role);
+                    changed = state.constrain_selection(&dependency, role, rel_type);
                     true
                 } else {
                     false
@@ -342,7 +350,7 @@ impl Selector for UserVerb {
         }
 
         let mut selection = self
-            .derive_selection(ctx, index, selector_filters, notifier, role)
+            .derive_selection(ctx, index, selector_filters, notifier, role, rel_type)
             .await
             .map_err(|e| {
                 pest::error::Error::new_from_span(

@@ -63,11 +63,34 @@ pub struct ParentReference {
     pub symbol_ref: SymbolRef,
 }
 
+/// Containment relationship: parent contains child (parent.offset_range @> child.offset_range)
+#[derive(Debug, Clone, PartialEq)]
+pub struct HasChildReference {
+    pub parent_symbol: Symbol,
+    pub parent_instance: SymbolInstance,
+    pub child_symbol: Symbol,
+    pub child_instance: SymbolInstance,
+    pub parent_object: Object,
+}
+
+/// Containment relationship: child is contained by parent
+#[derive(Debug, Clone, PartialEq)]
+pub struct HasParentReference {
+    pub child_symbol: Symbol,
+    pub child_instance: SymbolInstance,
+    pub parent_symbol: Symbol,
+    pub parent_instance: SymbolInstance,
+}
+
 #[derive(Clone, PartialEq)]
 pub struct Selection {
     pub nodes: Vec<SelectionNode>,
+    // Reference-based relationships (calls)
     pub parents: Vec<ParentReference>,
     pub children: Vec<ChildReference>,
+    // Containment relationships (composition)
+    pub has_parents: Vec<HasParentReference>,
+    pub has_children: Vec<HasChildReference>,
 }
 
 impl Selection {
@@ -76,6 +99,8 @@ impl Selection {
             nodes: Vec::new(),
             parents: Vec::new(),
             children: Vec::new(),
+            has_parents: Vec::new(),
+            has_children: Vec::new(),
         }
     }
 
@@ -83,6 +108,8 @@ impl Selection {
         self.nodes.extend(other.nodes);
         self.parents.extend(other.parents);
         self.children.extend(other.children);
+        self.has_parents.extend(other.has_parents);
+        self.has_children.extend(other.has_children);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -108,6 +135,13 @@ impl Selection {
         selection
             .children
             .retain(|c| node_instance_ids.contains(&DeclarationId::new(c.from_instance.id)));
+        // Prune containment relationships
+        selection
+            .has_parents
+            .retain(|c| node_instance_ids.contains(&DeclarationId::new(c.child_instance.id)));
+        selection
+            .has_children
+            .retain(|c| node_instance_ids.contains(&DeclarationId::new(c.parent_instance.id)));
     }
 }
 
@@ -136,6 +170,22 @@ impl std::fmt::Debug for Selection {
                     .children
                     .iter()
                     .map(|c| c.symbol.name.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "has_parents",
+                &self
+                    .has_parents
+                    .iter()
+                    .map(|p| p.parent_symbol.name.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "has_children",
+                &self
+                    .has_children
+                    .iter()
+                    .map(|c| c.child_symbol.name.clone())
                     .collect::<Vec<_>>(),
             )
             .finish()

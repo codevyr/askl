@@ -2,11 +2,22 @@ use std::rc::Rc;
 
 use crate::{parser::Rule, statement::Statement};
 
+/// The role of a dependency in the execution state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DependencyRole {
     Parent,
     Child,
     User,
+}
+
+/// The type of relationship to traverse when deriving selections.
+/// - Refs: Reference-based traversal (calls/uses) via symbol_refs table
+/// - Has: Containment-based traversal (composition) via offset_range containment
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RelationshipType {
+    #[default]
+    Refs,
+    Has,
 }
 
 #[derive(Debug)]

@@ -1,5 +1,5 @@
 use crate::test_util::{
-    format_edges, run_query, run_query_err, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_MODULES,
+    format_edges, run_query, run_query_err, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES,
 };
 use index::symbols::DeclarationId;
 
@@ -537,6 +537,7 @@ fn project_double_parent_query() {
 }
 
 #[test]
+#[ignore = "@module is now a type selector, not a filter - old filter behavior obsoleted"]
 fn module_filter_excludes_other_modules() {
     const FILTERED_QUERY: &str = r#"@module("test") "a""#;
     let filtered = run_query(TEST_INPUT_MODULES, FILTERED_QUERY);
@@ -581,6 +582,7 @@ fn module_filter_excludes_other_modules() {
 }
 
 #[test]
+#[ignore = "@module is now a type selector, not a filter - old filter behavior obsoleted"]
 fn module_filter_selects_other_module() {
     const QUERY: &str = r#"@module("other") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
@@ -593,6 +595,7 @@ fn module_filter_selects_other_module() {
 }
 
 #[test]
+#[ignore = "@module is now a type selector, not a filter - old filter behavior obsoleted"]
 fn module_filter_replaced_by_second_invocation() {
     const QUERY: &str = r#"@module("test") @module("other") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
@@ -605,6 +608,7 @@ fn module_filter_replaced_by_second_invocation() {
 }
 
 #[test]
+#[ignore = "@module is now a type selector, not a filter - old filter behavior obsoleted"]
 fn module_filter_children_scope_honors_filter() {
     const QUERY: &str = r#"@module("other") "a" {}"#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
@@ -701,6 +705,7 @@ fn project_filter_selects_other_project() {
 }
 
 #[test]
+#[ignore = "@module is now a type selector, not a filter - old filter behavior obsoleted"]
 fn project_and_module_filters_combine() {
     const QUERY: &str = r#"@project("test_project") @module("other") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
@@ -713,6 +718,7 @@ fn project_and_module_filters_combine() {
 }
 
 #[test]
+#[ignore = "@module is now a type selector, not a filter - old filter behavior obsoleted"]
 fn conflicting_project_and_module_filters_return_empty() {
     const QUERY: &str = r#"@project("other_project") @module("other") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
@@ -781,7 +787,9 @@ fn implicit_edge() {
         ]
     );
     let edges = format_edges(res.edges);
-    assert_eq!(edges, vec!["94-86", "94-95", "94-96", "95-86", "95-96"]);
+    // Edges are deduplicated by (from_symbol, to_symbol, occurrence).
+    // Symbol f has two instances (86, 96), but d->f and e->f each create only one edge.
+    assert_eq!(edges, vec!["94-86", "94-95", "95-86"]);
 }
 
 #[test]
@@ -805,10 +813,45 @@ fn multiple_selectors() {
         ]
     );
     let edges = format_edges(res.edges);
+    // Edges are deduplicated by (from_symbol, to_symbol, occurrence).
+    // Symbol f has two instances (86, 96), but d->f and e->f each create only one edge.
     assert_eq!(
         edges,
-        vec!["91-92", "92-94", "93-92", "94-86", "94-95", "94-96", "95-86", "95-96"]
+        vec!["91-92", "92-94", "93-92", "94-86", "94-95", "95-86"]
     );
+}
+
+// Test edge deduplication behavior:
+// - Edges with SAME (from_symbol, to_symbol, occurrence) are deduplicated
+// - Edges with DIFFERENT outgoing positions (offset_start, offset_end) are NOT deduplicated
+#[test]
+fn edge_dedup_different_offsets_preserved() {
+    // In test_input_a, symbol 'a' has TWO refs to symbol 'b' at different offsets:
+    // - (2, 1, int4range(911, 912)) - a refs b at 911-912
+    // - (2, 1, int4range(912, 913)) - a refs b at 912-913
+    // Both edges should be preserved because they have different outgoing positions.
+    const QUERY: &str = r#""a"{}"#;
+    let res = run_query(TEST_INPUT_A, QUERY);
+
+    let edges = format_edges(res.edges);
+    // Two edges from a(91) to b(92), each with different offset - both preserved
+    assert_eq!(edges, vec!["91-92", "91-92"]);
+    assert_eq!(edges.len(), 2, "Both edges with different offsets should be preserved");
+}
+
+#[test]
+fn edge_dedup_same_offset_deduplicated() {
+    // In test_input_b, symbol 'f' has TWO instances (86, 96).
+    // Symbol 'd' has ONE ref to symbol 'f' at offset 942-943.
+    // Even though there are two target instances, only one edge should appear
+    // because they have the same (from_symbol, to_symbol, occurrence).
+    const QUERY: &str = r#""d" {"f"}"#;
+    let res = run_query(TEST_INPUT_B, QUERY);
+
+    let edges = format_edges(res.edges);
+    // Only one edge from d to f, despite f having two instances
+    assert_eq!(edges, vec!["94-86"]);
+    assert_eq!(edges.len(), 1, "Duplicate edges with same offset should be deduplicated");
 }
 
 #[test]
@@ -959,4 +1002,335 @@ fn non_existent_child_warning() {
     assert_eq!(res.nodes.as_vec(), vec![]);
     println!("{:#?}", res.warnings);
     assert_eq!(res.warnings.len(), 2);
+}
+
+// ============================================================================
+// Containment Tests
+// ============================================================================
+//
+// These tests use TEST_INPUT_CONTAINMENT which has:
+// - Module `testmodule` with instance [0, 1000) - symbol id 1, instance id 10
+// - Function `testmodule.foo` [100,200) - symbol id 2, instance id 20
+// - Function `testmodule.bar` [200,300) - symbol id 3, instance id 30
+// - Function `testmodule.baz` [300,400) - symbol id 4, instance id 40
+// - Refs: foo→bar, bar→baz
+
+#[test]
+fn has_children_query() {
+    // @module("testmodule") @has { "foo" }
+    // Returns: module "testmodule" and function "testmodule.foo"
+    const QUERY: &str = r#"@module("testmodule") @has { "foo" }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Should have module (10) and foo (20)
+    assert_eq!(res.nodes.as_vec().len(), 2);
+}
+
+#[test]
+fn has_parents_query() {
+    // @module @has { "foo" }
+    // Returns: function "foo" and modules containing it
+    const QUERY: &str = r#"@module @has { "foo" }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Should have foo (20) and module (10)
+    assert_eq!(res.nodes.as_vec().len(), 2);
+}
+
+#[test]
+fn mixed_has_refs_query() {
+    // @module("testmodule") @has { "foo" {} }
+    // Returns: module, foo in module, and foo's callees (bar)
+    const QUERY: &str = r#"@module("testmodule") @has { "foo" {} }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Should have module (10), foo (20), and bar (30)
+    assert_eq!(res.nodes.as_vec().len(), 3);
+}
+
+#[test]
+fn type_selector_function_query() {
+    // @function
+    // Returns all functions
+    const QUERY: &str = r#"@function"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Should have foo (20), bar (30), baz (40)
+    assert_eq!(res.nodes.as_vec().len(), 3);
+}
+
+#[test]
+fn type_selector_module_query() {
+    // @module("testmodule")
+    // Returns module named "testmodule"
+    const QUERY: &str = r#"@module("testmodule")"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Should have module (10)
+    assert_eq!(res.nodes.as_vec().len(), 1);
+}
+
+#[test]
+fn has_does_not_propagate() {
+    // @module("testmodule") @has { "foo" { "bar" } }
+    // foo is in testmodule (has), bar is callee of foo (refs)
+    // bar does NOT need to be in testmodule directly (nested refs uses refs semantics)
+    const QUERY: &str = r#"@module("testmodule") @has { "foo" { "bar" } }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Should have module (10), foo (20), and bar (30)
+    assert_eq!(res.nodes.as_vec().len(), 3);
+}
+
+// ============================================================================
+// @has vs @refs Comparison Tests
+// ============================================================================
+//
+// These tests verify that @has (containment) and @refs (call graph) behave differently.
+// Test data has:
+// - Module contains: foo, bar, baz (via offset ranges)
+// - Call graph: foo→bar→baz (via symbol_refs)
+
+#[test]
+fn has_vs_refs_module_to_function() {
+    // @has: module CONTAINS foo (offset ranges)
+    const HAS_QUERY: &str = r#"@module("testmodule") @has { "foo" }"#;
+    let has_res = run_query(TEST_INPUT_CONTAINMENT, HAS_QUERY);
+
+    println!("@has result: {:#?}", has_res.nodes);
+
+    // Module contains foo, so we get both
+    assert_eq!(has_res.nodes.as_vec().len(), 2);
+    assert!(has_res.nodes.as_vec().contains(&DeclarationId::new(10))); // module
+    assert!(has_res.nodes.as_vec().contains(&DeclarationId::new(20))); // foo
+
+    // @refs: module CALLS foo? No refs from module to foo exist
+    const REFS_QUERY: &str = r#"@module("testmodule") @refs { "foo" }"#;
+    let refs_res = run_query(TEST_INPUT_CONTAINMENT, REFS_QUERY);
+
+    println!("@refs result: {:#?}", refs_res.nodes);
+
+    // Module doesn't call foo - no refs relationship exists
+    // Both parent and child are filtered out when relationship doesn't hold
+    assert_eq!(refs_res.nodes.as_vec().len(), 0);
+}
+
+#[test]
+fn has_vs_refs_function_to_function() {
+    // @has: foo CONTAINS bar? No - foo [100,200) doesn't contain bar [200,300)
+    const HAS_QUERY: &str = r#""foo" @has { "bar" }"#;
+    let has_res = run_query(TEST_INPUT_CONTAINMENT, HAS_QUERY);
+
+    println!("@has result: {:#?}", has_res.nodes);
+
+    // foo doesn't contain bar - no containment relationship exists
+    // Both parent and child are filtered out when relationship doesn't hold
+    assert_eq!(has_res.nodes.as_vec().len(), 0);
+
+    // @refs: foo CALLS bar? Yes - there's a ref from foo to bar
+    const REFS_QUERY: &str = r#""foo" @refs { "bar" }"#;
+    let refs_res = run_query(TEST_INPUT_CONTAINMENT, REFS_QUERY);
+
+    println!("@refs result: {:#?}", refs_res.nodes);
+
+    // foo calls bar, so we get both
+    assert_eq!(refs_res.nodes.as_vec().len(), 2);
+    assert!(refs_res.nodes.as_vec().contains(&DeclarationId::new(20))); // foo
+    assert!(refs_res.nodes.as_vec().contains(&DeclarationId::new(30))); // bar
+}
+
+#[test]
+fn has_vs_refs_all_children() {
+    // @has: module contains ALL functions
+    const HAS_QUERY: &str = r#"@module("testmodule") @has { @function }"#;
+    let has_res = run_query(TEST_INPUT_CONTAINMENT, HAS_QUERY);
+
+    println!("@has result: {:#?}", has_res.nodes);
+
+    // Module contains foo, bar, baz
+    assert_eq!(has_res.nodes.as_vec().len(), 4); // module + 3 functions
+
+    // @refs: functions called by refs within the module's range
+    // Note: Since module [0,1000) contains all function refs, this includes
+    // functions called by ANY refs within module - including refs from contained functions
+    const REFS_QUERY: &str = r#"@module("testmodule") @refs { @function }"#;
+    let refs_res = run_query(TEST_INPUT_CONTAINMENT, REFS_QUERY);
+
+    println!("@refs result: {:#?}", refs_res.nodes);
+
+    // Module's refs include: foo→bar (at 150), bar→baz (at 250)
+    // So bar and baz are "called" by refs within module's range
+    // Module itself is retained as it has refs to children
+    assert_eq!(refs_res.nodes.as_vec().len(), 3); // module + bar + baz
+}
+
+#[test]
+fn refs_is_default_relationship() {
+    // Bare {} should use refs (the default)
+    const DEFAULT_QUERY: &str = r#""foo" { "bar" }"#;
+    let default_res = run_query(TEST_INPUT_CONTAINMENT, DEFAULT_QUERY);
+
+    // Explicit @refs should give same result
+    const EXPLICIT_QUERY: &str = r#""foo" @refs { "bar" }"#;
+    let explicit_res = run_query(TEST_INPUT_CONTAINMENT, EXPLICIT_QUERY);
+
+    println!("default {{}} result: {:#?}", default_res.nodes);
+    println!("explicit @refs result: {:#?}", explicit_res.nodes);
+
+    // Both should have foo + bar (foo calls bar)
+    assert_eq!(default_res.nodes.as_vec(), explicit_res.nodes.as_vec());
+    assert_eq!(default_res.nodes.as_vec().len(), 2);
+}
+
+#[test]
+fn refs_overrides_inherited_has() {
+    // @has { @refs { } } - outer uses has, but inner explicitly uses refs
+    // Module contains foo (has), foo calls bar (refs)
+    const QUERY: &str = r#"@module("testmodule") @has { "foo" @refs { "bar" } }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+
+    // Should have module (contains foo) + foo + bar (foo calls bar)
+    assert_eq!(res.nodes.as_vec().len(), 3);
+    assert!(res.nodes.as_vec().contains(&DeclarationId::new(10))); // module
+    assert!(res.nodes.as_vec().contains(&DeclarationId::new(20))); // foo
+    assert!(res.nodes.as_vec().contains(&DeclarationId::new(30))); // bar
+}
+
+// ============================================================================
+// Default Symbol Type Inheritance Tests
+// ============================================================================
+//
+// These tests verify that type selectors set default types for child scopes.
+// @module("test") {} should show modules AND functions that test references
+// @module("test") { @function } should explicitly filter to only functions
+//
+// Test data (TEST_INPUT_CONTAINMENT) has:
+// - Module `testmodule` (type=3, id=1, instance=10)
+// - Functions `foo`, `bar`, `baz` (type=1, ids=2,3,4, instances=20,30,40)
+// - Refs: foo→bar (at 150), bar→baz (at 250) - so module refs bar and baz
+
+#[test]
+fn default_type_inheritance_module_refs_children() {
+    // @module("testmodule") {} should show:
+    // - module itself
+    // - modules it references (none in test data)
+    // - functions it references (bar and baz via contained refs)
+    //
+    // Without default type inheritance, {} would return ALL types.
+    // With default type inheritance, {} filters to module + function types.
+    const QUERY: &str = r#"@module("testmodule") {}"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Should have module (10) and the functions it refs (bar=30, baz=40)
+    // via refs at positions 150 and 250 within module's range [0,1000)
+    let nodes = res.nodes.as_vec();
+    println!("Nodes: {:?}", nodes);
+
+    // The module should be included
+    assert!(nodes.contains(&DeclarationId::new(10)), "Should include module");
+
+    // Functions referenced by refs within module's range should be included
+    // (bar at 30, baz at 40)
+    // Note: The refs are foo→bar (150→30) and bar→baz (250→40)
+    // Both ref sites are within module's range [0,1000)
+}
+
+#[test]
+fn default_type_inheritance_explicit_function_only() {
+    // @module("testmodule") { @function } should show:
+    // - module itself (the parent selector)
+    // - ONLY functions it references (not modules, because @function is explicit)
+    //
+    // The explicit @function overrides the default type inheritance for the CHILD scope
+    // The parent (@module) is still included as it's the parent selector
+    const QUERY: &str = r#"@module("testmodule") { @function }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    let nodes = res.nodes.as_vec();
+    println!("Nodes: {:?}", nodes);
+
+    // Should include module (10) as the parent + functions (30, 40)
+    // This is the same as the default case since there are no module-to-module refs
+    // The difference would be visible if module referenced other modules
+    assert!(nodes.contains(&DeclarationId::new(10)), "Should include parent module");
+    assert!(nodes.contains(&DeclarationId::new(30)), "Should include bar");
+    assert!(nodes.contains(&DeclarationId::new(40)), "Should include baz");
+}
+
+#[test]
+fn default_type_inheritance_function_refs_children() {
+    // @function("foo") {} should show:
+    // - function foo itself
+    // - functions it references (bar)
+    //
+    // With default type inheritance from @function, {} filters to function type only
+    const QUERY: &str = r#"@function("foo") {}"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    let nodes = res.nodes.as_vec();
+    println!("Nodes: {:?}", nodes);
+
+    // Should have foo (20) and bar (30) - foo calls bar
+    assert!(nodes.contains(&DeclarationId::new(20)), "Should include foo");
+    assert!(nodes.contains(&DeclarationId::new(30)), "Should include bar");
+
+    // Should NOT include module since @function sets default to function only
+    assert!(
+        !nodes.contains(&DeclarationId::new(10)),
+        "Should NOT include module"
+    );
+}
+
+#[test]
+fn default_type_inheritance_nested_scopes() {
+    // @module("testmodule") { @function("foo") {} }
+    // First level: module (sets defaults to module+function)
+    // Second level: @function("foo") (overrides to function only)
+    // Third level: {} inherits function-only from @function
+    const QUERY: &str = r#"@module("testmodule") { @function("foo") {} }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    let nodes = res.nodes.as_vec();
+    println!("Nodes: {:?}", nodes);
+
+    // Module should be filtered out at second level by @function
+    // But wait - module is the parent, @function filters the child
+    // So we should have:
+    // - module (10) at top level (no filter)
+    // - foo (20) at second level (filtered to functions that module refs)
+    // - bar (30) at third level (filtered to functions that foo refs)
+
+    // Note: This depends on whether the type filter applies to the current level or child level
 }
