@@ -6,7 +6,7 @@ use sqlx::{
     Pool, Sqlite,
 };
 #[cfg(feature = "legacy-sqlite")]
-use std::{path::Path, str::FromStr};
+use std::str::FromStr;
 
 use crate::symbols::{
     DeclarationId, FileId, ModuleId, Occurrence, ProjectId, SymbolId, SymbolScope, SymbolType,
@@ -175,7 +175,7 @@ pub struct DeclarationFull {
 
 #[cfg(feature = "legacy-sqlite")]
 pub struct Index {
-    pool: SqlitePool,
+    _pool: SqlitePool,
 }
 
 #[cfg(feature = "legacy-sqlite")]
@@ -185,7 +185,7 @@ impl Index {
 
         let pool = SqlitePool::connect_with(options).await?;
 
-        Ok(Self { pool })
+        Ok(Self { _pool: pool })
     }
 
     async fn create_tables(_pool: &Pool<Sqlite>) -> Result<()> {
@@ -202,7 +202,7 @@ impl Index {
 
         Self::create_tables(&pool).await?;
 
-        Ok(Self { pool })
+        Ok(Self { _pool: pool })
     }
 
     pub async fn new_or_connect(database: &str) -> Result<Self> {
@@ -217,131 +217,135 @@ impl Index {
 
         Self::create_tables(&pool).await?;
 
-        Ok(Self { pool })
+        Ok(Self { _pool: pool })
     }
 
     pub const TEST_INPUT_A: &'static str = "test_input_a.sql";
     pub const TEST_INPUT_B: &'static str = "test_input_b.sql";
     pub const TEST_INPUT_MODULES: &'static str = "test_input_modules.sql";
 
-    pub async fn create_or_get_module(&self, module_name: &str) -> Result<ModuleId> {
-        let rec = sqlx::query!(
-            r#"
-            SELECT id AS "module_id?: ModuleId"
-            FROM modules
-            WHERE module_name = ?1
-            "#,
-            module_name
-        )
-        .fetch_optional(&self.pool)
-        .await?;
+    pub async fn create_or_get_module(&self, _module_name: &str) -> Result<ModuleId> {
+        unimplemented!();
 
-        if let Some(rec) = rec {
-            return Ok(rec.module_id.unwrap());
-        }
+        // let rec = sqlx::query!(
+        //     r#"
+        //     SELECT id AS "module_id?: ModuleId"
+        //     FROM modules
+        //     WHERE module_name = ?1
+        //     "#,
+        //     module_name
+        // )
+        // .fetch_optional(&self.pool)
+        // .await?;
 
-        let module_id = sqlx::query!(
-            r#"
-            INSERT INTO modules (module_name)
-            VALUES (?1)
-            "#,
-            module_name,
-        )
-        .execute(&self.pool)
-        .await?
-        .last_insert_rowid();
+        // if let Some(rec) = rec {
+        //     return Ok(rec.module_id.unwrap());
+        // }
 
-        Ok(module_id.into())
+        // let module_id = sqlx::query!(
+        //     r#"
+        //     INSERT INTO modules (module_name)
+        //     VALUES (?1)
+        //     "#,
+        //     module_name,
+        // )
+        // .execute(&self.pool)
+        // .await?
+        // .last_insert_rowid();
+
+        // Ok(module_id.into())
     }
 
     pub async fn create_or_get_fileid(
         &self,
-        module: ModuleId,
-        module_relative_path: &str,
-        file_string: &str,
-        file_type: &str,
+        _module: ModuleId,
+        _module_relative_path: &str,
+        _file_string: &str,
+        _file_type: &str,
     ) -> Result<FileId> {
-        let path_in_root = Path::new(module_relative_path).join(file_string);
+        unimplemented!();
+        // let path_in_root = Path::new(module_relative_path).join(file_string);
 
-        let filesystem_path = if !file_string.starts_with("/") {
-            path_in_root.as_os_str().to_str().unwrap()
-        } else {
-            file_string
-        };
+        // let filesystem_path = if !file_string.starts_with("/") {
+        //     path_in_root.as_os_str().to_str().unwrap()
+        // } else {
+        //     file_string
+        // };
 
-        let rec = sqlx::query!(
-            r#"
-            SELECT id AS "file_id?: FileId"
-            FROM files
-            WHERE module = ?1 AND module_path = ?2
-            "#,
-            module,
-            module_relative_path
-        )
-        .fetch_optional(&self.pool)
-        .await?;
+        // let rec = sqlx::query!(
+        //     r#"
+        //     SELECT id AS "file_id?: FileId"
+        //     FROM files
+        //     WHERE module = ?1 AND module_path = ?2
+        //     "#,
+        //     module,
+        //     module_relative_path
+        // )
+        // .fetch_optional(&self.pool)
+        // .await?;
 
-        if let Some(rec) = rec {
-            return Ok(rec.file_id.unwrap());
-        }
+        // if let Some(rec) = rec {
+        //     return Ok(rec.file_id.unwrap());
+        // }
 
-        let file_id = sqlx::query!(
-            r#"
-            INSERT INTO files (module, module_path, filesystem_path, filetype)
-            VALUES (?1, ?2, ?3, ?4)
-            "#,
-            module,
-            module_relative_path,
-            filesystem_path,
-            file_type,
-        )
-        .execute(&self.pool)
-        .await?
-        .last_insert_rowid();
+        // let file_id = sqlx::query!(
+        //     r#"
+        //     INSERT INTO files (module, module_path, filesystem_path, filetype)
+        //     VALUES (?1, ?2, ?3, ?4)
+        //     "#,
+        //     module,
+        //     module_relative_path,
+        //     filesystem_path,
+        //     file_type,
+        // )
+        // .execute(&self.pool)
+        // .await?
+        // .last_insert_rowid();
 
-        Ok(file_id.into())
+        // Ok(file_id.into())
     }
 
     pub async fn insert_symbol(
         &self,
-        name: &str,
-        module: ModuleId,
-        scope: SymbolScope,
+        _name: &str,
+        _module: ModuleId,
+        _scope: SymbolScope,
     ) -> Result<Symbol> {
-        let rec = sqlx::query_as!(
-            Symbol,
-            r#"
-                SELECT id, name, module AS "module: ModuleId", symbol_scope
-                FROM symbols
-                WHERE name = ? AND module = ? AND symbol_scope = ?
-                "#,
-            name,
-            module,
-            scope
-        )
-        .fetch_optional(&self.pool)
-        .await?;
+        unimplemented!();
+        // let rec = sqlx::query_as!(
+        //     Symbol,
+        //     r#"
+        //         SELECT id, name, module AS "module: ModuleId", symbol_scope
+        //         FROM symbols
+        //         WHERE name = ? AND module = ? AND symbol_scope = ?
+        //         "#,
+        //     name,
+        //     module,
+        //     scope
+        // )
+        // .fetch_optional(&self.pool)
+        // .await?;
 
-        if let Some(symbol) = rec {
-            return Ok(symbol);
-        }
+        // if let Some(symbol) = rec {
+        //     return Ok(symbol);
+        // }
 
-        let rec = sqlx::query!(
-            r#"
-            INSERT INTO symbols(name, module, symbol_scope)
-            VALUES (?1, ?2, ?3)
-            RETURNING id
-            "#,
-            name,
-            module,
-            scope
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        // let rec = sqlx::query!(
+        //     r#"
+        //     INSERT INTO symbols(name, module, symbol_scope)
+        //     VALUES (?1, ?2, ?3)
+        //     RETURNING id
+        //     "#,
+        //     name,
+        //     module,
+        //     scope
+        // )
+        // .fetch_one(&self.pool)
+        // .await?;
 
-        let id: SymbolId = rec.id.into();
-        let new_symbol = Symbol::new(id, name, module, scope);
-        return Ok(new_symbol);
+        // let id: SymbolId = rec.id.into();
+        // let new_symbol = Symbol::new(id, name, module, scope);
+        // return Ok(new_symbol);
     }
 
     pub async fn add_declaration(&self, _declaration: Declaration) -> Result<Declaration> {
@@ -421,17 +425,19 @@ impl Index {
     }
 
     pub async fn all_symbols(&self) -> Result<Vec<Symbol>> {
-        let symbols: Vec<Symbol> = sqlx::query_as!(
-            Symbol,
-            r#"
-            SELECT id, name, module, symbol_scope
-            FROM symbols
-            "#
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        unimplemented!();
 
-        Ok(symbols)
+        // let symbols: Vec<Symbol> = sqlx::query_as!(
+        //     Symbol,
+        //     r#"
+        //     SELECT id, name, module, symbol_scope
+        //     FROM symbols
+        //     "#
+        // )
+        // .fetch_all(&self.pool)
+        // .await?;
+
+        // Ok(symbols)
     }
 
     pub async fn all_declarations(&self) -> Result<Vec<Declaration>> {
@@ -466,52 +472,58 @@ impl Index {
     }
 
     pub async fn all_modules(&self) -> Result<Vec<Module>> {
-        let files: Vec<Module> = sqlx::query_as!(
-            Module,
-            r#"
-            SELECT *
-            FROM modules
-            "#
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        unimplemented!();
 
-        Ok(files)
+        // let files: Vec<Module> = sqlx::query_as!(
+        //     Module,
+        //     r#"
+        //     SELECT *
+        //     FROM modules
+        //     "#
+        // )
+        // .fetch_all(&self.pool)
+        // .await?;
+
+        // Ok(files)
     }
 
     pub async fn all_files(&self) -> Result<Vec<File>> {
-        let files: Vec<File> = sqlx::query_as!(
-            File,
-            r#"
-            SELECT id, module, module_path, filesystem_path, filetype, content_hash
-            FROM files
-            "#
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        unimplemented!();
 
-        Ok(files)
+        // let files: Vec<File> = sqlx::query_as!(
+        //     File,
+        //     r#"
+        //     SELECT id, module, module_path, filesystem_path, filetype, content_hash
+        //     FROM files
+        //     "#
+        // )
+        // .fetch_all(&self.pool)
+        // .await?;
+
+        // Ok(files)
     }
 
     pub async fn all_refs(&self) -> Result<Vec<Reference>> {
-        let references: Vec<Reference> = sqlx::query_as!(
-            Reference,
-            r#"
-            SELECT from_decls.id as "from_decl!: DeclarationId",
-                   symbol_refs.to_symbol as "to_symbol: SymbolId",
-                   symbol_refs.from_file as "from_file: FileId",
-                   symbol_refs.from_offset_start,
-                   symbol_refs.from_offset_end
-            FROM symbol_refs
-            JOIN declarations AS from_decls
-              ON symbol_refs.from_file = from_decls.file_id
-             AND from_decls.start_offset <= symbol_refs.from_offset_start
-             AND from_decls.end_offset >= symbol_refs.from_offset_end
-            "#
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        unimplemented!();
 
-        Ok(references)
+        // let references: Vec<Reference> = sqlx::query_as!(
+        //     Reference,
+        //     r#"
+        //     SELECT from_decls.id as "from_decl!: DeclarationId",
+        //            symbol_refs.to_symbol as "to_symbol: SymbolId",
+        //            symbol_refs.from_file as "from_file: FileId",
+        //            symbol_refs.from_offset_start,
+        //            symbol_refs.from_offset_end
+        //     FROM symbol_refs
+        //     JOIN declarations AS from_decls
+        //       ON symbol_refs.from_file = from_decls.file_id
+        //      AND from_decls.start_offset <= symbol_refs.from_offset_start
+        //      AND from_decls.end_offset >= symbol_refs.from_offset_end
+        //     "#
+        // )
+        // .fetch_all(&self.pool)
+        // .await?;
+
+        // Ok(references)
     }
 }
