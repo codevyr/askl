@@ -98,7 +98,7 @@ type ParentDeclOn = Eq<
 pub type ParentsQuery<'a> = BoxedSelectStatement<
     'a,
     ParentSelectionTuple,
-    FromClause<SymbolRefSymbolInstanceParentInstanceJoin>,
+    FromClause<SymbolRefSymbolInstanceParentInstanceParentSymbolJoin>,
     Pg,
 >;
 
@@ -426,7 +426,6 @@ impl CompoundNameMixin {
 
 impl SymbolSearchMixin for CompoundNameMixin {
     fn enter(&mut self, _connection: &mut Connection) -> Result<()> {
-        println!("Searching for symbols by lquery: {:?}", self.lquery);
         Ok(())
     }
 
@@ -498,6 +497,76 @@ impl SymbolSearchMixin for CompoundNameMixin {
     }
 }
 
+/// ExactNameMixin - filters symbols by exact name match.
+/// Used for directory and file selectors where paths should match exactly.
+#[derive(Debug, Clone)]
+pub struct ExactNameMixin {
+    pub name: String,
+}
+
+impl ExactNameMixin {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+        }
+    }
+}
+
+impl SymbolSearchMixin for ExactNameMixin {
+    fn enter(&mut self, _connection: &mut Connection) -> Result<()> {
+        Ok(())
+    }
+
+    fn filter_current<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: CurrentQuery<'a>,
+    ) -> Result<CurrentQuery<'a>> {
+        use index_schema::symbols;
+        let name = self.name.clone();
+        Ok(query.filter(symbols::dsl::name.eq(name)))
+    }
+
+    fn filter_parents<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: ParentsQuery<'a>,
+    ) -> Result<ParentsQuery<'a>> {
+        use index_schema::symbols;
+        let name = self.name.clone();
+        Ok(query.filter(symbols::dsl::name.eq(name)))
+    }
+
+    fn filter_children<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: ChildrenQuery<'a>,
+    ) -> Result<ChildrenQuery<'a>> {
+        let name = self.name.clone();
+        Ok(query.filter(PARENT_SYMBOLS_ALIAS.field(index_schema::symbols::dsl::name).eq(name)))
+    }
+
+    fn filter_has_parents<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: HasParentsQuery<'a>,
+    ) -> Result<HasParentsQuery<'a>> {
+        use index_schema::symbols;
+        let name = self.name.clone();
+        Ok(query.filter(symbols::dsl::name.eq(name)))
+    }
+
+    fn filter_has_children<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: HasChildrenQuery<'a>,
+    ) -> Result<HasChildrenQuery<'a>> {
+        use index_schema::symbols;
+        let name = self.name.clone();
+        Ok(query.filter(symbols::dsl::name.eq(name)))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DeclarationIdMixin {
     pub decl_ids: Vec<i32>,
@@ -513,7 +582,6 @@ impl DeclarationIdMixin {
 
 impl SymbolSearchMixin for DeclarationIdMixin {
     fn enter(&mut self, _connection: &mut Connection) -> Result<()> {
-        println!("Searching for symbols by decl_id: {:?}", self.decl_ids);
         Ok(())
     }
 
@@ -601,3 +669,10 @@ impl SymbolSearchMixin for ProjectFilterMixin {
         Ok(query.filter(projects::dsl::project_name.eq(self.project_name.clone())))
     }
 }
+
+/// Symbol type constants
+pub const SYMBOL_TYPE_FUNCTION: i32 = 1;
+pub const SYMBOL_TYPE_FILE: i32 = 2;
+pub const SYMBOL_TYPE_MODULE: i32 = 3;
+pub const SYMBOL_TYPE_DIRECTORY: i32 = 4;
+

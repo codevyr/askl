@@ -4,13 +4,37 @@ INSERT INTO projects (id, project_name, root_path)
 VALUES
     (1, 'test_project', '/test_project');
 
-INSERT INTO directories (id, project_id, parent_id, path)
-VALUES (1, 1, NULL, '/');
+-- directories table has been removed - directories are now symbols
 
-INSERT INTO objects (id, project_id, directory_id, module_path, filesystem_path, filetype, content_hash)
+INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, content_hash)
 VALUES
-    (1, 1, 1, 'main.c', '/main.c', 'cc', '');
+    (1, 1, 'main.c', '/main.c', 'cc', '');
 
+-- Sentinel object for "/" directory
+INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, content_hash)
+VALUES (2, 1, '/', '/', 'directory', '');
+
+-- File symbol (type=2)
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
+VALUES (100, '/main.c', 1, 2, NULL);
+
+-- Directory symbol (type=4)
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
+VALUES (101, '/', 1, 4, NULL);
+
+-- File instance
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
+VALUES (1001, 100, 1, int4range(0, 1000));
+
+-- Directory self-instance on sentinel object
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
+VALUES (1002, 101, 2, int4range(0, 0));
+
+-- Directory instance on /main.c for containment
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
+VALUES (1003, 101, 1, int4range(0, 1000));
+
+-- Function symbols (type=1)
 INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
 VALUES
     (1, 'foo', 1, 1, 1),

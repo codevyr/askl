@@ -28,7 +28,7 @@ pub struct SymbolInstance {
 pub struct Object {
     pub id: i32,
     pub project_id: i32,
-    pub directory_id: i32,
+    // directory_id removed - directories are now symbols
     pub module_path: String,
     pub filesystem_path: String,
     pub filetype: String,

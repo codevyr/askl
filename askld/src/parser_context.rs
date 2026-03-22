@@ -13,11 +13,10 @@ use std::{
     sync::Arc,
 };
 
-/// Symbol type IDs for default symbol type inheritance
-pub const SYMBOL_TYPE_FUNCTION: i32 = 1;
-pub const SYMBOL_TYPE_FILE: i32 = 2;
-pub const SYMBOL_TYPE_MODULE: i32 = 3;
-pub const SYMBOL_TYPE_DIRECTORY: i32 = 4;
+// Re-export symbol type constants from the index crate (single source of truth)
+pub use index::db_diesel::{
+    SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FILE, SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MODULE,
+};
 
 #[derive(Debug)]
 pub enum ScopeFactory {
@@ -50,6 +49,9 @@ pub struct ParserContext {
     /// Set by type selectors (@module, @function, etc.) to [parent_type, function_type].
     /// When a child scope has no explicit type selector, it will filter by these types.
     default_symbol_types: RefCell<Option<Vec<i32>>>,
+    /// Whether a relationship modifier (@has or @refs) was explicitly used in this context.
+    /// Used to distinguish inherited @has from explicit @has in nested scopes.
+    has_relationship_modifier: RefCell<bool>,
 }
 
 impl ParserContext {
@@ -63,6 +65,7 @@ impl ParserContext {
             scope_factory: Some(scope_factory),
             relationship_type: RefCell::new(RelationshipType::Refs),
             default_symbol_types: RefCell::new(None),
+            has_relationship_modifier: RefCell::new(false),
         })
     }
 
@@ -77,6 +80,8 @@ impl ParserContext {
             relationship_type: RefCell::new(from.get_relationship_type()),
             // Inherit default symbol types from parent context
             default_symbol_types: RefCell::new(from.get_default_symbol_types()),
+            // Don't inherit - each context tracks its own modifiers
+            has_relationship_modifier: RefCell::new(false),
         })
     }
 
@@ -123,7 +128,7 @@ impl ParserContext {
     pub fn command(&self, span: Span) -> Command {
         let mut command = self.command.take();
         if command.selectors().count() == 0 {
-            command.extend(UnitVerb::new(span));
+            command.extend(UnitVerb::new(span.clone()));
         }
         command
     }
@@ -142,14 +147,27 @@ impl ParserContext {
         self.source.clone()
     }
 
-    /// Set the relationship type for statements created in this context.
-    pub fn set_relationship_type(&self, rel_type: RelationshipType) {
+    /// Set the relationship type explicitly from a verb (@has or @refs).
+    /// Marks that a relationship modifier was used, affecting child scope behavior.
+    pub fn set_relationship_type_explicit(&self, rel_type: RelationshipType) {
+        *self.relationship_type.borrow_mut() = rel_type;
+        *self.has_relationship_modifier.borrow_mut() = true;
+    }
+
+    /// Set the relationship type as a default/inherited value.
+    /// Does NOT mark as explicit modifier - used for scope transitions and inheritance.
+    pub fn set_relationship_type_default(&self, rel_type: RelationshipType) {
         *self.relationship_type.borrow_mut() = rel_type;
     }
 
     /// Get the relationship type for statements created in this context.
     pub fn get_relationship_type(&self) -> RelationshipType {
         *self.relationship_type.borrow()
+    }
+
+    /// Check if a relationship modifier (@has or @refs) was explicitly used.
+    pub fn has_relationship_modifier(&self) -> bool {
+        *self.has_relationship_modifier.borrow()
     }
 
     /// Set the default symbol types for child scopes.

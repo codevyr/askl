@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::symbols::{
     DeclarationId, FileId, Occurrence, SymbolId, SymbolScope, SymbolType,
@@ -120,29 +118,6 @@ impl Selection {
         self.nodes.iter().map(|node| node.symbol_instance.id).collect()
     }
 
-    /// Remove any references to symbol instances that are no longer in the selection
-    pub fn prune_references(&mut self) {
-        let selection = self;
-
-        let node_instance_ids: HashSet<_> = selection
-            .nodes
-            .iter()
-            .map(|s| DeclarationId::new(s.symbol_instance.id))
-            .collect();
-        selection
-            .parents
-            .retain(|c| node_instance_ids.contains(&DeclarationId::new(c.to_instance.id)));
-        selection
-            .children
-            .retain(|c| node_instance_ids.contains(&DeclarationId::new(c.from_instance.id)));
-        // Prune containment relationships
-        selection
-            .has_parents
-            .retain(|c| node_instance_ids.contains(&DeclarationId::new(c.child_instance.id)));
-        selection
-            .has_children
-            .retain(|c| node_instance_ids.contains(&DeclarationId::new(c.parent_instance.id)));
-    }
 }
 
 impl std::fmt::Debug for Selection {

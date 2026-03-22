@@ -369,7 +369,6 @@ impl Selector for UserVerb {
 
         selector_state_with(&mut ctx.registry, self, |state| {
             state.selection = selection;
-            state.prune_references();
         });
         Ok(NotificationResult::new(true, vec![]))
     }

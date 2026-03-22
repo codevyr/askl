@@ -236,54 +236,67 @@ impl SelectorState {
                     self.constrain_by_owner(dependency);
                 }
             }
-            self.prune_references();
         }
 
         let len_after = self.selection.as_ref().unwrap().nodes.len();
         len_before != len_after
     }
 
-    /// Constrain by reference-based parent (I am a child, parent calls me)
+    /// Constrain by reference-based parent (I am a child, parent calls me).
+    /// Only counts relationship entries where the other end (parent) still exists
+    /// in the parent's current nodes — stale entries from pruned nodes are ignored.
     fn constrain_by_ref_parent(&mut self, parent: &Selection) {
+        let parent_node_ids: std::collections::HashSet<_> =
+            parent.nodes.iter().map(|n| n.symbol_instance.id).collect();
         let selection = self.selection.as_mut().unwrap();
         selection.nodes.retain(|s| {
-            parent
-                .children
-                .iter()
-                .any(|r| r.symbol_instance.id == s.symbol_instance.id)
+            parent.children.iter().any(|r| {
+                r.symbol_instance.id == s.symbol_instance.id
+                    && parent_node_ids.contains(&r.from_instance.id)
+            })
         });
     }
 
-    /// Constrain by reference-based child (I am a parent, child is called by me)
+    /// Constrain by reference-based child (I am a parent, child is called by me).
+    /// Only counts relationship entries where the other end (child) still exists
+    /// in the child's current nodes.
     fn constrain_by_ref_child(&mut self, child: &Selection) {
+        let child_node_ids: std::collections::HashSet<_> =
+            child.nodes.iter().map(|n| n.symbol_instance.id).collect();
         let selection = self.selection.as_mut().unwrap();
         selection.nodes.retain(|s| {
-            child
-                .parents
-                .iter()
-                .any(|r| r.from_instance.id == s.symbol_instance.id)
+            child.parents.iter().any(|r| {
+                r.from_instance.id == s.symbol_instance.id
+                    && child_node_ids.contains(&r.to_instance.id)
+            })
         });
     }
 
-    /// Constrain by containment-based parent (I am contained by parent)
+    /// Constrain by containment-based parent (I am contained by parent).
+    /// Only counts relationship entries where the parent still exists in parent's nodes.
     fn constrain_by_has_parent(&mut self, parent: &Selection) {
+        let parent_node_ids: std::collections::HashSet<_> =
+            parent.nodes.iter().map(|n| n.symbol_instance.id).collect();
         let selection = self.selection.as_mut().unwrap();
         selection.nodes.retain(|s| {
-            parent
-                .has_children
-                .iter()
-                .any(|r| r.child_instance.id == s.symbol_instance.id)
+            parent.has_children.iter().any(|r| {
+                r.child_instance.id == s.symbol_instance.id
+                    && parent_node_ids.contains(&r.parent_instance.id)
+            })
         });
     }
 
-    /// Constrain by containment-based child (I contain the child)
+    /// Constrain by containment-based child (I contain the child).
+    /// Only counts relationship entries where the child still exists in child's nodes.
     fn constrain_by_has_child(&mut self, child: &Selection) {
+        let child_node_ids: std::collections::HashSet<_> =
+            child.nodes.iter().map(|n| n.symbol_instance.id).collect();
         let selection = self.selection.as_mut().unwrap();
         selection.nodes.retain(|s| {
-            child
-                .has_parents
-                .iter()
-                .any(|r| r.parent_instance.id == s.symbol_instance.id)
+            child.has_parents.iter().any(|r| {
+                r.parent_instance.id == s.symbol_instance.id
+                    && child_node_ids.contains(&r.child_instance.id)
+            })
         });
     }
 
@@ -297,11 +310,6 @@ impl SelectorState {
         });
     }
 
-    fn prune_references(&mut self) {
-        if let Some(selection) = &mut self.selection {
-            selection.prune_references();
-        }
-    }
 }
 
 pub type SelectorId = usize;
@@ -458,7 +466,81 @@ pub trait Selector: std::fmt::Debug + Verb {
 
         selector_state_with(&mut ctx.registry, self, |state| {
             state.selection = selection;
-            state.prune_references();
+        });
+        Ok(NotificationResult::new(true, vec![]))
+    }
+
+    /// Like accept_notification but takes a pre-built Selection instead of a Statement.
+    /// Used when constraining/deriving a parent from the merged union of all children.
+    async fn accept_notification_from_selection(
+        &self,
+        ctx: &mut ExecutionContext,
+        index: &Index,
+        selector_filters: &[&dyn Filter],
+        dependency: &Selection,
+        role: DependencyRole,
+        rel_type: RelationshipType,
+    ) -> Result<NotificationResult, pest::error::Error<Rule>> {
+        let mut changed = false;
+        let (constrained, warnings) = selector_state_with(&mut ctx.registry, self, |state| {
+            if state.selection.is_some() {
+                changed = state.constrain_selection(dependency, role, rel_type);
+                let mut warnings = vec![];
+                if changed && state.selection.as_ref().unwrap().nodes.is_empty() {
+                    warnings.push(Error::new_from_span(
+                        CustomError {
+                            message: format!(
+                                "Statement did not match any symbols after applying constraints from children.",
+                            ),
+                        },
+                        self.span(),
+                    ));
+                }
+                (true, warnings)
+            } else {
+                (false, vec![])
+            }
+        });
+
+        if constrained {
+            return Ok(NotificationResult::new(changed, warnings));
+        }
+
+        // Derivation path: derive parent's selection from merged children.
+        let decl_ids: Vec<DeclarationId> = match (role, rel_type) {
+            (DependencyRole::Parent, RelationshipType::Refs) => dependency
+                .parents
+                .iter()
+                .map(|p| DeclarationId::new(p.from_instance.id))
+                .unique()
+                .collect(),
+            (DependencyRole::Parent, RelationshipType::Has) => dependency
+                .has_parents
+                .iter()
+                .map(|p| DeclarationId::new(p.parent_instance.id))
+                .unique()
+                .collect(),
+            _ => return Ok(NotificationResult::new(false, vec![])),
+        };
+
+        let mut selection = self
+            .find_symbol_by_declid(index, selector_filters, &decl_ids)
+            .await
+            .map_err(|e| {
+                Error::new_from_span(
+                    CustomError {
+                        message: format!("Failed to derive selection: {}", e),
+                    },
+                    self.span(),
+                )
+            })?;
+
+        selector_filters.iter().for_each(|f| {
+            f.filter(&mut selection);
+        });
+
+        selector_state_with(&mut ctx.registry, self, |state| {
+            state.selection = Some(selection);
         });
         Ok(NotificationResult::new(true, vec![]))
     }
@@ -557,12 +639,12 @@ pub trait Selector: std::fmt::Debug + Verb {
         selector_filters: &[&dyn Filter],
         parent: &Statement,
     ) -> Result<Option<Selection>> {
-        let parent = match parent.get_selection(&ctx) {
+        let parent_sel = match parent.get_selection(&ctx) {
             Some(selection) => selection,
             None => return Ok(None),
         };
         // Get the child instance IDs from the parent's has_children
-        let decl_ids = parent
+        let decl_ids = parent_sel
             .has_children
             .iter()
             .map(|p| DeclarationId::new(p.child_instance.id))

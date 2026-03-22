@@ -8,17 +8,44 @@ VALUES
     (1, 'test_project', '/test_project'),
     (2, 'other_project', '/other_project');
 
-INSERT INTO directories (id, project_id, parent_id, path)
-VALUES
-    (1, 1, NULL, '/'),
-    (2, 2, NULL, '/');
+-- directories table has been removed - directories are now symbols
 
-INSERT INTO objects (id, project_id, directory_id, module_path, filesystem_path, filetype, content_hash)
+INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, content_hash)
 VALUES
-    (1, 1, 1, 'main.c', '/main.c', 'cc', ''),
-    (2, 1, 1, 'bar.c', '/bar.c', 'cc', ''),
-    (3, 1, 1, 'main.c', '/other_main.c', 'cc', ''),
-    (4, 2, 2, 'main.c', '/project_only_main.c', 'cc', '');
+    (1, 1, 'main.c', '/main.c', 'cc', ''),
+    (2, 1, 'bar.c', '/bar.c', 'cc', ''),
+    (3, 1, 'main.c', '/other_main.c', 'cc', ''),
+    (4, 2, 'main.c', '/project_only_main.c', 'cc', '');
+
+-- File symbols (type=2)
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
+VALUES
+    (500, '/main.c', 1, 2, NULL),
+    (501, '/bar.c', 1, 2, NULL),
+    (502, '/other_main.c', 1, 2, NULL),
+    (503, '/project_only_main.c', 2, 2, NULL);
+
+-- Directory symbols (type=4)
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
+VALUES
+    (510, '/', 1, 4, NULL),
+    (511, '/', 2, 4, NULL);
+
+-- File symbol instances
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
+VALUES
+    (5001, 500, 1, int4range(0, 10000)),
+    (5011, 501, 2, int4range(0, 10000)),
+    (5021, 502, 3, int4range(0, 10000)),
+    (5031, 503, 4, int4range(0, 10000));
+
+-- Directory symbol instances
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
+VALUES
+    (5100, 510, 1, int4range(0, 10000)),
+    (5101, 510, 2, int4range(0, 10000)),
+    (5102, 510, 3, int4range(0, 10000)),
+    (5110, 511, 4, int4range(0, 10000));
 
 -- Symbols are now project-scoped. For the "module filter" tests, we use symbol names
 -- that include a module-like prefix (e.g., "test.a", "other.a") to simulate modules.

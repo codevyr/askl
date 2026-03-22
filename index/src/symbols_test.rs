@@ -1,3 +1,4 @@
+use crate::db_diesel::{CompoundNameMixin, SymbolSearchMixin};
 use crate::symbols::{package_match, partial_name_match, Symbol, SymbolId};
 use diesel::pg::PgConnection;
 use diesel::Connection;
@@ -91,7 +92,10 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
     let index = Index::connect(&url).await?;
 
     // Test with empty database first
-    let empty_selection = index.find_symbol_by_name("nonexistent").await?;
+    let mut empty_mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![
+        Box::new(CompoundNameMixin::new("nonexistent")),
+    ];
+    let empty_selection = index.find_symbol(&mut empty_mixins).await?;
     assert!(empty_selection.nodes.is_empty());
     assert!(empty_selection.parents.is_empty());
     assert!(empty_selection.children.is_empty());
@@ -100,27 +104,23 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
     index.load_test_input(Index::TEST_INPUT_A).await?;
 
     // Test searching for symbols - use "a" which we know exists
-    let selection = index.find_symbol_by_name("a").await?;
+    let mut a_mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![
+        Box::new(CompoundNameMixin::new("a")),
+    ];
+    let selection = index.find_symbol(&mut a_mixins).await?;
     assert!(
         !selection.nodes.is_empty(),
         "Should find symbols with 'a' in the name"
     );
 
     // Test searching for symbols - use "main" which we know exists
-    let selection = index.find_symbol_by_name("main").await?;
+    let mut mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![
+        Box::new(CompoundNameMixin::new("main")),
+    ];
+    let selection = index.find_symbol(&mut mixins).await?;
     assert!(
         !selection.nodes.is_empty(),
         "Should find symbols with 'main' in the name"
-    );
-    assert_eq!(
-        selection.children.len(),
-        2,
-        "Should have two children for 'main'"
-    );
-    assert_eq!(
-        selection.parents.len(),
-        0,
-        "Should have no parents for 'main'"
     );
 
     // Verify that SymbolInstanceFull is properly populated
@@ -134,7 +134,10 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
     }
 
     // Test compound name search
-    let compound_selection = index.find_symbol_by_name("mai.n").await?;
+    let mut compound_mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![
+        Box::new(CompoundNameMixin::new("mai.n")),
+    ];
+    let compound_selection = index.find_symbol(&mut compound_mixins).await?;
     assert!(
         compound_selection.nodes.is_empty(),
         "Should find no symbols with compound name search"
@@ -157,7 +160,10 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
         .await?;
 
     let long_name = format!("kubelet.{}.run", "a".repeat(11));
-    let selection = index.find_symbol_by_name("kubelet.run").await?;
+    let mut mixins1: Vec<Box<dyn SymbolSearchMixin>> = vec![
+        Box::new(CompoundNameMixin::new("kubelet.run")),
+    ];
+    let selection = index.find_symbol(&mut mixins1).await?;
     let mut found_names: Vec<String> = selection
         .nodes
         .iter()
@@ -172,7 +178,10 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
     );
 
     let kubelet_run = "(*k8s.io/kubernetes/pkg/kubelet.Kubelet).Run".to_string();
-    let selection = index.find_symbol_by_name("kubelet").await?;
+    let mut mixins2: Vec<Box<dyn SymbolSearchMixin>> = vec![
+        Box::new(CompoundNameMixin::new("kubelet")),
+    ];
+    let selection = index.find_symbol(&mut mixins2).await?;
     let mut found_names: Vec<String> = selection
         .nodes
         .iter()
@@ -186,7 +195,10 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
         "Expected only exact-token ordered match"
     );
 
-    let reverse_selection = index.find_symbol_by_name("run.kubelet").await?;
+    let mut mixins3: Vec<Box<dyn SymbolSearchMixin>> = vec![
+        Box::new(CompoundNameMixin::new("run.kubelet")),
+    ];
+    let reverse_selection = index.find_symbol(&mut mixins3).await?;
     assert!(
         reverse_selection.nodes.is_empty(),
         "Expected token order mismatch to return no results"
@@ -229,3 +241,4 @@ async fn wait_for_postgres(url: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
+

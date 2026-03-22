@@ -11,7 +11,7 @@ use crate::statement::Statement;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    CompoundNameMixin, IgnoreFilterMixin, Index, ParentReference,
+    CompoundNameMixin, ExactNameMixin, IgnoreFilterMixin, Index, ParentReference,
     ProjectFilterMixin, Selection, SymbolSearchMixin,
 };
 use index::models_diesel::SymbolRef;
@@ -150,6 +150,9 @@ impl Selector for NameSelector {
     ) -> Result<Option<Selection>> {
         let mut search_mixins = search_mixins;
         search_mixins.push(Box::new(CompoundNameMixin::new(&self.name)));
+        // Type filtering is handled by DefaultTypeFilter added in statement.rs.
+        // NameSelector does not add its own type filter to avoid conflicting
+        // with inherited default types from parent scopes.
         let selection = cfg.index.find_symbol(&mut search_mixins).await?;
         Ok(Some(selection))
     }
@@ -218,6 +221,7 @@ impl Selector for ForcedVerb {
     ) -> Result<Option<Selection>> {
         let mut search_mixins = search_mixins;
         search_mixins.push(Box::new(CompoundNameMixin::new(&self.name)));
+        // Type filtering is handled by DefaultTypeFilter added in statement.rs.
         let selection = cfg.index.find_symbol(&mut search_mixins).await?;
 
         // Cache the forced selection so derivations can fabricate the
@@ -248,10 +252,6 @@ impl Selector for ForcedVerb {
         let mut normal_selection = match cached_selection {
             Some(selection) => selection,
             None => {
-                println!(
-                    "ForcedVerb: No symbols found with name {}",
-                    self.name.as_str()
-                );
                 return Ok(Some(Selection::new()));
             }
         };
@@ -616,7 +616,7 @@ impl Verb for HasModifier {
 
     /// The @has verb consumes itself by setting the relationship type in the parser context
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.set_relationship_type(RelationshipType::Has);
+        ctx.set_relationship_type_explicit(RelationshipType::Has);
         Ok(true) // consumed - don't add to command
     }
 }
@@ -661,7 +661,7 @@ impl Verb for RefsModifier {
 
     /// The @refs verb consumes itself by setting the relationship type in the parser context
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.set_relationship_type(RelationshipType::Refs);
+        ctx.set_relationship_type_explicit(RelationshipType::Refs);
         Ok(true) // consumed - don't add to command
     }
 }
@@ -673,12 +673,43 @@ impl Display for RefsModifier {
 }
 
 /// TypeSelector - selects symbols by type (@function, @file, @module, @directory)
-/// Optionally filters by name pattern
+///
+/// # Behavior Modes
+///
+/// - **Filter mode** (`filter_only=true`): Returns `None` from `select_from_all`,
+///   forcing derivation from parent. Much more efficient when used inside `@has { }`.
+///   At root level (no parent), returns empty results.
+///
+/// - **Selector mode** (`filter_only=false`): Queries all symbols of this type
+///   from the database. Works at any level including root.
+///
+/// # Default Behavior
+///
+/// The default is optimized for performance - querying all symbols of a type
+/// can be expensive, so filter mode is preferred when possible:
+///
+/// - `@function` (no args) → filter mode
+/// - `@function("foo")` (with name) → selector mode
+/// - `@function(filter="true")` → explicitly filter mode
+/// - `@function(filter="false")` → explicitly selector mode (select all)
+/// - `@function("foo", filter="true")` → filter mode even with name
+///
+/// # Examples
+///
+/// ```text
+/// @file("main.go") @has { @function }     // filter: derives functions from file
+/// @function("main")                        // selector: queries for "main" function
+/// @function(filter="false")                // selector: queries ALL functions
+/// @function                                // filter: empty at root, derives in @has
+/// ```
 #[derive(Debug)]
 pub(super) struct TypeSelector {
     span: Span,
     symbol_type_id: i32,
     name_pattern: Option<String>,
+    /// If true, don't select from all - only act as a filter when deriving from parent.
+    /// This is much more efficient for queries like `@file @has { @function }`.
+    filter_only: bool,
 }
 
 impl TypeSelector {
@@ -690,15 +721,49 @@ impl TypeSelector {
     pub fn new(
         span: Span,
         positional: &Vec<String>,
-        _named: &HashMap<String, String>,
+        named: &HashMap<String, String>,
         symbol_type_id: i32,
     ) -> Result<Arc<dyn Verb>> {
         let name_pattern = positional.first().cloned();
+
+        // Check for explicit filter argument (true or false)
+        let explicit_filter = named.get("filter").map(|v| v.eq_ignore_ascii_case("true"));
+
+        // Default: filter mode if no name pattern, selector mode if name provided
+        // Can be overridden with explicit filter="true" or filter="false"
+        let filter_only = match explicit_filter {
+            Some(true) => true,   // filter="true" forces filter mode
+            Some(false) => false, // filter="false" forces selector mode
+            None => name_pattern.is_none(), // default based on name presence
+        };
+
         Ok(Arc::new(Self {
             span,
             symbol_type_id,
             name_pattern,
+            filter_only,
         }))
+    }
+
+    /// Build search mixins for this type selector.
+    /// Used by both `get_filter_mixins` and `select_from_all_impl` to avoid duplication.
+    fn build_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
+        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![
+            Box::new(SymbolTypeMixin::new(self.symbol_type_id)),
+        ];
+        if let Some(ref name) = self.name_pattern {
+            // Use exact name matching for directory and file types (path-based names)
+            // Use fuzzy lquery matching for function and module types
+            match self.symbol_type_id {
+                SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE => {
+                    mixins.push(Box::new(ExactNameMixin::new(name)));
+                }
+                _ => {
+                    mixins.push(Box::new(CompoundNameMixin::new(name)));
+                }
+            }
+        }
+        mixins
     }
 }
 
@@ -721,6 +786,10 @@ impl Verb for TypeSelector {
         Ok(self)
     }
 
+    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
+        Ok(self)
+    }
+
     /// Set default symbol types for child scopes.
     /// When @module is used, children should include both module and function types by default.
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
@@ -738,6 +807,12 @@ impl Verb for TypeSelector {
     }
 }
 
+impl Filter for TypeSelector {
+    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
+        self.build_mixins()
+    }
+}
+
 #[async_trait(?Send)]
 impl Selector for TypeSelector {
     async fn select_from_all_impl(
@@ -746,11 +821,14 @@ impl Selector for TypeSelector {
         cfg: &ControlFlowGraph,
         search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
     ) -> Result<Option<Selection>> {
-        let mut search_mixins = search_mixins;
-        search_mixins.push(Box::new(SymbolTypeMixin::new(self.symbol_type_id)));
-        if let Some(ref name) = self.name_pattern {
-            search_mixins.push(Box::new(CompoundNameMixin::new(name)));
+        // In filter mode, don't query all symbols - wait for derivation from parent.
+        // This is much more efficient for queries like `@file @has { @function }`.
+        if self.filter_only {
+            return Ok(None);
         }
+
+        let mut search_mixins = search_mixins;
+        search_mixins.extend(self.build_mixins());
         let selection = cfg.index.find_symbol(&mut search_mixins).await?;
         Ok(Some(selection))
     }
@@ -867,7 +945,15 @@ impl Display for DefaultTypeFilter {
     }
 }
 
-/// DefaultSymbolTypeMixin - filters symbols by multiple type IDs (OR condition)
+/// DefaultSymbolTypeMixin - filters symbols by multiple type IDs (OR condition).
+///
+/// Applied to all five query axes:
+/// - `filter_current`: constrains which symbols this command matches
+/// - `filter_parents`/`filter_children`: constrains the *caller* side of refs queries
+///   to this command's types. This is intentional — by default, only functions appear
+///   as callers. To see module-level refs, use `@module { "foo" }` which sets the
+///   inherited default types to [MODULE, FUNCTION].
+/// - `filter_has_parents`/`filter_has_children`: constrains containment queries
 #[derive(Debug, Clone)]
 pub struct DefaultSymbolTypeMixin {
     pub symbol_type_ids: Vec<i32>,
@@ -888,10 +974,46 @@ impl SymbolSearchMixin for DefaultSymbolTypeMixin {
         use diesel::prelude::*;
         use index::schema_diesel::symbols;
 
-        // Clone to avoid lifetime issues with eq_any
         let types = self.symbol_type_ids.clone();
-        // Filter by any of the symbol types (OR condition)
         Ok(query.filter(symbols::dsl::symbol_type.eq_any(types)))
+    }
+
+    /// Filter parent_symbols in the parents query (who calls me) to this command's types.
+    /// This ensures only instances of matching types can "own" refs.
+    fn filter_parents<'a>(
+        &self,
+        _connection: &mut index::db_diesel::Connection,
+        query: index::db_diesel::mixins::ParentsQuery<'a>,
+    ) -> anyhow::Result<index::db_diesel::mixins::ParentsQuery<'a>> {
+        use diesel::prelude::*;
+        use index::db_diesel::mixins::PARENT_SYMBOLS_ALIAS;
+        use index::schema_diesel::symbols;
+
+        let types = self.symbol_type_ids.clone();
+        Ok(query.filter(
+            PARENT_SYMBOLS_ALIAS
+                .field(symbols::dsl::symbol_type)
+                .eq_any(types),
+        ))
+    }
+
+    /// Filter parent_symbols in the children query (my callees) to this command's types.
+    /// This ensures only instances of matching types can "own" refs.
+    fn filter_children<'a>(
+        &self,
+        _connection: &mut index::db_diesel::Connection,
+        query: index::db_diesel::mixins::ChildrenQuery<'a>,
+    ) -> anyhow::Result<index::db_diesel::mixins::ChildrenQuery<'a>> {
+        use diesel::prelude::*;
+        use index::db_diesel::mixins::PARENT_SYMBOLS_ALIAS;
+        use index::schema_diesel::symbols;
+
+        let types = self.symbol_type_ids.clone();
+        Ok(query.filter(
+            PARENT_SYMBOLS_ALIAS
+                .field(symbols::dsl::symbol_type)
+                .eq_any(types),
+        ))
     }
 
     fn filter_has_parents<'a>(
@@ -918,3 +1040,5 @@ impl SymbolSearchMixin for DefaultSymbolTypeMixin {
         Ok(query.filter(symbols::dsl::symbol_type.eq_any(types)))
     }
 }
+
+
