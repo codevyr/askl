@@ -134,24 +134,27 @@ struct DirectoryChildRow {
     compact_path: Option<String>,
 }
 
+/// Single name column from a query.
 #[derive(Debug, QueryableByName)]
-struct DirectoryChildStatsRow {
+struct NameRow {
     #[diesel(sql_type = diesel::sql_types::Text)]
-    path: String,
-    #[diesel(sql_type = diesel::sql_types::BigInt)]
-    child_dir_count: i64,
-    #[diesel(sql_type = diesel::sql_types::BigInt)]
-    file_count: i64,
+    name: String,
 }
 
+/// Generic boolean result from an EXISTS query.
 #[derive(Debug, QueryableByName)]
-struct DirectoryWalkRow {
+struct ExistsRow {
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    exists: bool,
+}
+
+/// Per-directory child counts for determining has_children and compact eligibility.
+#[derive(Debug, QueryableByName)]
+struct ChildCountsRow {
     #[diesel(sql_type = diesel::sql_types::BigInt)]
-    child_dir_count: i64,
+    dir_count: i64,
     #[diesel(sql_type = diesel::sql_types::BigInt)]
     file_count: i64,
-    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
-    child_path: Option<String>,
 }
 
 // DirectoryPathRow removed - directories are now symbols
@@ -427,13 +430,12 @@ impl IndexStore {
                 return Ok(ProjectTreeResult::NotDirectory);
             }
 
-            let directories = load_directory_children_with_compact(
+            let (directories, files) = load_tree_children(
                 &mut conn,
                 project_id,
                 &normalized,
                 compact,
             )?;
-            let files = load_file_children(&mut conn, project_id, &normalized)?;
 
             let mut nodes = Vec::with_capacity(directories.len() + files.len());
             for row in directories {
@@ -445,7 +447,7 @@ impl IndexStore {
                     has_children: row.has_children,
                     file_id: None,
                     filetype: None,
-                    compact_path: if compact { row.compact_path } else { None },
+                    compact_path: row.compact_path,
                 });
             }
 
@@ -504,210 +506,184 @@ impl IndexStore {
     }
 }
 
-fn load_directory_children_with_compact(
+/// Load direct child directories and files for a given parent path.
+/// Uses individual per-directory queries with static LIKE prefixes so that
+/// PostgreSQL uses the fast composite btree index (project_id, symbol_type,
+/// name text_pattern_ops) instead of falling back to the slow trigram index.
+fn load_tree_children(
     conn: &mut PgConnection,
     project_id: i32,
     parent_path: &str,
     compact: bool,
-) -> Result<Vec<DirectoryChildRow>, StoreError> {
-    // Find child directories: directories whose name starts with parent_path
-    // and have exactly one more path component than parent_path
-    //
-    // Example: If parent_path is "/src", child directories are:
-    // - /src/lib (depth 2 when parent is depth 1)
-    // - /src/util (depth 2)
-    // But NOT /src/lib/sub (depth 3)
-    //
-    // Query: find directory symbols that:
-    // 1. Belong to this project
-    // 2. Have type DIRECTORY (4)
-    // 3. Name starts with parent_path (or equals "/" for root children)
-    // 4. Have depth = parent_depth + 1
-    // Find direct child directories: starts_with(name, parent || '/') and no extra slash
-    let rows = diesel::sql_query(
-        r#"
-        WITH child_dirs AS (
-            SELECT s.id, s.name as path
-            FROM index.symbols s
-            WHERE s.project_id = $1
-              AND s.symbol_type = 4
-              AND starts_with(s.name, $2)
-              AND s.name != $2
-              AND (
-                  CASE WHEN $2 = '/' THEN
-                      position('/' IN substring(s.name FROM 2)) = 0
-                  ELSE
-                      position('/' IN substring(s.name FROM length($2) + 2)) = 0
-                  END
-              )
-        ),
-        grandchild_dirs AS (
-            SELECT cd.id AS parent_id, COUNT(DISTINCT s2.id) AS child_dir_count
-            FROM child_dirs cd
-            JOIN index.symbols s2 ON s2.project_id = $1
-                AND s2.symbol_type = 4
-                AND starts_with(s2.name, cd.path || '/')
-                AND position('/' IN substring(s2.name FROM length(cd.path) + 2)) = 0
-            GROUP BY cd.id
-        ),
-        child_files AS (
-            SELECT cd.id AS parent_id, COUNT(DISTINCT o.id) AS file_count
-            FROM child_dirs cd
-            JOIN index.symbols fs ON fs.project_id = $1
-                AND fs.symbol_type = 2
-                AND starts_with(fs.name, cd.path || '/')
-                AND position('/' IN substring(fs.name FROM length(cd.path) + 2)) = 0
-            JOIN index.symbol_instances si ON si.symbol = fs.id
-            JOIN index.objects o ON o.id = si.object_id
-            GROUP BY cd.id
-        )
-        SELECT cd.path,
-            COALESCE(gd.child_dir_count, 0) AS child_dir_count,
-            COALESCE(cf.file_count, 0) AS file_count
-        FROM child_dirs cd
-        LEFT JOIN grandchild_dirs gd ON gd.parent_id = cd.id
-        LEFT JOIN child_files cf ON cf.parent_id = cd.id
-        ORDER BY cd.path
-        "#,
-    )
-    .bind::<diesel::sql_types::Integer, _>(project_id)
-    .bind::<diesel::sql_types::Text, _>(if parent_path == "/" {
+) -> Result<(Vec<DirectoryChildRow>, Vec<FileChildRow>), StoreError> {
+    let prefix = if parent_path == "/" {
         "/".to_string()
     } else {
         format!("{}/", parent_path)
-    })
-    .load::<DirectoryChildStatsRow>(conn)?;
+    };
 
-    let mut children = Vec::with_capacity(rows.len());
-    for row in rows {
-        let has_children = row.child_dir_count > 0 || row.file_count > 0;
-        let compact_path = if compact && row.file_count == 0 && row.child_dir_count == 1 {
-            compute_compact_path(conn, project_id, &row.path)?
+    // 1. Get direct child directories (depth-1 under parent).
+    //    Uses composite index via static LIKE $2||'%'.
+    let child_dir_names: Vec<String> = diesel::sql_query(
+        r#"
+        SELECT s.name
+        FROM index.symbols s
+        WHERE s.project_id = $1
+          AND s.symbol_type = 4
+          AND s.name LIKE $2 || '%'
+          AND s.name != $2
+          AND position('/' IN substring(s.name FROM length($2) + 1)) = 0
+        ORDER BY s.name
+        "#,
+    )
+    .bind::<diesel::sql_types::Integer, _>(project_id)
+    .bind::<diesel::sql_types::Text, _>(&prefix)
+    .load::<NameRow>(conn)?
+    .into_iter()
+    .map(|r| r.name)
+    .collect();
+
+    // 2. For each child dir, get child counts with individual queries.
+    //    Each query uses the composite index (~0.1ms each).
+    //    Counts enable both has_children and compact eligibility checks.
+    let mut dir_children = Vec::with_capacity(child_dir_names.len());
+    for dir_name in &child_dir_names {
+        let child_prefix = format!("{}/", dir_name);
+        let counts = query_child_counts(conn, project_id, &child_prefix)?;
+        let has_children = counts.dir_count > 0 || counts.file_count > 0;
+
+        // Only compute compact path for eligible dirs (exactly 1 subdir, 0 files).
+        let compact_path = if compact && counts.dir_count == 1 && counts.file_count == 0 {
+            compute_compact_path(conn, project_id, &dir_name)?
         } else {
             None
         };
-        children.push(DirectoryChildRow {
-            path: row.path,
+
+        dir_children.push(DirectoryChildRow {
+            path: dir_name.clone(),
             has_children,
             compact_path,
         });
     }
 
-    Ok(children)
+    // 4. Get direct child files.
+    let files = load_file_children(conn, project_id, &prefix)?;
+
+    Ok((dir_children, files))
 }
 
-fn compute_compact_path(
+/// Query direct child dir count and file count under a prefix.
+fn query_child_counts(
     conn: &mut PgConnection,
     project_id: i32,
-    start_path: &str,
-) -> Result<Option<String>, StoreError> {
-    let mut current_path = start_path.to_string();
-    let mut last_path = None;
-    loop {
-        let row = load_directory_walk_row(conn, project_id, &current_path)?;
-        if row.file_count != 0 || row.child_dir_count != 1 {
-            break;
-        }
-        let child_path = match row.child_path {
-            Some(path) => path,
-            None => break,
-        };
-        last_path = Some(child_path.clone());
-        current_path = child_path;
-    }
-    Ok(last_path)
-}
-
-fn load_directory_walk_row(
-    conn: &mut PgConnection,
-    project_id: i32,
-    dir_path: &str,
-) -> Result<DirectoryWalkRow, StoreError> {
-    // Query child directory count and file count for a directory path
-    // using symbol-based lookups instead of directories table
-    // Note: This function is only called for non-root directories (from compute_compact_path)
-    // so we don't need the root '/' special case here
-    let query = r#"
+    child_prefix: &str,
+) -> Result<ChildCountsRow, StoreError> {
+    let row = diesel::sql_query(
+        r#"
         SELECT
-            -- Count child directories
-            (SELECT COUNT(DISTINCT s.id)
-             FROM index.symbols s
-             WHERE s.project_id = $1
-               AND s.symbol_type = 4
-               AND starts_with(s.name, $2 || '/')
-               AND position('/' IN substring(s.name FROM length($2) + 2)) = 0
-            ) AS child_dir_count,
-            -- Count files directly in this directory
-            (SELECT COUNT(DISTINCT fs.id)
-             FROM index.symbols fs
-             WHERE fs.project_id = $1
-               AND fs.symbol_type = 2
-               AND starts_with(fs.name, $2 || '/')
-               AND position('/' IN substring(fs.name FROM length($2) + 2)) = 0
-            ) AS file_count,
-            -- Get first child directory path
-            (SELECT s.name
-             FROM index.symbols s
-             WHERE s.project_id = $1
-               AND s.symbol_type = 4
-               AND starts_with(s.name, $2 || '/')
-               AND position('/' IN substring(s.name FROM length($2) + 2)) = 0
-             ORDER BY s.name
-             LIMIT 1
-            ) AS child_path
-    "#;
-
-    let row = diesel::sql_query(query)
-        .bind::<diesel::sql_types::Integer, _>(project_id)
-        .bind::<diesel::sql_types::Text, _>(dir_path)
-        .get_result::<DirectoryWalkRow>(conn)?;
+            (SELECT COUNT(*) FROM index.symbols s
+             WHERE s.project_id = $1 AND s.symbol_type = 4
+               AND s.name LIKE $2 || '%'
+               AND position('/' IN substring(s.name FROM length($2) + 1)) = 0
+            ) AS dir_count,
+            (SELECT COUNT(*) FROM index.symbols s
+             WHERE s.project_id = $1 AND s.symbol_type = 2
+               AND s.name LIKE $2 || '%'
+               AND position('/' IN substring(s.name FROM length($2) + 1)) = 0
+            ) AS file_count
+        "#,
+    )
+    .bind::<diesel::sql_types::Integer, _>(project_id)
+    .bind::<diesel::sql_types::Text, _>(child_prefix)
+    .get_result::<ChildCountsRow>(conn)?;
     Ok(row)
 }
 
+/// Walk down a chain of single-child-no-files directories for compact display.
+/// Returns the deepest directory path in the chain, or None if no compaction.
+/// Caller should only invoke this for dirs with exactly 1 subdir and 0 files.
+fn compute_compact_path(
+    conn: &mut PgConnection,
+    project_id: i32,
+    dir_path: &str,
+) -> Result<Option<String>, StoreError> {
+    let mut current = dir_path.to_string();
+    for _ in 0..20 {
+        let child_prefix = format!("{}/", current);
+
+        // Get up to 2 child dirs — we only need to know if there's exactly 1.
+        let child_dirs: Vec<NameRow> = diesel::sql_query(
+            r#"
+            SELECT s.name
+            FROM index.symbols s
+            WHERE s.project_id = $1
+              AND s.symbol_type = 4
+              AND s.name LIKE $2 || '%'
+              AND position('/' IN substring(s.name FROM length($2) + 1)) = 0
+            LIMIT 2
+            "#,
+        )
+        .bind::<diesel::sql_types::Integer, _>(project_id)
+        .bind::<diesel::sql_types::Text, _>(&child_prefix)
+        .load(conn)?;
+
+        if child_dirs.len() != 1 {
+            break;
+        }
+
+        // Check for any direct child files
+        let has_files = diesel::sql_query(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM index.symbols s
+                WHERE s.project_id = $1
+                  AND s.symbol_type = 2
+                  AND s.name LIKE $2 || '%'
+                  AND position('/' IN substring(s.name FROM length($2) + 1)) = 0
+            ) AS exists
+            "#,
+        )
+        .bind::<diesel::sql_types::Integer, _>(project_id)
+        .bind::<diesel::sql_types::Text, _>(&child_prefix)
+        .get_result::<ExistsRow>(conn)?;
+
+        let single_child = child_dirs.into_iter().next().unwrap().name;
+        if has_files.exists {
+            // Has files — stop compaction but include this dir
+            current = single_child;
+            break;
+        }
+        current = single_child;
+    }
+
+    if current != dir_path {
+        Ok(Some(current))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Load direct child files under a parent prefix.
 fn load_file_children(
     conn: &mut PgConnection,
     project_id: i32,
-    parent_path: &str,
+    parent_prefix: &str,
 ) -> Result<Vec<FileChildRow>, StoreError> {
-    // Find files directly in this directory
-    // Files are identified by FILE symbols (type=2) whose name is parent_path/filename
-    // where filename has no '/' in it
-    // Handle root '/' specially: files like '/main.go' have no slash after position 1
-    let query = if parent_path == "/" {
+    let rows = diesel::sql_query(
         r#"
-            SELECT DISTINCT o.id, o.filesystem_path AS path, o.filetype
-            FROM index.objects o
-            JOIN index.symbols fs ON fs.name = o.filesystem_path
-            WHERE fs.project_id = $1
-              AND fs.symbol_type = 2
-              AND fs.name LIKE '/%'
-              AND fs.name != '/'
-              AND position('/' IN substring(fs.name FROM 2)) = 0
-            ORDER BY o.filesystem_path
-        "#
-    } else {
-        r#"
-            SELECT DISTINCT o.id, o.filesystem_path AS path, o.filetype
-            FROM index.objects o
-            JOIN index.symbols fs ON fs.name = o.filesystem_path
-            WHERE fs.project_id = $1
-              AND fs.symbol_type = 2
-              AND starts_with(fs.name, $2 || '/')
-              AND position('/' IN substring(fs.name FROM length($2) + 2)) = 0
-            ORDER BY o.filesystem_path
-        "#
-    };
-
-    let rows = if parent_path == "/" {
-        diesel::sql_query(query)
-            .bind::<diesel::sql_types::Integer, _>(project_id)
-            .load::<FileChildRow>(conn)?
-    } else {
-        diesel::sql_query(query)
-            .bind::<diesel::sql_types::Integer, _>(project_id)
-            .bind::<diesel::sql_types::Text, _>(parent_path)
-            .load::<FileChildRow>(conn)?
-    };
+        SELECT DISTINCT o.id, o.filesystem_path AS path, o.filetype
+        FROM index.objects o
+        JOIN index.symbols fs ON fs.name = o.filesystem_path
+        WHERE fs.project_id = $1
+          AND fs.symbol_type = 2
+          AND fs.name LIKE $2 || '%'
+          AND position('/' IN substring(fs.name FROM length($2) + 1)) = 0
+        ORDER BY o.filesystem_path
+        "#,
+    )
+    .bind::<diesel::sql_types::Integer, _>(project_id)
+    .bind::<diesel::sql_types::Text, _>(parent_prefix)
+    .load::<FileChildRow>(conn)?;
     Ok(rows)
 }
 
