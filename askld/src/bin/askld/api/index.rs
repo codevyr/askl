@@ -2,6 +2,7 @@ use actix_web::{delete, get, http::header, web, HttpRequest, HttpResponse, Respo
 use askld::auth::AuthIdentity;
 use askld::index_store::{IndexStore, ProjectTreeResult, StoreError, UploadError};
 use askld::proto::askl::index::Project;
+use futures::future::join_all;
 use log::{error, warn};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -187,12 +188,27 @@ pub async fn get_project_tree(
         }
     };
 
+    // Process all expand paths concurrently
+    let expand_futures: Vec<_> = query
+        .expand
+        .iter()
+        .map(|expand_path| {
+            let store = store.clone();
+            let expand_path = expand_path.clone();
+            let project_id = *project_id;
+            async move {
+                let result = store
+                    .list_project_tree(project_id, &expand_path, compact)
+                    .await;
+                (expand_path, result)
+            }
+        })
+        .collect();
+    let expand_results = join_all(expand_futures).await;
+
     let mut expanded = std::collections::HashMap::new();
-    for expand_path in &query.expand {
-        let nodes = match store
-            .list_project_tree(*project_id, expand_path, compact)
-            .await
-        {
+    for (expand_path, result) in expand_results {
+        let nodes = match result {
             Ok(ProjectTreeResult::Nodes(nodes)) => nodes,
             Ok(ProjectTreeResult::ProjectNotFound) => {
                 return HttpResponse::NotFound().body("Project not found");
@@ -209,7 +225,7 @@ pub async fn get_project_tree(
                 return HttpResponse::InternalServerError().body("Failed to load project tree");
             }
         };
-        expanded.insert(expand_path.clone(), nodes);
+        expanded.insert(expand_path, nodes);
     }
 
     let response = TreeResponse {
