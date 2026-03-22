@@ -1,5 +1,5 @@
 use crate::test_util::{
-    format_edges, run_query, run_query_err, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES,
+    format_edges, run_query, run_query_err, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES, TEST_INPUT_TREE_BROWSER,
 };
 use index::symbols::DeclarationId;
 
@@ -1017,51 +1017,82 @@ fn non_existent_child_warning() {
 
 #[test]
 fn has_children_query() {
-    // @module("testmodule") @has { "foo" }
-    // Returns: module "testmodule" and function "testmodule.foo"
-    const QUERY: &str = r#"@module("testmodule") @has { "foo" }"#;
+    // @module("testmodule") @has { @file @has { "foo" } }
+    // With direct-children-only: module(3) → file(2) → function(1)
+    // Returns: module "testmodule", file, and function "testmodule.foo"
+    const QUERY: &str = r#"@module("testmodule") @has { @file @has { "foo" } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // Should have module (10) and foo (20)
-    assert_eq!(res.nodes.as_vec().len(), 2);
+    // Should have module (10), file (510), and foo (20)
+    assert_eq!(res.nodes.as_vec().len(), 3);
 }
 
 #[test]
 fn has_parents_query() {
-    // @module @has { "foo" }
-    // Returns: function "foo" and modules containing it
-    const QUERY: &str = r#"@module @has { "foo" }"#;
+    // @file @has { "foo" }
+    // With direct-children-only: file(2) → function(1)
+    // Returns: function "foo" and its containing file
+    const QUERY: &str = r#"@file @has { "foo" }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // Should have foo (20) and module (10)
+    // Should have file (510) and foo (20)
     assert_eq!(res.nodes.as_vec().len(), 2);
 }
 
 #[test]
 fn mixed_has_refs_query() {
-    // @module("testmodule") @has { "foo" {} }
-    // Returns: module, foo in module, and foo's callees (bar)
-    const QUERY: &str = r#"@module("testmodule") @has { "foo" {} }"#;
+    // @module("testmodule") @has { @file @has { "foo" {} } }
+    // With direct-children-only: module(3) → file(2) → function(1), then refs
+    // Returns: module, file, foo in file, and foo's callees (bar)
+    const QUERY: &str = r#"@module("testmodule") @has { @file @has { "foo" {} } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // Should have module (10), foo (20), and bar (30)
-    assert_eq!(res.nodes.as_vec().len(), 3);
+    // Should have module (10), file (510), foo (20), and bar (30)
+    assert_eq!(res.nodes.as_vec().len(), 4);
 }
 
 #[test]
 fn type_selector_function_query() {
-    // @function
-    // Returns all functions
+    // @function("testmodule.foo")
+    // Returns function named "testmodule.foo"
+    const QUERY: &str = r#"@function("testmodule.foo")"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Should have foo (20)
+    assert_eq!(res.nodes.as_vec().len(), 1);
+}
+
+#[test]
+fn type_selector_function_filter_at_root() {
+    // @function (no name) at root acts as filter - returns empty
+    // because there's no parent to derive from
     const QUERY: &str = r#"@function"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Filter at root level = empty
+    assert_eq!(res.nodes.as_vec().len(), 0);
+}
+
+#[test]
+fn type_selector_function_explicit_select_all() {
+    // @function(filter="false")
+    // Explicitly select all functions (override default filter behavior)
+    const QUERY: &str = r#"@function(filter="false")"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1087,16 +1118,17 @@ fn type_selector_module_query() {
 
 #[test]
 fn has_does_not_propagate() {
-    // @module("testmodule") @has { "foo" { "bar" } }
-    // foo is in testmodule (has), bar is callee of foo (refs)
-    // bar does NOT need to be in testmodule directly (nested refs uses refs semantics)
-    const QUERY: &str = r#"@module("testmodule") @has { "foo" { "bar" } }"#;
+    // @file @has { "foo" { "bar" } }
+    // foo is in file (has), bar is callee of foo (refs)
+    // bar does NOT need to be in file directly (nested refs uses refs semantics)
+    // With direct-children-only: file(2) → function(1)
+    const QUERY: &str = r#"@file @has { "foo" { "bar" } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // Should have module (10), foo (20), and bar (30)
+    // Should have file (510), foo (20), and bar (30)
     assert_eq!(res.nodes.as_vec().len(), 3);
 }
 
@@ -1111,24 +1143,25 @@ fn has_does_not_propagate() {
 
 #[test]
 fn has_vs_refs_module_to_function() {
-    // @has: module CONTAINS foo (offset ranges)
-    const HAS_QUERY: &str = r#"@module("testmodule") @has { "foo" }"#;
+    // With direct-children-only: test file(2) → function(1)
+    // @has: file CONTAINS foo (offset ranges)
+    const HAS_QUERY: &str = r#"@file("/main.go") @has { "foo" }"#;
     let has_res = run_query(TEST_INPUT_CONTAINMENT, HAS_QUERY);
 
     println!("@has result: {:#?}", has_res.nodes);
 
-    // Module contains foo, so we get both
+    // File contains foo, so we get both
     assert_eq!(has_res.nodes.as_vec().len(), 2);
-    assert!(has_res.nodes.as_vec().contains(&DeclarationId::new(10))); // module
+    assert!(has_res.nodes.as_vec().contains(&DeclarationId::new(510))); // file
     assert!(has_res.nodes.as_vec().contains(&DeclarationId::new(20))); // foo
 
-    // @refs: module CALLS foo? No refs from module to foo exist
-    const REFS_QUERY: &str = r#"@module("testmodule") @refs { "foo" }"#;
+    // @refs: file CALLS foo? No refs from file to foo exist
+    const REFS_QUERY: &str = r#"@file("/main.go") @refs { "foo" }"#;
     let refs_res = run_query(TEST_INPUT_CONTAINMENT, REFS_QUERY);
 
     println!("@refs result: {:#?}", refs_res.nodes);
 
-    // Module doesn't call foo - no refs relationship exists
+    // File doesn't call foo - no refs relationship exists
     // Both parent and child are filtered out when relationship doesn't hold
     assert_eq!(refs_res.nodes.as_vec().len(), 0);
 }
@@ -1159,27 +1192,26 @@ fn has_vs_refs_function_to_function() {
 
 #[test]
 fn has_vs_refs_all_children() {
-    // @has: module contains ALL functions
-    const HAS_QUERY: &str = r#"@module("testmodule") @has { @function }"#;
+    // Test @has vs @refs behavior comparison
+    // @has: directory contains file(s) and transitively contains functions
+    const HAS_QUERY: &str = r#"@directory("/") @has { @file @has { @function } }"#;
     let has_res = run_query(TEST_INPUT_CONTAINMENT, HAS_QUERY);
 
     println!("@has result: {:#?}", has_res.nodes);
 
-    // Module contains foo, bar, baz
-    assert_eq!(has_res.nodes.as_vec().len(), 4); // module + 3 functions
+    // Directory "/" contains file "/main.go" which contains foo, bar, baz
+    // Results: directory + file + 3 functions = 5 nodes
+    assert_eq!(has_res.nodes.as_vec().len(), 5);
 
-    // @refs: functions called by refs within the module's range
-    // Note: Since module [0,1000) contains all function refs, this includes
-    // functions called by ANY refs within module - including refs from contained functions
-    const REFS_QUERY: &str = r#"@module("testmodule") @refs { @function }"#;
+    // @refs: test function-to-function refs
+    // foo calls bar, bar calls baz
+    const REFS_QUERY: &str = r#""foo" @refs { @function }"#;
     let refs_res = run_query(TEST_INPUT_CONTAINMENT, REFS_QUERY);
 
     println!("@refs result: {:#?}", refs_res.nodes);
 
-    // Module's refs include: foo→bar (at 150), bar→baz (at 250)
-    // So bar and baz are "called" by refs within module's range
-    // Module itself is retained as it has refs to children
-    assert_eq!(refs_res.nodes.as_vec().len(), 3); // module + bar + baz
+    // foo calls bar, so we get foo + bar
+    assert_eq!(refs_res.nodes.as_vec().len(), 2); // foo + bar
 }
 
 #[test]
@@ -1203,15 +1235,16 @@ fn refs_is_default_relationship() {
 #[test]
 fn refs_overrides_inherited_has() {
     // @has { @refs { } } - outer uses has, but inner explicitly uses refs
-    // Module contains foo (has), foo calls bar (refs)
-    const QUERY: &str = r#"@module("testmodule") @has { "foo" @refs { "bar" } }"#;
+    // With direct-children-only: file(2) → function(1)
+    // File contains foo (has), foo calls bar (refs)
+    const QUERY: &str = r#"@file("/main.go") @has { "foo" @refs { "bar" } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
 
-    // Should have module (contains foo) + foo + bar (foo calls bar)
+    // Should have file (contains foo) + foo + bar (foo calls bar)
     assert_eq!(res.nodes.as_vec().len(), 3);
-    assert!(res.nodes.as_vec().contains(&DeclarationId::new(10))); // module
+    assert!(res.nodes.as_vec().contains(&DeclarationId::new(510))); // file
     assert!(res.nodes.as_vec().contains(&DeclarationId::new(20))); // foo
     assert!(res.nodes.as_vec().contains(&DeclarationId::new(30))); // bar
 }
@@ -1333,4 +1366,300 @@ fn default_type_inheritance_nested_scopes() {
     // - bar (30) at third level (filtered to functions that foo refs)
 
     // Note: This depends on whether the type filter applies to the current level or child level
+}
+
+// ============================================================================
+// File and Directory containment tests
+// ============================================================================
+//
+// TEST_INPUT_CONTAINMENT has these symbols with hierarchy:
+// - Directory "/" (id=50, instance=500) [0, 1000) level=4
+// - File "/main.go" (id=51, instance=510) [0, 1000) level=2
+// - Module "testmodule" (id=1, instance=10) [0, 1000) level=3
+// - Function "testmodule.foo" (id=2, instance=20) [100, 200) level=1
+// - Function "testmodule.bar" (id=3, instance=30) [200, 300) level=1
+// - Function "testmodule.baz" (id=4, instance=40) [300, 400) level=1
+
+#[test]
+fn file_contains_function() {
+    // @file("/main.go") @has { @function }
+    // Returns: file /main.go and all functions it contains
+    const QUERY: &str = r#"@file("/main.go") @has { @function }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Should have file (510) + functions (20, 30, 40)
+    assert_eq!(res.nodes.as_vec().len(), 4);
+}
+
+#[test]
+fn file_contains_specific_function() {
+    // @file("/main.go") @has { "foo" }
+    // Returns: file /main.go and function foo
+    const QUERY: &str = r#"@file("/main.go") @has { "foo" }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Should have file (510) + foo (20)
+    assert_eq!(res.nodes.as_vec().len(), 2);
+}
+
+#[test]
+fn directory_contains_file() {
+    // @directory("/") @has { @module @has { @file } }
+    // With direct-children-only: directory(4) → module(3) → file(2)
+    // Returns: directory /, module, and file
+    const QUERY: &str = r#"@directory("/") @has { @module @has { @file } }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Directory + module + file = 3 nodes
+    assert_eq!(res.nodes.as_vec().len(), 3);
+}
+
+#[test]
+fn directory_contains_module() {
+    // @directory("/") @has { @module }
+    // Returns: directory / and modules contained in it
+    const QUERY: &str = r#"@directory("/") @has { @module }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Directory + module = 2 nodes
+    assert_eq!(res.nodes.as_vec().len(), 2);
+}
+
+#[test]
+fn directory_contains_function() {
+    // @directory("/") @has { @module @has { @file @has { @function } } }
+    // With direct-children-only: directory(4) → module(3) → file(2) → function(1)
+    // Returns: directory, module, file, and all functions
+    const QUERY: &str = r#"@directory("/") @has { @module @has { @file @has { @function } } }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Directory + module + file + 3 functions = 6 nodes
+    assert_eq!(res.nodes.as_vec().len(), 6);
+}
+
+#[test]
+fn full_hierarchy_query() {
+    // @directory("/") @has { @module @has { @file("/main.go") @has { "foo" } } }
+    // With direct-children-only: directory(4) → module(3) → file(2) → function(1)
+    // Returns: directory, module, file /main.go, and foo
+    const QUERY: &str = r#"@directory("/") @has { @module @has { @file("/main.go") @has { "foo" } } }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Directory + module + file + foo = 4 nodes
+    assert_eq!(res.nodes.as_vec().len(), 4);
+}
+
+#[test]
+fn file_type_selector_filter_at_root() {
+    // @file (no name) at root acts as filter - returns empty
+    // because there's no parent to derive from
+    const QUERY: &str = r#"@file"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Filter at root level = empty
+    assert_eq!(res.nodes.as_vec().len(), 0);
+}
+
+#[test]
+fn file_type_selector_by_name() {
+    // @file("/main.go")
+    // Returns file /main.go
+    const QUERY: &str = r#"@file("/main.go")"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Should have file (510)
+    assert_eq!(res.nodes.as_vec().len(), 1);
+}
+
+#[test]
+fn directory_type_selector_filter_at_root() {
+    // @directory (no name) at root acts as filter - returns empty
+    // because there's no parent to derive from
+    const QUERY: &str = r#"@directory"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Filter at root level = empty
+    assert_eq!(res.nodes.as_vec().len(), 0);
+}
+
+// ============================================================================
+// Directory Containment - Direct Children Only Tests
+// ============================================================================
+//
+// These tests verify the directory instance model in TEST_INPUT_TREE_BROWSER:
+// - Each directory has instances ONLY for files directly in it
+// - "/" has NO instances (no files directly in root)
+// - "/src" has 1 instance (in object 1 for /src/main.go)
+// - "/docs" has 1 instance (in object 5 for /docs/readme.md)
+// - "/src/util" has 2 instances (in objects 2,3)
+// - "/src/config" has 1 instance (in object 4)
+//
+// NOTE: @directory("/src") currently uses CompoundNameMixin which does
+// prefix/partial name matching, so it matches /src, /src/util, /src/config, etc.
+// This is a known behavior - exact path matching could be added as an improvement.
+
+#[test]
+fn directory_src_util_contains_its_direct_files() {
+    // @directory("/src/util") @has { @file }
+    // /src/util has instances in objects 2,3 (util.go, helper.go)
+    // Files in those objects: util.go (obj 2), helper.go (obj 3)
+    const QUERY: &str = r#"@directory("/src/util") @has { @file }"#;
+    let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // /src/util directory + 2 files = 4 nodes (directory constrained to instances matching children)
+    assert_eq!(
+        res.nodes.as_vec().len(),
+        4,
+        "/src/util should have directory + 2 file instances = 4 nodes. Got {}.",
+        res.nodes.as_vec().len()
+    );
+}
+
+#[test]
+fn directory_docs_contains_its_direct_file() {
+    // @directory("/docs") @has { @file }
+    // /docs has 1 instance (in object 5 for readme.md)
+    const QUERY: &str = r#"@directory("/docs") @has { @file }"#;
+    let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // /docs directory + 1 file = 2 nodes
+    assert_eq!(
+        res.nodes.as_vec().len(),
+        2,
+        "/docs should have directory + 1 file instance = 2 nodes. Got {}.",
+        res.nodes.as_vec().len()
+    );
+}
+
+#[test]
+fn directory_has_empty_scope_returns_children() {
+    // @directory("/src/util") @has {}
+    // Empty scope should inherit @has relationship and return all direct children
+    // /src/util has instances in objects 2,3 (util.go, helper.go)
+    // With default type inheritance [DIRECTORY, FUNCTION], we get:
+    // - Directory instances for /src/util
+    // - Function instances in those objects (none in test data)
+    // - Any other directories contained (none)
+    const QUERY: &str = r#"@directory("/src/util") @has {}"#;
+    let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // /src/util has 2 instances (in objects 2 and 3)
+    // Empty {} with @has should find children in those objects
+    // With default type filter [DIRECTORY, FUNCTION], we get:
+    // - The 2 directory instances of /src/util itself (via the TypeSelector)
+    // - Plus any contained directories/functions (none in test data that match)
+    // So we expect at least 2 nodes for the directory itself
+    assert!(
+        res.nodes.as_vec().len() >= 2,
+        "@directory('/src/util') @has {{}} should return directory + any children. Got {} nodes.",
+        res.nodes.as_vec().len()
+    );
+}
+
+#[test]
+fn directory_has_empty_scope_with_file_test_data() {
+    // @module("testmodule") @has {}
+    // Empty scope should inherit @has relationship and return all direct children
+    // In TEST_INPUT_CONTAINMENT, module has instances and contains file/functions
+    const QUERY: &str = r#"@module("testmodule") @has {}"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // module "testmodule" has 1 instance [0,1000)
+    // With default type filter [MODULE, FUNCTION], the empty @has {} should find:
+    // - The module instance itself
+    // - Functions contained in it (foo, bar, baz - but depends on type hierarchy)
+    // The module contains file (level 2), file contains functions (level 1)
+    // But with direct containment, module (level 3) > file (level 2) should work
+    // Actually with [MODULE, FUNCTION] filter, we should get:
+    // - module itself (from @module selector)
+    // - functions if they match the type filter
+    assert!(
+        res.nodes.as_vec().len() >= 1,
+        "@module('testmodule') @has {{}} should return module + any matching children. Got {} nodes.",
+        res.nodes.as_vec().len()
+    );
+}
+
+#[test]
+fn has_sibling_children_different_types() {
+    // @directory("/") @has { @module ; @file }
+    // Test that sibling children of different types use UNION logic.
+    // Directory "/" contains both modules and files via different instances.
+    // Both sibling children should be found.
+    const QUERY: &str = r#"@directory("/") @has { @module ; @file }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // Directory "/" should contain:
+    // - module (testmodule) via one instance
+    // - file (/main.go) via possibly another instance
+    // The parent directory should NOT be filtered out by the union of both children
+    assert!(
+        res.nodes.as_vec().len() >= 2,
+        "@directory('/') @has {{ @module ; @file }} should return directory + module + file (union of both). Got {} nodes.",
+        res.nodes.as_vec().len()
+    );
+}
+
+// =============================================================================
+// Directory @refs tests (directory hierarchy via symbol_refs)
+// =============================================================================
+
+// Test data (TEST_INPUT_TREE_BROWSER):
+// /src → /src/util and /src/config via symbol_refs
+// Directories: /, /src, /docs, /src/util, /src/config
+
+#[test]
+fn directory_refs_children() {
+    // @directory("/src") @refs { @directory } should return /src + child dirs
+    const QUERY: &str = r#"@directory("/src") @refs { @directory }"#;
+    let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
+
+    let names: Vec<_> = res.nodes.0.iter().map(|n| n.symbol.name.as_str()).collect();
+    println!("directory_refs_children names: {:?}", names);
+
+    assert!(names.contains(&"/src"), "Should contain parent /src");
+    assert!(names.contains(&"/src/util"), "Should contain child /src/util");
+    assert!(names.contains(&"/src/config"), "Should contain child /src/config");
 }

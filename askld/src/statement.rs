@@ -39,22 +39,20 @@ pub fn build_statement<'a>(
                 build_verb(sub_ctx.clone(), pair)?;
             }
             Rule::scope => {
-                // Capture the relationship_type AFTER verbs run - this is for children
-                let child_rel_type = sub_ctx.get_relationship_type();
-
-                // Check if relationship_type was changed by a verb (like @has or @refs)
-                if child_rel_type == inherited_rel_type {
+                // Check if a relationship modifier (@has or @refs) was explicitly used
+                // in this statement's verbs
+                if !sub_ctx.has_relationship_modifier() {
                     // No relationship modifier in this statement's verbs
                     // Reset to Refs for the scope's children
-                    sub_ctx.set_relationship_type(RelationshipType::Refs);
+                    sub_ctx.set_relationship_type_default(RelationshipType::Refs);
                 }
-                // else: @has/@refs set it, keep the new value for children
+                // else: @has/@refs was used, keep the relationship type for children
 
                 scope = build_scope(sub_ctx.clone(), pair)?;
 
                 // Restore this statement's own relationship_type (how it relates to its parent)
                 // This is the INHERITED value, not the value after @has/@refs modified it
-                sub_ctx.set_relationship_type(inherited_rel_type);
+                sub_ctx.set_relationship_type_default(inherited_rel_type);
                 break;
             }
             _ => Err(Error::new_from_span(
@@ -76,15 +74,13 @@ pub fn build_statement<'a>(
         ));
     }
 
-    // If we inherited default symbol types and no explicit type selector was used,
-    // add a DefaultTypeFilter to filter by those types
-    if let Some(default_types) = inherited_default_types {
-        // Check if the current command has a type selector
-        // This happens after all verbs are processed
-        let has_type_selector = sub_ctx.has_type_selector();
-        if !has_type_selector && !default_types.is_empty() {
-            sub_ctx.extend_verb(DefaultTypeFilter::new(statement_span.clone(), default_types));
-        }
+    // If no explicit type selector was used, add a DefaultTypeFilter.
+    // Use inherited default types if available, otherwise default to [FUNCTION].
+    if !sub_ctx.has_type_selector() {
+        let default_types = inherited_default_types
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| vec![crate::parser_context::SYMBOL_TYPE_FUNCTION]);
+        sub_ctx.extend_verb(DefaultTypeFilter::new(statement_span.clone(), default_types));
     }
 
     let command = sub_ctx.command(statement_span);
@@ -97,17 +93,19 @@ pub fn build_statement<'a>(
 
 pub fn build_empty_statement(ctx: Rc<ParserContext>, span: Span) -> Rc<Statement> {
     let scope: Rc<dyn Scope> = Rc::new(EmptyScope::new());
-    let sub_ctx = ParserContext::derive(ctx, span.clone());
-    // An empty statement (like {}) should use Refs, not inherit @has from parent
-    sub_ctx.set_relationship_type(RelationshipType::Refs);
+    let sub_ctx = ParserContext::derive(ctx.clone(), span.clone());
+    // Keep the inherited relationship type (Has or Refs).
+    // For @has {}, we want to use Has relationship (containment).
+    // For {} without @has, the parent context already reset to Refs.
+    // The relationship type is correctly set by build_statement before calling build_scope.
 
-    // If we inherited default symbol types, add a DefaultTypeFilter
-    // (empty statements have no explicit type selector)
-    if let Some(default_types) = sub_ctx.get_default_symbol_types() {
-        if !default_types.is_empty() {
-            sub_ctx.extend_verb(DefaultTypeFilter::new(span.clone(), default_types));
-        }
-    }
+    // Empty statements have no explicit type selector — always add DefaultTypeFilter.
+    // Use inherited default types if available, otherwise default to [FUNCTION].
+    let default_types = sub_ctx
+        .get_default_symbol_types()
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| vec![crate::parser_context::SYMBOL_TYPE_FUNCTION]);
+    sub_ctx.extend_verb(DefaultTypeFilter::new(span.clone(), default_types));
 
     let command = sub_ctx.command(span);
     let relationship_type = sub_ctx.get_relationship_type();
@@ -551,6 +549,12 @@ impl Statement {
 
     /// Notify the dependent statement's execution state about change in the
     /// state of a dependency.
+    ///
+    /// When a child notifies its parent (role=Parent), we defer the constraint
+    /// until ALL children have resolved. This prevents over-constraining the
+    /// parent when multiple sibling children exist (e.g., `@has { @directory ; @file }`).
+    /// The parent is constrained against the **union** of all children's selections,
+    /// so it retains nodes that match ANY child.
     pub async fn notify(
         &self,
         ctx: &mut ExecutionContext,
@@ -559,6 +563,64 @@ impl Statement {
     ) -> Result<(), pest::error::Error<Rule>> {
         let _update_dependency: tracing::span::EnteredSpan =
             tracing::info_span!("notify").entered();
+
+        if dependent.dependency_role == DependencyRole::Parent {
+            // Child notifying parent — defer until all children have selections.
+            let all_children_resolved = dependent
+                .statement
+                .children()
+                .all(|child| child.is_selection_some(ctx));
+            if !all_children_resolved {
+                return Ok(());
+            }
+
+            // Merge all children's selections into one (union).
+            let mut merged = Selection::new();
+            let mut any_has_selection = false;
+            for child in dependent.statement.children() {
+                if !child.command().has_selectors() {
+                    continue;
+                }
+                if child.get_state().weak {
+                    continue;
+                }
+                if let Some(sel) = child.get_selection(ctx) {
+                    merged.extend(sel.clone());
+                    any_has_selection = true;
+                }
+            }
+
+            if !any_has_selection {
+                return Ok(());
+            }
+
+            // Use the notifying child's relationship type (all siblings share it).
+            let rel_type = self.get_relationship_type();
+
+            let res = dependent
+                .statement
+                .command()
+                .notify_from_selection(
+                    ctx,
+                    &cfg.index,
+                    &merged,
+                    DependencyRole::Parent,
+                    rel_type,
+                )
+                .await?;
+
+            if res.changed {
+                dependent.statement.get_state_mut().completed = false;
+            }
+            dependent
+                .statement
+                .get_state_mut()
+                .warnings
+                .extend(res.warnings);
+            return Ok(());
+        }
+
+        // Original flow for Child and User roles.
         let receiver_rel_type = dependent.statement.get_relationship_type();
         let res = dependent
             .statement

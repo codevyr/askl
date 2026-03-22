@@ -661,8 +661,13 @@ pub fn package_match<'a>(name: &'a str) -> SymbolMatcher<'a> {
     let search_pattern = clean_and_split_string(name);
 
     Box::new(move |(_, s): (&'a SymbolId, &'a Symbol)| {
+        // Handle empty name_split (e.g., "/" directory)
+        if s.name_split.is_empty() {
+            return None;
+        }
         for i in 0..search_pattern.len() {
-            if s.name_split.len() - 1 <= i {
+            // Check bounds: we need at least i+1 elements beyond the match
+            if s.name_split.len() <= i + 1 {
                 return None;
             }
             if s.name_split[i] != search_pattern[i] {

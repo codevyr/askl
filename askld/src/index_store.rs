@@ -79,20 +79,18 @@ struct NewProject {
 #[diesel(table_name = index_schema::objects)]
 struct NewObject {
     project_id: i32,
-    directory_id: i32,
+    // directory_id removed - directories are now symbols
     module_path: String,
     filesystem_path: String,
     filetype: String,
     content_hash: String,
+    // Directory sentinel objects have:
+    // - filesystem_path = directory path (e.g., "/src")
+    // - filetype = "directory"
+    // - content_hash = "" (empty)
 }
 
-#[derive(Insertable, Clone)]
-#[diesel(table_name = index_schema::directories)]
-struct NewDirectory {
-    project_id: i32,
-    parent_id: Option<i32>,
-    path: String,
-}
+// NewDirectory removed - directories are now symbols
 
 #[derive(Insertable, Clone)]
 #[diesel(table_name = index_schema::object_contents)]
@@ -138,8 +136,6 @@ struct DirectoryChildRow {
 
 #[derive(Debug, QueryableByName)]
 struct DirectoryChildStatsRow {
-    #[diesel(sql_type = diesel::sql_types::Integer)]
-    id: i32,
     #[diesel(sql_type = diesel::sql_types::Text)]
     path: String,
     #[diesel(sql_type = diesel::sql_types::BigInt)]
@@ -154,19 +150,11 @@ struct DirectoryWalkRow {
     child_dir_count: i64,
     #[diesel(sql_type = diesel::sql_types::BigInt)]
     file_count: i64,
-    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Integer>)]
-    child_id: Option<i32>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     child_path: Option<String>,
 }
 
-#[derive(Debug, QueryableByName)]
-struct DirectoryPathRow {
-    #[diesel(sql_type = diesel::sql_types::Text)]
-    path: String,
-    #[diesel(sql_type = diesel::sql_types::Integer)]
-    id: i32,
-}
+// DirectoryPathRow removed - directories are now symbols
 
 #[derive(Debug, QueryableByName)]
 struct FileChildRow {
@@ -241,18 +229,11 @@ impl IndexStore {
                     None => return Err(UploadError::Conflict),
                 };
 
+                // Directory paths are collected for creating directory symbols later
                 let directory_paths = {
                     let _span: tracing::span::EnteredSpan =
                         tracing::info_span!("collect_directory_paths").entered();
                     collect_directory_paths(&upload.objects)
-                };
-                let directory_map = {
-                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
-                        "insert_directories",
-                        count = directory_paths.len()
-                    )
-                    .entered();
-                    insert_directories(conn, project_id, &directory_paths)?
                 };
 
                 let object_inserts = {
@@ -261,7 +242,7 @@ impl IndexStore {
                         count = upload.objects.len()
                     )
                     .entered();
-                    build_objects(project_id, &upload.objects, &directory_map)?
+                    build_objects(project_id, &upload.objects)?
                 };
                 let object_map = {
                     let _span: tracing::span::EnteredSpan = tracing::info_span!(
@@ -315,6 +296,16 @@ impl IndexStore {
                     )
                     .entered();
                     insert_symbol_refs(conn, &symbol_ref_rows)?;
+                }
+
+                // Create directory symbols and their instances
+                {
+                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
+                        "create_directory_symbols",
+                        count = directory_paths.len()
+                    )
+                    .entered();
+                    create_directory_symbols(conn, project_id, &object_inserts, &object_map)?;
                 }
 
                 Ok(project_id)
@@ -437,24 +428,29 @@ impl IndexStore {
             }
 
             let normalized = normalize_full_path(&path);
-            let directory_id = index_schema::directories::table
-                .filter(index_schema::directories::project_id.eq(project_id))
-                .filter(index_schema::directories::path.eq(&normalized))
-                .select(index_schema::directories::id)
+
+            // Find directory symbol for the requested path
+            let dir_symbol = index_schema::symbols::table
+                .filter(index_schema::symbols::project_id.eq(project_id))
+                .filter(index_schema::symbols::symbol_type.eq(4)) // DIRECTORY
+                .filter(index_schema::symbols::name.eq(&normalized))
+                .select(index_schema::symbols::id)
                 .first::<i32>(&mut conn)
                 .optional()?;
-            let directory_id = match directory_id {
-                Some(id) => id,
-                None => return Ok(ProjectTreeResult::NotDirectory),
-            };
+
+            // If path is "/" and no root directory symbol exists yet, that's OK
+            // (empty project or not yet indexed)
+            if dir_symbol.is_none() && normalized != "/" {
+                return Ok(ProjectTreeResult::NotDirectory);
+            }
 
             let directories = load_directory_children_with_compact(
                 &mut conn,
                 project_id,
-                directory_id,
+                &normalized,
                 compact,
             )?;
-            let files = load_file_children(&mut conn, directory_id)?;
+            let files = load_file_children(&mut conn, project_id, &normalized)?;
 
             let mut nodes = Vec::with_capacity(directories.len() + files.len());
             for row in directories {
@@ -528,33 +524,82 @@ impl IndexStore {
 fn load_directory_children_with_compact(
     conn: &mut PgConnection,
     project_id: i32,
-    directory_id: i32,
+    parent_path: &str,
     compact: bool,
 ) -> Result<Vec<DirectoryChildRow>, StoreError> {
+    // Find child directories: directories whose name starts with parent_path
+    // and have exactly one more path component than parent_path
+    //
+    // Example: If parent_path is "/src", child directories are:
+    // - /src/lib (depth 2 when parent is depth 1)
+    // - /src/util (depth 2)
+    // But NOT /src/lib/sub (depth 3)
+    //
+    // Query: find directory symbols that:
+    // 1. Belong to this project
+    // 2. Have type DIRECTORY (4)
+    // 3. Name starts with parent_path (or equals "/" for root children)
+    // 4. Have depth = parent_depth + 1
+    // Find direct child directories: starts_with(name, parent || '/') and no extra slash
     let rows = diesel::sql_query(
         r#"
-        SELECT
-            d.id,
-            d.path,
-            COUNT(DISTINCT c.id) AS child_dir_count,
-            COUNT(DISTINCT f.id) AS file_count
-        FROM index.directories d
-        LEFT JOIN index.directories c ON c.parent_id = d.id
-        LEFT JOIN index.objects f ON f.directory_id = d.id
-        WHERE d.project_id = $1 AND d.parent_id = $2
-        GROUP BY d.id
-        ORDER BY d.path
+        WITH child_dirs AS (
+            SELECT s.id, s.name as path
+            FROM index.symbols s
+            WHERE s.project_id = $1
+              AND s.symbol_type = 4
+              AND starts_with(s.name, $2)
+              AND s.name != $2
+              AND (
+                  CASE WHEN $2 = '/' THEN
+                      position('/' IN substring(s.name FROM 2)) = 0
+                  ELSE
+                      position('/' IN substring(s.name FROM length($2) + 2)) = 0
+                  END
+              )
+        ),
+        grandchild_dirs AS (
+            SELECT cd.id AS parent_id, COUNT(DISTINCT s2.id) AS child_dir_count
+            FROM child_dirs cd
+            JOIN index.symbols s2 ON s2.project_id = $1
+                AND s2.symbol_type = 4
+                AND starts_with(s2.name, cd.path || '/')
+                AND position('/' IN substring(s2.name FROM length(cd.path) + 2)) = 0
+            GROUP BY cd.id
+        ),
+        child_files AS (
+            SELECT cd.id AS parent_id, COUNT(DISTINCT o.id) AS file_count
+            FROM child_dirs cd
+            JOIN index.symbols fs ON fs.project_id = $1
+                AND fs.symbol_type = 2
+                AND starts_with(fs.name, cd.path || '/')
+                AND position('/' IN substring(fs.name FROM length(cd.path) + 2)) = 0
+            JOIN index.symbol_instances si ON si.symbol = fs.id
+            JOIN index.objects o ON o.id = si.object_id
+            GROUP BY cd.id
+        )
+        SELECT cd.path,
+            COALESCE(gd.child_dir_count, 0) AS child_dir_count,
+            COALESCE(cf.file_count, 0) AS file_count
+        FROM child_dirs cd
+        LEFT JOIN grandchild_dirs gd ON gd.parent_id = cd.id
+        LEFT JOIN child_files cf ON cf.parent_id = cd.id
+        ORDER BY cd.path
         "#,
     )
-        .bind::<diesel::sql_types::Integer, _>(project_id)
-        .bind::<diesel::sql_types::Integer, _>(directory_id)
-        .load::<DirectoryChildStatsRow>(conn)?;
+    .bind::<diesel::sql_types::Integer, _>(project_id)
+    .bind::<diesel::sql_types::Text, _>(if parent_path == "/" {
+        "/".to_string()
+    } else {
+        format!("{}/", parent_path)
+    })
+    .load::<DirectoryChildStatsRow>(conn)?;
 
     let mut children = Vec::with_capacity(rows.len());
     for row in rows {
         let has_children = row.child_dir_count > 0 || row.file_count > 0;
         let compact_path = if compact && row.file_count == 0 && row.child_dir_count == 1 {
-            compute_compact_path(conn, project_id, row.id)?
+            compute_compact_path(conn, project_id, &row.path)?
         } else {
             None
         };
@@ -571,25 +616,21 @@ fn load_directory_children_with_compact(
 fn compute_compact_path(
     conn: &mut PgConnection,
     project_id: i32,
-    start_id: i32,
+    start_path: &str,
 ) -> Result<Option<String>, StoreError> {
-    let mut current_id = start_id;
+    let mut current_path = start_path.to_string();
     let mut last_path = None;
     loop {
-        let row = load_directory_walk_row(conn, project_id, current_id)?;
+        let row = load_directory_walk_row(conn, project_id, &current_path)?;
         if row.file_count != 0 || row.child_dir_count != 1 {
             break;
         }
-        let child_id = match row.child_id {
-            Some(id) => id,
-            None => break,
-        };
         let child_path = match row.child_path {
             Some(path) => path,
             None => break,
         };
-        last_path = Some(child_path);
-        current_id = child_id;
+        last_path = Some(child_path.clone());
+        current_path = child_path;
     }
     Ok(last_path)
 }
@@ -597,49 +638,93 @@ fn compute_compact_path(
 fn load_directory_walk_row(
     conn: &mut PgConnection,
     project_id: i32,
-    directory_id: i32,
+    dir_path: &str,
 ) -> Result<DirectoryWalkRow, StoreError> {
+    // Query child directory count and file count for a directory path
+    // using symbol-based lookups instead of directories table
+    // Note: This function is only called for non-root directories (from compute_compact_path)
+    // so we don't need the root '/' special case here
     let query = r#"
         SELECT
-            (SELECT COUNT(*)
-             FROM index.directories
-             WHERE project_id = $1 AND parent_id = $2) AS child_dir_count,
-            (SELECT COUNT(*)
-             FROM index.objects
-             WHERE project_id = $1 AND directory_id = $2) AS file_count,
-            (SELECT id
-             FROM index.directories
-             WHERE project_id = $1 AND parent_id = $2
-             ORDER BY path
-             LIMIT 1) AS child_id,
-            (SELECT path
-             FROM index.directories
-             WHERE project_id = $1 AND parent_id = $2
-             ORDER BY path
-             LIMIT 1) AS child_path
+            -- Count child directories
+            (SELECT COUNT(DISTINCT s.id)
+             FROM index.symbols s
+             WHERE s.project_id = $1
+               AND s.symbol_type = 4
+               AND starts_with(s.name, $2 || '/')
+               AND position('/' IN substring(s.name FROM length($2) + 2)) = 0
+            ) AS child_dir_count,
+            -- Count files directly in this directory
+            (SELECT COUNT(DISTINCT fs.id)
+             FROM index.symbols fs
+             WHERE fs.project_id = $1
+               AND fs.symbol_type = 2
+               AND starts_with(fs.name, $2 || '/')
+               AND position('/' IN substring(fs.name FROM length($2) + 2)) = 0
+            ) AS file_count,
+            -- Get first child directory path
+            (SELECT s.name
+             FROM index.symbols s
+             WHERE s.project_id = $1
+               AND s.symbol_type = 4
+               AND starts_with(s.name, $2 || '/')
+               AND position('/' IN substring(s.name FROM length($2) + 2)) = 0
+             ORDER BY s.name
+             LIMIT 1
+            ) AS child_path
     "#;
 
     let row = diesel::sql_query(query)
         .bind::<diesel::sql_types::Integer, _>(project_id)
-        .bind::<diesel::sql_types::Integer, _>(directory_id)
+        .bind::<diesel::sql_types::Text, _>(dir_path)
         .get_result::<DirectoryWalkRow>(conn)?;
     Ok(row)
 }
 
 fn load_file_children(
     conn: &mut PgConnection,
-    directory_id: i32,
+    project_id: i32,
+    parent_path: &str,
 ) -> Result<Vec<FileChildRow>, StoreError> {
-    let query = r#"
-        SELECT id, filesystem_path AS path, filetype
-        FROM index.objects
-        WHERE directory_id = $1
-        ORDER BY filesystem_path
-    "#;
+    // Find files directly in this directory
+    // Files are identified by FILE symbols (type=2) whose name is parent_path/filename
+    // where filename has no '/' in it
+    // Handle root '/' specially: files like '/main.go' have no slash after position 1
+    let query = if parent_path == "/" {
+        r#"
+            SELECT DISTINCT o.id, o.filesystem_path AS path, o.filetype
+            FROM index.objects o
+            JOIN index.symbols fs ON fs.name = o.filesystem_path
+            WHERE fs.project_id = $1
+              AND fs.symbol_type = 2
+              AND fs.name LIKE '/%'
+              AND fs.name != '/'
+              AND position('/' IN substring(fs.name FROM 2)) = 0
+            ORDER BY o.filesystem_path
+        "#
+    } else {
+        r#"
+            SELECT DISTINCT o.id, o.filesystem_path AS path, o.filetype
+            FROM index.objects o
+            JOIN index.symbols fs ON fs.name = o.filesystem_path
+            WHERE fs.project_id = $1
+              AND fs.symbol_type = 2
+              AND starts_with(fs.name, $2 || '/')
+              AND position('/' IN substring(fs.name FROM length($2) + 2)) = 0
+            ORDER BY o.filesystem_path
+        "#
+    };
 
-    let rows = diesel::sql_query(query)
-        .bind::<diesel::sql_types::Integer, _>(directory_id)
-        .load::<FileChildRow>(conn)?;
+    let rows = if parent_path == "/" {
+        diesel::sql_query(query)
+            .bind::<diesel::sql_types::Integer, _>(project_id)
+            .load::<FileChildRow>(conn)?
+    } else {
+        diesel::sql_query(query)
+            .bind::<diesel::sql_types::Integer, _>(project_id)
+            .bind::<diesel::sql_types::Text, _>(parent_path)
+            .load::<FileChildRow>(conn)?
+    };
     Ok(rows)
 }
 
@@ -714,16 +799,6 @@ fn collect_directory_paths(objects: &[UploadObject]) -> HashSet<String> {
     paths
 }
 
-fn path_depth(path: &str) -> usize {
-    if path == "/" {
-        return 0;
-    }
-    path.trim_matches('/')
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .count()
-}
-
 fn parent_dir(path: &str) -> String {
     let normalized = normalize_full_path(path);
     if normalized == "/" {
@@ -736,135 +811,12 @@ fn parent_dir(path: &str) -> String {
     }
 }
 
-fn insert_directories(
-    conn: &mut PgConnection,
-    project_id: i32,
-    directory_paths: &HashSet<String>,
-) -> Result<HashMap<String, i32>, UploadError> {
-    use index_schema::directories;
-
-    let mut mapping = HashMap::new();
-
-    if directory_paths.contains("/") {
-        let inserted: Option<i32> = diesel::insert_into(directories::table)
-            .values(NewDirectory {
-                project_id,
-                parent_id: None,
-                path: "/".to_string(),
-            })
-            .on_conflict((directories::project_id, directories::path))
-            .do_nothing()
-            .returning(directories::id)
-            .get_result(conn)
-            .optional()?;
-
-        let root_id = match inserted {
-            Some(id) => id,
-            None => directories::table
-                .filter(directories::project_id.eq(project_id))
-                .filter(directories::path.eq("/"))
-                .select(directories::id)
-                .first::<i32>(conn)?,
-        };
-        mapping.insert("/".to_string(), root_id);
-    }
-
-    let mut entries = Vec::new();
-    for path in directory_paths {
-        if path == "/" {
-            continue;
-        }
-        entries.push(DirectoryEntry {
-            path: path.clone(),
-            parent_path: parent_dir(path),
-            depth: path_depth(path),
-        });
-    }
-    entries.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.path.cmp(&b.path)));
-
-    let mut index = 0;
-    while index < entries.len() {
-        let depth = entries[index].depth;
-        let mut end_index = index + 1;
-        while end_index < entries.len() && entries[end_index].depth == depth {
-            end_index += 1;
-        }
-
-        for chunk in entries[index..end_index].chunks(MAX_INSERT_ROWS) {
-            insert_directory_batch(conn, project_id, chunk)?;
-            let paths: Vec<String> = chunk.iter().map(|entry| entry.path.clone()).collect();
-            for row in fetch_directory_ids(conn, project_id, &paths)? {
-                mapping.insert(row.path, row.id);
-            }
-        }
-
-        index = end_index;
-    }
-
-    Ok(mapping)
-}
-
-fn insert_directory_batch(
-    conn: &mut PgConnection,
-    project_id: i32,
-    entries: &[DirectoryEntry],
-) -> Result<(), UploadError> {
-    if entries.is_empty() {
-        return Ok(());
-    }
-
-    let paths: Vec<String> = entries.iter().map(|entry| entry.path.clone()).collect();
-    let parent_paths: Vec<String> = entries
-        .iter()
-        .map(|entry| entry.parent_path.clone())
-        .collect();
-
-    let query = r#"
-        INSERT INTO index.directories (project_id, parent_id, path)
-        SELECT $1, parent.id, v.path
-        FROM unnest($2::text[], $3::text[]) AS v(path, parent_path)
-        JOIN index.directories parent
-          ON parent.project_id = $1 AND parent.path = v.parent_path
-        ON CONFLICT (project_id, path) DO NOTHING
-    "#;
-
-    diesel::sql_query(query)
-        .bind::<diesel::sql_types::Integer, _>(project_id)
-        .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(paths)
-        .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(parent_paths)
-        .execute(conn)?;
-    Ok(())
-}
-
-fn fetch_directory_ids(
-    conn: &mut PgConnection,
-    project_id: i32,
-    paths: &[String],
-) -> Result<Vec<DirectoryPathRow>, UploadError> {
-    if paths.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let rows = diesel::sql_query(
-        "SELECT path, id FROM index.directories WHERE project_id = $1 AND path = ANY($2)",
-    )
-    .bind::<diesel::sql_types::Integer, _>(project_id)
-    .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(paths.to_vec())
-    .load::<DirectoryPathRow>(conn)?;
-    Ok(rows)
-}
-
-#[derive(Clone)]
-struct DirectoryEntry {
-    path: String,
-    parent_path: String,
-    depth: usize,
-}
+// insert_directories, insert_directory_batch, fetch_directory_ids, DirectoryEntry
+// have been removed - directories are now created as symbols via create_directory_symbols()
 
 fn build_objects(
     project_id: i32,
     objects: &[UploadObject],
-    directory_map: &HashMap<String, i32>,
 ) -> Result<Vec<ObjectInsert>, UploadError> {
     let mut seen = HashSet::new();
     let mut inserts = Vec::new();
@@ -889,19 +841,11 @@ fn build_objects(
             )));
         }
         let filesystem_path = normalize_full_path(filesystem_path_raw);
-        let directory_path = parent_dir(&filesystem_path);
-        let directory_id = directory_map.get(&directory_path).ok_or_else(|| {
-            UploadError::Invalid(format!(
-                "missing directory mapping for path {}",
-                directory_path
-            ))
-        })?;
         inserts.push(ObjectInsert {
             local_id: object.local_id,
             content: object.content.clone(),
             row: NewObject {
                 project_id,
-                directory_id: *directory_id,
                 module_path: object.module_path.clone(),
                 filesystem_path,
                 filetype: object.filetype.clone(),
@@ -1084,6 +1028,179 @@ fn insert_symbol_refs(conn: &mut PgConnection, rows: &[NewSymbolRef]) -> Result<
             .execute(conn)?;
     }
     Ok(())
+}
+
+/// Creates directory symbols, instances, and parent→child directory refs.
+///
+/// Each directory symbol gets:
+/// - An instance on each direct child file's object (for range-based containment)
+/// - A symbol_ref from each direct child directory (for directory hierarchy traversal)
+///
+/// Containment (via @has) uses strict type level comparison (>), so:
+///   directory(4) > module(3) > file(2) > function(1)
+/// Directory→directory hierarchy uses symbol_refs (via @refs).
+fn create_directory_symbols(
+    conn: &mut PgConnection,
+    project_id: i32,
+    object_inserts: &[ObjectInsert],
+    object_map: &HashMap<i64, i32>,
+) -> Result<(), UploadError> {
+    // Step 1: Collect all directory paths (including all ancestors)
+    let mut dir_paths: HashSet<String> = HashSet::new();
+    for obj in object_inserts {
+        let path = &obj.row.filesystem_path;
+        let mut current = parent_dir(path);
+        loop {
+            dir_paths.insert(normalize_full_path(&current));
+            if current == "/" {
+                break;
+            }
+            current = parent_dir(&current);
+        }
+    }
+
+    if dir_paths.is_empty() {
+        return Ok(());
+    }
+
+    // Step 2: Create directory symbols
+    let dir_symbols: Vec<NewSymbol> = dir_paths
+        .iter()
+        .map(|path| NewSymbol {
+            name: path.clone(),
+            project_id,
+            symbol_type: 4, // DIRECTORY
+            symbol_scope: None,
+        })
+        .collect();
+
+    let mut dir_symbol_map: HashMap<String, i32> = HashMap::new();
+    for chunk in dir_symbols.chunks(MAX_INSERT_ROWS) {
+        let rows: Vec<NewSymbol> = chunk.to_vec();
+        let ids: Vec<i32> = diesel::insert_into(index_schema::symbols::table)
+            .values(&rows)
+            .returning(index_schema::symbols::id)
+            .get_results(conn)?;
+
+        for (symbol, id) in chunk.iter().zip(ids) {
+            dir_symbol_map.insert(symbol.name.clone(), id);
+        }
+    }
+
+    // Step 3: Create a sentinel object per directory and a self-instance on it.
+    // This ensures every directory is visible to the query engine regardless of
+    // whether it contains direct files.
+    let mut dir_objects: Vec<NewObject> = Vec::new();
+    for dir_path in &dir_paths {
+        dir_objects.push(NewObject {
+            project_id,
+            module_path: dir_path.clone(),
+            filesystem_path: dir_path.clone(),
+            filetype: "directory".to_string(),
+            content_hash: String::new(),
+        });
+    }
+
+    // Insert sentinel objects and build dir_path → db_object_id mapping
+    let mut dir_object_map: HashMap<String, i32> = HashMap::new();
+    for chunk in dir_objects.chunks(MAX_INSERT_ROWS) {
+        let ids: Vec<i32> = diesel::insert_into(index_schema::objects::table)
+            .values(chunk)
+            .returning(index_schema::objects::id)
+            .get_results(conn)?;
+        for (obj, id) in chunk.iter().zip(ids) {
+            dir_object_map.insert(obj.filesystem_path.clone(), id);
+        }
+    }
+
+    // Create self-instances: one per directory on its sentinel object, range [0, 0)
+    let mut instances: Vec<NewSymbolInstance> = Vec::new();
+    for dir_path in &dir_paths {
+        if let (Some(&symbol_id), Some(&object_id)) =
+            (dir_symbol_map.get(dir_path), dir_object_map.get(dir_path))
+        {
+            instances.push(NewSymbolInstance {
+                symbol: symbol_id,
+                object_id,
+                offset_range: 0..0,
+            });
+        }
+    }
+
+    // Also create directory instances on direct child files for containment queries.
+    // These allow @has to find files/functions inside a directory via range overlap.
+    for obj in object_inserts {
+        let db_object_id = *object_map.get(&obj.local_id).ok_or_else(|| {
+            UploadError::Invalid(format!("Missing object mapping for local_id {}", obj.local_id))
+        })?;
+
+        let content_len = obj.content.len() as i32;
+        let file_path = &obj.row.filesystem_path;
+        let parent = normalize_full_path(&parent_dir(file_path));
+
+        if let Some(&symbol_id) = dir_symbol_map.get(&parent) {
+            instances.push(NewSymbolInstance {
+                symbol: symbol_id,
+                object_id: db_object_id,
+                offset_range: 0..content_len,
+            });
+        }
+    }
+
+    for chunk in instances.chunks(MAX_INSERT_ROWS) {
+        diesel::insert_into(index_schema::symbol_instances::table)
+            .values(chunk)
+            .execute(conn)?;
+    }
+
+    // Step 4: Create symbol_refs for parent→child directory relationships.
+    // Each ref uses the parent's sentinel object as from_object.
+    let mut refs: Vec<NewSymbolRef> = Vec::new();
+
+    for parent_dir in &dir_paths {
+        let from_object = match dir_object_map.get(parent_dir) {
+            Some(&id) => id,
+            None => continue,
+        };
+
+        for child_dir in &dir_paths {
+            if child_dir != parent_dir && is_direct_child_path(parent_dir, child_dir) {
+                if let Some(&child_symbol_id) = dir_symbol_map.get(child_dir) {
+                    refs.push(NewSymbolRef {
+                        to_symbol: child_symbol_id,
+                        from_object,
+                        from_offset_range: 0..0,
+                    });
+                }
+            }
+        }
+    }
+
+    insert_symbol_refs(conn, &refs)?;
+
+    Ok(())
+}
+
+/// Returns true if child_path is a direct child of parent_path.
+/// E.g., is_direct_child_path("/src", "/src/util") => true
+///       is_direct_child_path("/src", "/src/util/foo") => false
+fn is_direct_child_path(parent: &str, child: &str) -> bool {
+    if parent == "/" {
+        // Root case: child must be like "/xxx" with no more slashes
+        if !child.starts_with('/') || child == "/" {
+            return false;
+        }
+        let after_root = &child[1..];
+        !after_root.contains('/')
+    } else {
+        // Non-root case: child must start with parent + "/"
+        let prefix = format!("{}/", parent);
+        if !child.starts_with(&prefix) {
+            return false;
+        }
+        let after_prefix = &child[prefix.len()..];
+        !after_prefix.contains('/')
+    }
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {

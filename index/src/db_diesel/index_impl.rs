@@ -10,7 +10,7 @@ use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::symbols::FileId;
 
 use super::mixins::{
-    CompoundNameMixin, SymbolSearchMixin, PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
+    SymbolSearchMixin, PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
     CONTAINER_INSTANCE_ALIAS, CONTAINER_SYMBOL_ALIAS, CONTAINER_TYPE_ALIAS,
     CONTAINED_INSTANCE_ALIAS, CONTAINED_SYMBOL_ALIAS, CONTAINED_TYPE_ALIAS,
 };
@@ -53,6 +53,7 @@ impl Index {
     pub const TEST_INPUT_MODULES: &'static str = "test_input_modules.sql";
     pub const TEST_INPUT_SYMBOL_TOKENS: &'static str = "test_input_symbol_tokens.sql";
     pub const TEST_INPUT_CONTAINMENT: &'static str = "test_input_containment.sql";
+    pub const TEST_INPUT_TREE_BROWSER: &'static str = "test_input_tree_browser.sql";
 
     pub async fn load_test_input(&self, input_path: &str) -> Result<()> {
         let connection = &mut self.pool.get().unwrap();
@@ -100,6 +101,12 @@ impl Index {
             "test_input_containment.sql" => {
                 connection
                     .batch_execute(include_str!("../../../sql/test_input_containment.sql"))
+                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
+                    .unwrap();
+            }
+            "test_input_tree_browser.sql" => {
+                connection
+                    .batch_execute(include_str!("../../../sql/test_input_tree_browser.sql"))
                     .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
                     .unwrap();
             }
@@ -199,6 +206,12 @@ impl Index {
                         .field(symbol_instances::dsl::object_id)
                         .eq(symbol_refs::dsl::from_object)),
                 )
+                // Join the parent's symbol (caller) to enable type filtering via mixin
+                .inner_join(
+                    parent_symbols.on(parent_symbols
+                        .field(symbols::dsl::id)
+                        .eq(parent_decls.field(symbol_instances::dsl::symbol))),
+                )
                 .filter(
                     parent_decls
                         .field(symbol_instances::dsl::offset_range)
@@ -240,6 +253,7 @@ impl Index {
                         .field(symbol_instances::dsl::offset_range)
                         .contains_range(symbol_refs::dsl::from_offset_range),
                 )
+                // Join the parent's symbol (caller) to enable type filtering via mixin
                 .inner_join(
                     parent_symbols.on(parent_symbols
                         .field(symbols::dsl::id)
@@ -312,7 +326,8 @@ impl Index {
                     )
                 )
                 .filter(
-                    // Container's type level > current's type level
+                    // Container's type level > current's type level (strict)
+                    // directory(4) > module(3) > file(2) > function(1)
                     container_type.field(symbol_types::dsl::level)
                         .gt(symbol_types::dsl::level)
                 )
@@ -375,7 +390,8 @@ impl Index {
                     )
                 )
                 .filter(
-                    // Current's type level > contained's type level
+                    // Current's type level > contained's type level (strict)
+                    // directory(4) > module(3) > file(2) > function(1)
                     symbol_types::dsl::level
                         .gt(contained_type.field(symbol_types::dsl::level))
                 )
@@ -481,9 +497,4 @@ impl Index {
         selection
     }
 
-    pub async fn find_symbol_by_name(&self, name: &str) -> Result<Selection> {
-        let mixin = CompoundNameMixin::new(name);
-        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![Box::new(mixin)];
-        self.find_symbol(&mut mixins).await
-    }
 }

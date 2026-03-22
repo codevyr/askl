@@ -93,6 +93,36 @@ impl Command {
         }
     }
 
+    /// Notify all selectors using a pre-built merged selection (constraint + derivation).
+    /// Used when a parent is notified by the union of all its children's selections.
+    pub async fn notify_from_selection(
+        &self,
+        ctx: &mut ExecutionContext,
+        index: &Index,
+        dependency: &Selection,
+        role: DependencyRole,
+        rel_type: RelationshipType,
+    ) -> Result<NotificationResult, pest::error::Error<Rule>> {
+        let mut changed = false;
+        let mut warnings = vec![];
+        let selector_filters: Vec<&dyn Filter> = self.filters().collect();
+        for selector in self.selectors() {
+            let res = selector
+                .accept_notification_from_selection(
+                    ctx,
+                    index,
+                    &selector_filters,
+                    dependency,
+                    role,
+                    rel_type,
+                )
+                .await?;
+            changed |= res.changed;
+            warnings.extend(res.warnings);
+        }
+        Ok(NotificationResult::new(changed, warnings))
+    }
+
     pub async fn accept_notification(
         &self,
         ctx: &mut ExecutionContext,
@@ -142,7 +172,6 @@ impl Command {
                 .unwrap();
             if let Some(selection) = &mut current_selection {
                 self.filter(selection);
-                selection.prune_references();
                 if selection.is_empty() {
                     warnings.push(pest::error::Error::new_from_span(
                         pest::error::ErrorVariant::CustomError {

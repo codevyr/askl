@@ -32,22 +32,19 @@ diesel::table! {
     index.objects (id) {
         id -> Integer,
         project_id -> Integer,
-        directory_id -> Integer,
+        // directory_id removed - directories are now symbols
         module_path -> Text,
         filesystem_path -> Text,
         filetype -> Text,
         content_hash -> Text,
+        // Directory sentinel objects have:
+        // - filesystem_path = directory path (e.g., "/src")
+        // - filetype = "directory"
+        // - content_hash = "" (empty)
     }
 }
 
-diesel::table! {
-    index.directories (id) {
-        id -> Integer,
-        project_id -> Integer,
-        parent_id -> Nullable<Integer>,
-        path -> Text,
-    }
-}
+// directories table has been removed - directories are now symbols
 
 diesel::table! {
     index.projects (id) {
@@ -85,9 +82,9 @@ diesel::table! {
 diesel::joinable!(symbol_instances -> objects (object_id));
 diesel::joinable!(symbol_instances -> symbols (symbol));
 diesel::joinable!(object_contents -> objects (object_id));
-diesel::joinable!(objects -> directories (directory_id));
+// joinable!(objects -> directories (directory_id)) removed - directories table dropped
 diesel::joinable!(objects -> projects (project_id));
-diesel::joinable!(directories -> projects (project_id));
+// joinable!(directories -> projects (project_id)) removed - directories table dropped
 diesel::joinable!(symbol_refs -> symbols (to_symbol));
 diesel::joinable!(symbols -> projects (project_id));
 diesel::joinable!(symbols -> symbol_types (symbol_type));
@@ -95,7 +92,7 @@ diesel::joinable!(symbols -> symbol_types (symbol_type));
 diesel::allow_tables_to_appear_in_same_query!(
     symbol_instances,
     symbol_types,
-    directories,
+    // directories removed
     object_contents,
     objects,
     projects,

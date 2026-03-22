@@ -27,3 +27,5 @@ mod group_test;
 mod parser_test;
 #[cfg(test)]
 mod test_util;
+#[cfg(test)]
+mod tree_browser_test;
