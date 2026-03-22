@@ -41,7 +41,12 @@ impl Command {
         let mut verbs = vec![];
         for verb in self.verbs.iter() {
             match verb.derive_method() {
-                DeriveMethod::Clone => verbs.push(verb.clone()),
+                DeriveMethod::Clone => {
+                    // Use derive_new_instance if available to create an independent
+                    // copy, avoiding shared registry state between parent and child.
+                    let derived = verb.derive_new_instance().unwrap_or_else(|| verb.clone());
+                    verbs.push(derived);
+                }
                 DeriveMethod::Skip => {}
             }
         }

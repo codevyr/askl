@@ -710,6 +710,9 @@ pub(super) struct TypeSelector {
     /// If true, don't select from all - only act as a filter when deriving from parent.
     /// This is much more efficient for queries like `@file @has { @function }`.
     filter_only: bool,
+    /// If true, this filter is inherited (cloned) into derived child scopes.
+    /// Used for namespace filters like `@module("test", filter="true", inherit="true")`.
+    inherit: bool,
 }
 
 impl TypeSelector {
@@ -737,11 +740,17 @@ impl TypeSelector {
             None => name_pattern.is_none(), // default based on name presence
         };
 
+        let inherit = named
+            .get("inherit")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         Ok(Arc::new(Self {
             span,
             symbol_type_id,
             name_pattern,
             filter_only,
+            inherit,
         }))
     }
 
@@ -790,6 +799,42 @@ impl Verb for TypeSelector {
         Ok(self)
     }
 
+    fn derive_method(&self) -> DeriveMethod {
+        if self.inherit {
+            DeriveMethod::Clone
+        } else {
+            DeriveMethod::Skip
+        }
+    }
+
+    fn derive_new_instance(&self) -> Option<Arc<dyn Verb>> {
+        // Create a fresh TypeSelector instance so derived child scopes
+        // get their own registry entry, avoiding shared state issues.
+        Some(Arc::new(TypeSelector {
+            span: self.span.clone(),
+            symbol_type_id: self.symbol_type_id,
+            name_pattern: self.name_pattern.clone(),
+            filter_only: self.filter_only,
+            inherit: self.inherit,
+        }))
+    }
+
+    fn get_tag(&self) -> Option<VerbTag> {
+        if self.filter_only && self.name_pattern.is_some() {
+            Some(VerbTag::TypeFilter)
+        } else {
+            None
+        }
+    }
+
+    fn add_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
+        if self.filter_only && self.name_pattern.is_some() {
+            self.replace_verb(existing_verbs)
+        } else {
+            self.extend_verb(existing_verbs)
+        }
+    }
+
     /// Set default symbol types for child scopes.
     /// When @module is used, children should include both module and function types by default.
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
@@ -809,7 +854,23 @@ impl Verb for TypeSelector {
 
 impl Filter for TypeSelector {
     fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
-        self.build_mixins()
+        if self.filter_only && self.name_pattern.is_some() {
+            // When used as a namespace filter (e.g., @module("test", filter="true")),
+            // only constrain by name pattern, not by type. This allows
+            // @module("test", filter="true") "a" to find functions named "test.a"
+            // rather than restricting to MODULE-type symbols.
+            let name = self.name_pattern.as_ref().unwrap();
+            match self.symbol_type_id {
+                SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE => {
+                    vec![Box::new(ExactNameMixin::new(name))]
+                }
+                _ => {
+                    vec![Box::new(CompoundNameMixin::new(name))]
+                }
+            }
+        } else {
+            self.build_mixins()
+        }
     }
 }
 

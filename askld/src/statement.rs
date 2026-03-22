@@ -241,14 +241,16 @@ impl Statement {
     }
 
     fn is_selection_some(&self, ctx: &ExecutionContext) -> bool {
-        let mut is_some = true;
+        let mut has_selector = false;
+        let mut has_any_selection = false;
         ctx.registry
             .for_each_selector(self.command().selectors(), |selector, sel_state| {
-                if selector.get_selection(sel_state).is_none() {
-                    is_some = false;
+                has_selector = true;
+                if selector.get_selection(sel_state).is_some() {
+                    has_any_selection = true;
                 }
             });
-        is_some
+        !has_selector || has_any_selection
     }
 
     // Statements that have dependencies resolved and are ready to execute
