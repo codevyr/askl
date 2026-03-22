@@ -517,10 +517,10 @@ fn two_statements() {
 
 #[test]
 fn project_double_parent_query() {
-    // Tests @module filter with double parent query pattern.
-    // @module("test", filter="true", inherit="true") acts as a namespace filter
+    // Tests @mod filter with double parent query pattern.
+    // @mod("test", filter="true", inherit="true") acts as a namespace filter
     // that propagates into child scopes via inherit="true".
-    const QUERY: &str = r#"@module("test", filter="true", inherit="true") {{"b"}}"#;
+    const QUERY: &str = r#"@mod("test", filter="true", inherit="true") {{"b"}}"#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -539,7 +539,7 @@ fn project_double_parent_query() {
 
 #[test]
 fn module_filter_excludes_other_modules() {
-    const FILTERED_QUERY: &str = r#"@module("test", filter="true") "a""#;
+    const FILTERED_QUERY: &str = r#"@mod("test", filter="true") "a""#;
     let filtered = run_query(TEST_INPUT_MODULES, FILTERED_QUERY);
 
     println!("{:#?}", filtered.nodes);
@@ -561,7 +561,7 @@ fn module_filter_excludes_other_modules() {
         ]
     );
 
-    const FILTERED_AND_UNFILTERED_QUERY: &str = r#"@module("test", filter="true") "a"; "a""#;
+    const FILTERED_AND_UNFILTERED_QUERY: &str = r#"@mod("test", filter="true") "a"; "a""#;
     let filtered_unfiltered = run_query(TEST_INPUT_MODULES, FILTERED_AND_UNFILTERED_QUERY);
     let filtered_unfiltered_nodes = filtered_unfiltered.nodes.as_vec();
 
@@ -574,7 +574,7 @@ fn module_filter_excludes_other_modules() {
         ]
     );
 
-    const PREAMBLE_FILTERED_QUERY: &str = r#"@preamble @module("test", filter="true", inherit="true"); "a""#;
+    const PREAMBLE_FILTERED_QUERY: &str = r#"@preamble @mod("test", filter="true", inherit="true"); "a""#;
     let preamble_filtered = run_query(TEST_INPUT_MODULES, PREAMBLE_FILTERED_QUERY);
     let preamble_filtered_nodes = preamble_filtered.nodes.as_vec();
 
@@ -583,7 +583,7 @@ fn module_filter_excludes_other_modules() {
 
 #[test]
 fn module_filter_selects_other_module() {
-    const QUERY: &str = r#"@module("other", filter="true") "a""#;
+    const QUERY: &str = r#"@mod("other", filter="true") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -595,7 +595,7 @@ fn module_filter_selects_other_module() {
 
 #[test]
 fn module_filter_replaced_by_second_invocation() {
-    const QUERY: &str = r#"@module("test", filter="true") @module("other", filter="true") "a""#;
+    const QUERY: &str = r#"@mod("test", filter="true") @mod("other", filter="true") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -607,7 +607,7 @@ fn module_filter_replaced_by_second_invocation() {
 
 #[test]
 fn module_filter_children_scope_honors_filter() {
-    const QUERY: &str = r#"@module("other", filter="true") "a" {}"#;
+    const QUERY: &str = r#"@mod("other", filter="true") "a" {}"#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -703,7 +703,7 @@ fn project_filter_selects_other_project() {
 
 #[test]
 fn project_and_module_filters_combine() {
-    const QUERY: &str = r#"@project("test_project") @module("other", filter="true") "a""#;
+    const QUERY: &str = r#"@project("test_project") @mod("other", filter="true") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -715,7 +715,7 @@ fn project_and_module_filters_combine() {
 
 #[test]
 fn conflicting_project_and_module_filters_return_empty() {
-    const QUERY: &str = r#"@project("other_project") @module("other", filter="true") "a""#;
+    const QUERY: &str = r#"@project("other_project") @mod("other", filter="true") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1012,10 +1012,10 @@ fn non_existent_child_warning() {
 
 #[test]
 fn has_children_query() {
-    // @module("testmodule") @has { @file @has { "foo" } }
+    // @mod("testmodule") @has { @file @has { "foo" } }
     // With direct-children-only: module(3) → file(2) → function(1)
     // Returns: module "testmodule", file, and function "testmodule.foo"
-    const QUERY: &str = r#"@module("testmodule") @has { @file @has { "foo" } }"#;
+    const QUERY: &str = r#"@mod("testmodule") @has { @file @has { "foo" } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1042,10 +1042,10 @@ fn has_parents_query() {
 
 #[test]
 fn mixed_has_refs_query() {
-    // @module("testmodule") @has { @file @has { "foo" {} } }
+    // @mod("testmodule") @has { @file @has { "foo" {} } }
     // With direct-children-only: module(3) → file(2) → function(1), then refs
     // Returns: module, file, foo in file, and foo's callees (bar)
-    const QUERY: &str = r#"@module("testmodule") @has { @file @has { "foo" {} } }"#;
+    const QUERY: &str = r#"@mod("testmodule") @has { @file @has { "foo" {} } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1057,9 +1057,9 @@ fn mixed_has_refs_query() {
 
 #[test]
 fn type_selector_function_query() {
-    // @function("testmodule.foo")
+    // @func("testmodule.foo")
     // Returns function named "testmodule.foo"
-    const QUERY: &str = r#"@function("testmodule.foo")"#;
+    const QUERY: &str = r#"@func("testmodule.foo")"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1071,9 +1071,9 @@ fn type_selector_function_query() {
 
 #[test]
 fn type_selector_function_filter_at_root() {
-    // @function (no name) at root acts as filter - returns empty
+    // @func (no name) at root acts as filter - returns empty
     // because there's no parent to derive from
-    const QUERY: &str = r#"@function"#;
+    const QUERY: &str = r#"@func"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1085,9 +1085,9 @@ fn type_selector_function_filter_at_root() {
 
 #[test]
 fn type_selector_function_explicit_select_all() {
-    // @function(filter="false")
+    // @func(filter="false")
     // Explicitly select all functions (override default filter behavior)
-    const QUERY: &str = r#"@function(filter="false")"#;
+    const QUERY: &str = r#"@func(filter="false")"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1099,9 +1099,9 @@ fn type_selector_function_explicit_select_all() {
 
 #[test]
 fn type_selector_module_query() {
-    // @module("testmodule")
+    // @mod("testmodule")
     // Returns module named "testmodule"
-    const QUERY: &str = r#"@module("testmodule")"#;
+    const QUERY: &str = r#"@mod("testmodule")"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1189,7 +1189,7 @@ fn has_vs_refs_function_to_function() {
 fn has_vs_refs_all_children() {
     // Test @has vs @refs behavior comparison
     // @has: directory contains file(s) and transitively contains functions
-    const HAS_QUERY: &str = r#"@directory("/") @has { @file @has { @function } }"#;
+    const HAS_QUERY: &str = r#"@dir("/") @has { @file @has { @func } }"#;
     let has_res = run_query(TEST_INPUT_CONTAINMENT, HAS_QUERY);
 
     println!("@has result: {:#?}", has_res.nodes);
@@ -1200,7 +1200,7 @@ fn has_vs_refs_all_children() {
 
     // @refs: test function-to-function refs
     // foo calls bar, bar calls baz
-    const REFS_QUERY: &str = r#""foo" @refs { @function }"#;
+    const REFS_QUERY: &str = r#""foo" @refs { @func }"#;
     let refs_res = run_query(TEST_INPUT_CONTAINMENT, REFS_QUERY);
 
     println!("@refs result: {:#?}", refs_res.nodes);
@@ -1249,8 +1249,8 @@ fn refs_overrides_inherited_has() {
 // ============================================================================
 //
 // These tests verify that type selectors set default types for child scopes.
-// @module("test") {} should show modules AND functions that test references
-// @module("test") { @function } should explicitly filter to only functions
+// @mod("test") {} should show modules AND functions that test references
+// @mod("test") { @func } should explicitly filter to only functions
 //
 // Test data (TEST_INPUT_CONTAINMENT) has:
 // - Module `testmodule` (type=3, id=1, instance=10)
@@ -1259,14 +1259,14 @@ fn refs_overrides_inherited_has() {
 
 #[test]
 fn default_type_inheritance_module_refs_children() {
-    // @module("testmodule") {} should show:
+    // @mod("testmodule") {} should show:
     // - module itself
     // - modules it references (none in test data)
     // - functions it references (bar and baz via contained refs)
     //
     // Without default type inheritance, {} would return ALL types.
     // With default type inheritance, {} filters to module + function types.
-    const QUERY: &str = r#"@module("testmodule") {}"#;
+    const QUERY: &str = r#"@mod("testmodule") {}"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1288,13 +1288,13 @@ fn default_type_inheritance_module_refs_children() {
 
 #[test]
 fn default_type_inheritance_explicit_function_only() {
-    // @module("testmodule") { @function } should show:
+    // @mod("testmodule") { @func } should show:
     // - module itself (the parent selector)
-    // - ONLY functions it references (not modules, because @function is explicit)
+    // - ONLY functions it references (not modules, because @func is explicit)
     //
-    // The explicit @function overrides the default type inheritance for the CHILD scope
-    // The parent (@module) is still included as it's the parent selector
-    const QUERY: &str = r#"@module("testmodule") { @function }"#;
+    // The explicit @func overrides the default type inheritance for the CHILD scope
+    // The parent (@mod) is still included as it's the parent selector
+    const QUERY: &str = r#"@mod("testmodule") { @func }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1313,12 +1313,12 @@ fn default_type_inheritance_explicit_function_only() {
 
 #[test]
 fn default_type_inheritance_function_refs_children() {
-    // @function("foo") {} should show:
+    // @func("foo") {} should show:
     // - function foo itself
     // - functions it references (bar)
     //
-    // With default type inheritance from @function, {} filters to function type only
-    const QUERY: &str = r#"@function("foo") {}"#;
+    // With default type inheritance from @func, {} filters to function type only
+    const QUERY: &str = r#"@func("foo") {}"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1331,7 +1331,7 @@ fn default_type_inheritance_function_refs_children() {
     assert!(nodes.contains(&SymbolInstanceId::new(20)), "Should include foo");
     assert!(nodes.contains(&SymbolInstanceId::new(30)), "Should include bar");
 
-    // Should NOT include module since @function sets default to function only
+    // Should NOT include module since @func sets default to function only
     assert!(
         !nodes.contains(&SymbolInstanceId::new(10)),
         "Should NOT include module"
@@ -1340,11 +1340,11 @@ fn default_type_inheritance_function_refs_children() {
 
 #[test]
 fn default_type_inheritance_nested_scopes() {
-    // @module("testmodule") { @function("foo") {} }
+    // @mod("testmodule") { @func("foo") {} }
     // First level: module (sets defaults to module+function)
-    // Second level: @function("foo") (overrides to function only)
-    // Third level: {} inherits function-only from @function
-    const QUERY: &str = r#"@module("testmodule") { @function("foo") {} }"#;
+    // Second level: @func("foo") (overrides to function only)
+    // Third level: {} inherits function-only from @func
+    const QUERY: &str = r#"@mod("testmodule") { @func("foo") {} }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1353,8 +1353,8 @@ fn default_type_inheritance_nested_scopes() {
     let nodes = res.nodes.as_vec();
     println!("Nodes: {:?}", nodes);
 
-    // Module should be filtered out at second level by @function
-    // But wait - module is the parent, @function filters the child
+    // Module should be filtered out at second level by @func
+    // But wait - module is the parent, @func filters the child
     // So we should have:
     // - module (10) at top level (no filter)
     // - foo (20) at second level (filtered to functions that module refs)
@@ -1377,9 +1377,9 @@ fn default_type_inheritance_nested_scopes() {
 
 #[test]
 fn file_contains_function() {
-    // @file("/main.go") @has { @function }
+    // @file("/main.go") @has { @func }
     // Returns: file /main.go and all functions it contains
-    const QUERY: &str = r#"@file("/main.go") @has { @function }"#;
+    const QUERY: &str = r#"@file("/main.go") @has { @func }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1405,10 +1405,10 @@ fn file_contains_specific_function() {
 
 #[test]
 fn directory_contains_file() {
-    // @directory("/") @has { @module @has { @file } }
+    // @dir("/") @has { @mod @has { @file } }
     // With direct-children-only: directory(4) → module(3) → file(2)
     // Returns: directory /, module, and file
-    const QUERY: &str = r#"@directory("/") @has { @module @has { @file } }"#;
+    const QUERY: &str = r#"@dir("/") @has { @mod @has { @file } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1420,9 +1420,9 @@ fn directory_contains_file() {
 
 #[test]
 fn directory_contains_module() {
-    // @directory("/") @has { @module }
+    // @dir("/") @has { @mod }
     // Returns: directory / and modules contained in it
-    const QUERY: &str = r#"@directory("/") @has { @module }"#;
+    const QUERY: &str = r#"@dir("/") @has { @mod }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1434,10 +1434,10 @@ fn directory_contains_module() {
 
 #[test]
 fn directory_contains_function() {
-    // @directory("/") @has { @module @has { @file @has { @function } } }
+    // @dir("/") @has { @mod @has { @file @has { @func } } }
     // With direct-children-only: directory(4) → module(3) → file(2) → function(1)
     // Returns: directory, module, file, and all functions
-    const QUERY: &str = r#"@directory("/") @has { @module @has { @file @has { @function } } }"#;
+    const QUERY: &str = r#"@dir("/") @has { @mod @has { @file @has { @func } } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1449,10 +1449,10 @@ fn directory_contains_function() {
 
 #[test]
 fn full_hierarchy_query() {
-    // @directory("/") @has { @module @has { @file("/main.go") @has { "foo" } } }
+    // @dir("/") @has { @mod @has { @file("/main.go") @has { "foo" } } }
     // With direct-children-only: directory(4) → module(3) → file(2) → function(1)
     // Returns: directory, module, file /main.go, and foo
-    const QUERY: &str = r#"@directory("/") @has { @module @has { @file("/main.go") @has { "foo" } } }"#;
+    const QUERY: &str = r#"@dir("/") @has { @mod @has { @file("/main.go") @has { "foo" } } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1492,9 +1492,9 @@ fn file_type_selector_by_name() {
 
 #[test]
 fn directory_type_selector_filter_at_root() {
-    // @directory (no name) at root acts as filter - returns empty
+    // @dir (no name) at root acts as filter - returns empty
     // because there's no parent to derive from
-    const QUERY: &str = r#"@directory"#;
+    const QUERY: &str = r#"@dir"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1516,16 +1516,16 @@ fn directory_type_selector_filter_at_root() {
 // - "/src/util" has 2 instances (in objects 2,3)
 // - "/src/config" has 1 instance (in object 4)
 //
-// NOTE: @directory("/src") currently uses CompoundNameMixin which does
+// NOTE: @dir("/src") currently uses CompoundNameMixin which does
 // prefix/partial name matching, so it matches /src, /src/util, /src/config, etc.
 // This is a known behavior - exact path matching could be added as an improvement.
 
 #[test]
 fn directory_src_util_contains_its_direct_files() {
-    // @directory("/src/util") @has { @file }
+    // @dir("/src/util") @has { @file }
     // /src/util has instances in objects 2,3 (util.go, helper.go)
     // Files in those objects: util.go (obj 2), helper.go (obj 3)
-    const QUERY: &str = r#"@directory("/src/util") @has { @file }"#;
+    const QUERY: &str = r#"@dir("/src/util") @has { @file }"#;
     let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1542,9 +1542,9 @@ fn directory_src_util_contains_its_direct_files() {
 
 #[test]
 fn directory_docs_contains_its_direct_file() {
-    // @directory("/docs") @has { @file }
+    // @dir("/docs") @has { @file }
     // /docs has 1 instance (in object 5 for readme.md)
-    const QUERY: &str = r#"@directory("/docs") @has { @file }"#;
+    const QUERY: &str = r#"@dir("/docs") @has { @file }"#;
     let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1561,14 +1561,14 @@ fn directory_docs_contains_its_direct_file() {
 
 #[test]
 fn directory_has_empty_scope_returns_children() {
-    // @directory("/src/util") @has {}
+    // @dir("/src/util") @has {}
     // Empty scope should inherit @has relationship and return all direct children
     // /src/util has instances in objects 2,3 (util.go, helper.go)
     // With default type inheritance [DIRECTORY, FUNCTION], we get:
     // - Directory instances for /src/util
     // - Function instances in those objects (none in test data)
     // - Any other directories contained (none)
-    const QUERY: &str = r#"@directory("/src/util") @has {}"#;
+    const QUERY: &str = r#"@dir("/src/util") @has {}"#;
     let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1582,17 +1582,17 @@ fn directory_has_empty_scope_returns_children() {
     // So we expect at least 2 nodes for the directory itself
     assert!(
         res.nodes.as_vec().len() >= 2,
-        "@directory('/src/util') @has {{}} should return directory + any children. Got {} nodes.",
+        "@dir('/src/util') @has {{}} should return directory + any children. Got {} nodes.",
         res.nodes.as_vec().len()
     );
 }
 
 #[test]
 fn directory_has_empty_scope_with_file_test_data() {
-    // @module("testmodule") @has {}
+    // @mod("testmodule") @has {}
     // Empty scope should inherit @has relationship and return all direct children
     // In TEST_INPUT_CONTAINMENT, module has instances and contains file/functions
-    const QUERY: &str = r#"@module("testmodule") @has {}"#;
+    const QUERY: &str = r#"@mod("testmodule") @has {}"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1605,22 +1605,22 @@ fn directory_has_empty_scope_with_file_test_data() {
     // The module contains file (level 2), file contains functions (level 1)
     // But with direct containment, module (level 3) > file (level 2) should work
     // Actually with [MODULE, FUNCTION] filter, we should get:
-    // - module itself (from @module selector)
+    // - module itself (from @mod selector)
     // - functions if they match the type filter
     assert!(
         res.nodes.as_vec().len() >= 1,
-        "@module('testmodule') @has {{}} should return module + any matching children. Got {} nodes.",
+        "@mod('testmodule') @has {{}} should return module + any matching children. Got {} nodes.",
         res.nodes.as_vec().len()
     );
 }
 
 #[test]
 fn has_sibling_children_different_types() {
-    // @directory("/") @has { @module ; @file }
+    // @dir("/") @has { @mod ; @file }
     // Test that sibling children of different types use UNION logic.
     // Directory "/" contains both modules and files via different instances.
     // Both sibling children should be found.
-    const QUERY: &str = r#"@directory("/") @has { @module ; @file }"#;
+    const QUERY: &str = r#"@dir("/") @has { @mod ; @file }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1632,7 +1632,7 @@ fn has_sibling_children_different_types() {
     // The parent directory should NOT be filtered out by the union of both children
     assert!(
         res.nodes.as_vec().len() >= 2,
-        "@directory('/') @has {{ @module ; @file }} should return directory + module + file (union of both). Got {} nodes.",
+        "@dir('/') @has {{ @mod ; @file }} should return directory + module + file (union of both). Got {} nodes.",
         res.nodes.as_vec().len()
     );
 }
@@ -1647,8 +1647,8 @@ fn has_sibling_children_different_types() {
 
 #[test]
 fn directory_refs_children() {
-    // @directory("/src") @refs { @directory } should return /src + child dirs
-    const QUERY: &str = r#"@directory("/src") @refs { @directory }"#;
+    // @dir("/src") @refs { @dir } should return /src + child dirs
+    const QUERY: &str = r#"@dir("/src") @refs { @dir }"#;
     let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
 
     let names: Vec<_> = res.nodes.0.iter().map(|n| n.symbol.name.as_str()).collect();

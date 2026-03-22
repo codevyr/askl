@@ -182,9 +182,9 @@ impl ParserContext {
     }
 
     /// Check if the command has a type selector verb.
-    /// Type selectors are: @function, @file, @module, @directory
+    /// Type selectors are: @func, @file, @mod, @dir
     pub fn has_type_selector(&self) -> bool {
-        const TYPE_SELECTOR_NAMES: &[&str] = &["function", "file", "module", "directory"];
+        const TYPE_SELECTOR_NAMES: &[&str] = &["func", "file", "mod", "dir"];
         self.command
             .borrow()
             .selectors()

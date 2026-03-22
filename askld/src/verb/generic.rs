@@ -716,10 +716,10 @@ pub(super) struct TypeSelector {
 }
 
 impl TypeSelector {
-    pub(super) const NAME_FUNCTION: &'static str = "function";
+    pub(super) const NAME_FUNCTION: &'static str = "func";
     pub(super) const NAME_FILE: &'static str = "file";
-    pub(super) const NAME_MODULE: &'static str = "module";
-    pub(super) const NAME_DIRECTORY: &'static str = "directory";
+    pub(super) const NAME_MODULE: &'static str = "mod";
+    pub(super) const NAME_DIRECTORY: &'static str = "dir";
 
     pub fn new(
         span: Span,
