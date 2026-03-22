@@ -73,7 +73,8 @@ pub(crate) fn build_generic_verb(
 
     let span = ident.as_span();
     let res = match Identifier::build(ident)?.0.as_str() {
-        NameSelector::NAME => NameSelector::new(verb_span, &positional, &named),
+        GenericSelector::NAME => GenericSelector::new(verb_span, &positional, &named),
+        GenericFilter::NAME => GenericFilter::new(verb_span, &positional, &named),
         IgnoreVerb::NAME => IgnoreVerb::new(verb_span, &positional, &named),
         ProjectFilter::NAME => ProjectFilter::new(verb_span, &positional, &named),
         ForcedVerb::NAME => ForcedVerb::new(verb_span, &positional, &named),
@@ -108,7 +109,7 @@ pub struct NameSelector {
 }
 
 impl NameSelector {
-    pub(super) const NAME: &'static str = "select";
+    pub(super) const NAME: &'static str = "_name_select";
 
     pub fn new(
         span: Span,
@@ -850,6 +851,10 @@ impl Verb for TypeSelector {
         // Don't consume - still add this verb to the command
         Ok(false)
     }
+
+    fn suppresses_default_type_filter(&self) -> bool {
+        true
+    }
 }
 
 impl Filter for TypeSelector {
@@ -1003,6 +1008,305 @@ impl Filter for DefaultTypeFilter {
 impl Display for DefaultTypeFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "DefaultTypeFilter({:?})", self.symbol_type_ids)
+    }
+}
+
+// ============================================================================
+// GenericSelector — @select
+// ============================================================================
+
+#[derive(Debug)]
+pub struct GenericSelector {
+    span: Span,
+    captured_filters: OnceLock<Vec<Arc<dyn Verb>>>,
+}
+
+impl GenericSelector {
+    pub const NAME: &'static str = "select";
+
+    pub fn new(
+        span: Span,
+        _positional: &Vec<String>,
+        _named: &HashMap<String, String>,
+    ) -> Result<Arc<dyn Verb>> {
+        Ok(Arc::new(Self {
+            span,
+            captured_filters: OnceLock::new(),
+        }))
+    }
+}
+
+impl Verb for GenericSelector {
+    fn name(&self) -> &str {
+        GenericSelector::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
+        Ok(self)
+    }
+
+    fn requires_name_constraint(&self) -> bool {
+        true
+    }
+
+    fn has_name_constraint(&self) -> bool {
+        self.captured_filters
+            .get()
+            .map(|filters| filters.iter().any(|v| v.has_name_constraint()))
+            .unwrap_or(false)
+    }
+
+    fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
+        // Capture filter verbs from the command at this point (before we're added).
+        // This gives each @select its own positional filter set.
+        let filters = ctx.get_filter_verbs();
+        let _ = self.captured_filters.set(filters);
+        Ok(false)
+    }
+}
+
+#[async_trait(?Send)]
+impl Selector for GenericSelector {
+    async fn select_from_all_impl(
+        &self,
+        _ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        _search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+    ) -> Result<Option<Selection>> {
+        // Ignore incoming search_mixins (command-wide filters including DefaultTypeFilter).
+        // Instead, use only the captured filter verbs' mixins.
+        let mut search_mixins: Vec<Box<dyn SymbolSearchMixin>> = Vec::new();
+        if let Some(captured) = self.captured_filters.get() {
+            for verb in captured {
+                if let Ok(filter) = verb.as_filter() {
+                    search_mixins.extend(filter.get_filter_mixins());
+                }
+            }
+        }
+        let selection = cfg.index.find_symbol(&mut search_mixins).await?;
+        Ok(Some(selection))
+    }
+}
+
+impl Display for GenericSelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GenericSelector")
+    }
+}
+
+// ============================================================================
+// GenericFilter — @filter
+// ============================================================================
+
+fn parse_symbol_types(s: &str) -> Result<Vec<i32>> {
+    s.split(',')
+        .map(|part| {
+            let part = part.trim();
+            match part {
+                "func" => Ok(SYMBOL_TYPE_FUNCTION),
+                "mod" => Ok(SYMBOL_TYPE_MODULE),
+                "file" => Ok(SYMBOL_TYPE_FILE),
+                "dir" => Ok(SYMBOL_TYPE_DIRECTORY),
+                other => bail!("Unknown symbol type: '{}'", other),
+            }
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+enum FilterKind {
+    Type { symbol_type_ids: Vec<i32> },
+    ExactName { value: String },
+    CompoundName { value: String },
+}
+
+impl FilterKind {
+    fn parse(kind: &str, value: &str) -> Result<Self> {
+        match kind {
+            "type" => Ok(FilterKind::Type {
+                symbol_type_ids: parse_symbol_types(value)?,
+            }),
+            "exact_name" => Ok(FilterKind::ExactName {
+                value: value.to_string(),
+            }),
+            "compound_name" => Ok(FilterKind::CompoundName {
+                value: value.to_string(),
+            }),
+            other => bail!(
+                "Unknown filter kind: '{}'. Expected 'type', 'exact_name', or 'compound_name'",
+                other
+            ),
+        }
+    }
+
+    fn tag_name(&self) -> &'static str {
+        match self {
+            FilterKind::Type { .. } => "type",
+            FilterKind::ExactName { .. } => "exact_name",
+            FilterKind::CompoundName { .. } => "compound_name",
+        }
+    }
+
+    fn has_name_constraint(&self) -> bool {
+        match self {
+            FilterKind::Type { .. } => false,
+            FilterKind::ExactName { .. } | FilterKind::CompoundName { .. } => true,
+        }
+    }
+
+    fn suppresses_default_type_filter(&self) -> bool {
+        matches!(self, FilterKind::Type { .. })
+    }
+
+    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
+        match self {
+            FilterKind::Type { symbol_type_ids } => {
+                if symbol_type_ids.len() == 1 {
+                    vec![Box::new(SymbolTypeMixin::new(symbol_type_ids[0]))]
+                } else {
+                    vec![Box::new(DefaultSymbolTypeMixin::new(
+                        symbol_type_ids.clone(),
+                    ))]
+                }
+            }
+            FilterKind::ExactName { value } => {
+                vec![Box::new(ExactNameMixin::new(value))]
+            }
+            FilterKind::CompoundName { value } => {
+                vec![Box::new(CompoundNameMixin::new(value))]
+            }
+        }
+    }
+
+    fn update_context(&self, ctx: &ParserContext, inherit: bool) {
+        if let FilterKind::Type { symbol_type_ids } = self {
+            if inherit {
+                let mut default_types = symbol_type_ids.clone();
+                if !default_types.contains(&SYMBOL_TYPE_FUNCTION) {
+                    default_types.push(SYMBOL_TYPE_FUNCTION);
+                }
+                ctx.set_default_symbol_types(default_types);
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for FilterKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FilterKind::Type { symbol_type_ids } => write!(f, "type={:?}", symbol_type_ids),
+            FilterKind::ExactName { value } => write!(f, "exact_name={}", value),
+            FilterKind::CompoundName { value } => write!(f, "compound_name={}", value),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct GenericFilter {
+    span: Span,
+    kind: FilterKind,
+    inherit: bool,
+}
+
+impl GenericFilter {
+    pub const NAME: &'static str = "filter";
+
+    pub fn new(
+        span: Span,
+        positional: &Vec<String>,
+        named: &HashMap<String, String>,
+    ) -> Result<Arc<dyn Verb>> {
+        let kind_str = positional
+            .first()
+            .ok_or_else(|| anyhow!("@filter requires a kind as first argument"))?;
+
+        let value = positional
+            .get(1)
+            .ok_or_else(|| anyhow!("@filter requires a value as second argument"))?;
+
+        let kind = FilterKind::parse(kind_str, value)?;
+
+        let inherit = named
+            .get("inherit")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        Ok(Arc::new(Self {
+            span,
+            kind,
+            inherit,
+        }))
+    }
+}
+
+impl Verb for GenericFilter {
+    fn name(&self) -> &str {
+        GenericFilter::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
+        Ok(self)
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        if self.inherit {
+            DeriveMethod::Clone
+        } else {
+            DeriveMethod::Skip
+        }
+    }
+
+    fn derive_new_instance(&self) -> Option<Arc<dyn Verb>> {
+        if self.inherit {
+            Some(Arc::new(GenericFilter {
+                span: self.span.clone(),
+                kind: self.kind.clone(),
+                inherit: self.inherit,
+            }))
+        } else {
+            None
+        }
+    }
+
+    fn get_tag(&self) -> Option<VerbTag> {
+        Some(VerbTag::GenericFilter(self.kind.tag_name()))
+    }
+
+    fn add_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
+        self.replace_verb(existing_verbs)
+    }
+
+    fn suppresses_default_type_filter(&self) -> bool {
+        self.kind.suppresses_default_type_filter()
+    }
+
+    fn has_name_constraint(&self) -> bool {
+        self.kind.has_name_constraint()
+    }
+
+    fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
+        self.kind.update_context(ctx, self.inherit);
+        Ok(false)
+    }
+}
+
+impl Filter for GenericFilter {
+    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
+        self.kind.get_filter_mixins()
+    }
+}
+
+impl Display for GenericFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GenericFilter({})", self.kind)
     }
 }
 

@@ -181,13 +181,16 @@ impl ParserContext {
         self.default_symbol_types.borrow().clone()
     }
 
-    /// Check if the command has a type selector verb.
-    /// Type selectors are: @func, @file, @mod, @dir
+    /// Check if the command has a verb that provides its own type filtering,
+    /// making the automatic DefaultTypeFilter unnecessary.
+    /// This covers: @func, @file, @mod, @dir, @filter("type", ...)
     pub fn has_type_selector(&self) -> bool {
-        const TYPE_SELECTOR_NAMES: &[&str] = &["func", "file", "mod", "dir"];
-        self.command
-            .borrow()
-            .selectors()
-            .any(|s| TYPE_SELECTOR_NAMES.contains(&s.name()))
+        self.command.borrow().has_suppress_default_type_filter()
+    }
+
+    /// Get filter verb Arcs from the current command.
+    /// Used by GenericSelector to capture its positional filter set.
+    pub fn get_filter_verbs(&self) -> Vec<Arc<dyn Verb>> {
+        self.command.borrow().filter_verbs()
     }
 }
