@@ -229,13 +229,6 @@ impl IndexStore {
                     None => return Err(UploadError::Conflict),
                 };
 
-                // Directory paths are collected for creating directory symbols later
-                let directory_paths = {
-                    let _span: tracing::span::EnteredSpan =
-                        tracing::info_span!("collect_directory_paths").entered();
-                    collect_directory_paths(&upload.objects)
-                };
-
                 let object_inserts = {
                     let _span: tracing::span::EnteredSpan = tracing::info_span!(
                         "build_objects",
@@ -296,16 +289,6 @@ impl IndexStore {
                     )
                     .entered();
                     insert_symbol_refs(conn, &symbol_ref_rows)?;
-                }
-
-                // Create directory symbols and their instances
-                {
-                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
-                        "create_directory_symbols",
-                        count = directory_paths.len()
-                    )
-                    .entered();
-                    create_directory_symbols(conn, project_id, &object_inserts, &object_map)?;
                 }
 
                 Ok(project_id)
@@ -782,37 +765,7 @@ struct SymbolInsert {
     row: NewSymbol,
 }
 
-fn collect_directory_paths(objects: &[UploadObject]) -> HashSet<String> {
-    let mut paths = HashSet::new();
-    paths.insert("/".to_string());
-    for object in objects {
-        let filesystem_path = normalize_full_path(&object.filesystem_path);
-        let mut dir_path = parent_dir(&filesystem_path);
-        loop {
-            paths.insert(dir_path.clone());
-            if dir_path == "/" {
-                break;
-            }
-            dir_path = parent_dir(&dir_path);
-        }
-    }
-    paths
-}
-
-fn parent_dir(path: &str) -> String {
-    let normalized = normalize_full_path(path);
-    if normalized == "/" {
-        return "/".to_string();
-    }
-    let trimmed = normalized.trim_end_matches('/');
-    match trimmed.rfind('/') {
-        Some(0) | None => "/".to_string(),
-        Some(idx) => trimmed[..idx].to_string(),
-    }
-}
-
-// insert_directories, insert_directory_batch, fetch_directory_ids, DirectoryEntry
-// have been removed - directories are now created as symbols via create_directory_symbols()
+// Directory symbols are now created by the indexer, not the server.
 
 fn build_objects(
     project_id: i32,
@@ -1028,179 +981,6 @@ fn insert_symbol_refs(conn: &mut PgConnection, rows: &[NewSymbolRef]) -> Result<
             .execute(conn)?;
     }
     Ok(())
-}
-
-/// Creates directory symbols, instances, and parent→child directory refs.
-///
-/// Each directory symbol gets:
-/// - An instance on each direct child file's object (for range-based containment)
-/// - A symbol_ref from each direct child directory (for directory hierarchy traversal)
-///
-/// Containment (via @has) uses strict type level comparison (>), so:
-///   directory(4) > module(3) > file(2) > function(1)
-/// Directory→directory hierarchy uses symbol_refs (via @refs).
-fn create_directory_symbols(
-    conn: &mut PgConnection,
-    project_id: i32,
-    object_inserts: &[ObjectInsert],
-    object_map: &HashMap<i64, i32>,
-) -> Result<(), UploadError> {
-    // Step 1: Collect all directory paths (including all ancestors)
-    let mut dir_paths: HashSet<String> = HashSet::new();
-    for obj in object_inserts {
-        let path = &obj.row.filesystem_path;
-        let mut current = parent_dir(path);
-        loop {
-            dir_paths.insert(normalize_full_path(&current));
-            if current == "/" {
-                break;
-            }
-            current = parent_dir(&current);
-        }
-    }
-
-    if dir_paths.is_empty() {
-        return Ok(());
-    }
-
-    // Step 2: Create directory symbols
-    let dir_symbols: Vec<NewSymbol> = dir_paths
-        .iter()
-        .map(|path| NewSymbol {
-            name: path.clone(),
-            project_id,
-            symbol_type: 4, // DIRECTORY
-            symbol_scope: None,
-        })
-        .collect();
-
-    let mut dir_symbol_map: HashMap<String, i32> = HashMap::new();
-    for chunk in dir_symbols.chunks(MAX_INSERT_ROWS) {
-        let rows: Vec<NewSymbol> = chunk.to_vec();
-        let ids: Vec<i32> = diesel::insert_into(index_schema::symbols::table)
-            .values(&rows)
-            .returning(index_schema::symbols::id)
-            .get_results(conn)?;
-
-        for (symbol, id) in chunk.iter().zip(ids) {
-            dir_symbol_map.insert(symbol.name.clone(), id);
-        }
-    }
-
-    // Step 3: Create a sentinel object per directory and a self-instance on it.
-    // This ensures every directory is visible to the query engine regardless of
-    // whether it contains direct files.
-    let mut dir_objects: Vec<NewObject> = Vec::new();
-    for dir_path in &dir_paths {
-        dir_objects.push(NewObject {
-            project_id,
-            module_path: dir_path.clone(),
-            filesystem_path: dir_path.clone(),
-            filetype: "directory".to_string(),
-            content_hash: String::new(),
-        });
-    }
-
-    // Insert sentinel objects and build dir_path → db_object_id mapping
-    let mut dir_object_map: HashMap<String, i32> = HashMap::new();
-    for chunk in dir_objects.chunks(MAX_INSERT_ROWS) {
-        let ids: Vec<i32> = diesel::insert_into(index_schema::objects::table)
-            .values(chunk)
-            .returning(index_schema::objects::id)
-            .get_results(conn)?;
-        for (obj, id) in chunk.iter().zip(ids) {
-            dir_object_map.insert(obj.filesystem_path.clone(), id);
-        }
-    }
-
-    // Create self-instances: one per directory on its sentinel object, range [0, 0)
-    let mut instances: Vec<NewSymbolInstance> = Vec::new();
-    for dir_path in &dir_paths {
-        if let (Some(&symbol_id), Some(&object_id)) =
-            (dir_symbol_map.get(dir_path), dir_object_map.get(dir_path))
-        {
-            instances.push(NewSymbolInstance {
-                symbol: symbol_id,
-                object_id,
-                offset_range: 0..0,
-            });
-        }
-    }
-
-    // Also create directory instances on direct child files for containment queries.
-    // These allow @has to find files/functions inside a directory via range overlap.
-    for obj in object_inserts {
-        let db_object_id = *object_map.get(&obj.local_id).ok_or_else(|| {
-            UploadError::Invalid(format!("Missing object mapping for local_id {}", obj.local_id))
-        })?;
-
-        let content_len = obj.content.len() as i32;
-        let file_path = &obj.row.filesystem_path;
-        let parent = normalize_full_path(&parent_dir(file_path));
-
-        if let Some(&symbol_id) = dir_symbol_map.get(&parent) {
-            instances.push(NewSymbolInstance {
-                symbol: symbol_id,
-                object_id: db_object_id,
-                offset_range: 0..content_len,
-            });
-        }
-    }
-
-    for chunk in instances.chunks(MAX_INSERT_ROWS) {
-        diesel::insert_into(index_schema::symbol_instances::table)
-            .values(chunk)
-            .execute(conn)?;
-    }
-
-    // Step 4: Create symbol_refs for parent→child directory relationships.
-    // Each ref uses the parent's sentinel object as from_object.
-    let mut refs: Vec<NewSymbolRef> = Vec::new();
-
-    for parent_dir in &dir_paths {
-        let from_object = match dir_object_map.get(parent_dir) {
-            Some(&id) => id,
-            None => continue,
-        };
-
-        for child_dir in &dir_paths {
-            if child_dir != parent_dir && is_direct_child_path(parent_dir, child_dir) {
-                if let Some(&child_symbol_id) = dir_symbol_map.get(child_dir) {
-                    refs.push(NewSymbolRef {
-                        to_symbol: child_symbol_id,
-                        from_object,
-                        from_offset_range: 0..0,
-                    });
-                }
-            }
-        }
-    }
-
-    insert_symbol_refs(conn, &refs)?;
-
-    Ok(())
-}
-
-/// Returns true if child_path is a direct child of parent_path.
-/// E.g., is_direct_child_path("/src", "/src/util") => true
-///       is_direct_child_path("/src", "/src/util/foo") => false
-fn is_direct_child_path(parent: &str, child: &str) -> bool {
-    if parent == "/" {
-        // Root case: child must be like "/xxx" with no more slashes
-        if !child.starts_with('/') || child == "/" {
-            return false;
-        }
-        let after_root = &child[1..];
-        !after_root.contains('/')
-    } else {
-        // Non-root case: child must start with parent + "/"
-        let prefix = format!("{}/", parent);
-        if !child.starts_with(&prefix) {
-            return false;
-        }
-        let after_prefix = &child[prefix.len()..];
-        !after_prefix.contains('/')
-    }
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
