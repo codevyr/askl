@@ -19,7 +19,7 @@ pub fn format_edges(edges: EdgeList) -> Vec<String> {
     edges
         .as_vec()
         .into_iter()
-        .map(|(f, t, _)| format!("{}-{}", f.declaration_id, t.declaration_id))
+        .map(|(f, t, _)| format!("{}-{}", f.instance_id, t.instance_id))
         .collect()
 }
 

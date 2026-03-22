@@ -1,7 +1,7 @@
 use crate::test_util::{
     format_edges, run_query, run_query_err, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES, TEST_INPUT_TREE_BROWSER,
 };
-use index::symbols::DeclarationId;
+use index::symbols::SymbolInstanceId;
 
 #[test]
 fn single_node_query() {
@@ -12,7 +12,7 @@ fn single_node_query() {
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
-    assert_eq!(res.nodes.as_vec(), vec![DeclarationId::new(91)]);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(91)]);
     assert_eq!(res.edges.0.len(), 0);
 }
 
@@ -25,7 +25,7 @@ fn single_child_query() {
     println!("{:#?}", res.edges);
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(92)]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(92)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-92", "91-92"]);
@@ -40,7 +40,7 @@ fn single_parent_query() {
     println!("{:#?}", res.edges);
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(942)]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(942)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["942-91"]);
@@ -56,9 +56,9 @@ fn double_parent_query() {
     assert_eq!(
         res.nodes.as_vec(),
         vec![
-            DeclarationId::new(91),
-            DeclarationId::new(92),
-            DeclarationId::new(942)
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(92),
+            SymbolInstanceId::new(942)
         ]
     );
     let edges = format_edges(res.edges);
@@ -119,7 +119,7 @@ fn forced_child_query_1() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(92)]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(92)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-92", "91-92", "92-91"]);
@@ -135,7 +135,7 @@ fn forced_child_query_2() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(92), DeclarationId::new(93)]
+        vec![SymbolInstanceId::new(92), SymbolInstanceId::new(93)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["92-93"]);
@@ -153,7 +153,7 @@ fn forced_child_query_3() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(93), DeclarationId::new(942)]
+        vec![SymbolInstanceId::new(93), SymbolInstanceId::new(942)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["942-93"]);
@@ -169,7 +169,7 @@ fn forced_child_query_4() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(97)]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(97)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-97"]);
@@ -186,10 +186,10 @@ fn forced_child_query_5() {
     assert_eq!(
         res.nodes.as_vec(),
         vec![
-            DeclarationId::new(91),
-            DeclarationId::new(92),
-            DeclarationId::new(97),
-            DeclarationId::new(942),
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(92),
+            SymbolInstanceId::new(97),
+            SymbolInstanceId::new(942),
         ]
     );
     let edges = format_edges(res.edges);
@@ -210,9 +210,9 @@ fn forced_child_query_6() {
     assert_eq!(
         res.nodes.as_vec(),
         vec![
-            DeclarationId::new(91),
-            DeclarationId::new(92),
-            DeclarationId::new(97),
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(92),
+            SymbolInstanceId::new(97),
         ]
     );
     let edges = format_edges(res.edges);
@@ -230,9 +230,9 @@ fn forced_child_query_7() {
     assert_eq!(
         res.nodes.as_vec(),
         vec![
-            DeclarationId::new(91),
-            DeclarationId::new(92),
-            DeclarationId::new(942)
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(92),
+            SymbolInstanceId::new(942)
         ]
     );
     let edges = format_edges(res.edges);
@@ -251,7 +251,7 @@ fn generic_forced_child_query_3() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(93), DeclarationId::new(942)]
+        vec![SymbolInstanceId::new(93), SymbolInstanceId::new(942)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["942-93"]);
@@ -267,7 +267,7 @@ fn two_selectors() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(92),]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(92),]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-92", "91-92"]);
@@ -283,7 +283,7 @@ fn two_selectors_children() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(92),]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(92),]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-92", "91-92"]);
@@ -299,7 +299,7 @@ fn statement_after_scope() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(92),]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(92),]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-92", "91-92"]);
@@ -316,7 +316,7 @@ fn statement_after_scope_newline() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(92),]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(92),]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-92", "91-92"]);
@@ -330,7 +330,7 @@ fn ignore_node_no_result() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![DeclarationId::new(91)]);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(91)]);
     let edges = format_edges(res.edges);
     assert_eq!(edges, Vec::<String>::new());
 }
@@ -345,7 +345,7 @@ fn ignore_node_sibling() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(94), DeclarationId::new(96)]
+        vec![SymbolInstanceId::new(94), SymbolInstanceId::new(96)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["94-96"]);
@@ -359,7 +359,7 @@ fn ignore_node_parent_no_result() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![DeclarationId::new(95)]);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(95)]);
     let edges = format_edges(res.edges);
     assert_eq!(edges, Vec::<String>::new());
 }
@@ -374,7 +374,7 @@ fn ignore_node_parent_no_result_2() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(96), DeclarationId::new(97)]
+        vec![SymbolInstanceId::new(96), SymbolInstanceId::new(97)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["96-97"]);
@@ -405,7 +405,7 @@ fn ignore_node_parent_no_result_4() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(96), DeclarationId::new(97)]
+        vec![SymbolInstanceId::new(96), SymbolInstanceId::new(97)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["96-97"]);
@@ -421,7 +421,7 @@ fn ignore_node_wrong_parent() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(94), DeclarationId::new(95)]
+        vec![SymbolInstanceId::new(94), SymbolInstanceId::new(95)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["94-95"]);
@@ -436,7 +436,7 @@ fn ignore_node_recurse() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![DeclarationId::new(91)]);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(91)]);
     let edges = format_edges(res.edges);
     assert_eq!(edges, Vec::<String>::new());
 }
@@ -450,7 +450,7 @@ fn ignore_another_statement() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![DeclarationId::new(91)]);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(91)]);
     let edges = format_edges(res.edges);
     assert_eq!(edges, Vec::<String>::new());
 }
@@ -471,10 +471,10 @@ fn two_sub_statements() {
     assert_eq!(
         res.nodes.as_vec(),
         vec![
-            DeclarationId::new(94),
-            DeclarationId::new(95),
-            DeclarationId::new(96),
-            DeclarationId::new(97),
+            SymbolInstanceId::new(94),
+            SymbolInstanceId::new(95),
+            SymbolInstanceId::new(96),
+            SymbolInstanceId::new(97),
         ]
     );
     let edges = format_edges(res.edges);
@@ -493,7 +493,7 @@ fn statement_semicolon() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(94), DeclarationId::new(96),]
+        vec![SymbolInstanceId::new(94), SymbolInstanceId::new(96),]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["94-96"]);
@@ -509,7 +509,7 @@ fn two_statements() {
     println!("{:#?}", res.edges);
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(92)]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(92)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-92", "91-92"]);
@@ -527,9 +527,9 @@ fn project_double_parent_query() {
     assert_eq!(
         res.nodes.as_vec(),
         vec![
-            DeclarationId::new(91),
-            DeclarationId::new(92),
-            DeclarationId::new(942)
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(92),
+            SymbolInstanceId::new(942)
         ]
     );
     let edges = format_edges(res.edges);
@@ -545,7 +545,7 @@ fn module_filter_excludes_other_modules() {
     println!("{:#?}", filtered.nodes);
     println!("{:#?}", filtered.edges);
 
-    assert_eq!(filtered.nodes.as_vec(), vec![DeclarationId::new(91)]);
+    assert_eq!(filtered.nodes.as_vec(), vec![SymbolInstanceId::new(91)]);
     assert_eq!(filtered.edges.0.len(), 0);
 
     const UNFILTERED_QUERY: &str = r#""a""#;
@@ -555,9 +555,9 @@ fn module_filter_excludes_other_modules() {
     assert_eq!(
         unfiltered_nodes,
         vec![
-            DeclarationId::new(91),
-            DeclarationId::new(201),
-            DeclarationId::new(301)
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(201),
+            SymbolInstanceId::new(301)
         ]
     );
 
@@ -568,9 +568,9 @@ fn module_filter_excludes_other_modules() {
     assert_eq!(
         filtered_unfiltered_nodes,
         vec![
-            DeclarationId::new(91),
-            DeclarationId::new(201),
-            DeclarationId::new(301)
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(201),
+            SymbolInstanceId::new(301)
         ]
     );
 
@@ -578,7 +578,7 @@ fn module_filter_excludes_other_modules() {
     let preamble_filtered = run_query(TEST_INPUT_MODULES, PREAMBLE_FILTERED_QUERY);
     let preamble_filtered_nodes = preamble_filtered.nodes.as_vec();
 
-    assert_eq!(preamble_filtered_nodes, vec![DeclarationId::new(91)]);
+    assert_eq!(preamble_filtered_nodes, vec![SymbolInstanceId::new(91)]);
 }
 
 #[test]
@@ -590,7 +590,7 @@ fn module_filter_selects_other_module() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![DeclarationId::new(201)]);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(201)]);
     assert_eq!(res.edges.0.len(), 0);
 }
 
@@ -603,7 +603,7 @@ fn module_filter_replaced_by_second_invocation() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![DeclarationId::new(201)]);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(201)]);
     assert_eq!(res.edges.0.len(), 0);
 }
 
@@ -618,7 +618,7 @@ fn module_filter_children_scope_honors_filter() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(201), DeclarationId::new(202)]
+        vec![SymbolInstanceId::new(201), SymbolInstanceId::new(202)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["201-202"]);
@@ -634,7 +634,7 @@ fn project_filter_excludes_other_projects() {
 
     assert_eq!(
         filtered.nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(201)]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(201)]
     );
     assert_eq!(filtered.edges.0.len(), 0);
 
@@ -645,9 +645,9 @@ fn project_filter_excludes_other_projects() {
     assert_eq!(
         unfiltered_nodes,
         vec![
-            DeclarationId::new(91),
-            DeclarationId::new(201),
-            DeclarationId::new(301)
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(201),
+            SymbolInstanceId::new(301)
         ]
     );
 
@@ -658,9 +658,9 @@ fn project_filter_excludes_other_projects() {
     assert_eq!(
         filtered_unfiltered_nodes,
         vec![
-            DeclarationId::new(91),
-            DeclarationId::new(201),
-            DeclarationId::new(301)
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(201),
+            SymbolInstanceId::new(301)
         ]
     );
 
@@ -670,7 +670,7 @@ fn project_filter_excludes_other_projects() {
 
     assert_eq!(
         preamble_filtered_nodes,
-        vec![DeclarationId::new(91), DeclarationId::new(201)]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(201)]
     );
 
     const REPLACE_PROJECT_FILTERED_QUERY: &str = r#"@project("adsf") @project("test_project") "a""#;
@@ -679,7 +679,7 @@ fn project_filter_excludes_other_projects() {
 
     assert_eq!(
         replace_project_filtered_nodes,
-        vec![DeclarationId::new(91), DeclarationId::new(201)]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(201)]
     );
 }
 
@@ -691,7 +691,7 @@ fn project_filter_selects_other_project() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![DeclarationId::new(301)]);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(301)]);
     assert_eq!(res.edges.0.len(), 0);
 
     const WRONG_PROJECT_QUERY: &str = r#"@project("blablabla_project") "a""#;
@@ -713,7 +713,7 @@ fn project_and_module_filters_combine() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![DeclarationId::new(201)]);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(201)]);
     assert_eq!(res.edges.0.len(), 0);
 }
 
@@ -741,9 +741,9 @@ fn scoped_project_filter_does_not_leak() {
     assert_eq!(
         res.nodes.as_vec(),
         vec![
-            DeclarationId::new(91),
-            DeclarationId::new(201),
-            DeclarationId::new(301)
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(201),
+            SymbolInstanceId::new(301)
         ]
     );
     assert_eq!(res.edges.0.len(), 0);
@@ -760,9 +760,9 @@ fn multiple_projects_with_forced() {
     assert_eq!(
         res.nodes.as_vec(),
         vec![
-            DeclarationId::new(91),
-            DeclarationId::new(201),
-            DeclarationId::new(301)
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(201),
+            SymbolInstanceId::new(301)
         ]
     );
     let edges = format_edges(res.edges);
@@ -780,10 +780,10 @@ fn implicit_edge() {
     assert_eq!(
         res.nodes.as_vec(),
         vec![
-            DeclarationId::new(86),
-            DeclarationId::new(94),
-            DeclarationId::new(95),
-            DeclarationId::new(96)
+            SymbolInstanceId::new(86),
+            SymbolInstanceId::new(94),
+            SymbolInstanceId::new(95),
+            SymbolInstanceId::new(96)
         ]
     );
     let edges = format_edges(res.edges);
@@ -803,13 +803,13 @@ fn multiple_selectors() {
     assert_eq!(
         res.nodes.as_vec(),
         vec![
-            DeclarationId::new(86),
-            DeclarationId::new(91),
-            DeclarationId::new(92),
-            DeclarationId::new(93),
-            DeclarationId::new(94),
-            DeclarationId::new(95),
-            DeclarationId::new(96),
+            SymbolInstanceId::new(86),
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(92),
+            SymbolInstanceId::new(93),
+            SymbolInstanceId::new(94),
+            SymbolInstanceId::new(95),
+            SymbolInstanceId::new(96),
         ]
     );
     let edges = format_edges(res.edges);
@@ -888,7 +888,7 @@ fn preamble_second_command() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![DeclarationId::new(91)]);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(91)]);
     let edges = format_edges(res.edges);
     assert_eq!(edges, Vec::<String>::new());
 }
@@ -930,7 +930,7 @@ fn weak_grandchild() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(96), DeclarationId::new(97)]
+        vec![SymbolInstanceId::new(96), SymbolInstanceId::new(97)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["96-97"]);
@@ -946,7 +946,7 @@ fn weak_grandchild_2() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(92)]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(92)]
     );
     assert_eq!(res.warnings.len(), 0);
     let edges = format_edges(res.edges);
@@ -963,7 +963,7 @@ fn weak_grandparent() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(942)]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(942)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["942-91"]);
@@ -979,7 +979,7 @@ fn weak_grandparent_2() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(942)]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(942)]
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["942-91"]);
@@ -1152,8 +1152,8 @@ fn has_vs_refs_module_to_function() {
 
     // File contains foo, so we get both
     assert_eq!(has_res.nodes.as_vec().len(), 2);
-    assert!(has_res.nodes.as_vec().contains(&DeclarationId::new(510))); // file
-    assert!(has_res.nodes.as_vec().contains(&DeclarationId::new(20))); // foo
+    assert!(has_res.nodes.as_vec().contains(&SymbolInstanceId::new(510))); // file
+    assert!(has_res.nodes.as_vec().contains(&SymbolInstanceId::new(20))); // foo
 
     // @refs: file CALLS foo? No refs from file to foo exist
     const REFS_QUERY: &str = r#"@file("/main.go") @refs { "foo" }"#;
@@ -1186,8 +1186,8 @@ fn has_vs_refs_function_to_function() {
 
     // foo calls bar, so we get both
     assert_eq!(refs_res.nodes.as_vec().len(), 2);
-    assert!(refs_res.nodes.as_vec().contains(&DeclarationId::new(20))); // foo
-    assert!(refs_res.nodes.as_vec().contains(&DeclarationId::new(30))); // bar
+    assert!(refs_res.nodes.as_vec().contains(&SymbolInstanceId::new(20))); // foo
+    assert!(refs_res.nodes.as_vec().contains(&SymbolInstanceId::new(30))); // bar
 }
 
 #[test]
@@ -1244,9 +1244,9 @@ fn refs_overrides_inherited_has() {
 
     // Should have file (contains foo) + foo + bar (foo calls bar)
     assert_eq!(res.nodes.as_vec().len(), 3);
-    assert!(res.nodes.as_vec().contains(&DeclarationId::new(510))); // file
-    assert!(res.nodes.as_vec().contains(&DeclarationId::new(20))); // foo
-    assert!(res.nodes.as_vec().contains(&DeclarationId::new(30))); // bar
+    assert!(res.nodes.as_vec().contains(&SymbolInstanceId::new(510))); // file
+    assert!(res.nodes.as_vec().contains(&SymbolInstanceId::new(20))); // foo
+    assert!(res.nodes.as_vec().contains(&SymbolInstanceId::new(30))); // bar
 }
 
 // ============================================================================
@@ -1283,7 +1283,7 @@ fn default_type_inheritance_module_refs_children() {
     println!("Nodes: {:?}", nodes);
 
     // The module should be included
-    assert!(nodes.contains(&DeclarationId::new(10)), "Should include module");
+    assert!(nodes.contains(&SymbolInstanceId::new(10)), "Should include module");
 
     // Functions referenced by refs within module's range should be included
     // (bar at 30, baz at 40)
@@ -1311,9 +1311,9 @@ fn default_type_inheritance_explicit_function_only() {
     // Should include module (10) as the parent + functions (30, 40)
     // This is the same as the default case since there are no module-to-module refs
     // The difference would be visible if module referenced other modules
-    assert!(nodes.contains(&DeclarationId::new(10)), "Should include parent module");
-    assert!(nodes.contains(&DeclarationId::new(30)), "Should include bar");
-    assert!(nodes.contains(&DeclarationId::new(40)), "Should include baz");
+    assert!(nodes.contains(&SymbolInstanceId::new(10)), "Should include parent module");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "Should include bar");
+    assert!(nodes.contains(&SymbolInstanceId::new(40)), "Should include baz");
 }
 
 #[test]
@@ -1333,12 +1333,12 @@ fn default_type_inheritance_function_refs_children() {
     println!("Nodes: {:?}", nodes);
 
     // Should have foo (20) and bar (30) - foo calls bar
-    assert!(nodes.contains(&DeclarationId::new(20)), "Should include foo");
-    assert!(nodes.contains(&DeclarationId::new(30)), "Should include bar");
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "Should include foo");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "Should include bar");
 
     // Should NOT include module since @function sets default to function only
     assert!(
-        !nodes.contains(&DeclarationId::new(10)),
+        !nodes.contains(&SymbolInstanceId::new(10)),
         "Should NOT include module"
     );
 }

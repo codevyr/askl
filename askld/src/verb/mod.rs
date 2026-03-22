@@ -8,8 +8,8 @@ use crate::span::Span;
 use crate::statement::Statement;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use index::db_diesel::{DeclarationIdMixin, Index, Selection, SymbolSearchMixin};
-use index::symbols::DeclarationId;
+use index::db_diesel::{SymbolInstanceIdMixin, Index, Selection, SymbolSearchMixin};
+use index::symbols::SymbolInstanceId;
 use itertools::Itertools;
 use log::debug;
 use pest::error::Error;
@@ -507,24 +507,24 @@ pub trait Selector: std::fmt::Debug + Verb {
         }
 
         // Derivation path: derive parent's selection from merged children.
-        let decl_ids: Vec<DeclarationId> = match (role, rel_type) {
+        let decl_ids: Vec<SymbolInstanceId> = match (role, rel_type) {
             (DependencyRole::Parent, RelationshipType::Refs) => dependency
                 .parents
                 .iter()
-                .map(|p| DeclarationId::new(p.from_instance.id))
+                .map(|p| SymbolInstanceId::new(p.from_instance.id))
                 .unique()
                 .collect(),
             (DependencyRole::Parent, RelationshipType::Has) => dependency
                 .has_parents
                 .iter()
-                .map(|p| DeclarationId::new(p.parent_instance.id))
+                .map(|p| SymbolInstanceId::new(p.parent_instance.id))
                 .unique()
                 .collect(),
             _ => return Ok(NotificationResult::new(false, vec![])),
         };
 
         let mut selection = self
-            .find_symbol_by_declid(index, selector_filters, &decl_ids)
+            .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
             .await
             .map_err(|e| {
                 Error::new_from_span(
@@ -595,12 +595,12 @@ pub trait Selector: std::fmt::Debug + Verb {
         let decl_ids = parent
             .children
             .iter()
-            .map(|p| DeclarationId::new(p.symbol_instance.id))
+            .map(|p| SymbolInstanceId::new(p.symbol_instance.id))
             .unique()
             .collect::<Vec<_>>();
 
         let children_selection = self
-            .find_symbol_by_declid(index, selector_filters, &decl_ids)
+            .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
             .await?;
 
         Ok(Some(children_selection))
@@ -621,11 +621,11 @@ pub trait Selector: std::fmt::Debug + Verb {
         let decl_ids = child
             .parents
             .iter()
-            .map(|p| DeclarationId::new(p.from_instance.id))
+            .map(|p| SymbolInstanceId::new(p.from_instance.id))
             .unique()
             .collect::<Vec<_>>();
         let parent_selection = self
-            .find_symbol_by_declid(index, selector_filters, &decl_ids)
+            .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
             .await?;
 
         Ok(Some(parent_selection))
@@ -647,12 +647,12 @@ pub trait Selector: std::fmt::Debug + Verb {
         let decl_ids = parent_sel
             .has_children
             .iter()
-            .map(|p| DeclarationId::new(p.child_instance.id))
+            .map(|p| SymbolInstanceId::new(p.child_instance.id))
             .unique()
             .collect::<Vec<_>>();
 
         let children_selection = self
-            .find_symbol_by_declid(index, selector_filters, &decl_ids)
+            .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
             .await?;
 
         Ok(Some(children_selection))
@@ -674,11 +674,11 @@ pub trait Selector: std::fmt::Debug + Verb {
         let decl_ids = child
             .has_parents
             .iter()
-            .map(|p| DeclarationId::new(p.parent_instance.id))
+            .map(|p| SymbolInstanceId::new(p.parent_instance.id))
             .unique()
             .collect::<Vec<_>>();
         let parent_selection = self
-            .find_symbol_by_declid(index, selector_filters, &decl_ids)
+            .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
             .await?;
 
         Ok(Some(parent_selection))
@@ -698,13 +698,13 @@ pub trait Selector: std::fmt::Debug + Verb {
         Ok(Some(provider.clone()))
     }
 
-    async fn find_symbol_by_declid(
+    async fn find_symbol_by_instance_id(
         &self,
         index: &Index,
         selector_filters: &[&dyn Filter],
-        declarations: &Vec<DeclarationId>,
+        instances: &Vec<SymbolInstanceId>,
     ) -> Result<Selection> {
-        let mixin = DeclarationIdMixin::new(declarations);
+        let mixin = SymbolInstanceIdMixin::new(instances);
         let mut mixins: Vec<Box<dyn SymbolSearchMixin>> = selector_filters
             .iter()
             .flat_map(|f| f.get_filter_mixins())

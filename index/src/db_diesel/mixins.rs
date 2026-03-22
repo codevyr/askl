@@ -11,7 +11,7 @@ use diesel::sql_types::{Bool, Int4range, Integer, Text};
 use crate::ltree::Ltree;
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::schema_diesel as index_schema;
-use crate::symbols::{symbol_name_to_path, symbol_query_to_lquery, DeclarationId};
+use crate::symbols::{symbol_name_to_path, symbol_query_to_lquery, SymbolInstanceId};
 
 use super::Connection;
 
@@ -568,19 +568,19 @@ impl SymbolSearchMixin for ExactNameMixin {
 }
 
 #[derive(Debug, Clone)]
-pub struct DeclarationIdMixin {
-    pub decl_ids: Vec<i32>,
+pub struct SymbolInstanceIdMixin {
+    pub instance_ids: Vec<i32>,
 }
 
-impl DeclarationIdMixin {
-    pub fn new(ids: &[DeclarationId]) -> Self {
+impl SymbolInstanceIdMixin {
+    pub fn new(ids: &[SymbolInstanceId]) -> Self {
         Self {
-            decl_ids: ids.iter().map(|id| Into::<i32>::into(*id)).collect(),
+            instance_ids: ids.iter().map(|id| Into::<i32>::into(*id)).collect(),
         }
     }
 }
 
-impl SymbolSearchMixin for DeclarationIdMixin {
+impl SymbolSearchMixin for SymbolInstanceIdMixin {
     fn enter(&mut self, _connection: &mut Connection) -> Result<()> {
         Ok(())
     }
@@ -592,7 +592,7 @@ impl SymbolSearchMixin for DeclarationIdMixin {
     ) -> Result<CurrentQuery<'a>> {
         use crate::schema_diesel::symbol_instances;
 
-        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.decl_ids.clone())))
+        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.instance_ids.clone())))
     }
 
     fn filter_parents<'a>(
@@ -602,7 +602,7 @@ impl SymbolSearchMixin for DeclarationIdMixin {
     ) -> Result<ParentsQuery<'a>> {
         use crate::schema_diesel::symbol_instances;
 
-        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.decl_ids.clone())))
+        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.instance_ids.clone())))
     }
 
     fn filter_children<'a>(
@@ -615,7 +615,7 @@ impl SymbolSearchMixin for DeclarationIdMixin {
         Ok(query.filter(
             PARENT_DECLS_ALIAS
                 .field(symbol_instances::dsl::id)
-                .eq_any(self.decl_ids.clone()),
+                .eq_any(self.instance_ids.clone()),
         ))
     }
 
@@ -627,7 +627,7 @@ impl SymbolSearchMixin for DeclarationIdMixin {
         use crate::schema_diesel::symbol_instances;
 
         // Filter on the child/current symbol instance
-        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.decl_ids.clone())))
+        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.instance_ids.clone())))
     }
 
     fn filter_has_children<'a>(
@@ -638,7 +638,7 @@ impl SymbolSearchMixin for DeclarationIdMixin {
         use crate::schema_diesel::symbol_instances;
 
         // Filter on the parent/current symbol instance
-        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.decl_ids.clone())))
+        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.instance_ids.clone())))
     }
 }
 

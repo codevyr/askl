@@ -1,6 +1,6 @@
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::symbols::{
-    DeclarationId, FileId, Occurrence, SymbolId, SymbolScope, SymbolType,
+    SymbolInstanceId, FileId, Occurrence, SymbolId, SymbolScope, SymbolType,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -14,14 +14,14 @@ pub struct ObjectFullDiesel {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ReferenceFullDiesel {
-    pub from_decl: DeclarationId,
+    pub from_symbol_instance: SymbolInstanceId,
     pub to_symbol: SymbolId,
     pub occurrence: Occurrence,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SymbolInstanceFullDiesel {
-    pub id: DeclarationId,
+    pub id: SymbolInstanceId,
     pub symbol: SymbolId,
     pub name: String,
     pub symbol_scope: SymbolScope,
@@ -114,7 +114,7 @@ impl Selection {
         self.nodes.is_empty()
     }
 
-    pub fn get_decl_ids(&self) -> Vec<i32> {
+    pub fn get_instance_ids(&self) -> Vec<i32> {
         self.nodes.iter().map(|node| node.symbol_instance.id).collect()
     }
 

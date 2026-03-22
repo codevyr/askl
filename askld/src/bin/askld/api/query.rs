@@ -2,7 +2,7 @@ use actix_web::{get, post, web, HttpResponse, Responder};
 use askld::execution_context::ExecutionContext;
 use askld::offset_range::range_bounds_to_offsets;
 use askld::parser::parse;
-use index::symbols::{DeclarationId, FileId, SymbolId, SymbolType};
+use index::symbols::{SymbolInstanceId, FileId, SymbolId, SymbolType};
 use log::{debug, info};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -100,7 +100,7 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
                 let (start_offset, end_offset) =
                     range_bounds_to_offsets(&n.symbol_instance.offset_range).unwrap();
                 NodeSymbolInstance {
-                    id: DeclarationId::new(n.symbol_instance.id).to_string(),
+                    id: SymbolInstanceId::new(n.symbol_instance.id).to_string(),
                     symbol: SymbolId(n.symbol_instance.symbol).to_string(),
                     object_id: FileId::new(n.object.id).to_string(),
                     project_id: n.object.project_id.to_string(),
