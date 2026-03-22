@@ -1839,3 +1839,107 @@ fn generic_select_positional_capture_two_selectors() {
     assert!(nodes.contains(&SymbolInstanceId::new(20)), "Should include foo");
     assert!(nodes.contains(&SymbolInstanceId::new(30)), "Should include bar");
 }
+
+// ============================================================================
+// @derive Tests
+// ============================================================================
+
+#[test]
+fn derive_type_refs_equivalent_to_refs() {
+    // @derive(type="refs") should behave identically to @refs
+    const DERIVE_QUERY: &str = r#""foo" @derive(type="refs") { "bar" }"#;
+    const REFS_QUERY: &str = r#""foo" @refs { "bar" }"#;
+    let derive_res = run_query(TEST_INPUT_CONTAINMENT, DERIVE_QUERY);
+    let refs_res = run_query(TEST_INPUT_CONTAINMENT, REFS_QUERY);
+
+    assert_eq!(derive_res.nodes.as_vec(), refs_res.nodes.as_vec());
+    assert_eq!(derive_res.nodes.as_vec().len(), 2); // foo + bar
+}
+
+#[test]
+fn derive_type_has_equivalent_to_has() {
+    // @derive(type="has") should behave identically to @has
+    const DERIVE_QUERY: &str = r#"@file("/main.go") @derive(type="has") { "foo" }"#;
+    const HAS_QUERY: &str = r#"@file("/main.go") @has { "foo" }"#;
+    let derive_res = run_query(TEST_INPUT_CONTAINMENT, DERIVE_QUERY);
+    let has_res = run_query(TEST_INPUT_CONTAINMENT, HAS_QUERY);
+
+    assert_eq!(derive_res.nodes.as_vec(), has_res.nodes.as_vec());
+    assert_eq!(derive_res.nodes.as_vec().len(), 2); // file + foo
+}
+
+#[test]
+fn derive_type_refs_has_union() {
+    // @derive(type="refs,has") should find via either relationship
+    // File contains foo (has), foo calls bar (refs) — so with file as parent:
+    // - @has finds foo (contained by file)
+    // - @refs finds nothing (file doesn't call anything)
+    // - @derive(type="refs,has") finds foo (union)
+    const QUERY: &str = r#"@file("/main.go") @derive(type="refs,has") { "foo" }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    assert_eq!(res.nodes.as_vec().len(), 2); // file + foo
+    assert!(res.nodes.as_vec().contains(&SymbolInstanceId::new(510))); // file
+    assert!(res.nodes.as_vec().contains(&SymbolInstanceId::new(20))); // foo
+
+    // Now test where refs would find results but has wouldn't:
+    // foo calls bar (refs), but foo doesn't contain bar (has)
+    const QUERY2: &str = r#""foo" @derive(type="refs,has") { "bar" }"#;
+    let res2 = run_query(TEST_INPUT_CONTAINMENT, QUERY2);
+
+    assert_eq!(res2.nodes.as_vec().len(), 2); // foo + bar
+    assert!(res2.nodes.as_vec().contains(&SymbolInstanceId::new(20))); // foo
+    assert!(res2.nodes.as_vec().contains(&SymbolInstanceId::new(30))); // bar
+}
+
+#[test]
+fn derive_inherit_true_propagates() {
+    // @derive(type="has", inherit="true") propagates to grandchildren
+    // @file @derive(type="has", inherit="true") { { "foo" } }
+    // Without inherit, the grandchild {} would reset to refs, but with inherit
+    // the grandchild also uses has semantics
+    // file has→ ??? has→ foo
+    // Since file contains foo directly, the intermediate {} derives contained functions,
+    // then the inner "foo" also uses has to constrain
+    const QUERY: &str = r#"@file("/main.go") @derive(type="has", inherit="true") { @func { "foo" } }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("derive inherit=true result: {:#?}", res.nodes);
+    // file → (has) functions → (has) foo
+    // intermediate @func gets all functions contained in file (foo, bar, baz)
+    // then "foo" is constrained by has from those functions — but functions don't contain other functions
+    // So this should be empty because foo doesn't contain foo
+    // Actually: the inner "foo" is a child of @func, so it derives from @func's selection
+    // With has semantics: which of @func's results contain "foo"? None — functions don't contain functions
+    // This is expected: has between peer functions yields nothing
+    assert_eq!(res.nodes.as_vec().len(), 0);
+}
+
+#[test]
+fn derive_without_inherit_resets_to_refs() {
+    // Without inherit, grandchild resets to refs (same as current @has behavior)
+    // @file @derive(type="has") { "foo" { "bar" } }
+    // file has→ foo refs→ bar (grandchild resets to refs)
+    const QUERY: &str = r#"@file("/main.go") @derive(type="has") { "foo" { "bar" } }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("derive without inherit result: {:#?}", res.nodes);
+    // file (has) foo (refs) bar — should find all three
+    assert_eq!(res.nodes.as_vec().len(), 3); // file, foo, bar
+}
+
+#[test]
+fn derive_invalid_type_errors() {
+    // @derive(type="invalid") should produce an error
+    const QUERY: &str = r#"@derive(type="invalid") { "foo" }"#;
+    let res = run_query_err(TEST_INPUT_CONTAINMENT, QUERY);
+    assert!(res.is_err(), "Expected error for invalid type");
+}
+
+#[test]
+fn derive_missing_type_errors() {
+    // @derive without type param should produce an error
+    const QUERY: &str = r#"@derive { "foo" }"#;
+    let res = run_query_err(TEST_INPUT_CONTAINMENT, QUERY);
+    assert!(res.is_err(), "Expected error for missing type param");
+}
