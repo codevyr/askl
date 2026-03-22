@@ -3,7 +3,7 @@ use std::{collections::HashMap, path::Path};
 use anyhow::{anyhow, bail, Result};
 use clang_ast::Id;
 use index::{
-    db::{Declaration, Index},
+    db::{SymbolInstance, Index},
     symbols::{self, FileId, ModuleId, SymbolId, SymbolScope, SymbolType},
 };
 use serde::{Deserialize, Serialize};
@@ -150,7 +150,7 @@ impl FunctionDecl {
         &self,
         state: &mut GlobalVisitorState,
         unit_state: &mut ModuleVisitorState,
-        declaration: &Declaration,
+        instance: &SymbolInstance,
         inner: &Vec<Node>,
     ) -> Result<()> {
         for node in self.extract_call_refs(inner) {
@@ -166,7 +166,7 @@ impl FunctionDecl {
                     match &referenced_decl.kind {
                         Clang::FunctionDecl(f) => {
                             // If the reference id is unknown, then the reference is
-                            // also an implicit symbol declaration
+                            // also an implicit symbol instance
                             let to_id = if let Some(symbol_id) =
                                 unit_state.get_symbol(&referenced_decl.id)
                             {
@@ -174,7 +174,7 @@ impl FunctionDecl {
                             } else {
                                 let name = f.name.as_ref().unwrap();
                                 let symbol_scope = SymbolScope::Global;
-                                // Implicit symbol declaration
+                                // Implicit symbol instance
                                 let symbol_type = SymbolType::Function;
 
                                 let symbol = state
@@ -183,21 +183,21 @@ impl FunctionDecl {
                                     .await?;
                                 unit_state.add_symbol(referenced_decl.id, symbol.id);
 
-                                let declaration = Declaration::new(
+                                let instance = SymbolInstance::new(
                                     symbol.id,
                                     file_id,
                                     symbol_type,
                                     &ref_expr.range,
                                 )
                                 .unwrap();
-                                state.index.add_declaration(declaration).await?;
+                                state.index.add_symbol_instance(instance).await?;
 
                                 symbol.id
                             };
 
                             state
                                 .get_index()
-                                .add_reference(declaration.id, to_id, &occurrence)
+                                .add_reference(instance.id, to_id, &occurrence)
                                 .await?;
                         }
                         Clang::ParmVarDecl | Clang::EnumConstantDecl(_) | Clang::VarDecl(_) => {}
@@ -238,11 +238,11 @@ impl FunctionDecl {
             .insert_symbol(name, unit_state.module_id, symbol_scope)
             .await?;
 
-        let declaration = Declaration::new(symbol.id, file_id, symbol_type, &clang_range).unwrap();
-        let declaration = state.index.add_declaration(declaration).await?;
+        let instance = SymbolInstance::new(symbol.id, file_id, symbol_type, &clang_range).unwrap();
+        let instance = state.index.add_symbol_instance(instance).await?;
         unit_state.add_symbol(id, symbol.id);
 
-        self.visit_references(state, unit_state, &declaration, inner)
+        self.visit_references(state, unit_state, &instance, inner)
             .await?;
 
         Ok(())

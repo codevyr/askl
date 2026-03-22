@@ -9,7 +9,7 @@ use sqlx::{
 use std::str::FromStr;
 
 use crate::symbols::{
-    DeclarationId, FileId, ModuleId, Occurrence, ProjectId, SymbolId, SymbolScope, SymbolType,
+    SymbolInstanceId, FileId, ModuleId, Occurrence, ProjectId, SymbolId, SymbolScope, SymbolType,
 };
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
@@ -32,17 +32,17 @@ impl Symbol {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
-pub struct Declaration {
-    pub id: DeclarationId,
+pub struct SymbolInstance {
+    pub id: SymbolInstanceId,
     pub symbol: SymbolId,
     pub file_id: FileId,
     pub symbol_type: SymbolType,
     pub offset_range: (i32, i32),
 }
 
-impl Declaration {
+impl SymbolInstance {
     pub fn new_nolines(
-        id: DeclarationId,
+        id: SymbolInstanceId,
         symbol: SymbolId,
         file_id: FileId,
         symbol_type: SymbolType,
@@ -66,7 +66,7 @@ impl Declaration {
             .ok_or(anyhow::anyhow!("Range does not provide byte offsets"))?;
 
         Ok(Self {
-            id: DeclarationId::invalid(),
+            id: SymbolInstanceId::invalid(),
             symbol,
             file_id,
             symbol_type,
@@ -74,7 +74,7 @@ impl Declaration {
         })
     }
 
-    pub fn with_id(self, id: DeclarationId) -> Self {
+    pub fn with_id(self, id: SymbolInstanceId) -> Self {
         let mut res = self;
         res.id = id;
         res
@@ -129,7 +129,7 @@ impl File {
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
 pub struct Reference {
-    pub from_decl: DeclarationId,
+    pub from_symbol_instance: SymbolInstanceId,
     pub to_symbol: SymbolId,
     pub from_file: FileId,
     pub from_offset_start: i64,
@@ -154,14 +154,14 @@ pub struct FileFull {
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
 pub struct ReferenceFull {
-    pub from_decl: DeclarationId,
+    pub from_symbol_instance: SymbolInstanceId,
     pub to_symbol: SymbolId,
     pub occurrence: Occurrence,
 }
 
 #[derive(Debug, sqlx::FromRow, PartialEq, Eq)]
-pub struct DeclarationFull {
-    pub id: DeclarationId,
+pub struct SymbolInstanceFull {
+    pub id: SymbolInstanceId,
     pub symbol: SymbolId,
     pub name: String,
     pub symbol_scope: SymbolScope,
@@ -348,7 +348,7 @@ impl Index {
         // return Ok(new_symbol);
     }
 
-    pub async fn add_declaration(&self, _declaration: Declaration) -> Result<Declaration> {
+    pub async fn add_symbol_instance(&self, _instance: SymbolInstance) -> Result<SymbolInstance> {
         unimplemented!();
         // let rec = sqlx::query_as!(
         //     Declaration,
@@ -384,14 +384,14 @@ impl Index {
         // .fetch_one(&self.pool)
         // .await?;
 
-        // let id: DeclarationId = rec.id.into();
+        // let id: SymbolInstanceId = rec.id.into();
 
         // Ok(declaration.with_id(id))
     }
 
     pub async fn add_reference(
         &self,
-        _from_decl: DeclarationId,
+        _from_symbol_instance: SymbolInstanceId,
         _to_symbol: SymbolId,
         _occurrence: &Occurrence,
     ) -> Result<()> {
@@ -414,7 +414,7 @@ impl Index {
         //     log::error!(
         //         "Failed to add reference {} {}->{} {:?}",
         //         err,
-        //         from_decl,
+        //         from_symbol_instance,
         //         to_symbol,
         //         occurrence
         //     );
@@ -440,7 +440,7 @@ impl Index {
         // Ok(symbols)
     }
 
-    pub async fn all_declarations(&self) -> Result<Vec<Declaration>> {
+    pub async fn all_symbol_instances(&self) -> Result<Vec<SymbolInstance>> {
         unimplemented!();
         //     let declarations: Vec<Declaration> = sqlx::query_as!(
         //         Declaration,
@@ -509,16 +509,16 @@ impl Index {
         // let references: Vec<Reference> = sqlx::query_as!(
         //     Reference,
         //     r#"
-        //     SELECT from_decls.id as "from_decl!: DeclarationId",
+        //     SELECT from_symbol_instances.id as "from_symbol_instance!: SymbolInstanceId",
         //            symbol_refs.to_symbol as "to_symbol: SymbolId",
         //            symbol_refs.from_file as "from_file: FileId",
         //            symbol_refs.from_offset_start,
         //            symbol_refs.from_offset_end
         //     FROM symbol_refs
-        //     JOIN declarations AS from_decls
-        //       ON symbol_refs.from_file = from_decls.file_id
-        //      AND from_decls.start_offset <= symbol_refs.from_offset_start
-        //      AND from_decls.end_offset >= symbol_refs.from_offset_end
+        //     JOIN declarations AS from_symbol_instances
+        //       ON symbol_refs.from_file = from_symbol_instances.file_id
+        //      AND from_symbol_instances.start_offset <= symbol_refs.from_offset_start
+        //      AND from_symbol_instances.end_offset >= symbol_refs.from_offset_end
         //     "#
         // )
         // .fetch_all(&self.pool)

@@ -103,8 +103,8 @@ fn offset_from_line_col(content: &[u8], line: usize, col: usize) -> Option<i32> 
     None
 }
 
-impl From<db::Declaration> for Occurrence {
-    fn from(symbol: db::Declaration) -> Self {
+impl From<db::SymbolInstance> for Occurrence {
+    fn from(symbol: db::SymbolInstance) -> Self {
         Occurrence {
             offset_range: symbol.offset_range,
             file: symbol.file_id,
@@ -114,13 +114,13 @@ impl From<db::Declaration> for Occurrence {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
 pub struct Reference {
-    pub from: DeclarationId,
+    pub from: SymbolInstanceId,
     pub to: SymbolId,
     pub occurrence: Option<Occurrence>,
 }
 
 impl Reference {
-    pub fn new(from: DeclarationId, to: SymbolId) -> Self {
+    pub fn new(from: SymbolInstanceId, to: SymbolId) -> Self {
         Self {
             from,
             to,
@@ -128,7 +128,7 @@ impl Reference {
         }
     }
 
-    pub fn new_occurrence(from: DeclarationId, to: SymbolId, occurrence: Occurrence) -> Self {
+    pub fn new_occurrence(from: SymbolInstanceId, to: SymbolId, occurrence: Occurrence) -> Self {
         Self {
             from,
             to,
@@ -138,16 +138,16 @@ impl Reference {
 }
 
 pub type SymbolRefs = HashMap<SymbolId, HashSet<Occurrence>>;
-pub type DeclarationRefs = HashMap<DeclarationId, HashSet<Occurrence>>;
+pub type SymbolInstanceRefs = HashMap<SymbolInstanceId, HashSet<Occurrence>>;
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct Symbol {
     pub id: SymbolId,
     pub name: String,
     pub name_split: Vec<String>,
-    pub declarations: HashSet<DeclarationId>,
+    pub instances: HashSet<SymbolInstanceId>,
     pub children: SymbolRefs,
-    pub parents: DeclarationRefs,
+    pub parents: SymbolInstanceRefs,
 }
 
 impl Symbol {
@@ -156,9 +156,9 @@ impl Symbol {
             id,
             name_split: clean_and_split_string(&name),
             name,
-            declarations: HashSet::new(),
+            instances: HashSet::new(),
             children: SymbolRefs::new(),
-            parents: DeclarationRefs::new(),
+            parents: SymbolInstanceRefs::new(),
         }
     }
 
@@ -171,7 +171,7 @@ impl Symbol {
             .or_insert(HashSet::from([occurrence]));
     }
 
-    pub fn add_parent(&mut self, id: DeclarationId, occurrence: Occurrence) {
+    pub fn add_parent(&mut self, id: SymbolInstanceId, occurrence: Occurrence) {
         self.parents
             .entry(id)
             .and_modify(|occurences| {
@@ -381,9 +381,9 @@ impl serde::Serialize for FileId {
     sqlx::FromRow,
 )]
 #[sqlx(transparent)]
-pub struct DeclarationId(i32);
+pub struct SymbolInstanceId(i32);
 
-impl DeclarationId {
+impl SymbolInstanceId {
     pub fn invalid() -> Self {
         Self(-1)
     }
@@ -393,37 +393,37 @@ impl DeclarationId {
     }
 }
 
-impl From<i64> for DeclarationId {
+impl From<i64> for SymbolInstanceId {
     fn from(value: i64) -> Self {
         Self(value as i32)
     }
 }
 
-impl From<Option<i64>> for DeclarationId {
+impl From<Option<i64>> for SymbolInstanceId {
     fn from(value: Option<i64>) -> Self {
         Self(value.unwrap() as i32)
     }
 }
 
-impl Into<i32> for DeclarationId {
+impl Into<i32> for SymbolInstanceId {
     fn into(self) -> i32 {
         self.0
     }
 }
 
-impl fmt::Display for DeclarationId {
+impl fmt::Display for SymbolInstanceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-impl From<i32> for DeclarationId {
+impl From<i32> for SymbolInstanceId {
     fn from(value: i32) -> Self {
         Self(value)
     }
 }
 
-impl serde::Serialize for DeclarationId {
+impl serde::Serialize for SymbolInstanceId {
     fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,

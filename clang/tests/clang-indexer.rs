@@ -4,14 +4,14 @@ use std::{env, path::Path};
 use index::{
     db::{Module, Symbol},
     symbols::{
-        self, DeclarationId, FileId, ModuleId, Occurrence, ProjectId, SymbolId, SymbolScope,
+        self, SymbolInstanceId, FileId, ModuleId, Occurrence, ProjectId, SymbolId, SymbolScope,
         SymbolType,
     },
 };
 
 use anyhow::Result;
 use clang::clang::{run_clang_ast, CompileCommand, GlobalVisitorState};
-use index::db::{Declaration, Index, Reference};
+use index::db::{SymbolInstance, Index, Reference};
 use std::collections::HashMap;
 
 async fn index_files(files: Vec<&str>, module: &Module) -> GlobalVisitorState {
@@ -67,9 +67,9 @@ async fn index_files(files: Vec<&str>, module: &Module) -> GlobalVisitorState {
 }
 
 /// We do not need all fields for comparison
-fn mask_declaration(symbol: &Declaration) -> Declaration {
-    Declaration {
-        id: DeclarationId::invalid(),
+fn mask_instance(symbol: &SymbolInstance) -> SymbolInstance {
+    SymbolInstance {
+        id: SymbolInstanceId::invalid(),
         symbol: symbol.symbol,
         // name: symbol.name.clone(),
         file_id: symbol.file_id,
@@ -80,7 +80,7 @@ fn mask_declaration(symbol: &Declaration) -> Declaration {
 
 fn mask_ref(reference: &Reference) -> Reference {
     Reference {
-        from_decl: reference.from_decl,
+        from_symbol_instance: reference.from_symbol_instance,
         to_symbol: reference.to_symbol,
         from_file: reference.from_file,
         from_offset_start: 0,
@@ -88,9 +88,9 @@ fn mask_ref(reference: &Reference) -> Reference {
     }
 }
 
-fn new_ref(from_decl: i32, to_symbol: i32) -> Reference {
+fn new_ref(from_symbol_instance: i32, to_symbol: i32) -> Reference {
     Reference {
-        from_decl: DeclarationId::new(from_decl),
+        from_symbol_instance: SymbolInstanceId::new(from_symbol_instance),
         to_symbol: SymbolId(to_symbol),
         from_file: FileId::new(1),
         from_offset_start: 0,
@@ -141,28 +141,28 @@ async fn create_state() {
     }
     assert_eq!(symbols.len(), expected_symbols.len());
 
-    let declarations = state.get_index().all_declarations().await.unwrap();
-    for declaration in declarations.iter() {
-        println!("Declaration: {:?}", declaration);
+    let instances = state.get_index().all_symbol_instances().await.unwrap();
+    for instance in instances.iter() {
+        println!("SymbolInstance: {:?}", instance);
     }
 
-    let did = DeclarationId::invalid();
+    let did = SymbolInstanceId::invalid();
     let fid = FileId::new(1);
-    let expected_declarations = [
-        Declaration::new_nolines(did, SymbolId::new(1), fid, SymbolType::Function), // foo
-        Declaration::new_nolines(did, SymbolId::new(1), fid, SymbolType::Function), // foo
-        Declaration::new_nolines(did, SymbolId::new(2), fid, SymbolType::Function), // bar
-        Declaration::new_nolines(did, SymbolId::new(3), fid, SymbolType::Function), // zar
-        Declaration::new_nolines(did, SymbolId::new(4), fid, SymbolType::Function), // main
-        Declaration::new_nolines(did, SymbolId::new(5), fid, SymbolType::Function), // tar
-        Declaration::new_nolines(did, SymbolId::new(5), fid, SymbolType::Function), // tar
-        Declaration::new_nolines(did, SymbolId::new(5), fid, SymbolType::Function), // tar
-        Declaration::new_nolines(did, SymbolId::new(3), fid, SymbolType::Function), // zar
+    let expected_instances = [
+        SymbolInstance::new_nolines(did, SymbolId::new(1), fid, SymbolType::Function), // foo
+        SymbolInstance::new_nolines(did, SymbolId::new(1), fid, SymbolType::Function), // foo
+        SymbolInstance::new_nolines(did, SymbolId::new(2), fid, SymbolType::Function), // bar
+        SymbolInstance::new_nolines(did, SymbolId::new(3), fid, SymbolType::Function), // zar
+        SymbolInstance::new_nolines(did, SymbolId::new(4), fid, SymbolType::Function), // main
+        SymbolInstance::new_nolines(did, SymbolId::new(5), fid, SymbolType::Function), // tar
+        SymbolInstance::new_nolines(did, SymbolId::new(5), fid, SymbolType::Function), // tar
+        SymbolInstance::new_nolines(did, SymbolId::new(5), fid, SymbolType::Function), // tar
+        SymbolInstance::new_nolines(did, SymbolId::new(3), fid, SymbolType::Function), // zar
     ];
-    for (i, o) in declarations.iter().enumerate() {
-        assert_eq!(mask_declaration(o), expected_declarations[i]);
+    for (i, o) in instances.iter().enumerate() {
+        assert_eq!(mask_instance(o), expected_instances[i]);
     }
-    assert_eq!(declarations.len(), expected_declarations.len());
+    assert_eq!(instances.len(), expected_instances.len());
 
     let refs = state.get_index().all_refs().await.unwrap();
     for reference in refs.iter() {
@@ -193,10 +193,10 @@ pub async fn from_index(index: &Index) -> Result<()> {
         );
     }
 
-    let declarations = index.all_declarations().await?;
-    let mut declaration_map = HashMap::new();
-    for declaration in declarations {
-        declaration_map.insert(declaration.id, declaration);
+    let instances = index.all_symbol_instances().await?;
+    let mut instance_map = HashMap::new();
+    for instance in instances {
+        instance_map.insert(instance.id, instance);
     }
 
     let files = index.all_files().await?;
@@ -213,10 +213,10 @@ pub async fn from_index(index: &Index) -> Result<()> {
 
     let references = index.all_refs().await?;
     for reference in references {
-        let from_declaration = declaration_map.get(&reference.from_decl).unwrap();
-        let from_symbol = symbols_map.get_mut(&from_declaration.symbol).unwrap();
+        let from_instance = instance_map.get(&reference.from_symbol_instance).unwrap();
+        let from_symbol = symbols_map.get_mut(&from_instance.symbol).unwrap();
         let occurrence = Occurrence {
-            file: from_declaration.file_id,
+            file: from_instance.file_id,
             offset_range: (
                 reference.from_offset_start as i32,
                 reference.from_offset_end as i32,
@@ -225,7 +225,7 @@ pub async fn from_index(index: &Index) -> Result<()> {
         from_symbol.add_child(reference.to_symbol, occurrence.clone());
 
         let to_symbol = symbols_map.get_mut(&reference.to_symbol).unwrap();
-        to_symbol.add_parent(from_declaration.id, occurrence);
+        to_symbol.add_parent(from_instance.id, occurrence);
     }
 
     Ok(())

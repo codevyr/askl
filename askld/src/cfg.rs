@@ -2,7 +2,7 @@ use std::{collections::HashSet, iter::Iterator};
 
 use index::db_diesel::{Index, SelectionNode};
 use index::symbols::Occurrence;
-use index::symbols::{DeclarationId, SymbolId};
+use index::symbols::{SymbolInstanceId, SymbolId};
 
 pub struct ControlFlowGraph {
     pub index: Index,
@@ -20,11 +20,11 @@ impl NodeList {
         self.0.insert(node);
     }
 
-    pub fn as_vec(&self) -> Vec<DeclarationId> {
+    pub fn as_vec(&self) -> Vec<SymbolInstanceId> {
         let mut res: Vec<_> = self
             .0
             .iter()
-            .map(|n| DeclarationId::new(n.symbol_instance.id))
+            .map(|n| SymbolInstanceId::new(n.symbol_instance.id))
             .collect();
         res.sort();
         res
@@ -32,13 +32,13 @@ impl NodeList {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SymbolDeclId {
+pub struct SymbolNodeId {
     pub symbol_id: SymbolId,
-    pub declaration_id: DeclarationId,
+    pub instance_id: SymbolInstanceId,
 }
 
 #[derive(Debug, Clone)]
-pub struct EdgeList(pub HashSet<(SymbolDeclId, SymbolDeclId, Option<Occurrence>)>);
+pub struct EdgeList(pub HashSet<(SymbolNodeId, SymbolNodeId, Option<Occurrence>)>);
 
 impl EdgeList {
     pub fn new() -> Self {
@@ -47,20 +47,20 @@ impl EdgeList {
 
     pub fn add_reference(
         &mut self,
-        from: SymbolDeclId,
-        to: SymbolDeclId,
+        from: SymbolNodeId,
+        to: SymbolNodeId,
         occurrence: Option<Occurrence>,
     ) {
         self.0.insert((from, to, occurrence));
     }
 
-    pub fn as_vec(&self) -> Vec<(SymbolDeclId, SymbolDeclId, Option<Occurrence>)> {
+    pub fn as_vec(&self) -> Vec<(SymbolNodeId, SymbolNodeId, Option<Occurrence>)> {
         let mut res: Vec<_> = self.0.clone().into_iter().collect();
         res.sort_by(|(from_a, to_a, _), (from_b, to_b, _)| {
             from_a
-                .declaration_id
-                .cmp(&from_b.declaration_id)
-                .then_with(|| to_a.declaration_id.cmp(&to_b.declaration_id))
+                .instance_id
+                .cmp(&from_b.instance_id)
+                .then_with(|| to_a.instance_id.cmp(&to_b.instance_id))
                 .then_with(|| from_a.symbol_id.cmp(&from_b.symbol_id))
                 .then_with(|| to_a.symbol_id.cmp(&to_b.symbol_id))
         });

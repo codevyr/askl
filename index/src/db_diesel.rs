@@ -10,7 +10,7 @@ mod selection;
 
 pub use index_impl::Index;
 pub use mixins::{
-    CompoundNameMixin, CurrentQuery, DeclarationIdMixin, ExactNameMixin,
+    CompoundNameMixin, CurrentQuery, SymbolInstanceIdMixin, ExactNameMixin,
     IgnoreFilterMixin, ProjectFilterMixin, SymbolSearchMixin,
     SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_FILE, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_DIRECTORY,
 };

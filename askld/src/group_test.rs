@@ -7,7 +7,7 @@
 // avoid confusion between the `@scope` modifier and the `scope` object in the
 // AST. But also I intend to change how groups behave.
 use crate::test_util::{format_edges, run_query, TEST_INPUT_A};
-use index::symbols::DeclarationId;
+use index::symbols::SymbolInstanceId;
 
 #[test]
 fn single_isolated_scope() {
@@ -18,7 +18,7 @@ fn single_isolated_scope() {
     println!("{:#?}", res_edges);
     assert_eq!(
         res_nodes.as_vec(),
-        vec![DeclarationId::new(94), DeclarationId::new(95)]
+        vec![SymbolInstanceId::new(94), SymbolInstanceId::new(95)]
     );
     let edges = format_edges(res_edges);
     assert_eq!(edges, vec!["94-95"]);
@@ -33,7 +33,7 @@ fn double_isolated_scope() {
     println!("{:#?}", res_edges);
     assert_eq!(
         res_nodes.as_vec(),
-        vec![DeclarationId::new(94), DeclarationId::new(95)]
+        vec![SymbolInstanceId::new(94), SymbolInstanceId::new(95)]
     );
     let edges = format_edges(res_edges);
     assert_eq!(edges, vec!["94-95"]);
@@ -49,7 +49,7 @@ fn isolated_scopes() {
     println!("{:#?}", res_edges);
     assert_eq!(
         res_nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(92)]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(92)]
     );
     let edges = format_edges(res_edges);
     assert_eq!(edges, Vec::<String>::new());
@@ -65,7 +65,7 @@ fn implicitly_isolated_scopes() {
     println!("{:#?}", res_edges);
     assert_eq!(
         res_nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(92)]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(92)]
     );
     let edges = format_edges(res_edges);
     assert_eq!(edges, Vec::<String>::new());
@@ -81,7 +81,7 @@ fn preamble_isolated_scope_with_nodes() {
 
     assert_eq!(
         res_nodes.as_vec(),
-        vec![DeclarationId::new(91), DeclarationId::new(92)]
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(92)]
     );
     let edges = format_edges(res_edges);
     assert_eq!(edges, Vec::<String>::new());

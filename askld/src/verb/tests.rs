@@ -1,4 +1,4 @@
-use index::{db_diesel::Index, symbols::DeclarationId};
+use index::{db_diesel::Index, symbols::SymbolInstanceId};
 use testcontainers::{clients, core::WaitFor, GenericImage};
 
 use crate::test_support::wait_for_postgres;
@@ -54,17 +54,17 @@ async fn test_select_matching_name() {
             .await
             .unwrap();
 
-        let mut got_symbol_instances: Vec<DeclarationId> = result
+        let mut got_symbol_instances: Vec<SymbolInstanceId> = result
             .unwrap()
             .nodes
             .into_iter()
-            .map(|s| DeclarationId::new(s.symbol_instance.id))
+            .map(|s| SymbolInstanceId::new(s.symbol_instance.id))
             .collect();
         got_symbol_instances.sort();
 
-        let expected_symbol_instances: Vec<DeclarationId> = expected_ids
+        let expected_symbol_instances: Vec<SymbolInstanceId> = expected_ids
             .into_iter()
-            .map(|i| DeclarationId::new(i))
+            .map(|i| SymbolInstanceId::new(i))
             .collect();
 
         assert_eq!(
@@ -91,9 +91,9 @@ fn test_ignore_package_filter() {
     assert_eq!(
         res.nodes.as_vec(),
         vec![
-            DeclarationId::new(91),
-            DeclarationId::new(93),
-            DeclarationId::new(94),
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(93),
+            SymbolInstanceId::new(94),
         ]
     );
 }

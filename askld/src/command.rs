@@ -146,9 +146,9 @@ impl Command {
     }
 
     /// Computes the selected symbols based on the selectors defined in the
-    /// command. This method returns an `Option<DeclarationRefs>`, which will be
+    /// command. This method returns an `Option<SymbolInstanceRefs>`, which will be
     /// `None` if no symbols are selected. It returns
-    /// `Some(DeclarationRefs::new())` if no symbols match the selectors.
+    /// `Some(SymbolInstanceRefs::new())` if no symbols match the selectors.
     pub async fn compute_selected(
         &self,
         ctx: &mut ExecutionContext,

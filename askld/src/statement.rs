@@ -1,4 +1,4 @@
-use crate::cfg::{ControlFlowGraph, EdgeList, NodeList, SymbolDeclId};
+use crate::cfg::{ControlFlowGraph, EdgeList, NodeList, SymbolNodeId};
 use crate::command::{Command, LabeledStatements};
 use crate::execution_context::ExecutionContext;
 use crate::execution_state::{
@@ -14,7 +14,7 @@ use crate::verb::{build_verb, DefaultTypeFilter};
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::Selection;
-use index::symbols::{DeclarationId, FileId, Occurrence, SymbolId};
+use index::symbols::{SymbolInstanceId, FileId, Occurrence, SymbolId};
 use pest::error::Error;
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashSet;
@@ -452,10 +452,10 @@ impl Statement {
 
         let complete_selection = all_nodes.clone();
 
-        let all_nodes = HashSet::<DeclarationId>::from_iter(
+        let all_nodes = HashSet::<SymbolInstanceId>::from_iter(
             all_nodes
                 .iter()
-                .map(|node| DeclarationId::new(node.symbol_instance.id)),
+                .map(|node| SymbolInstanceId::new(node.symbol_instance.id)),
         );
 
         let mut all_references = EdgeList::new();
@@ -472,8 +472,8 @@ impl Statement {
                 continue;
             };
             for child in &current.children {
-                if !all_nodes.contains(&DeclarationId::new(child.from_instance.id))
-                    || !all_nodes.contains(&DeclarationId::new(child.symbol_instance.id))
+                if !all_nodes.contains(&SymbolInstanceId::new(child.from_instance.id))
+                    || !all_nodes.contains(&SymbolInstanceId::new(child.symbol_instance.id))
                 {
                     continue;
                 }
@@ -493,21 +493,21 @@ impl Statement {
                 }
 
                 all_references.add_reference(
-                    SymbolDeclId {
+                    SymbolNodeId {
                         symbol_id: from_symbol,
-                        declaration_id: DeclarationId::new(child.from_instance.id),
+                        instance_id: SymbolInstanceId::new(child.from_instance.id),
                     },
-                    SymbolDeclId {
+                    SymbolNodeId {
                         symbol_id: to_symbol,
-                        declaration_id: DeclarationId::new(child.symbol_instance.id),
+                        instance_id: SymbolInstanceId::new(child.symbol_instance.id),
                     },
                     Some(occurrence),
                 );
             }
 
             for parent in &current.parents {
-                if !all_nodes.contains(&DeclarationId::new(parent.from_instance.id))
-                    || !all_nodes.contains(&DeclarationId::new(parent.to_instance.id))
+                if !all_nodes.contains(&SymbolInstanceId::new(parent.from_instance.id))
+                    || !all_nodes.contains(&SymbolInstanceId::new(parent.to_instance.id))
                 {
                     continue;
                 }
@@ -527,13 +527,13 @@ impl Statement {
                 }
 
                 all_references.add_reference(
-                    SymbolDeclId {
+                    SymbolNodeId {
                         symbol_id: from_symbol,
-                        declaration_id: DeclarationId::new(parent.from_instance.id),
+                        instance_id: SymbolInstanceId::new(parent.from_instance.id),
                     },
-                    SymbolDeclId {
+                    SymbolNodeId {
                         symbol_id: to_symbol,
-                        declaration_id: DeclarationId::new(parent.to_instance.id),
+                        instance_id: SymbolInstanceId::new(parent.to_instance.id),
                     },
                     Some(occurrence),
                 );
