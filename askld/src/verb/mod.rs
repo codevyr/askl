@@ -24,7 +24,7 @@ mod generic;
 mod labels;
 mod preamble;
 
-pub use self::generic::{DefaultTypeFilter, NameSelector, UnitVerb};
+pub use self::generic::{DefaultTypeFilter, GenericFilter, GenericSelector, NameSelector, UnitVerb};
 
 use self::generic::{build_generic_verb, ForcedVerb};
 
@@ -116,6 +116,7 @@ pub enum VerbTag {
     ProjectFilter,
     NameSelector,
     TypeFilter,
+    GenericFilter(&'static str),
 }
 
 pub fn add_verb(existing_verbs: Vec<Arc<dyn Verb>>, new_verb: Arc<dyn Verb>) -> Vec<Arc<dyn Verb>> {
@@ -131,7 +132,7 @@ pub fn add_verb(existing_verbs: Vec<Arc<dyn Verb>>, new_verb: Arc<dyn Verb>) -> 
     updated_verbs
 }
 
-pub trait Verb: std::fmt::Debug + Sync {
+pub trait Verb: std::fmt::Debug + Send + Sync {
     fn name(&self) -> &str;
 
     fn derive_method(&self) -> DeriveMethod {
@@ -187,6 +188,24 @@ pub trait Verb: std::fmt::Debug + Sync {
 
     fn as_labeler<'a>(&'a self) -> Result<&'a dyn Labeler> {
         bail!("Not a marker verb")
+    }
+
+    /// Whether this verb suppresses the automatic DefaultTypeFilter.
+    /// When true, build_statement will not add a DefaultTypeFilter for this statement.
+    fn suppresses_default_type_filter(&self) -> bool {
+        false
+    }
+
+    /// Whether this selector requires a name constraint from some verb on the command.
+    fn requires_name_constraint(&self) -> bool {
+        false
+    }
+
+    /// Whether this verb has (or provides) a name constraint.
+    /// Filters override to indicate they constrain by name.
+    /// Selectors override to check their own filter set.
+    fn has_name_constraint(&self) -> bool {
+        false
     }
 }
 

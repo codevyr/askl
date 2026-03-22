@@ -1658,3 +1658,184 @@ fn directory_refs_children() {
     assert!(names.contains(&"/src/util"), "Should contain child /src/util");
     assert!(names.contains(&"/src/config"), "Should contain child /src/config");
 }
+
+// ============================================================================
+// Generic @select and @filter verb tests
+// ============================================================================
+
+#[test]
+fn generic_filter_type_func_with_name_and_select() {
+    // @filter("type", "func") @filter("compound_name", "a") @select
+    // Same as "a" with func type — should find function "a"
+    const QUERY: &str = r#"@filter("type", "func") @filter("compound_name", "a") @select"#;
+    let res = run_query(TEST_INPUT_A, QUERY);
+
+    println!("{:#?}", res.nodes);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(91)]);
+}
+
+#[test]
+fn generic_filter_type_func_only() {
+    // @filter("type", "func") — filter only, no selection (like bare @func)
+    // At root level with no parent to derive from, filter-only returns empty
+    const QUERY: &str = r#"@filter("type", "func")"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    // Filter at root = empty (no selector to drive selection)
+    assert_eq!(res.nodes.as_vec().len(), 0);
+}
+
+#[test]
+fn generic_filter_compound_name_inherit() {
+    // @filter("compound_name", "test", inherit="true") {{"b"}}
+    // Namespace filter inherited through double parent.
+    // The "test" compound name filter is inherited into child scopes,
+    // constraining grandchildren to also match "test" in their name search.
+    // Without the filter, "b" matches both test.b (92) and other.b (202).
+    // With the filter, only test.* symbols survive.
+    const QUERY: &str = r#"@filter("compound_name", "test", inherit="true") {{"b"}}"#;
+    let res = run_query(TEST_INPUT_MODULES, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(res.warnings.is_empty(), "Should produce no warnings");
+    // Grandchild "b" matches test.b (92). Intermediate derives callers of test.b:
+    // test.a (91), test.c (93), test.main (942). Inherited "test" filter excludes other.*.
+    assert_eq!(nodes.len(), 4);
+    assert!(nodes.contains(&SymbolInstanceId::new(92)), "test.b");
+    assert!(nodes.contains(&SymbolInstanceId::new(91)), "test.a (caller of test.b)");
+    assert!(nodes.contains(&SymbolInstanceId::new(93)), "test.c (caller of test.b)");
+    assert!(nodes.contains(&SymbolInstanceId::new(942)), "test.main (caller of test.b)");
+    // Verify the filter actually excluded other.* symbols
+    assert!(!nodes.contains(&SymbolInstanceId::new(201)), "other.a should be excluded");
+    assert!(!nodes.contains(&SymbolInstanceId::new(202)), "other.b should be excluded");
+}
+
+#[test]
+fn generic_filter_type_replacement() {
+    // @filter("type", "func") @filter("type", "mod") — second replaces first (same kind tag)
+    // The final type filter should be "mod" only.
+    const QUERY: &str =
+        r#"@filter("type", "func") @filter("type", "mod") @filter("compound_name", "testmodule") @select"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    // Should find module "testmodule" (10) — func filter was replaced by mod filter
+    assert_eq!(res.nodes.as_vec().len(), 1);
+    assert!(res.nodes.as_vec().contains(&SymbolInstanceId::new(10)));
+}
+
+#[test]
+fn generic_filter_type_comma_separated() {
+    // @filter("type", "func,mod") — OR semantics for multiple types
+    const QUERY: &str = r#"@filter("type", "func,mod") @filter("compound_name", "testmodule") @select"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    // Should find module "testmodule" (matches mod type and compound name)
+    assert!(res.nodes.as_vec().len() >= 1);
+    assert!(res.nodes.as_vec().contains(&SymbolInstanceId::new(10)));
+}
+
+#[test]
+fn generic_filter_exact_name() {
+    // @filter("exact_name", "/main.go") — exact name matching
+    // This should use ExactNameMixin
+    const QUERY: &str = r#"@filter("type", "file") @filter("exact_name", "/main.go") @select"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    // Should find file "/main.go" (id=510)
+    assert_eq!(res.nodes.as_vec().len(), 1);
+    assert!(res.nodes.as_vec().contains(&SymbolInstanceId::new(510)));
+}
+
+#[test]
+fn generic_filter_type_filter_alone_is_weak() {
+    // @filter("type", "func") alone — no selector, UnitVerb added, statement is weak
+    const QUERY: &str = r#"@filter("type", "func")"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    assert_eq!(res.nodes.as_vec().len(), 0);
+}
+
+#[test]
+fn generic_filter_with_select_constrains_parent() {
+    // @filter + @select is strong because @select is a real (non-unit) selector.
+    // The child selects directories, foo doesn't call any dirs → foo constrained away.
+    const QUERY: &str = r#""foo" { @filter("type", "dir") @select }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(20)),
+        "foo should be constrained away by child that found no matching dirs"
+    );
+}
+
+#[test]
+fn generic_select_alone_warns() {
+    // @select alone (no name filter) — should return warning
+    const QUERY: &str = r#"@select"#;
+    let res = run_query(TEST_INPUT_A, QUERY);
+
+    println!("{:#?}", res.warnings);
+    // Should have a warning about missing name constraint
+    assert!(
+        res.warnings.len() >= 1,
+        "Expected warning about missing name filter for @select"
+    );
+}
+
+#[test]
+fn generic_filter_with_name_selector() {
+    // @filter("type", "func") "a" — GenericFilter + NameSelector coexist
+    // The @filter("type", "func") suppresses DefaultTypeFilter, NameSelector does the selection
+    const QUERY: &str = r#"@filter("type", "func") "a""#;
+    let res = run_query(TEST_INPUT_A, QUERY);
+
+    println!("{:#?}", res.nodes);
+    // Should find function "a" (91)
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(91)]);
+}
+
+#[test]
+fn generic_select_queries_all_types_without_type_filter() {
+    // Bug 3 characterization: @filter("compound_name", ...) @select queries ALL types
+    // because GenericSelector uses only captured filters, ignoring DefaultTypeFilter.
+    // This is by design — @select without @filter("type") is explicitly unfiltered.
+    const QUERY_GENERIC: &str = r#"@filter("compound_name", "testmodule") @select"#;
+    let res_generic = run_query(TEST_INPUT_CONTAINMENT, QUERY_GENERIC);
+
+    // Contrast: "testmodule" (NameSelector) gets DefaultTypeFilter([FUNCTION])
+    const QUERY_PLAIN: &str = r#""testmodule""#;
+    let res_plain = run_query(TEST_INPUT_CONTAINMENT, QUERY_PLAIN);
+
+    // GenericSelector finds module (all types), NameSelector finds only functions
+    assert!(
+        res_generic.nodes.as_vec().contains(&SymbolInstanceId::new(10)),
+        "GenericSelector should find module (queries all types)"
+    );
+    assert!(
+        !res_plain.nodes.as_vec().contains(&SymbolInstanceId::new(10)),
+        "NameSelector should NOT find module (DefaultTypeFilter restricts to functions)"
+    );
+}
+
+#[test]
+fn generic_select_positional_capture_two_selectors() {
+    // @filter("compound_name", "foo") @select @filter("compound_name", "bar") @select {}
+    // Positional capture: first @select captures @filter("compound_name", "foo"),
+    // second @select captures both filters (foo and bar, but bar replaces foo due to same tag)
+    const QUERY: &str =
+        r#"@filter("compound_name", "foo") @select @filter("compound_name", "bar") @select {}"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    // First @select finds "foo", second @select finds "bar" (compound_name replaces)
+    // Both foo (20) and bar (30) should be in results
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "Should include foo");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "Should include bar");
+}

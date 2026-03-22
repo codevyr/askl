@@ -74,6 +74,20 @@ impl Command {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_selector().ok()))
     }
 
+    /// Return cloned Arcs of verbs that implement Filter.
+    pub fn filter_verbs(&self) -> Vec<Arc<dyn Verb>> {
+        self.verbs
+            .iter()
+            .filter(|v| v.as_filter().is_ok())
+            .cloned()
+            .collect()
+    }
+
+    /// Check if any verb suppresses the default type filter.
+    pub fn has_suppress_default_type_filter(&self) -> bool {
+        self.verbs.iter().any(|v| v.suppresses_default_type_filter())
+    }
+
     pub fn has_selectors(&self) -> bool {
         self.verbs.iter().any(|verb| verb.as_selector().is_ok())
     }
@@ -167,6 +181,24 @@ impl Command {
         }
 
         let mut warnings = vec![];
+
+        // Validate: each selector that requires a name constraint must have one
+        // in its own captured filters (per-selector, not command-wide).
+        for selector in selectors.iter() {
+            if !selector.requires_name_constraint() {
+                continue;
+            }
+            let has_name = selector.has_name_constraint();
+            if !has_name {
+                warnings.push(pest::error::Error::new_from_span(
+                    pest::error::ErrorVariant::CustomError {
+                        message: "@select requires at least one name filter (@filter(\"compound_name\", ...) or @filter(\"exact_name\", ...))".to_string(),
+                    },
+                    selector.span(),
+                ));
+            }
+        }
+
         for selector in selectors.into_iter() {
             let search_mixins: Vec<Box<dyn SymbolSearchMixin>> =
                 self.filters().flat_map(|f| f.get_filter_mixins()).collect();
