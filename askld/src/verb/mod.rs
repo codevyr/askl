@@ -115,6 +115,7 @@ pub enum DeriveMethod {
 pub enum VerbTag {
     ProjectFilter,
     NameSelector,
+    TypeFilter,
 }
 
 pub fn add_verb(existing_verbs: Vec<Arc<dyn Verb>>, new_verb: Arc<dyn Verb>) -> Vec<Arc<dyn Verb>> {
@@ -135,6 +136,13 @@ pub trait Verb: std::fmt::Debug + Sync {
 
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Skip
+    }
+
+    /// Create a new instance of this verb for derivation into child scopes.
+    /// Returns None to use the same Arc (default). Override to return
+    /// a fresh instance when shared registry state would cause issues.
+    fn derive_new_instance(&self) -> Option<Arc<dyn Verb>> {
+        None
     }
 
     fn extend_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {

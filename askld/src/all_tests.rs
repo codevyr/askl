@@ -516,11 +516,12 @@ fn two_statements() {
 }
 
 #[test]
-#[ignore = "module filter is broken after modules-as-symbols migration"]
 fn project_double_parent_query() {
-    // Tests @module filter with double parent query pattern
-    const QUERY: &str = r#"@module("test") {{"b"}}"#;
-    let res = run_query(TEST_INPUT_A, QUERY);
+    // Tests @module filter with double parent query pattern.
+    // @module("test", filter="true", inherit="true") acts as a namespace filter
+    // that propagates into child scopes via inherit="true".
+    const QUERY: &str = r#"@module("test", filter="true", inherit="true") {{"b"}}"#;
+    let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
@@ -533,13 +534,12 @@ fn project_double_parent_query() {
         ]
     );
     let edges = format_edges(res.edges);
-    assert_eq!(edges, vec!["91-92", "91-92", "942-91", "942-92"]);
+    assert_eq!(edges, vec!["91-92", "942-91", "942-92"]);
 }
 
 #[test]
-#[ignore = "@module is now a type selector, not a filter - old filter behavior obsoleted"]
 fn module_filter_excludes_other_modules() {
-    const FILTERED_QUERY: &str = r#"@module("test") "a""#;
+    const FILTERED_QUERY: &str = r#"@module("test", filter="true") "a""#;
     let filtered = run_query(TEST_INPUT_MODULES, FILTERED_QUERY);
 
     println!("{:#?}", filtered.nodes);
@@ -561,7 +561,7 @@ fn module_filter_excludes_other_modules() {
         ]
     );
 
-    const FILTERED_AND_UNFILTERED_QUERY: &str = r#"@module("test") "a"; "a""#;
+    const FILTERED_AND_UNFILTERED_QUERY: &str = r#"@module("test", filter="true") "a"; "a""#;
     let filtered_unfiltered = run_query(TEST_INPUT_MODULES, FILTERED_AND_UNFILTERED_QUERY);
     let filtered_unfiltered_nodes = filtered_unfiltered.nodes.as_vec();
 
@@ -574,7 +574,7 @@ fn module_filter_excludes_other_modules() {
         ]
     );
 
-    const PREAMBLE_FILTERED_QUERY: &str = r#"@preamble @module("test"); "a""#;
+    const PREAMBLE_FILTERED_QUERY: &str = r#"@preamble @module("test", filter="true", inherit="true"); "a""#;
     let preamble_filtered = run_query(TEST_INPUT_MODULES, PREAMBLE_FILTERED_QUERY);
     let preamble_filtered_nodes = preamble_filtered.nodes.as_vec();
 
@@ -582,9 +582,8 @@ fn module_filter_excludes_other_modules() {
 }
 
 #[test]
-#[ignore = "@module is now a type selector, not a filter - old filter behavior obsoleted"]
 fn module_filter_selects_other_module() {
-    const QUERY: &str = r#"@module("other") "a""#;
+    const QUERY: &str = r#"@module("other", filter="true") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -595,9 +594,8 @@ fn module_filter_selects_other_module() {
 }
 
 #[test]
-#[ignore = "@module is now a type selector, not a filter - old filter behavior obsoleted"]
 fn module_filter_replaced_by_second_invocation() {
-    const QUERY: &str = r#"@module("test") @module("other") "a""#;
+    const QUERY: &str = r#"@module("test", filter="true") @module("other", filter="true") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -608,9 +606,8 @@ fn module_filter_replaced_by_second_invocation() {
 }
 
 #[test]
-#[ignore = "@module is now a type selector, not a filter - old filter behavior obsoleted"]
 fn module_filter_children_scope_honors_filter() {
-    const QUERY: &str = r#"@module("other") "a" {}"#;
+    const QUERY: &str = r#"@module("other", filter="true") "a" {}"#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -705,9 +702,8 @@ fn project_filter_selects_other_project() {
 }
 
 #[test]
-#[ignore = "@module is now a type selector, not a filter - old filter behavior obsoleted"]
 fn project_and_module_filters_combine() {
-    const QUERY: &str = r#"@project("test_project") @module("other") "a""#;
+    const QUERY: &str = r#"@project("test_project") @module("other", filter="true") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -718,9 +714,8 @@ fn project_and_module_filters_combine() {
 }
 
 #[test]
-#[ignore = "@module is now a type selector, not a filter - old filter behavior obsoleted"]
 fn conflicting_project_and_module_filters_return_empty() {
-    const QUERY: &str = r#"@project("other_project") @module("other") "a""#;
+    const QUERY: &str = r#"@project("other_project") @module("other", filter="true") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
