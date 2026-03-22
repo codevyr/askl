@@ -84,6 +84,7 @@ pub(crate) fn build_generic_verb(
         PreambleVerb::NAME => PreambleVerb::new(verb_span, &positional, &named),
         HasModifier::NAME => HasModifier::new(verb_span, &positional, &named),
         RefsModifier::NAME => RefsModifier::new(verb_span, &positional, &named),
+        DeriveModifier::NAME => DeriveModifier::new(verb_span, &positional, &named),
         TypeSelector::NAME_FUNCTION => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FUNCTION),
         TypeSelector::NAME_FILE => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FILE),
         TypeSelector::NAME_MODULE => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_MODULE),
@@ -236,12 +237,13 @@ impl Selector for ForcedVerb {
         Ok(None)
     }
 
-    async fn derive_from_ref_parent(
+    async fn derive_from_parent(
         &self,
         ctx: &mut ExecutionContext,
         _index: &Index,
         _selector_filters: &[&dyn Filter],
         parent: &Statement,
+        _rel_type: RelationshipType,
     ) -> Result<Option<Selection>> {
         let parent_selection = match parent.get_selection(ctx) {
             Some(selection) => selection,
@@ -617,7 +619,7 @@ impl Verb for HasModifier {
 
     /// The @has verb consumes itself by setting the relationship type in the parser context
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.set_relationship_type_explicit(RelationshipType::Has);
+        ctx.set_relationship_type_explicit(RelationshipType::HAS);
         Ok(true) // consumed - don't add to command
     }
 }
@@ -662,7 +664,7 @@ impl Verb for RefsModifier {
 
     /// The @refs verb consumes itself by setting the relationship type in the parser context
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.set_relationship_type_explicit(RelationshipType::Refs);
+        ctx.set_relationship_type_explicit(RelationshipType::REFS);
         Ok(true) // consumed - don't add to command
     }
 }
@@ -670,6 +672,84 @@ impl Verb for RefsModifier {
 impl Display for RefsModifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "RefsModifier")
+    }
+}
+
+/// DeriveModifier - generalized relationship modifier with combination support
+/// @derive(type="refs")           — same as @refs
+/// @derive(type="has")            — same as @has
+/// @derive(type="refs,has")       — union: either relationship
+/// @derive(type="has", inherit="true") — has, propagated to all descendants
+#[derive(Debug)]
+pub(super) struct DeriveModifier {
+    span: Span,
+    relationship_type: RelationshipType,
+    inherit: bool,
+}
+
+impl DeriveModifier {
+    pub(super) const NAME: &'static str = "derive";
+
+    pub fn new(
+        span: Span,
+        _positional: &Vec<String>,
+        named: &HashMap<String, String>,
+    ) -> Result<Arc<dyn Verb>> {
+        let type_str = named
+            .get("type")
+            .ok_or_else(|| anyhow!("@derive requires a 'type' parameter"))?;
+
+        let mut rel_type = RelationshipType::EMPTY;
+        for part in type_str.split(',') {
+            match part.trim() {
+                "refs" => rel_type = rel_type | RelationshipType::REFS,
+                "has" => rel_type = rel_type | RelationshipType::HAS,
+                other => bail!("unknown relationship type '{}' in @derive (expected 'refs' or 'has')", other),
+            }
+        }
+
+        if rel_type == RelationshipType::EMPTY {
+            bail!("@derive type parameter must contain at least one of 'refs', 'has'");
+        }
+
+        let inherit = named
+            .get("inherit")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        Ok(Arc::new(Self {
+            span,
+            relationship_type: rel_type,
+            inherit,
+        }))
+    }
+}
+
+impl Verb for DeriveModifier {
+    fn name(&self) -> &str {
+        DeriveModifier::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Skip
+    }
+
+    fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
+        ctx.set_relationship_type_explicit(self.relationship_type);
+        if self.inherit {
+            ctx.set_inherit_relationship_modifier(true);
+        }
+        Ok(true) // consumed - don't add to command
+    }
+}
+
+impl Display for DeriveModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DeriveModifier")
     }
 }
 

@@ -52,6 +52,10 @@ pub struct ParserContext {
     /// Whether a relationship modifier (@has or @refs) was explicitly used in this context.
     /// Used to distinguish inherited @has from explicit @has in nested scopes.
     has_relationship_modifier: RefCell<bool>,
+    /// Whether the relationship modifier should be inherited by all descendants.
+    /// When true, derive() copies both has_relationship_modifier and inherit_relationship_modifier
+    /// to child contexts, so the relationship type propagates to all descendants.
+    inherit_relationship_modifier: RefCell<bool>,
 }
 
 impl ParserContext {
@@ -63,9 +67,10 @@ impl ParserContext {
             alternative_context: RefCell::new(None),
             command: RefCell::new(command),
             scope_factory: Some(scope_factory),
-            relationship_type: RefCell::new(RelationshipType::Refs),
+            relationship_type: RefCell::new(RelationshipType::REFS),
             default_symbol_types: RefCell::new(None),
             has_relationship_modifier: RefCell::new(false),
+            inherit_relationship_modifier: RefCell::new(false),
         })
     }
 
@@ -81,7 +86,9 @@ impl ParserContext {
             // Inherit default symbol types from parent context
             default_symbol_types: RefCell::new(from.get_default_symbol_types()),
             // Don't inherit - each context tracks its own modifiers
-            has_relationship_modifier: RefCell::new(false),
+            // UNLESS inherit_relationship_modifier is set, in which case propagate both flags
+            has_relationship_modifier: RefCell::new(*from.inherit_relationship_modifier.borrow()),
+            inherit_relationship_modifier: RefCell::new(*from.inherit_relationship_modifier.borrow()),
         })
     }
 
@@ -168,6 +175,12 @@ impl ParserContext {
     /// Check if a relationship modifier (@has or @refs) was explicitly used.
     pub fn has_relationship_modifier(&self) -> bool {
         *self.has_relationship_modifier.borrow()
+    }
+
+    /// Set the inherit_relationship_modifier flag.
+    /// When true, derive() will propagate the relationship modifier to all descendants.
+    pub fn set_inherit_relationship_modifier(&self, val: bool) {
+        *self.inherit_relationship_modifier.borrow_mut() = val;
     }
 
     /// Set the default symbol types for child scopes.

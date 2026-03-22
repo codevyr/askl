@@ -246,20 +246,14 @@ impl SelectorState {
         let len_before = self.selection.as_ref().unwrap().nodes.len();
 
         if let Some(_) = &mut self.selection {
-            match (role, rel_type) {
-                (DependencyRole::Parent, RelationshipType::Refs) => {
-                    self.constrain_by_ref_child(dependency);
+            match role {
+                DependencyRole::Parent => {
+                    self.constrain_by_child(dependency, rel_type);
                 }
-                (DependencyRole::Child, RelationshipType::Refs) => {
-                    self.constrain_by_ref_parent(dependency);
+                DependencyRole::Child => {
+                    self.constrain_by_parent(dependency, rel_type);
                 }
-                (DependencyRole::Parent, RelationshipType::Has) => {
-                    self.constrain_by_has_child(dependency);
-                }
-                (DependencyRole::Child, RelationshipType::Has) => {
-                    self.constrain_by_has_parent(dependency);
-                }
-                (DependencyRole::User, _) => {
+                DependencyRole::User => {
                     self.constrain_by_owner(dependency);
                 }
             }
@@ -269,61 +263,43 @@ impl SelectorState {
         len_before != len_after
     }
 
-    /// Constrain by reference-based parent (I am a child, parent calls me).
-    /// Only counts relationship entries where the other end (parent) still exists
-    /// in the parent's current nodes — stale entries from pruned nodes are ignored.
-    fn constrain_by_ref_parent(&mut self, parent: &Selection) {
+    /// Constrain by parent relationship (I am a child, parent connects to me).
+    /// Checks each flag in rel_type and OR-s the conditions for union semantics.
+    fn constrain_by_parent(&mut self, parent: &Selection, rel_type: RelationshipType) {
         let parent_node_ids: std::collections::HashSet<_> =
             parent.nodes.iter().map(|n| n.symbol_instance.id).collect();
         let selection = self.selection.as_mut().unwrap();
         selection.nodes.retain(|s| {
-            parent.children.iter().any(|r| {
-                r.symbol_instance.id == s.symbol_instance.id
-                    && parent_node_ids.contains(&r.from_instance.id)
-            })
+            (rel_type.contains(RelationshipType::REFS)
+                && parent.children.iter().any(|r| {
+                    r.symbol_instance.id == s.symbol_instance.id
+                        && parent_node_ids.contains(&r.from_instance.id)
+                }))
+                || (rel_type.contains(RelationshipType::HAS)
+                    && parent.has_children.iter().any(|r| {
+                        r.child_instance.id == s.symbol_instance.id
+                            && parent_node_ids.contains(&r.parent_instance.id)
+                    }))
         });
     }
 
-    /// Constrain by reference-based child (I am a parent, child is called by me).
-    /// Only counts relationship entries where the other end (child) still exists
-    /// in the child's current nodes.
-    fn constrain_by_ref_child(&mut self, child: &Selection) {
+    /// Constrain by child relationship (I am a parent, child connects to me).
+    /// Checks each flag in rel_type and OR-s the conditions for union semantics.
+    fn constrain_by_child(&mut self, child: &Selection, rel_type: RelationshipType) {
         let child_node_ids: std::collections::HashSet<_> =
             child.nodes.iter().map(|n| n.symbol_instance.id).collect();
         let selection = self.selection.as_mut().unwrap();
         selection.nodes.retain(|s| {
-            child.parents.iter().any(|r| {
-                r.from_instance.id == s.symbol_instance.id
-                    && child_node_ids.contains(&r.to_instance.id)
-            })
-        });
-    }
-
-    /// Constrain by containment-based parent (I am contained by parent).
-    /// Only counts relationship entries where the parent still exists in parent's nodes.
-    fn constrain_by_has_parent(&mut self, parent: &Selection) {
-        let parent_node_ids: std::collections::HashSet<_> =
-            parent.nodes.iter().map(|n| n.symbol_instance.id).collect();
-        let selection = self.selection.as_mut().unwrap();
-        selection.nodes.retain(|s| {
-            parent.has_children.iter().any(|r| {
-                r.child_instance.id == s.symbol_instance.id
-                    && parent_node_ids.contains(&r.parent_instance.id)
-            })
-        });
-    }
-
-    /// Constrain by containment-based child (I contain the child).
-    /// Only counts relationship entries where the child still exists in child's nodes.
-    fn constrain_by_has_child(&mut self, child: &Selection) {
-        let child_node_ids: std::collections::HashSet<_> =
-            child.nodes.iter().map(|n| n.symbol_instance.id).collect();
-        let selection = self.selection.as_mut().unwrap();
-        selection.nodes.retain(|s| {
-            child.has_parents.iter().any(|r| {
-                r.parent_instance.id == s.symbol_instance.id
-                    && child_node_ids.contains(&r.child_instance.id)
-            })
+            (rel_type.contains(RelationshipType::REFS)
+                && child.parents.iter().any(|r| {
+                    r.from_instance.id == s.symbol_instance.id
+                        && child_node_ids.contains(&r.to_instance.id)
+                }))
+                || (rel_type.contains(RelationshipType::HAS)
+                    && child.has_parents.iter().any(|r| {
+                        r.parent_instance.id == s.symbol_instance.id
+                            && child_node_ids.contains(&r.child_instance.id)
+                    }))
         });
     }
 
@@ -534,21 +510,29 @@ pub trait Selector: std::fmt::Debug + Verb {
         }
 
         // Derivation path: derive parent's selection from merged children.
-        let decl_ids: Vec<SymbolInstanceId> = match (role, rel_type) {
-            (DependencyRole::Parent, RelationshipType::Refs) => dependency
-                .parents
-                .iter()
-                .map(|p| SymbolInstanceId::new(p.from_instance.id))
-                .unique()
-                .collect(),
-            (DependencyRole::Parent, RelationshipType::Has) => dependency
-                .has_parents
-                .iter()
-                .map(|p| SymbolInstanceId::new(p.parent_instance.id))
-                .unique()
-                .collect(),
-            _ => return Ok(NotificationResult::new(false, vec![])),
-        };
+        if role != DependencyRole::Parent {
+            return Ok(NotificationResult::new(false, vec![]));
+        }
+        let capacity = if rel_type.contains(RelationshipType::REFS) { dependency.parents.len() } else { 0 }
+            + if rel_type.contains(RelationshipType::HAS) { dependency.has_parents.len() } else { 0 };
+        let mut decl_ids = Vec::with_capacity(capacity);
+        if rel_type.contains(RelationshipType::REFS) {
+            decl_ids.extend(
+                dependency
+                    .parents
+                    .iter()
+                    .map(|p| SymbolInstanceId::new(p.from_instance.id)),
+            );
+        }
+        if rel_type.contains(RelationshipType::HAS) {
+            decl_ids.extend(
+                dependency
+                    .has_parents
+                    .iter()
+                    .map(|p| SymbolInstanceId::new(p.parent_instance.id)),
+            );
+        }
+        let decl_ids: Vec<_> = decl_ids.into_iter().unique().collect();
 
         let mut selection = self
             .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
@@ -581,24 +565,16 @@ pub trait Selector: std::fmt::Debug + Verb {
         role: DependencyRole,
         rel_type: RelationshipType,
     ) -> Result<Option<Selection>> {
-        let selection = match (role, rel_type) {
-            (DependencyRole::Child, RelationshipType::Refs) => {
-                self.derive_from_ref_parent(ctx, index, selector_filters, notifier)
+        let selection = match role {
+            DependencyRole::Child => {
+                self.derive_from_parent(ctx, index, selector_filters, notifier, rel_type)
                     .await?
             }
-            (DependencyRole::Parent, RelationshipType::Refs) => {
-                self.derive_from_ref_child(ctx, index, selector_filters, notifier)
+            DependencyRole::Parent => {
+                self.derive_from_child(ctx, index, selector_filters, notifier, rel_type)
                     .await?
             }
-            (DependencyRole::Child, RelationshipType::Has) => {
-                self.derive_from_has_parent(ctx, index, selector_filters, notifier)
-                    .await?
-            }
-            (DependencyRole::Parent, RelationshipType::Has) => {
-                self.derive_from_has_child(ctx, index, selector_filters, notifier)
-                    .await?
-            }
-            (DependencyRole::User, _) => {
+            DependencyRole::User => {
                 self.derive_from_provider(ctx, index, selector_filters, notifier)
                     .await?
             }
@@ -607,108 +583,88 @@ pub trait Selector: std::fmt::Debug + Verb {
         Ok(selection)
     }
 
-    /// Derive from reference-based parent (I am a child, get children that parent calls)
-    async fn derive_from_ref_parent(
+    /// Derive from parent (I am a child, collect IDs from parent's children/has_children).
+    /// Handles combined relationship types with union semantics.
+    async fn derive_from_parent(
         &self,
         ctx: &mut ExecutionContext,
         index: &Index,
         selector_filters: &[&dyn Filter],
         parent: &Statement,
-    ) -> Result<Option<Selection>> {
-        let parent = match parent.get_selection(&ctx) {
-            Some(selection) => selection,
-            None => return Ok(None),
-        };
-        let decl_ids = parent
-            .children
-            .iter()
-            .map(|p| SymbolInstanceId::new(p.symbol_instance.id))
-            .unique()
-            .collect::<Vec<_>>();
-
-        let children_selection = self
-            .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
-            .await?;
-
-        Ok(Some(children_selection))
-    }
-
-    /// Derive from reference-based child (I am a parent, get parents that call child)
-    async fn derive_from_ref_child(
-        &self,
-        ctx: &mut ExecutionContext,
-        index: &Index,
-        selector_filters: &[&dyn Filter],
-        child: &Statement,
-    ) -> Result<Option<Selection>> {
-        let child = match child.get_selection(&ctx) {
-            Some(selection) => selection,
-            None => return Ok(None),
-        };
-        let decl_ids = child
-            .parents
-            .iter()
-            .map(|p| SymbolInstanceId::new(p.from_instance.id))
-            .unique()
-            .collect::<Vec<_>>();
-        let parent_selection = self
-            .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
-            .await?;
-
-        Ok(Some(parent_selection))
-    }
-
-    /// Derive from containment-based parent (I am contained, get contained symbols from container)
-    async fn derive_from_has_parent(
-        &self,
-        ctx: &mut ExecutionContext,
-        index: &Index,
-        selector_filters: &[&dyn Filter],
-        parent: &Statement,
+        rel_type: RelationshipType,
     ) -> Result<Option<Selection>> {
         let parent_sel = match parent.get_selection(&ctx) {
             Some(selection) => selection,
             None => return Ok(None),
         };
-        // Get the child instance IDs from the parent's has_children
-        let decl_ids = parent_sel
-            .has_children
-            .iter()
-            .map(|p| SymbolInstanceId::new(p.child_instance.id))
-            .unique()
-            .collect::<Vec<_>>();
+        let capacity = if rel_type.contains(RelationshipType::REFS) { parent_sel.children.len() } else { 0 }
+            + if rel_type.contains(RelationshipType::HAS) { parent_sel.has_children.len() } else { 0 };
+        let mut decl_ids = Vec::with_capacity(capacity);
+        if rel_type.contains(RelationshipType::REFS) {
+            decl_ids.extend(
+                parent_sel
+                    .children
+                    .iter()
+                    .map(|p| SymbolInstanceId::new(p.symbol_instance.id)),
+            );
+        }
+        if rel_type.contains(RelationshipType::HAS) {
+            decl_ids.extend(
+                parent_sel
+                    .has_children
+                    .iter()
+                    .map(|p| SymbolInstanceId::new(p.child_instance.id)),
+            );
+        }
+        let decl_ids: Vec<_> = decl_ids.into_iter().unique().collect();
 
-        let children_selection = self
+        let selection = self
             .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
             .await?;
 
-        Ok(Some(children_selection))
+        Ok(Some(selection))
     }
 
-    /// Derive from containment-based child (I am a container, get containers of child)
-    async fn derive_from_has_child(
+    /// Derive from child (I am a parent, collect IDs from child's parents/has_parents).
+    /// Handles combined relationship types with union semantics.
+    async fn derive_from_child(
         &self,
         ctx: &mut ExecutionContext,
         index: &Index,
         selector_filters: &[&dyn Filter],
         child: &Statement,
+        rel_type: RelationshipType,
     ) -> Result<Option<Selection>> {
-        let child = match child.get_selection(&ctx) {
+        let child_sel = match child.get_selection(&ctx) {
             Some(selection) => selection,
             None => return Ok(None),
         };
-        // Get the parent instance IDs from the child's has_parents
-        let decl_ids = child
-            .has_parents
-            .iter()
-            .map(|p| SymbolInstanceId::new(p.parent_instance.id))
-            .unique()
-            .collect::<Vec<_>>();
-        let parent_selection = self
+        let capacity = if rel_type.contains(RelationshipType::REFS) { child_sel.parents.len() } else { 0 }
+            + if rel_type.contains(RelationshipType::HAS) { child_sel.has_parents.len() } else { 0 };
+        let mut decl_ids = Vec::with_capacity(capacity);
+        if rel_type.contains(RelationshipType::REFS) {
+            decl_ids.extend(
+                child_sel
+                    .parents
+                    .iter()
+                    .map(|p| SymbolInstanceId::new(p.from_instance.id)),
+            );
+        }
+        if rel_type.contains(RelationshipType::HAS) {
+            decl_ids.extend(
+                child_sel
+                    .has_parents
+                    .iter()
+                    .map(|p| SymbolInstanceId::new(p.parent_instance.id)),
+            );
+        }
+        let decl_ids: Vec<_> = decl_ids.into_iter().unique().collect();
+
+        let selection = self
             .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
             .await?;
 
-        Ok(Some(parent_selection))
+        Ok(Some(selection))
     }
 
     async fn derive_from_provider(

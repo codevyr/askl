@@ -11,13 +11,33 @@ pub enum DependencyRole {
 }
 
 /// The type of relationship to traverse when deriving selections.
-/// - Refs: Reference-based traversal (calls/uses) via symbol_refs table
-/// - Has: Containment-based traversal (composition) via offset_range containment
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RelationshipType {
-    #[default]
-    Refs,
-    Has,
+/// Bitflag newtype: composable via `|`, testable via `contains()`.
+/// - REFS: Reference-based traversal (calls/uses) via symbol_refs table
+/// - HAS: Containment-based traversal (composition) via offset_range containment
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelationshipType(u8);
+
+impl RelationshipType {
+    pub(crate) const EMPTY: Self = Self(0);
+    pub const REFS: Self = Self(0b01);
+    pub const HAS: Self = Self(0b10);
+
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl Default for RelationshipType {
+    fn default() -> Self {
+        Self::REFS
+    }
+}
+
+impl std::ops::BitOr for RelationshipType {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
 }
 
 #[derive(Debug)]

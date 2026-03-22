@@ -204,12 +204,13 @@ impl Selector for UserVerb {
         return Ok(None);
     }
 
-    async fn derive_from_ref_parent(
+    async fn derive_from_parent(
         &self,
         ctx: &mut ExecutionContext,
         _index: &Index,
         _selector_filters: &[&dyn Filter],
         parent: &Statement,
+        _rel_type: RelationshipType,
     ) -> Result<Option<Selection>> {
         if !self.forced {
             bail!("Cannot derive from parent when not forced");
@@ -256,12 +257,13 @@ impl Selector for UserVerb {
         Ok(Some(normal_selection))
     }
 
-    async fn derive_from_ref_child(
+    async fn derive_from_child(
         &self,
         ctx: &mut ExecutionContext,
         _index: &Index,
         _selector_filters: &[&dyn Filter],
         child: &Statement,
+        _rel_type: RelationshipType,
     ) -> Result<Option<Selection>> {
         let child = match child.get_selection(&ctx) {
             Some(selection) => selection,

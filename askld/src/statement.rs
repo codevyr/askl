@@ -44,7 +44,7 @@ pub fn build_statement<'a>(
                 if !sub_ctx.has_relationship_modifier() {
                     // No relationship modifier in this statement's verbs
                     // Reset to Refs for the scope's children
-                    sub_ctx.set_relationship_type_default(RelationshipType::Refs);
+                    sub_ctx.set_relationship_type_default(RelationshipType::REFS);
                 }
                 // else: @has/@refs was used, keep the relationship type for children
 
@@ -148,7 +148,7 @@ pub struct Statement {
 
 impl Statement {
     pub fn new(command: Command, scope: Rc<dyn Scope>) -> Rc<Statement> {
-        Statement::new_with_relationship(command, scope, RelationshipType::Refs)
+        Statement::new_with_relationship(command, scope, RelationshipType::REFS)
     }
 
     pub fn new_with_relationship(
