@@ -5,6 +5,7 @@ diesel::table! {
         id -> Integer,
         name -> Text,
         level -> Integer,
+        dot_is_separator -> Bool,
     }
 }
 
