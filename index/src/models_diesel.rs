@@ -8,6 +8,7 @@ pub struct SymbolType {
     pub id: i32,
     pub name: String,
     pub level: i32,
+    pub dot_is_separator: bool,
 }
 
 #[derive(Clone, Queryable, Selectable, Identifiable, Associations, Debug, PartialEq, Eq, Hash)]

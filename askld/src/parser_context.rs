@@ -177,6 +177,13 @@ impl ParserContext {
         *self.has_relationship_modifier.borrow()
     }
 
+    /// Set the relationship type and mark it for propagation to all descendants.
+    /// Combines set_relationship_type_explicit + set_inherit_relationship_modifier(true).
+    pub fn set_relationship_type_inherited(&self, rel_type: RelationshipType) {
+        self.set_relationship_type_explicit(rel_type);
+        self.set_inherit_relationship_modifier(true);
+    }
+
     /// Set the inherit_relationship_modifier flag.
     /// When true, derive() will propagate the relationship modifier to all descendants.
     pub fn set_inherit_relationship_modifier(&self, val: bool) {

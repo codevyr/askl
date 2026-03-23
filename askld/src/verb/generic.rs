@@ -619,7 +619,7 @@ impl Verb for HasModifier {
 
     /// The @has verb consumes itself by setting the relationship type in the parser context
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.set_relationship_type_explicit(RelationshipType::HAS);
+        ctx.set_relationship_type_inherited(RelationshipType::HAS);
         Ok(true) // consumed - don't add to command
     }
 }
@@ -664,7 +664,7 @@ impl Verb for RefsModifier {
 
     /// The @refs verb consumes itself by setting the relationship type in the parser context
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.set_relationship_type_explicit(RelationshipType::REFS);
+        ctx.set_relationship_type_inherited(RelationshipType::REFS);
         Ok(true) // consumed - don't add to command
     }
 }
@@ -676,10 +676,10 @@ impl Display for RefsModifier {
 }
 
 /// DeriveModifier - generalized relationship modifier with combination support
-/// @derive(type="refs")           — same as @refs
-/// @derive(type="has")            — same as @has
-/// @derive(type="refs,has")       — union: either relationship
-/// @derive(type="has", inherit="true") — has, propagated to all descendants
+/// @derive(type="refs")           — same as @refs (inherits by default)
+/// @derive(type="has")            — same as @has (inherits by default)
+/// @derive(type="refs,has")       — union: either relationship (inherits by default)
+/// @derive(type="has", inherit="false") — has, NOT propagated to descendants
 #[derive(Debug)]
 pub(super) struct DeriveModifier {
     span: Span,
@@ -715,7 +715,7 @@ impl DeriveModifier {
         let inherit = named
             .get("inherit")
             .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .unwrap_or(true);
 
         Ok(Arc::new(Self {
             span,
@@ -740,9 +740,7 @@ impl Verb for DeriveModifier {
 
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
         ctx.set_relationship_type_explicit(self.relationship_type);
-        if self.inherit {
-            ctx.set_inherit_relationship_modifier(true);
-        }
+        ctx.set_inherit_relationship_modifier(self.inherit);
         Ok(true) // consumed - don't add to command
     }
 }
@@ -835,6 +833,18 @@ impl TypeSelector {
         }))
     }
 
+    /// Returns the appropriate name mixin for the given name and symbol type.
+    /// Directory/file types with path args (starting with '/') use exact match;
+    /// all other cases use compound name (ltree) matching.
+    fn name_mixin(name: &str, symbol_type_id: i32) -> Box<dyn SymbolSearchMixin> {
+        match symbol_type_id {
+            SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE if name.starts_with('/') => {
+                Box::new(ExactNameMixin::new(name))
+            }
+            _ => Box::new(CompoundNameMixin::new(name)),
+        }
+    }
+
     /// Build search mixins for this type selector.
     /// Used by both `get_filter_mixins` and `select_from_all_impl` to avoid duplication.
     fn build_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
@@ -842,16 +852,7 @@ impl TypeSelector {
             Box::new(SymbolTypeMixin::new(self.symbol_type_id)),
         ];
         if let Some(ref name) = self.name_pattern {
-            // Use exact name matching for directory and file types (path-based names)
-            // Use fuzzy lquery matching for function and module types
-            match self.symbol_type_id {
-                SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE => {
-                    mixins.push(Box::new(ExactNameMixin::new(name)));
-                }
-                _ => {
-                    mixins.push(Box::new(CompoundNameMixin::new(name)));
-                }
-            }
+            mixins.push(Self::name_mixin(name, self.symbol_type_id));
         }
         mixins
     }
@@ -916,17 +917,30 @@ impl Verb for TypeSelector {
         }
     }
 
-    /// Set default symbol types for child scopes.
-    /// When @module is used, children should include both module and function types by default.
+    /// Set default symbol types and relationship type for child scopes.
+    /// Container types (@dir, @file, @mod) implicitly set refs+has with inherit.
+    /// @func explicitly sets REFS to override any inherited refs+has.
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        use crate::parser_context::SYMBOL_TYPE_FUNCTION;
-
-        // Set default types for children: parent's type + function
-        let mut default_types = vec![self.symbol_type_id];
-        if self.symbol_type_id != SYMBOL_TYPE_FUNCTION {
-            default_types.push(SYMBOL_TYPE_FUNCTION);
-        }
+        let default_types = match self.symbol_type_id {
+            SYMBOL_TYPE_FUNCTION => vec![SYMBOL_TYPE_FUNCTION],
+            SYMBOL_TYPE_MODULE => vec![SYMBOL_TYPE_MODULE, SYMBOL_TYPE_FUNCTION],
+            SYMBOL_TYPE_FILE => vec![SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MODULE],
+            SYMBOL_TYPE_DIRECTORY => vec![SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FILE],
+            _ => vec![SYMBOL_TYPE_FUNCTION],
+        };
         ctx.set_default_symbol_types(default_types);
+
+        match self.symbol_type_id {
+            // Container types: set refs+has with inherit
+            SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE | SYMBOL_TYPE_MODULE => {
+                ctx.set_relationship_type_inherited(RelationshipType::REFS | RelationshipType::HAS);
+            }
+            // @func: explicitly set REFS to override any inherited refs+has
+            SYMBOL_TYPE_FUNCTION => {
+                ctx.set_relationship_type_explicit(RelationshipType::REFS);
+            }
+            _ => {}
+        }
 
         // Don't consume - still add this verb to the command
         Ok(false)
@@ -945,14 +959,7 @@ impl Filter for TypeSelector {
             // @module("test", filter="true") "a" to find functions named "test.a"
             // rather than restricting to MODULE-type symbols.
             let name = self.name_pattern.as_ref().unwrap();
-            match self.symbol_type_id {
-                SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE => {
-                    vec![Box::new(ExactNameMixin::new(name))]
-                }
-                _ => {
-                    vec![Box::new(CompoundNameMixin::new(name))]
-                }
-            }
+            vec![Self::name_mixin(name, self.symbol_type_id)]
         } else {
             self.build_mixins()
         }

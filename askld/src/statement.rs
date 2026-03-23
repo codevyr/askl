@@ -49,10 +49,6 @@ pub fn build_statement<'a>(
                 // else: @has/@refs was used, keep the relationship type for children
 
                 scope = build_scope(sub_ctx.clone(), pair)?;
-
-                // Restore this statement's own relationship_type (how it relates to its parent)
-                // This is the INHERITED value, not the value after @has/@refs modified it
-                sub_ctx.set_relationship_type_default(inherited_rel_type);
                 break;
             }
             _ => Err(Error::new_from_span(
@@ -64,6 +60,11 @@ pub fn build_statement<'a>(
             ))?,
         }
     }
+
+    // Restore this statement's own relationship_type (how it relates to its parent).
+    // This is the INHERITED value, not the value after verbs (like @has/@func) modified it.
+    // The verb modifications only affect children (via the scope built above).
+    sub_ctx.set_relationship_type_default(inherited_rel_type);
 
     if let Some(pair) = iter.next() {
         return Err(Error::new_from_span(

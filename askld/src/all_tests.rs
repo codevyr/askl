@@ -1042,10 +1042,11 @@ fn has_parents_query() {
 
 #[test]
 fn mixed_has_refs_query() {
-    // @mod("testmodule") @has { @file @has { "foo" {} } }
+    // @mod("testmodule") @has { @file @has { "foo" @refs {} } }
     // With direct-children-only: module(3) → file(2) → function(1), then refs
     // Returns: module, file, foo in file, and foo's callees (bar)
-    const QUERY: &str = r#"@mod("testmodule") @has { @file @has { "foo" {} } }"#;
+    // Note: @refs is needed to override inherited @has for the inner scope
+    const QUERY: &str = r#"@mod("testmodule") @has { @file @has { "foo" @refs {} } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1112,18 +1113,32 @@ fn type_selector_module_query() {
 }
 
 #[test]
-fn has_does_not_propagate() {
+fn has_propagates_by_default() {
     // @file @has { "foo" { "bar" } }
-    // foo is in file (has), bar is callee of foo (refs)
-    // bar does NOT need to be in file directly (nested refs uses refs semantics)
-    // With direct-children-only: file(2) → function(1)
+    // @has now inherits by default, so the inner {} also uses HAS.
+    // foo is in file (has), but foo does NOT contain bar (has) — functions don't contain functions.
+    // So bar is not found, constraining foo and file out.
     const QUERY: &str = r#"@file @has { "foo" { "bar" } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // Should have file (510), foo (20), and bar (30)
+    // With @has inheriting: foo doesn't contain bar → empty result
+    assert_eq!(res.nodes.as_vec().len(), 0);
+}
+
+#[test]
+fn has_with_explicit_refs_override() {
+    // To get the old behavior (has then refs), use explicit @refs on the inner scope
+    // @file @has { "foo" @refs { "bar" } }
+    const QUERY: &str = r#"@file @has { "foo" @refs { "bar" } }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    // file contains foo (has), foo calls bar (refs) — all three found
     assert_eq!(res.nodes.as_vec().len(), 3);
 }
 
@@ -1916,16 +1931,152 @@ fn derive_inherit_true_propagates() {
 }
 
 #[test]
-fn derive_without_inherit_resets_to_refs() {
-    // Without inherit, grandchild resets to refs (same as current @has behavior)
+fn derive_inherits_by_default() {
+    // @derive now inherits by default (inherit=true).
     // @file @derive(type="has") { "foo" { "bar" } }
-    // file has→ foo refs→ bar (grandchild resets to refs)
+    // file has→ foo has→ bar — but foo doesn't contain bar → empty
     const QUERY: &str = r#"@file("/main.go") @derive(type="has") { "foo" { "bar" } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
-    println!("derive without inherit result: {:#?}", res.nodes);
+    println!("derive inherits by default result: {:#?}", res.nodes);
+    // foo doesn't contain bar → empty
+    assert_eq!(res.nodes.as_vec().len(), 0);
+}
+
+#[test]
+fn derive_explicit_no_inherit_resets_to_refs() {
+    // With explicit inherit="false", grandchild resets to refs
+    // @file @derive(type="has", inherit="false") { "foo" { "bar" } }
+    // file has→ foo refs→ bar (grandchild resets to refs)
+    const QUERY: &str = r#"@file("/main.go") @derive(type="has", inherit="false") { "foo" { "bar" } }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("derive explicit no inherit result: {:#?}", res.nodes);
     // file (has) foo (refs) bar — should find all three
     assert_eq!(res.nodes.as_vec().len(), 3); // file, foo, bar
+}
+
+// ============================================================================
+// Unified type selector verb tests
+// ============================================================================
+//
+// These tests verify the unified behavior where container type selectors
+// (@dir, @file, @mod) implicitly set refs+has with inherit, and @func
+// explicitly sets REFS to override any inherited relationship.
+
+#[test]
+fn dir_implicit_has_shows_files() {
+    // @dir("/src/util") { @file } — works without explicit @has
+    // @dir implicitly sets refs+has with inherit, so @file children are found via HAS
+    const QUERY: &str = r#"@dir("/src/util") { @file }"#;
+    let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
+
+    let names: Vec<_> = res.nodes.0.iter().map(|n| n.symbol.name.as_str()).collect();
+    println!("dir implicit has names: {:?}", names);
+
+    // /src/util contains util.go and helper.go
+    assert!(names.contains(&"/src/util"), "Should contain directory");
+    assert!(names.contains(&"/src/util/util.go"), "Should contain util.go");
+    assert!(names.contains(&"/src/util/helper.go"), "Should contain helper.go");
+}
+
+#[test]
+fn dir_empty_scope_shows_dirs_and_files() {
+    // @dir("/src") {} — empty scope should show [DIRECTORY, FILE] (new defaults)
+    // @dir implicitly sets refs+has, so children are found via either relationship
+    const QUERY: &str = r#"@dir("/src") {}"#;
+    let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
+
+    let names: Vec<_> = res.nodes.0.iter().map(|n| n.symbol.name.as_str()).collect();
+    println!("dir empty scope names: {:?}", names);
+
+    // /src references /src/util and /src/config (refs), contains main.go (has)
+    assert!(names.contains(&"/src"), "Should contain /src itself");
+    assert!(names.contains(&"/src/util"), "Should contain child dir /src/util");
+    assert!(names.contains(&"/src/config"), "Should contain child dir /src/config");
+    assert!(names.contains(&"/src/main.go"), "Should contain child file /src/main.go");
+}
+
+#[test]
+fn func_overrides_inherited_refs_has() {
+    // @func("foo") { "bar" } — still uses REFS only (default unchanged)
+    const QUERY: &str = r#"@func("foo") { "bar" }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    println!("func refs only nodes: {:?}", nodes);
+
+    // foo calls bar (refs) — both found
+    assert_eq!(nodes.len(), 2);
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar");
+}
+
+#[test]
+fn dir_func_overrides_inherited_refs_has() {
+    // @dir("/") { @func("foo") { "bar" } }
+    // @dir sets refs+has with inherit, but @func overrides to REFS for its children.
+    // foo calls bar via REFS, so bar is found.
+    const QUERY: &str = r#"@dir("/") { @func("foo") { "bar" } }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    println!("dir func override nodes: {:?}", nodes);
+
+    // dir (500 or 501) + foo (20) + bar (30) = at least 3 nodes
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "Should include foo");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "Should include bar");
+    assert!(nodes.len() >= 3, "Should have dir + foo + bar");
+}
+
+#[test]
+fn func_overrides_has_in_nested_scope() {
+    // @func sets REFS explicitly, overriding inherited HAS from the @has modifier.
+    // So "bar" resolves via REFS: foo calls bar → result is file + foo + bar.
+    const QUERY: &str = r#"@file("/main.go") @has { @func { "bar" } }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert_eq!(nodes.len(), 3);
+    assert!(nodes.contains(&SymbolInstanceId::new(510)), "file");
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo (calls bar)");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar");
+}
+
+#[test]
+fn derive_refs_overrides_inherited_refs_has() {
+    // @derive(type="refs") inside @dir overrides inherited refs+has to REFS-only
+    const QUERY: &str = r#"@dir("/") @derive(type="refs") { @dir }"#;
+    let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
+
+    let names: Vec<_> = res.nodes.0.iter().map(|n| n.symbol.name.as_str()).collect();
+    println!("derive refs override names: {:?}", names);
+
+    // REFS only: / references /src and /docs via symbol_refs
+    assert!(names.contains(&"/"), "Should contain /");
+    assert!(names.contains(&"/src"), "Should contain /src");
+    assert!(names.contains(&"/docs"), "Should contain /docs");
+}
+
+#[test]
+fn file_implicit_has_shows_functions() {
+    // @file("/main.go") { @func } — works without explicit @has
+    // @file implicitly sets refs+has with inherit
+    const QUERY: &str = r#"@file("/main.go") { @func }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    println!("file implicit has nodes: {:?}", nodes);
+
+    // file contains foo, bar, baz (via HAS from implicit refs+has)
+    // @func filters to FUNCTION type and overrides to REFS — but the statement's
+    // own relationship to parent is restored to inherited value (refs+has)
+    // So file's children are found via refs+has, filtered to functions
+    assert!(nodes.contains(&SymbolInstanceId::new(510)), "file");
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar");
+    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz");
+    assert_eq!(nodes.len(), 4);
 }
 
 #[test]
