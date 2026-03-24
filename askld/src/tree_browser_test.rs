@@ -1,53 +1,17 @@
 use crate::index_store::{IndexStore, ProjectTreeResult};
-use crate::test_support::wait_for_postgres;
+use crate::test_util::{get_shared_db_url, TEST_INPUT_TREE_BROWSER};
 use diesel::pg::PgConnection;
 use diesel::r2d2::{ConnectionManager, Pool};
-use diesel_migrations::MigrationHarness;
-use index::db_diesel::MIGRATIONS;
-use testcontainers::{clients, core::WaitFor, GenericImage};
 use tokio::{runtime::Runtime, task};
 
-async fn setup_test_store() -> (IndexStore, testcontainers::Container<'static, GenericImage>) {
-    // Intentionally leak the Docker client to give it a 'static lifetime.
-    // This keeps the container alive for the duration of the test. Without this,
-    // the Docker client would be dropped when setup_test_store returns, which
-    // would stop the container before the test completes.
-    let docker = Box::leak(Box::new(clients::Cli::default()));
-    let image = GenericImage::new("postgres", "15-alpine")
-        .with_env_var("POSTGRES_PASSWORD", "postgres")
-        .with_env_var("POSTGRES_USER", "postgres")
-        .with_env_var("POSTGRES_DB", "askl")
-        .with_wait_for(WaitFor::message_on_stdout(
-            "database system is ready to accept connections",
-        ));
-    let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432);
-    let url = format!("postgres://postgres:postgres@127.0.0.1:{}/askl", port);
-
-    wait_for_postgres(&url).await.unwrap();
-
-    let manager = ConnectionManager::<PgConnection>::new(&url);
+fn shared_test_store() -> IndexStore {
+    let url = get_shared_db_url(TEST_INPUT_TREE_BROWSER);
+    let manager = ConnectionManager::<PgConnection>::new(url);
     let pool = Pool::builder()
         .test_on_check_out(true)
         .build(manager)
         .unwrap();
-
-    // Run migrations
-    {
-        let mut conn = pool.get().unwrap();
-        conn.run_pending_migrations(MIGRATIONS).unwrap();
-    }
-
-    // Load test data
-    {
-        let mut conn = pool.get().unwrap();
-        use diesel::connection::SimpleConnection;
-        conn.batch_execute(include_str!("../../sql/test_input_tree_browser.sql"))
-            .unwrap();
-    }
-
-    let store = IndexStore::from_pool(pool);
-    (store, node)
+    IndexStore::from_pool(pool)
 }
 
 #[test]
@@ -55,7 +19,7 @@ fn tree_browser_root_returns_direct_children() {
     let rt = Runtime::new().unwrap();
     let local = task::LocalSet::new();
     local.block_on(&rt, async {
-        let (store, _node) = setup_test_store().await;
+        let store = shared_test_store();
         let result = store.list_project_tree(1, "/", false).await.unwrap();
 
         match result {
@@ -93,7 +57,7 @@ fn tree_browser_nested_directory_returns_children() {
     let rt = Runtime::new().unwrap();
     let local = task::LocalSet::new();
     local.block_on(&rt, async {
-        let (store, _node) = setup_test_store().await;
+        let store = shared_test_store();
         let result = store.list_project_tree(1, "/src", false).await.unwrap();
 
         match result {
@@ -138,7 +102,7 @@ fn tree_browser_leaf_directory_returns_only_files() {
     let rt = Runtime::new().unwrap();
     let local = task::LocalSet::new();
     local.block_on(&rt, async {
-        let (store, _node) = setup_test_store().await;
+        let store = shared_test_store();
         let result = store.list_project_tree(1, "/src/util", false).await.unwrap();
 
         match result {
@@ -177,7 +141,7 @@ fn tree_browser_has_children_flag_correct() {
     let rt = Runtime::new().unwrap();
     let local = task::LocalSet::new();
     local.block_on(&rt, async {
-        let (store, _node) = setup_test_store().await;
+        let store = shared_test_store();
         let result = store.list_project_tree(1, "/", false).await.unwrap();
 
         match result {
@@ -206,7 +170,7 @@ fn tree_browser_nonexistent_path_returns_not_directory() {
     let rt = Runtime::new().unwrap();
     let local = task::LocalSet::new();
     local.block_on(&rt, async {
-        let (store, _node) = setup_test_store().await;
+        let store = shared_test_store();
         let result = store.list_project_tree(1, "/nonexistent", false).await.unwrap();
 
         match result {
