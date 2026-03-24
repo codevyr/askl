@@ -54,6 +54,7 @@ impl Index {
     pub const TEST_INPUT_SYMBOL_TOKENS: &'static str = "test_input_symbol_tokens.sql";
     pub const TEST_INPUT_CONTAINMENT: &'static str = "test_input_containment.sql";
     pub const TEST_INPUT_TREE_BROWSER: &'static str = "test_input_tree_browser.sql";
+    pub const TEST_INPUT_NESTED_FUNC: &'static str = "test_input_nested_func.sql";
 
     pub async fn load_test_input(&self, input_path: &str) -> Result<()> {
         let connection = &mut self.pool.get().unwrap();
@@ -107,6 +108,12 @@ impl Index {
             "test_input_tree_browser.sql" => {
                 connection
                     .batch_execute(include_str!("../../../sql/test_input_tree_browser.sql"))
+                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
+                    .unwrap();
+            }
+            "test_input_nested_func.sql" => {
+                connection
+                    .batch_execute(include_str!("../../../sql/test_input_nested_func.sql"))
                     .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
                     .unwrap();
             }
@@ -326,10 +333,16 @@ impl Index {
                     )
                 )
                 .filter(
-                    // Container's type level > current's type level (strict)
+                    // Container's type level >= current's type level
                     // directory(4) > module(3) > file(2) > function(1)
+                    // Using >= to support function-contains-function (nested/anonymous functions)
                     container_type.field(symbol_types::dsl::level)
-                        .gt(symbol_types::dsl::level)
+                        .ge(symbol_types::dsl::level)
+                )
+                .filter(
+                    // Prevent self-containment: container instance must differ from current instance
+                    container_instance.field(symbol_instances::dsl::id)
+                        .ne(symbol_instances::dsl::id)
                 )
                 .select((
                     Symbol::as_select(),                    // child_symbol (current)
@@ -390,10 +403,15 @@ impl Index {
                     )
                 )
                 .filter(
-                    // Current's type level > contained's type level (strict)
-                    // directory(4) > module(3) > file(2) > function(1)
+                    // Current's type level >= contained's type level
+                    // Using >= to support function-contains-function (nested/anonymous functions)
                     symbol_types::dsl::level
-                        .gt(contained_type.field(symbol_types::dsl::level))
+                        .ge(contained_type.field(symbol_types::dsl::level))
+                )
+                .filter(
+                    // Prevent self-containment: current instance must differ from contained instance
+                    symbol_instances::dsl::id
+                        .ne(contained_instance.field(symbol_instances::dsl::id))
                 )
                 .select((
                     Symbol::as_select(),                    // parent_symbol (current)

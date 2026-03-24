@@ -14,6 +14,7 @@ pub const TEST_INPUT_B: &'static str = index::db_diesel::Index::TEST_INPUT_B;
 pub const TEST_INPUT_MODULES: &'static str = index::db_diesel::Index::TEST_INPUT_MODULES;
 pub const TEST_INPUT_CONTAINMENT: &'static str = index::db_diesel::Index::TEST_INPUT_CONTAINMENT;
 pub const TEST_INPUT_TREE_BROWSER: &'static str = index::db_diesel::Index::TEST_INPUT_TREE_BROWSER;
+pub const TEST_INPUT_NESTED_FUNC: &'static str = index::db_diesel::Index::TEST_INPUT_NESTED_FUNC;
 
 pub fn format_edges(edges: EdgeList) -> Vec<String> {
     edges

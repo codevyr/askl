@@ -1,5 +1,5 @@
 use crate::test_util::{
-    format_edges, run_query, run_query_err, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES, TEST_INPUT_TREE_BROWSER,
+    format_edges, run_query, run_query_err, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC, TEST_INPUT_TREE_BROWSER,
 };
 use index::symbols::SymbolInstanceId;
 
@@ -2093,4 +2093,51 @@ fn derive_missing_type_errors() {
     const QUERY: &str = r#"@derive { "foo" }"#;
     let res = run_query_err(TEST_INPUT_CONTAINMENT, QUERY);
     assert!(res.is_err(), "Expected error for missing type param");
+}
+
+// Nested function containment tests
+// TEST_INPUT_NESTED_FUNC has:
+//   foo [100, 500) containing anon150 [150, 300) and anon350 [350, 490)
+//   bar [500, 700), baz [700, 900)
+
+#[test]
+fn nested_func_has_children() {
+    // "foo" @has {} should return foo and its nested anonymous functions
+    const QUERY: &str = r#""foo" @has {}"#;
+    let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+    // foo (20) and its two nested functions (25, 26)
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![SymbolInstanceId::new(20), SymbolInstanceId::new(25), SymbolInstanceId::new(26)]
+    );
+}
+
+#[test]
+fn nested_func_has_func_children() {
+    // "foo" @has { @func } should return foo and nested functions matching @func
+    const QUERY: &str = r#""foo" @has { @func }"#;
+    let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+    // foo (20) and its two nested functions (25, 26)
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![SymbolInstanceId::new(20), SymbolInstanceId::new(25), SymbolInstanceId::new(26)]
+    );
+}
+
+#[test]
+fn nested_func_has_parent() {
+    // @func @has { "anon150" } should find foo as a container of anon150
+    const QUERY: &str = r#"@func @has { "anon150" }"#;
+    let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
+
+    println!("{:#?}", res.nodes);
+    // foo (20) as the container, and anon150 (25) as the child
+    assert!(res.nodes.as_vec().contains(&SymbolInstanceId::new(25)));
+    assert!(res.nodes.as_vec().contains(&SymbolInstanceId::new(20)));
 }
