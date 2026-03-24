@@ -1,10 +1,8 @@
-use index::{db_diesel::Index, symbols::SymbolInstanceId};
-use testcontainers::{clients, core::WaitFor, GenericImage};
-
-use crate::test_support::wait_for_postgres;
+use index::symbols::SymbolInstanceId;
 
 use crate::{
-    cfg::ControlFlowGraph, execution_context::ExecutionContext, span::Span, test_util::run_query,
+    cfg::ControlFlowGraph, execution_context::ExecutionContext, span::Span,
+    test_util::{get_shared_index, run_query, VERB_TEST},
     verb::*,
 };
 
@@ -12,23 +10,8 @@ use std::collections::HashMap;
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_select_matching_name() {
-    let docker = clients::Cli::default();
-    let image = GenericImage::new("postgres", "15-alpine")
-        .with_env_var("POSTGRES_PASSWORD", "postgres")
-        .with_env_var("POSTGRES_USER", "postgres")
-        .with_env_var("POSTGRES_DB", "askl")
-        .with_wait_for(WaitFor::message_on_stdout(
-            "database system is ready to accept connections",
-        ));
-    let node = docker.run(image);
-    let port = node.get_host_port_ipv4(5432);
-    let url = format!("postgres://postgres:postgres@127.0.0.1:{}/askl", port);
-
-    wait_for_postgres(&url).await.unwrap();
-
-    let index_diesel = Index::connect(&url).await.unwrap();
-    index_diesel.load_test_input("verb_test.sql").await.unwrap();
-    let cfg = ControlFlowGraph::from_symbols(index_diesel);
+    let index = get_shared_index(VERB_TEST);
+    let cfg = ControlFlowGraph::from_symbols(index);
 
     let test_cases = vec![
         ("sort.Sort", vec![96]),

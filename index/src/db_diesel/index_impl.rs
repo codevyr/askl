@@ -17,6 +17,7 @@ use super::mixins::{
 use super::selection::{ChildReference, HasChildReference, HasParentReference, ParentReference, Selection, SelectionNode};
 use super::Connection;
 
+#[derive(Clone)]
 pub struct Index {
     pub(super) pool: Pool<ConnectionManager<PgConnection>>,
 }
@@ -55,6 +56,7 @@ impl Index {
     pub const TEST_INPUT_CONTAINMENT: &'static str = "test_input_containment.sql";
     pub const TEST_INPUT_TREE_BROWSER: &'static str = "test_input_tree_browser.sql";
     pub const TEST_INPUT_NESTED_FUNC: &'static str = "test_input_nested_func.sql";
+    pub const VERB_TEST: &'static str = "verb_test.sql";
 
     pub async fn load_test_input(&self, input_path: &str) -> Result<()> {
         let connection = &mut self.pool.get().unwrap();

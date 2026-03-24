@@ -1,5 +1,5 @@
 use askld::auth::{AuthError, AuthStore};
-use askld::test_support::wait_for_postgres;
+use askld::test_support::{postgres_url, wait_for_postgres};
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::sql_types::BigInt;
@@ -24,7 +24,7 @@ async fn auth_store_round_trip_with_postgres() {
         ));
     let node = docker.run(image);
     let port = node.get_host_port_ipv4(5432);
-    let url = format!("postgres://postgres:postgres@127.0.0.1:{}/askl", port);
+    let url = postgres_url(port);
 
     wait_for_postgres(&url).await.expect("wait for postgres");
 
