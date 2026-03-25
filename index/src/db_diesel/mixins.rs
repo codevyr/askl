@@ -11,7 +11,7 @@ use diesel::sql_types::{Bool, Int4range, Integer, Text};
 use crate::ltree::Ltree;
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::schema_diesel as index_schema;
-use crate::symbols::{symbol_name_to_path, symbol_query_to_lquery, SymbolInstanceId};
+use crate::symbols::{symbol_name_to_path, symbol_query_to_leaf_lquery, symbol_query_to_lquery, SymbolInstanceId};
 
 use super::Connection;
 
@@ -420,6 +420,13 @@ impl CompoundNameMixin {
         Self {
             raw_name: compound_name.to_string(),
             lquery: symbol_query_to_lquery(compound_name),
+        }
+    }
+
+    pub fn new_leaf_anchored(compound_name: &str) -> Self {
+        Self {
+            raw_name: compound_name.to_string(),
+            lquery: symbol_query_to_leaf_lquery(compound_name),
         }
     }
 }
