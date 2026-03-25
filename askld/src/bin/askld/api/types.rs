@@ -77,6 +77,25 @@ impl Edge {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct HasEdge {
+    id: String,
+    #[serde(serialize_with = "symbolid_as_string")]
+    parent: SymbolId,
+    #[serde(serialize_with = "symbolid_as_string")]
+    child: SymbolId,
+}
+
+impl HasEdge {
+    pub fn new(parent: SymbolId, child: SymbolId) -> Self {
+        Self {
+            id: format!("has-{}-{}", parent, child),
+            parent,
+            child,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct GraphObjectEntry {
     pub object_id: String,
     pub path: String,
@@ -87,6 +106,7 @@ pub struct GraphObjectEntry {
 pub struct Graph {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
+    pub has_edges: Vec<HasEdge>,
     pub objects: Vec<GraphObjectEntry>,
     pub warnings: Vec<ErrorResponse>,
 }
@@ -96,6 +116,7 @@ impl Graph {
         Self {
             nodes: vec![],
             edges: vec![],
+            has_edges: vec![],
             objects: vec![],
             warnings: vec![],
         }
@@ -107,6 +128,10 @@ impl Graph {
 
     pub fn add_edge(&mut self, edge: Edge) {
         self.edges.push(edge);
+    }
+
+    pub fn add_has_edge(&mut self, edge: HasEdge) {
+        self.has_edges.push(edge);
     }
 
     pub fn add_warnings(&mut self, warnings: Vec<pest::error::Error<Rule>>) {

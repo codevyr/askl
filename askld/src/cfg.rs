@@ -68,6 +68,30 @@ impl EdgeList {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HasEdge {
+    pub parent: SymbolId,
+    pub child: SymbolId,
+}
+
+pub struct HasEdgeList(pub HashSet<HasEdge>);
+
+impl HasEdgeList {
+    pub fn new() -> Self {
+        Self(HashSet::new())
+    }
+
+    pub fn add(&mut self, edge: HasEdge) {
+        self.0.insert(edge);
+    }
+
+    pub fn as_vec(&self) -> Vec<HasEdge> {
+        let mut res: Vec<_> = self.0.iter().cloned().collect();
+        res.sort_by(|a, b| a.parent.cmp(&b.parent).then_with(|| a.child.cmp(&b.child)));
+        res
+    }
+}
+
 impl ControlFlowGraph {
     pub fn from_symbols(index_diesel: Index) -> Self {
         Self {

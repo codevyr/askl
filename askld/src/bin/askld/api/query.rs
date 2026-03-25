@@ -8,7 +8,7 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use tokio::time::{timeout, Duration};
 
-use super::types::{AsklData, Edge, ErrorResponse, Graph, GraphObjectEntry, Node, NodeSymbolInstance};
+use super::types::{AsklData, Edge, ErrorResponse, Graph, GraphObjectEntry, HasEdge, Node, NodeSymbolInstance};
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -59,6 +59,7 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
 
     info!("Symbols: {:#?}", res.nodes.as_vec().len());
     info!("Edges: {:#?}", res.edges.0.len());
+    info!("Has edges: {:#?}", res.has_edges.0.len());
 
     let mut result_graph = Graph::new();
 
@@ -87,6 +88,13 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
             to.symbol_id,
             loc,
             from_project_id,
+        ));
+    }
+
+    for has_edge in res.has_edges.0 {
+        result_graph.add_has_edge(HasEdge::new(
+            has_edge.parent,
+            has_edge.child,
         ));
     }
 

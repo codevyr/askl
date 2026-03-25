@@ -1,4 +1,4 @@
-use crate::cfg::{ControlFlowGraph, EdgeList, NodeList, SymbolNodeId};
+use crate::cfg::{ControlFlowGraph, EdgeList, HasEdge, HasEdgeList, NodeList, SymbolNodeId};
 use crate::command::{Command, LabeledStatements};
 use crate::execution_context::ExecutionContext;
 use crate::execution_state::{
@@ -15,6 +15,7 @@ use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::Selection;
 use index::symbols::{SymbolInstanceId, FileId, Occurrence, SymbolId};
+use std::collections::HashMap;
 use pest::error::Error;
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashSet;
@@ -118,6 +119,7 @@ pub fn build_empty_statement(ctx: Rc<ParserContext>, span: Span) -> Rc<Statement
 pub struct ExecutionResult {
     pub nodes: NodeList,
     pub edges: EdgeList,
+    pub has_edges: HasEdgeList,
     pub warnings: Vec<pest::error::Error<Rule>>,
 }
 
@@ -125,11 +127,13 @@ impl ExecutionResult {
     pub fn new(
         nodes: NodeList,
         edges: EdgeList,
+        has_edges: HasEdgeList,
         warnings: Vec<pest::error::Error<Rule>>,
     ) -> ExecutionResult {
         ExecutionResult {
             nodes,
             edges,
+            has_edges,
             warnings,
         }
     }
@@ -433,34 +437,11 @@ impl Statement {
         filtered_warnings
     }
 
-    pub async fn execute(
-        &self,
-        ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-    ) -> Result<ExecutionResult, pest::error::Error<Rule>> {
-        let statements = self.compute_nodes(ctx, cfg).await?;
-
-        let warnings = self.gather_warnings(&statements);
-
-        let mut all_nodes = Vec::new();
-        for statement in &statements {
-            all_nodes.extend(
-                statement
-                    .get_selection(ctx)
-                    .iter()
-                    .map(|s| s.nodes.clone())
-                    .flatten(),
-            );
-        }
-
-        let complete_selection = all_nodes.clone();
-
-        let all_nodes = HashSet::<SymbolInstanceId>::from_iter(
-            all_nodes
-                .iter()
-                .map(|node| SymbolInstanceId::new(node.symbol_instance.id)),
-        );
-
+    fn collect_ref_edges(
+        statements: &[Rc<Statement>],
+        ctx: &ExecutionContext,
+        all_nodes: &HashSet<SymbolInstanceId>,
+    ) -> EdgeList {
         let mut all_references = EdgeList::new();
         // Track seen edges to deduplicate before returning.
         // Key: (from_symbol_id, to_symbol_id, occurrence)
@@ -468,7 +449,7 @@ impl Statement {
         // (e.g., module with 15 files creates 15 identical-looking edges for one import)
         let mut seen_edges: HashSet<(SymbolId, SymbolId, Option<Occurrence>)> = HashSet::new();
 
-        for statement in &statements {
+        for statement in statements {
             let current = if let Some(current) = statement.get_selection(ctx) {
                 current
             } else {
@@ -487,12 +468,11 @@ impl Statement {
                         .unwrap(),
                 };
 
-                // Deduplicate edges that would appear identical in output
                 let from_symbol = SymbolId::new(child.parent_symbol.id);
                 let to_symbol = SymbolId::new(child.symbol_ref.to_symbol);
                 let edge_key = (from_symbol.clone(), to_symbol.clone(), Some(occurrence.clone()));
                 if !seen_edges.insert(edge_key) {
-                    continue; // Already seen this edge
+                    continue;
                 }
 
                 all_references.add_reference(
@@ -521,12 +501,11 @@ impl Statement {
                         .unwrap(),
                 };
 
-                // Deduplicate edges that would appear identical in output
                 let from_symbol = SymbolId::new(parent.from_instance.symbol);
                 let to_symbol = SymbolId::new(parent.to_symbol.id);
                 let edge_key = (from_symbol.clone(), to_symbol.clone(), Some(occurrence.clone()));
                 if !seen_edges.insert(edge_key) {
-                    continue; // Already seen this edge
+                    continue;
                 }
 
                 all_references.add_reference(
@@ -543,11 +522,108 @@ impl Statement {
             }
         }
 
-        return Ok(ExecutionResult::new(
+        all_references
+    }
+
+    fn collect_has_edges(
+        statements: &[Rc<Statement>],
+        ctx: &ExecutionContext,
+        all_nodes: &HashSet<SymbolInstanceId>,
+    ) -> HasEdgeList {
+        // For each child instance, track only the best (tightest) parent.
+        // Key: child instance ID, Value: (HasEdge, parent_span) where smaller span = tighter container.
+        let mut best_per_child: HashMap<SymbolInstanceId, (HasEdge, i64)> = HashMap::new();
+
+        for statement in statements {
+            let current = if let Some(current) = statement.get_selection(ctx) {
+                current
+            } else {
+                continue;
+            };
+
+            // Both has_children and has_parents express the same relationship
+            // (parent contains child) but from different traversal directions.
+            // Unify them into a single iterator of (parent_instance, child_instance,
+            // parent_symbol_id, child_symbol_id).
+            let from_children = current.has_children.iter().map(|h| {
+                (&h.parent_instance, &h.child_instance, h.parent_symbol.id, h.child_symbol.id)
+            });
+            let from_parents = current.has_parents.iter().map(|h| {
+                (&h.parent_instance, &h.child_instance, h.parent_symbol.id, h.child_symbol.id)
+            });
+
+            for (parent_inst, child_inst, parent_sym, child_sym) in from_children.chain(from_parents) {
+                let parent_id = SymbolInstanceId::new(parent_inst.id);
+                let child_id = SymbolInstanceId::new(child_inst.id);
+
+                if !all_nodes.contains(&parent_id) || !all_nodes.contains(&child_id) {
+                    continue;
+                }
+
+                let parent_span = range_bounds_to_offsets(&parent_inst.offset_range)
+                    .map(|(s, e)| (e - s) as i64)
+                    .unwrap_or(i64::MAX);
+
+                let edge = HasEdge {
+                    parent: SymbolId::new(parent_sym),
+                    child: SymbolId::new(child_sym),
+                };
+
+                best_per_child
+                    .entry(child_id)
+                    .and_modify(|(existing_edge, existing_span)| {
+                        if parent_span < *existing_span {
+                            *existing_edge = edge.clone();
+                            *existing_span = parent_span;
+                        }
+                    })
+                    .or_insert((edge, parent_span));
+            }
+        }
+
+        let mut result = HasEdgeList::new();
+        for (_, (edge, _)) in best_per_child {
+            result.add(edge);
+        }
+
+        result
+    }
+
+    pub async fn execute(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+    ) -> Result<ExecutionResult, pest::error::Error<Rule>> {
+        let statements = self.compute_nodes(ctx, cfg).await?;
+
+        let warnings = self.gather_warnings(&statements);
+
+        let mut complete_selection = Vec::new();
+        for statement in &statements {
+            complete_selection.extend(
+                statement
+                    .get_selection(ctx)
+                    .iter()
+                    .map(|s| s.nodes.clone())
+                    .flatten(),
+            );
+        }
+
+        let all_nodes = HashSet::<SymbolInstanceId>::from_iter(
+            complete_selection
+                .iter()
+                .map(|node| SymbolInstanceId::new(node.symbol_instance.id)),
+        );
+
+        let ref_edges = Self::collect_ref_edges(&statements, ctx, &all_nodes);
+        let has_edges = Self::collect_has_edges(&statements, ctx, &all_nodes);
+
+        Ok(ExecutionResult::new(
             NodeList(complete_selection.into_iter().collect()),
-            all_references,
+            ref_edges,
+            has_edges,
             warnings,
-        ));
+        ))
     }
 
     /// Notify the dependent statement's execution state about change in the
