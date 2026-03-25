@@ -792,6 +792,9 @@ pub(super) struct TypeSelector {
     /// If true, this filter is inherited (cloned) into derived child scopes.
     /// Used for namespace filters like `@module("test", filter="true", inherit="true")`.
     inherit: bool,
+    /// If true, the last query token is anchored to the last path component.
+    /// Default for @dir and @file; can be overridden with `match="contains"`.
+    leaf_anchored: bool,
 }
 
 impl TypeSelector {
@@ -824,23 +827,30 @@ impl TypeSelector {
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+        let leaf_anchored = match named.get("match").map(|v| v.as_str()) {
+            Some("contains") => false,
+            _ => matches!(symbol_type_id, SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE),
+        };
+
         Ok(Arc::new(Self {
             span,
             symbol_type_id,
             name_pattern,
             filter_only,
             inherit,
+            leaf_anchored,
         }))
     }
 
     /// Returns the appropriate name mixin for the given name and symbol type.
     /// Directory/file types with path args (starting with '/') use exact match;
     /// all other cases use compound name (ltree) matching.
-    fn name_mixin(name: &str, symbol_type_id: i32) -> Box<dyn SymbolSearchMixin> {
+    fn name_mixin(name: &str, symbol_type_id: i32, leaf_anchored: bool) -> Box<dyn SymbolSearchMixin> {
         match symbol_type_id {
             SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE if name.starts_with('/') => {
                 Box::new(ExactNameMixin::new(name))
             }
+            _ if leaf_anchored => Box::new(CompoundNameMixin::new_leaf_anchored(name)),
             _ => Box::new(CompoundNameMixin::new(name)),
         }
     }
@@ -852,7 +862,7 @@ impl TypeSelector {
             Box::new(SymbolTypeMixin::new(self.symbol_type_id)),
         ];
         if let Some(ref name) = self.name_pattern {
-            mixins.push(Self::name_mixin(name, self.symbol_type_id));
+            mixins.push(Self::name_mixin(name, self.symbol_type_id, self.leaf_anchored));
         }
         mixins
     }
@@ -898,6 +908,7 @@ impl Verb for TypeSelector {
             name_pattern: self.name_pattern.clone(),
             filter_only: self.filter_only,
             inherit: self.inherit,
+            leaf_anchored: self.leaf_anchored,
         }))
     }
 
@@ -959,7 +970,7 @@ impl Filter for TypeSelector {
             // @module("test", filter="true") "a" to find functions named "test.a"
             // rather than restricting to MODULE-type symbols.
             let name = self.name_pattern.as_ref().unwrap();
-            vec![Self::name_mixin(name, self.symbol_type_id)]
+            vec![Self::name_mixin(name, self.symbol_type_id, self.leaf_anchored)]
         } else {
             self.build_mixins()
         }

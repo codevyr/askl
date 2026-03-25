@@ -565,6 +565,20 @@ pub fn symbol_name_to_path(input: &str) -> String {
 }
 
 pub fn symbol_query_to_lquery(input: &str) -> Option<String> {
+    build_lquery(input, false)
+}
+
+/// Like `symbol_query_to_lquery` but anchors the last token to the end of the path.
+/// This means the last query token must be the last component of the symbol path.
+///
+/// Examples:
+/// - `"kueue"` → `"*.kueue"`
+/// - `"pkg/kueue"` → `"*.pkg.*.kueue"`
+pub fn symbol_query_to_leaf_lquery(input: &str) -> Option<String> {
+    build_lquery(input, true)
+}
+
+fn build_lquery(input: &str, anchor_leaf: bool) -> Option<String> {
     let tokens = normalize_symbol_tokens(input);
     if tokens.is_empty() {
         return None;
@@ -572,9 +586,11 @@ pub fn symbol_query_to_lquery(input: &str) -> Option<String> {
 
     let mut parts: Vec<String> = Vec::with_capacity(tokens.len() * 2 + 1);
     parts.push("*".to_string());
-    for token in tokens {
-        parts.push(token);
-        parts.push("*".to_string());
+    for (i, token) in tokens.iter().enumerate() {
+        parts.push(token.clone());
+        if !anchor_leaf || i < tokens.len() - 1 {
+            parts.push("*".to_string());
+        }
     }
     Some(parts.join("."))
 }
@@ -676,4 +692,38 @@ pub fn package_match<'a>(name: &'a str) -> SymbolMatcher<'a> {
         }
         Some(s)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_symbol_query_to_leaf_lquery_single_token() {
+        assert_eq!(
+            symbol_query_to_leaf_lquery("kueue"),
+            Some("*.kueue".to_string())
+        );
+    }
+
+    #[test]
+    fn test_symbol_query_to_leaf_lquery_two_tokens() {
+        assert_eq!(
+            symbol_query_to_leaf_lquery("pkg/kueue"),
+            Some("*.pkg.*.kueue".to_string())
+        );
+    }
+
+    #[test]
+    fn test_symbol_query_to_leaf_lquery_three_tokens() {
+        assert_eq!(
+            symbol_query_to_leaf_lquery("a/b/c"),
+            Some("*.a.*.b.*.c".to_string())
+        );
+    }
+
+    #[test]
+    fn test_symbol_query_to_leaf_lquery_empty() {
+        assert_eq!(symbol_query_to_leaf_lquery(""), None);
+    }
 }
