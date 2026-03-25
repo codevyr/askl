@@ -1,4 +1,4 @@
-use crate::cfg::EdgeList;
+use crate::cfg::{EdgeList, HasEdgeList};
 use crate::execution_context::ExecutionContext;
 use crate::statement::ExecutionResult;
 use crate::test_support::{postgres_test_image, postgres_url, wait_for_postgres};
@@ -23,6 +23,14 @@ pub fn format_edges(edges: EdgeList) -> Vec<String> {
         .as_vec()
         .into_iter()
         .map(|(f, t, _)| format!("{}-{}", f.instance_id, t.instance_id))
+        .collect()
+}
+
+pub fn format_has_edges(has_edges: HasEdgeList) -> Vec<String> {
+    has_edges
+        .as_vec()
+        .into_iter()
+        .map(|e| format!("{}-{}", e.parent, e.child))
         .collect()
 }
 
