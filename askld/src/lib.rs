@@ -14,6 +14,7 @@ pub mod scope;
 pub mod span;
 pub mod statement;
 pub mod test_support;
+pub mod tracing_instrumentation;
 pub mod verb;
 
 #[cfg(test)]

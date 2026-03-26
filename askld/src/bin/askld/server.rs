@@ -63,6 +63,10 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
             .with(chrome_layer)
             .init();
 
+        diesel::connection::set_default_instrumentation(|| {
+            Some(Box::new(askld::tracing_instrumentation::TracingInstrumentation::new()))
+        }).expect("Failed to set diesel instrumentation");
+
         info!("Tracing enabled, writing to {}", trace_dir);
         Some(_guard)
     } else {
