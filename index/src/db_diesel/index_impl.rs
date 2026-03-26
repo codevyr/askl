@@ -70,6 +70,12 @@ impl Index {
             .run_pending_migrations(super::MIGRATIONS)
             .unwrap();
 
+        // Clear prepared statement cache after DDL changes to avoid
+        // "cached plan must not change result type" errors.
+        connection
+            .batch_execute("DEALLOCATE ALL")
+            .unwrap();
+
         match input_path {
             "test_input_a.sql" => {
                 connection
@@ -203,8 +209,6 @@ impl Index {
         // so that parents/children queries don't process instances that current excluded.
         let current_instance_ids: Vec<i32> =
             current.iter().map(|(_, inst, _, _)| inst.id).collect();
-        let current_symbol_ids: Vec<i32> =
-            current.iter().map(|(sym, _, _, _)| sym.id).collect();
 
         let parents = {
             let _parents_span: tracing::span::EnteredSpan =
@@ -282,13 +286,6 @@ impl Index {
                     parent_symbols.on(parent_symbols
                         .field(symbols::dsl::id)
                         .eq(parent_decls.field(symbol_instances::dsl::symbol))),
-                )
-                // Redundant with current_instance_ids filter + join, but steers the
-                // planner away from the expensive lquery GiST scan on symbol_path.
-                .filter(
-                    parent_symbols
-                        .field(symbols::dsl::id)
-                        .eq_any(&current_symbol_ids),
                 )
                 .inner_join(
                     objects::dsl::objects

@@ -277,6 +277,16 @@ fn ltree_filter_sql(column: &str, lquery: &str) -> String {
     format!("{} ~ '{}'::lquery", column, lquery)
 }
 
+/// Trait for composable query filters used by `find_symbol()`.
+///
+/// `filter_current` constrains which symbols the initial query matches.
+/// After the current query runs, `find_symbol()` extracts the surviving instance IDs
+/// (`current_instance_ids`) and applies them as inline filters to all follow-up queries.
+///
+/// Because of this, follow-up methods (`filter_parents`, `filter_children`, etc.) should
+/// only add filters that constrain the *relationship* side — e.g. the caller's type in
+/// `filter_parents`. Do NOT re-filter the current symbol in follow-up methods;
+/// `current_instance_ids` already handles that.
 pub trait SymbolSearchMixin: std::fmt::Debug {
     fn enter(&mut self, _connection: &mut Connection) -> Result<()> {
         Ok(())
@@ -387,26 +397,8 @@ impl SymbolSearchMixin for IgnoreFilterMixin {
         Ok(query)
     }
 
-    fn filter_parents<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: ParentsQuery<'a>,
-    ) -> Result<ParentsQuery<'a>> {
-        let query = Self::apply_filter(query, "symbols.symbol_path", &self.name_lquery);
-        let query = Self::apply_package_filter(query, "symbols.symbol_path", &self.package_path);
-        Ok(query)
-    }
-
-    fn filter_children<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: ChildrenQuery<'a>,
-    ) -> Result<ChildrenQuery<'a>> {
-        let query = Self::apply_filter(query, "parent_symbols.symbol_path", &self.name_lquery);
-        let query =
-            Self::apply_package_filter(query, "parent_symbols.symbol_path", &self.package_path);
-        Ok(query)
-    }
+    // No filter_parents/filter_children: these would only re-filter
+    // the current symbol, which is already constrained by current_instance_ids.
 }
 
 #[derive(Debug, Clone)]
@@ -432,10 +424,6 @@ impl CompoundNameMixin {
 }
 
 impl SymbolSearchMixin for CompoundNameMixin {
-    fn enter(&mut self, _connection: &mut Connection) -> Result<()> {
-        Ok(())
-    }
-
     fn filter_current<'a>(
         &self,
         _connection: &mut Connection,
@@ -449,59 +437,8 @@ impl SymbolSearchMixin for CompoundNameMixin {
         }
     }
 
-    fn filter_parents<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: ParentsQuery<'a>,
-    ) -> Result<ParentsQuery<'a>> {
-        if let Some(lquery) = &self.lquery {
-            let filter_sql = ltree_filter_sql("symbols.symbol_path", lquery);
-            Ok(query.filter(sql::<Bool>(&filter_sql)))
-        } else {
-            Ok(query)
-        }
-    }
-
-    fn filter_children<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: ChildrenQuery<'a>,
-    ) -> Result<ChildrenQuery<'a>> {
-        if let Some(lquery) = &self.lquery {
-            let filter_sql = ltree_filter_sql("parent_symbols.symbol_path", lquery);
-            Ok(query.filter(sql::<Bool>(&filter_sql)))
-        } else {
-            Ok(query)
-        }
-    }
-
-    fn filter_has_parents<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: HasParentsQuery<'a>,
-    ) -> Result<HasParentsQuery<'a>> {
-        // Filter on the child/current symbol (symbols.symbol_path)
-        if let Some(lquery) = &self.lquery {
-            let filter_sql = ltree_filter_sql("symbols.symbol_path", lquery);
-            Ok(query.filter(sql::<Bool>(&filter_sql)))
-        } else {
-            Ok(query)
-        }
-    }
-
-    fn filter_has_children<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: HasChildrenQuery<'a>,
-    ) -> Result<HasChildrenQuery<'a>> {
-        // Filter on the parent/current symbol (symbols.symbol_path)
-        if let Some(lquery) = &self.lquery {
-            let filter_sql = ltree_filter_sql("symbols.symbol_path", lquery);
-            Ok(query.filter(sql::<Bool>(&filter_sql)))
-        } else {
-            Ok(query)
-        }
-    }
+    // No filter_parents/filter_children/filter_has_*: these would only re-filter
+    // the current symbol, which is already constrained by current_instance_ids.
 }
 
 /// ExactNameMixin - filters symbols by exact name match.
@@ -520,10 +457,6 @@ impl ExactNameMixin {
 }
 
 impl SymbolSearchMixin for ExactNameMixin {
-    fn enter(&mut self, _connection: &mut Connection) -> Result<()> {
-        Ok(())
-    }
-
     fn filter_current<'a>(
         &self,
         _connection: &mut Connection,
@@ -534,44 +467,8 @@ impl SymbolSearchMixin for ExactNameMixin {
         Ok(query.filter(symbols::dsl::name.eq(name)))
     }
 
-    fn filter_parents<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: ParentsQuery<'a>,
-    ) -> Result<ParentsQuery<'a>> {
-        use index_schema::symbols;
-        let name = self.name.clone();
-        Ok(query.filter(symbols::dsl::name.eq(name)))
-    }
-
-    fn filter_children<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: ChildrenQuery<'a>,
-    ) -> Result<ChildrenQuery<'a>> {
-        let name = self.name.clone();
-        Ok(query.filter(PARENT_SYMBOLS_ALIAS.field(index_schema::symbols::dsl::name).eq(name)))
-    }
-
-    fn filter_has_parents<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: HasParentsQuery<'a>,
-    ) -> Result<HasParentsQuery<'a>> {
-        use index_schema::symbols;
-        let name = self.name.clone();
-        Ok(query.filter(symbols::dsl::name.eq(name)))
-    }
-
-    fn filter_has_children<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: HasChildrenQuery<'a>,
-    ) -> Result<HasChildrenQuery<'a>> {
-        use index_schema::symbols;
-        let name = self.name.clone();
-        Ok(query.filter(symbols::dsl::name.eq(name)))
-    }
+    // No filter_parents/filter_children/filter_has_*: these would only re-filter
+    // the current symbol, which is already constrained by current_instance_ids.
 }
 
 #[derive(Debug, Clone)]
@@ -588,10 +485,6 @@ impl SymbolInstanceIdMixin {
 }
 
 impl SymbolSearchMixin for SymbolInstanceIdMixin {
-    fn enter(&mut self, _connection: &mut Connection) -> Result<()> {
-        Ok(())
-    }
-
     fn filter_current<'a>(
         &self,
         _connection: &mut Connection,
@@ -602,51 +495,8 @@ impl SymbolSearchMixin for SymbolInstanceIdMixin {
         Ok(query.filter(symbol_instances::dsl::id.eq_any(self.instance_ids.clone())))
     }
 
-    fn filter_parents<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: ParentsQuery<'a>,
-    ) -> Result<ParentsQuery<'a>> {
-        use crate::schema_diesel::symbol_instances;
-
-        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.instance_ids.clone())))
-    }
-
-    fn filter_children<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: ChildrenQuery<'a>,
-    ) -> Result<ChildrenQuery<'a>> {
-        use crate::schema_diesel::symbol_instances;
-
-        Ok(query.filter(
-            PARENT_DECLS_ALIAS
-                .field(symbol_instances::dsl::id)
-                .eq_any(self.instance_ids.clone()),
-        ))
-    }
-
-    fn filter_has_parents<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: HasParentsQuery<'a>,
-    ) -> Result<HasParentsQuery<'a>> {
-        use crate::schema_diesel::symbol_instances;
-
-        // Filter on the child/current symbol instance
-        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.instance_ids.clone())))
-    }
-
-    fn filter_has_children<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: HasChildrenQuery<'a>,
-    ) -> Result<HasChildrenQuery<'a>> {
-        use crate::schema_diesel::symbol_instances;
-
-        // Filter on the parent/current symbol instance
-        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.instance_ids.clone())))
-    }
+    // No filter_parents/filter_children/filter_has_*: current_instance_ids
+    // is applied inline in find_symbol() after the current query resolves.
 }
 
 // ModuleFilterMixin removed - modules are now symbols with type=MODULE
