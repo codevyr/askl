@@ -199,6 +199,13 @@ impl Index {
         let parent_decls = PARENT_DECLS_ALIAS;
         let parent_symbols = PARENT_SYMBOLS_ALIAS;
 
+        // Use the IDs that survived current's filters (type, name, etc.)
+        // so that parents/children queries don't process instances that current excluded.
+        let current_instance_ids: Vec<i32> =
+            current.iter().map(|(_, inst, _, _)| inst.id).collect();
+        let current_symbol_ids: Vec<i32> =
+            current.iter().map(|(sym, _, _, _)| sym.id).collect();
+
         let parents = {
             let _parents_span: tracing::span::EnteredSpan =
                 tracing::info_span!("select_parents").entered();
@@ -225,6 +232,9 @@ impl Index {
                     parent_decls
                         .field(symbol_instances::dsl::offset_range)
                         .contains_range(symbol_refs::dsl::from_offset_range),
+                )
+                .filter(
+                    symbol_instances::dsl::id.eq_any(&current_instance_ids),
                 )
                 .select((
                     SymbolRef::as_select(),
@@ -262,11 +272,23 @@ impl Index {
                         .field(symbol_instances::dsl::offset_range)
                         .contains_range(symbol_refs::dsl::from_offset_range),
                 )
+                .filter(
+                    parent_decls
+                        .field(symbol_instances::dsl::id)
+                        .eq_any(&current_instance_ids),
+                )
                 // Join the parent's symbol (caller) to enable type filtering via mixin
                 .inner_join(
                     parent_symbols.on(parent_symbols
                         .field(symbols::dsl::id)
                         .eq(parent_decls.field(symbol_instances::dsl::symbol))),
+                )
+                // Redundant with current_instance_ids filter + join, but steers the
+                // planner away from the expensive lquery GiST scan on symbol_path.
+                .filter(
+                    parent_symbols
+                        .field(symbols::dsl::id)
+                        .eq_any(&current_symbol_ids),
                 )
                 .inner_join(
                     objects::dsl::objects
@@ -310,6 +332,7 @@ impl Index {
             let mut has_parents_query = symbol_instances::dsl::symbol_instances
                 .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
                 .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
+                .filter(symbol_instances::dsl::id.eq_any(&current_instance_ids))
                 .inner_join(
                     container_instance.on(
                         container_instance.field(symbol_instances::dsl::object_id)
@@ -379,6 +402,7 @@ impl Index {
             let mut has_children_query = symbol_instances::dsl::symbol_instances
                 .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
                 .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
+                .filter(symbol_instances::dsl::id.eq_any(&current_instance_ids))
                 .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(symbol_instances::dsl::object_id)))
                 .inner_join(
                     contained_instance.on(
