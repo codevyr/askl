@@ -1010,7 +1010,9 @@ impl Display for TypeSelector {
     }
 }
 
-/// SymbolTypeMixin - filters symbols by type ID
+/// SymbolTypeMixin - filters symbols by type ID.
+/// Only filter_current is needed; follow-up queries are constrained
+/// by current_instance_ids which already reflects the type filter.
 #[derive(Debug, Clone)]
 pub struct SymbolTypeMixin {
     pub symbol_type_id: i32,
@@ -1031,30 +1033,6 @@ impl SymbolSearchMixin for SymbolTypeMixin {
         use diesel::prelude::*;
         use index::schema_diesel::symbols;
 
-        Ok(query.filter(symbols::dsl::symbol_type.eq(self.symbol_type_id)))
-    }
-
-    fn filter_has_parents<'a>(
-        &self,
-        _connection: &mut index::db_diesel::Connection,
-        query: index::db_diesel::mixins::HasParentsQuery<'a>,
-    ) -> anyhow::Result<index::db_diesel::mixins::HasParentsQuery<'a>> {
-        use diesel::prelude::*;
-        use index::schema_diesel::symbols;
-
-        // Filter on the child/current symbol's type
-        Ok(query.filter(symbols::dsl::symbol_type.eq(self.symbol_type_id)))
-    }
-
-    fn filter_has_children<'a>(
-        &self,
-        _connection: &mut index::db_diesel::Connection,
-        query: index::db_diesel::mixins::HasChildrenQuery<'a>,
-    ) -> anyhow::Result<index::db_diesel::mixins::HasChildrenQuery<'a>> {
-        use diesel::prelude::*;
-        use index::schema_diesel::symbols;
-
-        // Filter on the parent/current symbol's type
         Ok(query.filter(symbols::dsl::symbol_type.eq(self.symbol_type_id)))
     }
 }
@@ -1410,13 +1388,14 @@ impl Display for GenericFilter {
 
 /// DefaultSymbolTypeMixin - filters symbols by multiple type IDs (OR condition).
 ///
-/// Applied to all five query axes:
 /// - `filter_current`: constrains which symbols this command matches
-/// - `filter_parents`/`filter_children`: constrains the *caller* side of refs queries
-///   to this command's types. This is intentional — by default, only functions appear
-///   as callers. To see module-level refs, use `@module { "foo" }` which sets the
-///   inherited default types to [MODULE, FUNCTION].
-/// - `filter_has_parents`/`filter_has_children`: constrains containment queries
+/// - `filter_parents`: constrains the *caller* side (parent_symbols) to this command's
+///   types. This is intentional — by default, only functions appear as callers.
+///   To see module-level refs, use `@module { "foo" }` which sets the inherited
+///   default types to [MODULE, FUNCTION].
+///
+/// No filter_children/filter_has_*: those would only re-filter the current symbol,
+/// which is already constrained by current_instance_ids after the current query.
 #[derive(Debug, Clone)]
 pub struct DefaultSymbolTypeMixin {
     pub symbol_type_ids: Vec<i32>,
@@ -1458,49 +1437,6 @@ impl SymbolSearchMixin for DefaultSymbolTypeMixin {
                 .field(symbols::dsl::symbol_type)
                 .eq_any(types),
         ))
-    }
-
-    /// Filter parent_symbols in the children query (my callees) to this command's types.
-    /// This ensures only instances of matching types can "own" refs.
-    fn filter_children<'a>(
-        &self,
-        _connection: &mut index::db_diesel::Connection,
-        query: index::db_diesel::mixins::ChildrenQuery<'a>,
-    ) -> anyhow::Result<index::db_diesel::mixins::ChildrenQuery<'a>> {
-        use diesel::prelude::*;
-        use index::db_diesel::mixins::PARENT_SYMBOLS_ALIAS;
-        use index::schema_diesel::symbols;
-
-        let types = self.symbol_type_ids.clone();
-        Ok(query.filter(
-            PARENT_SYMBOLS_ALIAS
-                .field(symbols::dsl::symbol_type)
-                .eq_any(types),
-        ))
-    }
-
-    fn filter_has_parents<'a>(
-        &self,
-        _connection: &mut index::db_diesel::Connection,
-        query: index::db_diesel::mixins::HasParentsQuery<'a>,
-    ) -> anyhow::Result<index::db_diesel::mixins::HasParentsQuery<'a>> {
-        use diesel::prelude::*;
-        use index::schema_diesel::symbols;
-
-        let types = self.symbol_type_ids.clone();
-        Ok(query.filter(symbols::dsl::symbol_type.eq_any(types)))
-    }
-
-    fn filter_has_children<'a>(
-        &self,
-        _connection: &mut index::db_diesel::Connection,
-        query: index::db_diesel::mixins::HasChildrenQuery<'a>,
-    ) -> anyhow::Result<index::db_diesel::mixins::HasChildrenQuery<'a>> {
-        use diesel::prelude::*;
-        use index::schema_diesel::symbols;
-
-        let types = self.symbol_type_ids.clone();
-        Ok(query.filter(symbols::dsl::symbol_type.eq_any(types)))
     }
 }
 
