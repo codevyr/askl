@@ -56,4 +56,5 @@ enum SymbolType {
   FILE = 2;
   MODULE = 3;
   DIRECTORY = 4;
+  TYPE = 5;
 }

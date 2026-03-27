@@ -15,7 +15,7 @@ use std::{
 
 // Re-export symbol type constants from the index crate (single source of truth)
 pub use index::db_diesel::{
-    SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FILE, SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MODULE,
+    SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FILE, SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
 };
 
 #[derive(Debug)]
