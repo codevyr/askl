@@ -532,4 +532,5 @@ pub const SYMBOL_TYPE_FUNCTION: i32 = 1;
 pub const SYMBOL_TYPE_FILE: i32 = 2;
 pub const SYMBOL_TYPE_MODULE: i32 = 3;
 pub const SYMBOL_TYPE_DIRECTORY: i32 = 4;
+pub const SYMBOL_TYPE_TYPE: i32 = 5;
 

@@ -439,6 +439,7 @@ pub enum SymbolType {
     File = 2,
     Module = 3,
     Directory = 4,
+    Type = 5,
 }
 
 impl SymbolType {
@@ -454,6 +455,7 @@ impl From<i64> for SymbolType {
             x if x == SymbolType::File as i64 => SymbolType::File,
             x if x == SymbolType::Module as i64 => SymbolType::Module,
             x if x == SymbolType::Directory as i64 => SymbolType::Directory,
+            x if x == SymbolType::Type as i64 => SymbolType::Type,
             _ => panic!("Invalid symbol type value {}", value),
         }
     }
@@ -466,6 +468,7 @@ impl From<i32> for SymbolType {
             x if x == SymbolType::File as i32 => SymbolType::File,
             x if x == SymbolType::Module as i32 => SymbolType::Module,
             x if x == SymbolType::Directory as i32 => SymbolType::Directory,
+            x if x == SymbolType::Type as i32 => SymbolType::Type,
             _ => panic!("Invalid symbol type value {}", value),
         }
     }

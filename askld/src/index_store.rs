@@ -718,15 +718,22 @@ fn path_basename(path: &str) -> String {
         .to_string()
 }
 
-/// Validates proto symbol type and returns it as-is since proto enum values
-/// match database IDs: FUNCTION=1, FILE=2, MODULE=3, DIRECTORY=4
+/// Validates proto symbol type against known symbol type constants.
 fn validate_symbol_type(proto_type: i32) -> Result<i32, UploadError> {
-    match proto_type {
-        1..=4 => Ok(proto_type),
-        _ => Err(UploadError::Invalid(format!(
+    const VALID_TYPES: &[i32] = &[
+        index::db_diesel::SYMBOL_TYPE_FUNCTION,
+        index::db_diesel::SYMBOL_TYPE_FILE,
+        index::db_diesel::SYMBOL_TYPE_MODULE,
+        index::db_diesel::SYMBOL_TYPE_DIRECTORY,
+        index::db_diesel::SYMBOL_TYPE_TYPE,
+    ];
+    if VALID_TYPES.contains(&proto_type) {
+        Ok(proto_type)
+    } else {
+        Err(UploadError::Invalid(format!(
             "invalid symbol type {}",
             proto_type
-        ))),
+        )))
     }
 }
 

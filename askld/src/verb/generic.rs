@@ -4,7 +4,7 @@ use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::{Identifier, NamedArgument, PositionalArgument, Rule};
 use crate::parser_context::{
     ParserContext, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FILE, SYMBOL_TYPE_FUNCTION,
-    SYMBOL_TYPE_MODULE,
+    SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
 };
 use crate::span::Span;
 use crate::statement::Statement;
@@ -89,6 +89,7 @@ pub(crate) fn build_generic_verb(
         TypeSelector::NAME_FILE => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FILE),
         TypeSelector::NAME_MODULE => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_MODULE),
         TypeSelector::NAME_DIRECTORY => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_DIRECTORY),
+        TypeSelector::NAME_TYPE => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_TYPE),
         unknown => Err(anyhow!("unknown verb : {}", unknown)),
     };
 
@@ -802,6 +803,7 @@ impl TypeSelector {
     pub(super) const NAME_FILE: &'static str = "file";
     pub(super) const NAME_MODULE: &'static str = "mod";
     pub(super) const NAME_DIRECTORY: &'static str = "dir";
+    pub(super) const NAME_TYPE: &'static str = "type";
 
     pub fn new(
         span: Span,
@@ -875,6 +877,7 @@ impl Verb for TypeSelector {
             SYMBOL_TYPE_FILE => TypeSelector::NAME_FILE,
             SYMBOL_TYPE_MODULE => TypeSelector::NAME_MODULE,
             SYMBOL_TYPE_DIRECTORY => TypeSelector::NAME_DIRECTORY,
+            SYMBOL_TYPE_TYPE => TypeSelector::NAME_TYPE,
             _ => "type_selector",
         }
     }
@@ -934,6 +937,7 @@ impl Verb for TypeSelector {
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
         let default_types = match self.symbol_type_id {
             SYMBOL_TYPE_FUNCTION => vec![SYMBOL_TYPE_FUNCTION],
+            SYMBOL_TYPE_TYPE => vec![SYMBOL_TYPE_TYPE],
             SYMBOL_TYPE_MODULE => vec![SYMBOL_TYPE_MODULE, SYMBOL_TYPE_FUNCTION],
             SYMBOL_TYPE_FILE => vec![SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MODULE],
             SYMBOL_TYPE_DIRECTORY => vec![SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FILE],
@@ -946,8 +950,8 @@ impl Verb for TypeSelector {
             SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE | SYMBOL_TYPE_MODULE => {
                 ctx.set_relationship_type_inherited(RelationshipType::REFS | RelationshipType::HAS);
             }
-            // @func: explicitly set REFS to override any inherited refs+has
-            SYMBOL_TYPE_FUNCTION => {
+            // @func/@type: explicitly set REFS to override any inherited refs+has
+            SYMBOL_TYPE_FUNCTION | SYMBOL_TYPE_TYPE => {
                 ctx.set_relationship_type_explicit(RelationshipType::REFS);
             }
             _ => {}
@@ -1005,6 +1009,7 @@ impl Display for TypeSelector {
             SYMBOL_TYPE_FILE => write!(f, "TypeSelector(file)"),
             SYMBOL_TYPE_MODULE => write!(f, "TypeSelector(module)"),
             SYMBOL_TYPE_DIRECTORY => write!(f, "TypeSelector(directory)"),
+            SYMBOL_TYPE_TYPE => write!(f, "TypeSelector(type)"),
             _ => write!(f, "TypeSelector({})", self.symbol_type_id),
         }
     }
@@ -1187,6 +1192,7 @@ fn parse_symbol_types(s: &str) -> Result<Vec<i32>> {
                 "mod" => Ok(SYMBOL_TYPE_MODULE),
                 "file" => Ok(SYMBOL_TYPE_FILE),
                 "dir" => Ok(SYMBOL_TYPE_DIRECTORY),
+                "type" => Ok(SYMBOL_TYPE_TYPE),
                 other => bail!("Unknown symbol type: '{}'", other),
             }
         })
