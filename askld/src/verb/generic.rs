@@ -59,18 +59,6 @@ pub(crate) fn build_generic_verb(
     })
     .collect::<Result<Vec<_>, _>>()?;
 
-    let ident = if let Rule::generic_ident = ident.as_rule() {
-        ident.into_inner().next().unwrap()
-    } else {
-        let span = ident.as_span();
-        return Err(Error::new_from_span(
-            CustomError {
-                message: format!("Expected verb name as @name"),
-            },
-            span,
-        ));
-    };
-
     let span = ident.as_span();
     let res = match Identifier::build(ident)?.0.as_str() {
         GenericSelector::NAME => GenericSelector::new(verb_span, &positional, &named),
@@ -619,7 +607,7 @@ impl Verb for HasModifier {
         DeriveMethod::Skip
     }
 
-    /// The @has verb consumes itself by setting the relationship type in the parser context
+    /// The has verb consumes itself by setting the relationship type in the parser context
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
         ctx.set_relationship_type_inherited(RelationshipType::HAS);
         Ok(true) // consumed - don't add to command
@@ -633,7 +621,7 @@ impl Display for HasModifier {
 }
 
 /// RefsModifier - explicitly sets the relationship type to Refs (reference/call-based)
-/// This is the default, but can be used to override an inherited @has
+/// This is the default, but can be used to override an inherited has
 #[derive(Debug)]
 pub(super) struct RefsModifier {
     span: Span,
@@ -664,7 +652,7 @@ impl Verb for RefsModifier {
         DeriveMethod::Skip
     }
 
-    /// The @refs verb consumes itself by setting the relationship type in the parser context
+    /// The refs verb consumes itself by setting the relationship type in the parser context
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
         ctx.set_relationship_type_inherited(RelationshipType::REFS);
         Ok(true) // consumed - don't add to command
@@ -678,10 +666,10 @@ impl Display for RefsModifier {
 }
 
 /// DeriveModifier - generalized relationship modifier with combination support
-/// @derive(type="refs")           — same as @refs (inherits by default)
-/// @derive(type="has")            — same as @has (inherits by default)
-/// @derive(type="refs,has")       — union: either relationship (inherits by default)
-/// @derive(type="has", inherit="false") — has, NOT propagated to descendants
+/// derive(type="refs")           — same as refs (inherits by default)
+/// derive(type="has")            — same as has (inherits by default)
+/// derive(type="refs,has")       — union: either relationship (inherits by default)
+/// derive(type="has", inherit="false") — has, NOT propagated to descendants
 #[derive(Debug)]
 pub(super) struct DeriveModifier {
     span: Span,
@@ -699,19 +687,19 @@ impl DeriveModifier {
     ) -> Result<Arc<dyn Verb>> {
         let type_str = named
             .get("type")
-            .ok_or_else(|| anyhow!("@derive requires a 'type' parameter"))?;
+            .ok_or_else(|| anyhow!("derive requires a 'type' parameter"))?;
 
         let mut rel_type = RelationshipType::EMPTY;
         for part in type_str.split(',') {
             match part.trim() {
                 "refs" => rel_type = rel_type | RelationshipType::REFS,
                 "has" => rel_type = rel_type | RelationshipType::HAS,
-                other => bail!("unknown relationship type '{}' in @derive (expected 'refs' or 'has')", other),
+                other => bail!("unknown relationship type '{}' in derive (expected 'refs' or 'has')", other),
             }
         }
 
         if rel_type == RelationshipType::EMPTY {
-            bail!("@derive type parameter must contain at least one of 'refs', 'has'");
+            bail!("derive type parameter must contain at least one of 'refs', 'has'");
         }
 
         let inherit = named
@@ -753,12 +741,12 @@ impl Display for DeriveModifier {
     }
 }
 
-/// TypeSelector - selects symbols by type (@function, @file, @module, @directory)
+/// TypeSelector - selects symbols by type (func, file, mod, dir)
 ///
 /// # Behavior Modes
 ///
 /// - **Filter mode** (`filter_only=true`): Returns `None` from `select_from_all`,
-///   forcing derivation from parent. Much more efficient when used inside `@has { }`.
+///   forcing derivation from parent. Much more efficient when used inside `has { }`.
 ///   At root level (no parent), returns empty results.
 ///
 /// - **Selector mode** (`filter_only=false`): Queries all symbols of this type
@@ -769,19 +757,19 @@ impl Display for DeriveModifier {
 /// The default is optimized for performance - querying all symbols of a type
 /// can be expensive, so filter mode is preferred when possible:
 ///
-/// - `@function` (no args) → filter mode
-/// - `@function("foo")` (with name) → selector mode
-/// - `@function(filter="true")` → explicitly filter mode
-/// - `@function(filter="false")` → explicitly selector mode (select all)
-/// - `@function("foo", filter="true")` → filter mode even with name
+/// - `func` (no args) → filter mode
+/// - `func("foo")` (with name) → selector mode
+/// - `func(filter="true")` → explicitly filter mode
+/// - `func(filter="false")` → explicitly selector mode (select all)
+/// - `func("foo", filter="true")` → filter mode even with name
 ///
 /// # Examples
 ///
 /// ```text
-/// @file("main.go") @has { @function }     // filter: derives functions from file
-/// @function("main")                        // selector: queries for "main" function
-/// @function(filter="false")                // selector: queries ALL functions
-/// @function                                // filter: empty at root, derives in @has
+/// file("main.go") has { func }             // filter: derives functions from file
+/// func("main")                              // selector: queries for "main" function
+/// func(filter="false")                      // selector: queries ALL functions
+/// func                                      // filter: empty at root, derives in has
 /// ```
 #[derive(Debug)]
 pub(super) struct TypeSelector {
@@ -789,13 +777,13 @@ pub(super) struct TypeSelector {
     symbol_type_id: i32,
     name_pattern: Option<String>,
     /// If true, don't select from all - only act as a filter when deriving from parent.
-    /// This is much more efficient for queries like `@file @has { @function }`.
+    /// This is much more efficient for queries like `file has { func }`.
     filter_only: bool,
     /// If true, this filter is inherited (cloned) into derived child scopes.
-    /// Used for namespace filters like `@module("test", filter="true", inherit="true")`.
+    /// Used for namespace filters like `mod("test", filter="true", inherit="true")`.
     inherit: bool,
     /// If true, the last query token is anchored to the last path component.
-    /// Default for @dir and @file; can be overridden with `match="contains"`.
+    /// Default for dir and file; can be overridden with `match="contains"`.
     leaf_anchored: bool,
 }
 
@@ -935,8 +923,8 @@ impl Verb for TypeSelector {
     }
 
     /// Set default symbol types and relationship type for child scopes.
-    /// Container types (@dir, @file, @mod) implicitly set refs+has with inherit.
-    /// @func explicitly sets REFS to override any inherited refs+has.
+    /// Container types (dir, file, mod) implicitly set refs+has with inherit.
+    /// func explicitly sets REFS to override any inherited refs+has.
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
         let default_types = match self.symbol_type_id {
             SYMBOL_TYPE_FUNCTION => vec![SYMBOL_TYPE_FUNCTION],
@@ -953,7 +941,7 @@ impl Verb for TypeSelector {
             SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE | SYMBOL_TYPE_MODULE => {
                 ctx.set_relationship_type_inherited(RelationshipType::REFS | RelationshipType::HAS);
             }
-            // @func/@type: explicitly set REFS to override any inherited refs+has
+            // func/type: explicitly set REFS to override any inherited refs+has
             SYMBOL_TYPE_FUNCTION | SYMBOL_TYPE_TYPE => {
                 ctx.set_relationship_type_explicit(RelationshipType::REFS);
             }
@@ -978,9 +966,9 @@ impl Verb for TypeSelector {
 impl Filter for TypeSelector {
     fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
         if self.filter_only && self.name_pattern.is_some() {
-            // When used as a namespace filter (e.g., @module("test", filter="true")),
+            // When used as a namespace filter (e.g., mod("test", filter="true")),
             // only constrain by name pattern, not by type. This allows
-            // @module("test", filter="true") "a" to find functions named "test.a"
+            // mod("test", filter="true") "a" to find functions named "test.a"
             // rather than restricting to MODULE-type symbols.
             let name = self.name_pattern.as_ref().unwrap();
             vec![Self::name_mixin(name, self.symbol_type_id, self.leaf_anchored)]
@@ -999,7 +987,7 @@ impl Selector for TypeSelector {
         search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
     ) -> Result<Option<Selection>> {
         // In filter mode, don't query all symbols - wait for derivation from parent.
-        // This is much more efficient for queries like `@file @has { @function }`.
+        // This is much more efficient for queries like `file has { func }`.
         if self.filter_only {
             return Ok(None);
         }
@@ -1102,7 +1090,7 @@ impl Display for DefaultTypeFilter {
 }
 
 // ============================================================================
-// GenericSelector — @select
+// GenericSelector — select
 // ============================================================================
 
 #[derive(Debug)]
@@ -1152,7 +1140,7 @@ impl Verb for GenericSelector {
 
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
         // Capture filter verbs from the command at this point (before we're added).
-        // This gives each @select its own positional filter set.
+        // This gives each select its own positional filter set.
         let filters = ctx.get_filter_verbs();
         let _ = self.captured_filters.set(filters);
         Ok(false)
@@ -1189,7 +1177,7 @@ impl Display for GenericSelector {
 }
 
 // ============================================================================
-// GenericFilter — @filter
+// GenericFilter — filter
 // ============================================================================
 
 fn parse_symbol_types(s: &str) -> Result<Vec<i32>> {
@@ -1313,11 +1301,11 @@ impl GenericFilter {
     ) -> Result<Arc<dyn Verb>> {
         let kind_str = positional
             .first()
-            .ok_or_else(|| anyhow!("@filter requires a kind as first argument"))?;
+            .ok_or_else(|| anyhow!("filter requires a kind as first argument"))?;
 
         let value = positional
             .get(1)
-            .ok_or_else(|| anyhow!("@filter requires a value as second argument"))?;
+            .ok_or_else(|| anyhow!("filter requires a value as second argument"))?;
 
         let kind = FilterKind::parse(kind_str, value)?;
 
@@ -1406,7 +1394,7 @@ impl Display for GenericFilter {
 /// - `filter_current`: constrains which symbols this command matches
 /// - `filter_parents`: constrains the *caller* side (parent_symbols) to this command's
 ///   types. This is intentional — by default, only functions appear as callers.
-///   To see module-level refs, use `@module { "foo" }` which sets the inherited
+///   To see module-level refs, use `mod { "foo" }` which sets the inherited
 ///   default types to [MODULE, FUNCTION].
 ///
 /// No filter_children/filter_has_*: those would only re-filter the current symbol,

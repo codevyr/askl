@@ -22,6 +22,7 @@ use crate::verb::Filter;
 pub(super) struct LabelVerb {
     span: Span,
     pub(super) label: String,
+    inherit: bool,
 }
 
 impl LabelVerb {
@@ -32,14 +33,27 @@ impl LabelVerb {
         positional: &Vec<String>,
         named: &HashMap<String, String>,
     ) -> Result<Arc<dyn Verb>> {
-        if !named.is_empty() {
-            bail!("Unexpected named arguments");
+        let inherit = if let Some(val) = named.get("inherit") {
+            match val.as_str() {
+                "true" => true,
+                "false" => false,
+                other => bail!("Unexpected value for inherit parameter: {}", other),
+            }
+        } else {
+            false
+        };
+
+        for key in named.keys() {
+            if key != "inherit" {
+                bail!("Unexpected named argument: {}", key);
+            }
         }
 
         if let Some(label) = positional.iter().next() {
             Ok(Arc::new(Self {
                 span,
                 label: label.clone(),
+                inherit,
             }))
         } else {
             bail!("Expected a positional argument");
@@ -57,7 +71,11 @@ impl Verb for LabelVerb {
     }
 
     fn derive_method(&self) -> DeriveMethod {
-        DeriveMethod::Skip
+        if self.inherit {
+            DeriveMethod::Clone
+        } else {
+            DeriveMethod::Skip
+        }
     }
 
     fn as_labeler<'a>(&'a self) -> Result<&'a dyn Labeler> {

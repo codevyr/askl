@@ -40,14 +40,14 @@ pub fn build_statement<'a>(
                 build_verb(sub_ctx.clone(), pair)?;
             }
             Rule::scope => {
-                // Check if a relationship modifier (@has or @refs) was explicitly used
+                // Check if a relationship modifier (has or refs) was explicitly used
                 // in this statement's verbs
                 if !sub_ctx.has_relationship_modifier() {
                     // No relationship modifier in this statement's verbs
                     // Reset to Refs for the scope's children
                     sub_ctx.set_relationship_type_default(RelationshipType::REFS);
                 }
-                // else: @has/@refs was used, keep the relationship type for children
+                // else: has/refs was used, keep the relationship type for children
 
                 scope = build_scope(sub_ctx.clone(), pair)?;
                 break;
@@ -63,7 +63,7 @@ pub fn build_statement<'a>(
     }
 
     // Restore this statement's own relationship_type (how it relates to its parent).
-    // This is the INHERITED value, not the value after verbs (like @has/@func) modified it.
+    // This is the INHERITED value, not the value after verbs (like has/func) modified it.
     // The verb modifications only affect children (via the scope built above).
     sub_ctx.set_relationship_type_default(inherited_rel_type);
 
@@ -97,8 +97,8 @@ pub fn build_empty_statement(ctx: Rc<ParserContext>, span: Span) -> Rc<Statement
     let scope: Rc<dyn Scope> = Rc::new(EmptyScope::new());
     let sub_ctx = ParserContext::derive(ctx.clone(), span.clone());
     // Keep the inherited relationship type (Has or Refs).
-    // For @has {}, we want to use Has relationship (containment).
-    // For {} without @has, the parent context already reset to Refs.
+    // For has {}, we want to use Has relationship (containment).
+    // For {} without has, the parent context already reset to Refs.
     // The relationship type is correctly set by build_statement before calling build_scope.
 
     // Empty statements have no explicit type selector — always add DefaultTypeFilter.
@@ -631,7 +631,7 @@ impl Statement {
     ///
     /// When a child notifies its parent (role=Parent), we defer the constraint
     /// until ALL children have resolved. This prevents over-constraining the
-    /// parent when multiple sibling children exist (e.g., `@has { @directory ; @file }`).
+    /// parent when multiple sibling children exist (e.g., `has { dir ; file }`).
     /// The parent is constrained against the **union** of all children's selections,
     /// so it retains nodes that match ANY child.
     pub async fn notify(

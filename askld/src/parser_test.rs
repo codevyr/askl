@@ -46,7 +46,7 @@ fn parse_child_query() {
 
 #[test]
 fn parse_unit_verb() {
-    const QUERY: &str = r#"@ignore(package="k8s.io/klog");; "a""#;
+    const QUERY: &str = r#"ignore(package="k8s.io/klog");; "a""#;
     let ast = parse(QUERY).unwrap();
     println!("{:?}", ast);
 }
@@ -81,7 +81,7 @@ fn newline_before_scope_splits() {
 
 #[test]
 fn newlines_in_parens() {
-    let ast = parse("@func(\n\"name\"\n)").unwrap();
+    let ast = parse("func(\n\"name\"\n)").unwrap();
     assert_eq!(ast.scope().statements().count(), 1);
 }
 
@@ -127,41 +127,41 @@ fn multiline_comment_does_not_separate() {
     assert_eq!(ast.scope().statements().count(), 1);
 }
 
-// === @preamble scope syntax parsing tests ===
+// === preamble scope syntax parsing tests ===
 
 #[test]
 fn preamble_scope_parses() {
-    let ast = parse("@preamble {\n@ignore(package=\"foo\")\n}\n\"bar\"").unwrap();
+    let ast = parse("preamble {\nignore(package=\"foo\")\n}\n\"bar\"").unwrap();
     assert_eq!(ast.scope().statements().count(), 2);
 }
 
 #[test]
 fn preamble_inline_parses() {
-    let ast = parse("@preamble @ignore(package=\"foo\")\n\"bar\"").unwrap();
+    let ast = parse("preamble ignore(package=\"foo\")\n\"bar\"").unwrap();
     assert_eq!(ast.scope().statements().count(), 2);
 }
 
 #[test]
 fn preamble_scope_multiple_verbs() {
-    let ast = parse("@preamble {\n@ignore(package=\"foo\")\n@ignore(package=\"bar\")\n}").unwrap();
+    let ast = parse("preamble {\nignore(package=\"foo\")\nignore(package=\"bar\")\n}").unwrap();
     assert_eq!(ast.scope().statements().count(), 1);
 }
 
 #[test]
 fn preamble_scope_single_line() {
-    let ast = parse("@preamble { @ignore(package=\"foo\") }\n\"bar\"").unwrap();
+    let ast = parse("preamble { ignore(package=\"foo\") }\n\"bar\"").unwrap();
     assert_eq!(ast.scope().statements().count(), 2);
 }
 
 #[test]
 fn preamble_alone_is_noop() {
-    let ast = parse("@preamble\n\"bar\"").unwrap();
+    let ast = parse("preamble\n\"bar\"").unwrap();
     assert_eq!(ast.scope().statements().count(), 2);
 }
 
 #[test]
 fn preamble_scope_with_semicolons() {
-    let ast = parse("@preamble { @ignore(package=\"foo\"); @ignore(package=\"bar\") }\n\"baz\"").unwrap();
+    let ast = parse("preamble { ignore(package=\"foo\"); ignore(package=\"bar\") }\n\"baz\"").unwrap();
     assert_eq!(ast.scope().statements().count(), 2);
 }
 
@@ -169,12 +169,48 @@ fn preamble_scope_with_semicolons() {
 
 #[test]
 fn multiline_positional_args() {
-    let ast = parse("@func(\n\"a\",\n\"b\"\n)").unwrap();
+    let ast = parse("func(\n\"a\",\n\"b\"\n)").unwrap();
     assert_eq!(ast.scope().statements().count(), 1);
 }
 
 #[test]
 fn multiline_named_args() {
-    let ast = parse("@ignore(\npackage=\"foo\"\n)").unwrap();
+    let ast = parse("ignore(\npackage=\"foo\"\n)").unwrap();
+    assert_eq!(ast.scope().statements().count(), 1);
+}
+
+#[test]
+fn label_shortcut_parses() {
+    let ast = parse("@foo").unwrap();
+    assert_eq!(ast.scope().statements().count(), 1);
+}
+
+#[test]
+fn inherit_label_shortcut_parses() {
+    let ast = parse("@@foo").unwrap();
+    assert_eq!(ast.scope().statements().count(), 1);
+}
+
+#[test]
+fn use_shortcut_parses() {
+    let ast = parse("#foo").unwrap();
+    assert_eq!(ast.scope().statements().count(), 1);
+}
+
+#[test]
+fn label_shortcut_with_scope() {
+    let ast = parse(r#"@foo "a" { "b" }"#).unwrap();
+    assert_eq!(ast.scope().statements().count(), 1);
+}
+
+#[test]
+fn bare_verb_with_args() {
+    let ast = parse(r#"func("main")"#).unwrap();
+    assert_eq!(ast.scope().statements().count(), 1);
+}
+
+#[test]
+fn bare_verb_no_args() {
+    let ast = parse("preamble").unwrap();
     assert_eq!(ast.scope().statements().count(), 1);
 }

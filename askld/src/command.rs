@@ -198,7 +198,7 @@ impl Command {
             if !has_name {
                 warnings.push(pest::error::Error::new_from_span(
                     pest::error::ErrorVariant::CustomError {
-                        message: "@select requires at least one name filter (@filter(\"compound_name\", ...) or @filter(\"exact_name\", ...))".to_string(),
+                        message: "select requires at least one name filter (filter(\"compound_name\", ...) or filter(\"exact_name\", ...))".to_string(),
                     },
                     selector.span(),
                 ));
