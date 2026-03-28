@@ -197,10 +197,7 @@ pub trait Symbols {
     Hash,
     PartialOrd,
     Ord,
-    sqlx::Type,
-    sqlx::FromRow,
 )]
-#[sqlx(transparent)]
 pub struct SymbolId(pub i32);
 
 impl SymbolId {
@@ -249,8 +246,7 @@ impl From<i64> for SymbolId {
     }
 }
 
-#[derive(Debug, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, sqlx::Type)]
-#[sqlx(transparent)]
+#[derive(Debug, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct ProjectId(i32);
 
 impl ProjectId {
@@ -286,8 +282,7 @@ impl serde::Serialize for ProjectId {
     }
 }
 
-#[derive(Debug, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, sqlx::Type)]
-#[sqlx(transparent)]
+#[derive(Debug, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct ModuleId(i32);
 
 impl ModuleId {
@@ -323,8 +318,7 @@ impl serde::Serialize for ModuleId {
     }
 }
 
-#[derive(Debug, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord, sqlx::Type)]
-#[sqlx(transparent)]
+#[derive(Debug, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct FileId(i32);
 
 impl FileId {
@@ -377,10 +371,7 @@ impl serde::Serialize for FileId {
     Hash,
     PartialOrd,
     Ord,
-    sqlx::Type,
-    sqlx::FromRow,
 )]
-#[sqlx(transparent)]
 pub struct SymbolInstanceId(i32);
 
 impl SymbolInstanceId {
@@ -432,7 +423,7 @@ impl serde::Serialize for SymbolInstanceId {
     }
 }
 
-#[derive(sqlx::Type, Debug, PartialEq, Eq, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Serialize, Deserialize)]
 #[repr(i32)]
 pub enum SymbolType {
     Function = 1,
@@ -477,7 +468,7 @@ impl From<i32> for SymbolType {
     }
 }
 
-#[derive(sqlx::Type, Debug, PartialEq, Eq, Copy, Clone)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 #[repr(i32)]
 pub enum SymbolScope {
     Local = 1,
