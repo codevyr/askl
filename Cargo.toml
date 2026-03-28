@@ -26,7 +26,6 @@ clang-ast = "0.1"
 futures = "0.3"
 actix-web = "4"
 rand = "0.8"
-sqlx = { version = "0.7", features = [ "runtime-tokio", "sqlite", "macros" ] }
 diesel = { version = "2.2", features = ["postgres", "r2d2", "chrono", "uuid"] }
 diesel-async = { version = "0.8", features = ["postgres", "bb8"] }
 prost = "0.12"

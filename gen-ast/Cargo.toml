@@ -27,6 +27,5 @@ shell-words = {workspace = true}
 clang-ast = {workspace = true}
 futures = {workspace = true}
 rand = {workspace = true}
-sqlx = {workspace = true}
 index = { path = "../index" }
 clang = { path = "../clang" }
