@@ -17,11 +17,12 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
-use diesel::r2d2::{ConnectionManager, Pool};
+use diesel_async::pooled_connection::{bb8, bb8::Pool, AsyncDieselConnectionManager};
+use diesel_async::scoped_futures::ScopedFutureExt;
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use futures::future::LocalBoxFuture;
 use serde::{Deserialize, Serialize};
-use tokio::task;
 use uuid::Uuid;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("../migrations");
@@ -56,7 +57,7 @@ use schema::{api_keys, users};
 
 #[derive(Clone)]
 pub struct AuthStore {
-    pool: Pool<ConnectionManager<PgConnection>>,
+    pool: Pool<AsyncPgConnection>,
 }
 
 #[derive(Debug, Clone)]
@@ -170,20 +171,33 @@ struct ApiKeyRow {
     expires_at: Option<DateTime<Utc>>,
 }
 
+fn run_migrations(database_url: &str) -> anyhow::Result<()> {
+    let mut conn = PgConnection::establish(database_url)?;
+    conn.run_pending_migrations(MIGRATIONS)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    Ok(())
+}
+
 impl AuthStore {
-    pub fn connect(database_url: &str) -> anyhow::Result<Self> {
-        let manager = ConnectionManager::<PgConnection>::new(database_url);
-        let pool = Pool::builder().build(manager)?;
-        Self::from_pool(pool)
+    pub async fn connect(database_url: &str) -> anyhow::Result<Self> {
+        run_migrations(database_url)?;
+        let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(database_url);
+        let pool = Pool::<AsyncPgConnection>::builder().build(config).await?;
+        Ok(Self { pool })
     }
 
-    pub fn from_pool(pool: Pool<ConnectionManager<PgConnection>>) -> anyhow::Result<Self> {
-        let mut connection = pool.get()?;
-        connection
-            .run_pending_migrations(MIGRATIONS)
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-
+    pub fn from_pool(pool: Pool<AsyncPgConnection>, database_url: &str) -> anyhow::Result<Self> {
+        run_migrations(database_url)?;
         Ok(Self { pool })
+    }
+
+    async fn get_conn(
+        &self,
+    ) -> Result<bb8::PooledConnection<'_, AsyncPgConnection>, AuthError> {
+        self.pool
+            .get()
+            .await
+            .map_err(|err| AuthError::Storage(err.to_string()))
     }
 
     pub async fn create_api_key(
@@ -195,21 +209,24 @@ impl AuthStore {
         let email = email.trim().to_string();
         let name = name.map(str::to_string);
         let secret = generate_secret();
-        let hashed_secret = hash_secret(&secret)?;
+        let hashed_secret = tokio::task::spawn_blocking({
+            let secret = secret.clone();
+            move || hash_secret(&secret)
+        })
+        .await
+        .map_err(|err| AuthError::Storage(err.to_string()))??;
         let key_id = Uuid::new_v4();
         let now = Utc::now();
-        let pool = self.pool.clone();
 
-        task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(|err| AuthError::Storage(err.to_string()))?;
+        let mut conn = self.get_conn().await?;
 
-            conn.transaction::<_, diesel::result::Error, _>(|conn| {
+        conn.transaction::<_, diesel::result::Error, _>(|conn| {
+            async move {
                 let existing_user_id = users::table
                     .filter(users::email.eq(&email))
                     .select(users::id)
                     .first::<Uuid>(conn)
+                    .await
                     .optional()?;
 
                 let user_id = if let Some(id) = existing_user_id {
@@ -222,7 +239,8 @@ impl AuthStore {
                     };
                     diesel::insert_into(users::table)
                         .values(&new_user)
-                        .execute(conn)?;
+                        .execute(conn)
+                        .await?;
                     new_user.id
                 };
 
@@ -238,28 +256,24 @@ impl AuthStore {
                 };
                 diesel::insert_into(api_keys::table)
                     .values(new_key)
-                    .execute(conn)?;
+                    .execute(conn)
+                    .await?;
                 Ok(())
-            })
-            .map_err(|err| AuthError::Storage(err.to_string()))?;
-
-            Ok(())
+            }
+            .scope_boxed()
         })
         .await
-        .map_err(|err| AuthError::Storage(err.to_string()))??;
+        .map_err(|err| AuthError::Storage(err.to_string()))?;
 
         Ok(format!("askl_{}.{}", key_id, secret))
     }
 
     pub async fn authenticate_token(&self, token: &str) -> Result<AuthIdentity, AuthError> {
         let (key_id, secret) = parse_token(token)?;
-        let pool = self.pool.clone();
 
-        task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(|err| AuthError::Storage(err.to_string()))?;
-
+        // Fetch the key record, then drop the connection before argon2 verification
+        let auth_row = {
+            let mut conn = self.get_conn().await?;
             let record = api_keys::table
                 .inner_join(users::table)
                 .select((
@@ -279,96 +293,87 @@ impl AuthStore {
                 )>(
                     &mut conn,
                 )
+                .await
                 .optional()
                 .map_err(|err| AuthError::Storage(err.to_string()))?
                 .ok_or(AuthError::InvalidToken)?;
 
-            let auth_row = AuthRow {
+            AuthRow {
                 user_id: record.0,
                 email: record.1,
                 hashed_secret: record.2,
                 revoked_at: record.3,
                 expires_at: record.4,
-            };
-
-            if auth_row.revoked_at.is_some() {
-                return Err(AuthError::RevokedToken);
             }
+        };
 
-            verify_secret(&auth_row.hashed_secret, &secret)?;
+        if auth_row.revoked_at.is_some() {
+            return Err(AuthError::RevokedToken);
+        }
 
-            if let Some(expires_at) = auth_row.expires_at {
-                if expires_at <= Utc::now() {
-                    return Err(AuthError::ExpiredToken);
-                }
+        // Argon2 is CPU-intensive — run on the blocking thread pool
+        let hashed = auth_row.hashed_secret.clone();
+        tokio::task::spawn_blocking(move || verify_secret(&hashed, &secret))
+            .await
+            .map_err(|err| AuthError::Storage(err.to_string()))??;
+
+        if let Some(expires_at) = auth_row.expires_at {
+            if expires_at <= Utc::now() {
+                return Err(AuthError::ExpiredToken);
             }
+        }
 
-            diesel::update(api_keys::table.filter(api_keys::id.eq(key_id)))
-                .set(api_keys::last_used_at.eq(Utc::now()))
-                .execute(&mut conn)
-                .map_err(|err| AuthError::Storage(err.to_string()))?;
+        // Re-acquire connection for the last_used_at update
+        let mut conn = self.get_conn().await?;
+        diesel::update(api_keys::table.filter(api_keys::id.eq(key_id)))
+            .set(api_keys::last_used_at.eq(Utc::now()))
+            .execute(&mut conn)
+            .await
+            .map_err(|err| AuthError::Storage(err.to_string()))?;
 
-            Ok(AuthIdentity {
-                user_id: auth_row.user_id,
-                email: auth_row.email,
-                key_id,
-            })
+        Ok(AuthIdentity {
+            user_id: auth_row.user_id,
+            email: auth_row.email,
+            key_id,
         })
-        .await
-        .map_err(|err| AuthError::Storage(err.to_string()))?
     }
 
     pub async fn revoke_api_key(&self, token_id: Uuid) -> Result<bool, AuthError> {
-        let pool = self.pool.clone();
-        let revoked = task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(|err| AuthError::Storage(err.to_string()))?;
+        let mut conn = self.get_conn().await?;
 
-            let updated = diesel::update(
-                api_keys::table
-                    .filter(api_keys::id.eq(token_id))
-                    .filter(api_keys::revoked_at.is_null()),
-            )
-            .set(api_keys::revoked_at.eq(Utc::now()))
-            .execute(&mut conn)
-            .map_err(|err| AuthError::Storage(err.to_string()))?;
-
-            Ok(updated > 0)
-        })
+        let updated = diesel::update(
+            api_keys::table
+                .filter(api_keys::id.eq(token_id))
+                .filter(api_keys::revoked_at.is_null()),
+        )
+        .set(api_keys::revoked_at.eq(Utc::now()))
+        .execute(&mut conn)
         .await
-        .map_err(|err| AuthError::Storage(err.to_string()))??;
+        .map_err(|err| AuthError::Storage(err.to_string()))?;
 
-        Ok(revoked)
+        Ok(updated > 0)
     }
 
     pub async fn list_api_keys(&self, email: &str) -> Result<Vec<ApiKeyInfo>, AuthError> {
         let email = email.trim().to_string();
-        let pool = self.pool.clone();
-        let rows = task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(|err| AuthError::Storage(err.to_string()))?;
 
-            let rows = api_keys::table
-                .inner_join(users::table)
-                .select((
-                    api_keys::id,
-                    api_keys::name,
-                    api_keys::created_at,
-                    api_keys::last_used_at,
-                    api_keys::revoked_at,
-                    api_keys::expires_at,
-                ))
-                .filter(users::email.eq(email))
-                .order(api_keys::created_at.desc())
-                .load::<ApiKeyRow>(&mut conn)
-                .map_err(|err| AuthError::Storage(err.to_string()))?;
+        let mut conn = self.get_conn().await?;
 
-            Ok(rows)
-        })
-        .await
-        .map_err(|err| AuthError::Storage(err.to_string()))??;
+        let rows = api_keys::table
+            .inner_join(users::table)
+            .select((
+                api_keys::id,
+                api_keys::name,
+                api_keys::created_at,
+                api_keys::last_used_at,
+                api_keys::revoked_at,
+                api_keys::expires_at,
+            ))
+            .filter(users::email.eq(email))
+            .order(api_keys::created_at.desc())
+            .load::<ApiKeyRow>(&mut conn)
+            .await
+            .map_err(|err| AuthError::Storage(err.to_string()))?;
 
         Ok(rows
             .into_iter()

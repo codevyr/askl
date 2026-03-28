@@ -28,7 +28,7 @@ async fn auth_store_round_trip_with_postgres() {
 
     wait_for_postgres(&url).await.expect("wait for postgres");
 
-    let store = AuthStore::connect(&url).expect("connect auth store");
+    let store = AuthStore::connect(&url).await.expect("connect auth store");
     let token = store
         .create_api_key("user@example.com", Some("test key"), None)
         .await

@@ -5,6 +5,10 @@ use askld::cfg::ControlFlowGraph;
 use askld::index_store::IndexStore;
 use diesel::pg::PgConnection;
 use diesel::r2d2::{ConnectionManager, Pool};
+use diesel_async::pooled_connection::bb8::Pool as AsyncPool;
+use diesel_async::pooled_connection::AsyncDieselConnectionManager;
+use diesel_async::AsyncPgConnection;
+
 use index::db_diesel::Index;
 use log::info;
 use tracing_chrome::ChromeLayerBuilder;
@@ -75,18 +79,28 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
         None
     };
 
-    let manager = ConnectionManager::<PgConnection>::new(&serve_args.database_url);
-    let pool = Pool::builder()
-        .build(manager)
-        .expect("Failed to build database pool");
+    // Sync pool for Index (which uses sync diesel throughout)
+    let sync_manager = ConnectionManager::<PgConnection>::new(&serve_args.database_url);
+    let sync_pool = Pool::builder()
+        .build(sync_manager)
+        .expect("Failed to build sync database pool");
 
-    let auth_store = AuthStore::from_pool(pool.clone()).expect("Failed to initialize auth store");
+    // Async pool for IndexStore and AuthStore
+    let async_config =
+        AsyncDieselConnectionManager::<AsyncPgConnection>::new(&serve_args.database_url);
+    let async_pool: AsyncPool<AsyncPgConnection> = AsyncPool::builder()
+        .build(async_config)
+        .await
+        .expect("Failed to build async database pool");
+
+    let auth_store = AuthStore::from_pool(async_pool.clone(), &serve_args.database_url)
+        .expect("Failed to initialize auth store");
     let auth_store = web::Data::new(auth_store);
 
-    let index_store = IndexStore::from_pool(pool.clone());
+    let index_store = IndexStore::from_pool(async_pool.clone());
     let index_store = web::Data::new(index_store);
 
-    let index_query = Index::from_pool(pool.clone()).expect("Failed to initialize index");
+    let index_query = Index::from_pool(sync_pool).expect("Failed to initialize index");
     let askl_data = web::Data::new(AsklData {
         cfg: ControlFlowGraph::from_symbols(index_query),
     });

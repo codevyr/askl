@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
-use diesel::pg::PgConnection;
 use diesel::prelude::*;
-use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::OptionalExtension;
+use diesel_async::pooled_connection::{bb8, bb8::Pool};
+use diesel_async::scoped_futures::ScopedFutureExt;
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use serde::Serialize;
+use tracing::Instrument;
 use sha2::{Digest, Sha256};
-use tokio::task;
 
 use crate::proto::askl::index::{Object as UploadObject, Project as UploadProject, Symbol as UploadSymbol};
 use index::schema_diesel as index_schema;
@@ -16,7 +17,7 @@ const MAX_INSERT_ROWS: usize = 1000;
 
 #[derive(Clone)]
 pub struct IndexStore {
-    pool: Pool<ConnectionManager<PgConnection>>,
+    pool: Pool<AsyncPgConnection>,
 }
 
 #[derive(Debug)]
@@ -79,18 +80,11 @@ struct NewProject {
 #[diesel(table_name = index_schema::objects)]
 struct NewObject {
     project_id: i32,
-    // directory_id removed - directories are now symbols
     module_path: String,
     filesystem_path: String,
     filetype: String,
     content_hash: String,
-    // Directory sentinel objects have:
-    // - filesystem_path = directory path (e.g., "/src")
-    // - filetype = "directory"
-    // - content_hash = "" (empty)
 }
-
-// NewDirectory removed - directories are now symbols
 
 #[derive(Insertable, Clone)]
 #[diesel(table_name = index_schema::object_contents)]
@@ -157,8 +151,6 @@ struct ChildCountsRow {
     file_count: i64,
 }
 
-// DirectoryPathRow removed - directories are now symbols
-
 #[derive(Debug, QueryableByName)]
 struct FileChildRow {
     #[diesel(sql_type = diesel::sql_types::Integer)]
@@ -182,21 +174,29 @@ impl From<diesel::result::Error> for StoreError {
 }
 
 impl IndexStore {
-    pub fn from_pool(pool: Pool<ConnectionManager<PgConnection>>) -> Self {
+    pub fn from_pool(pool: Pool<AsyncPgConnection>) -> Self {
         Self { pool }
     }
 
+    async fn get_conn(
+        &self,
+    ) -> Result<bb8::PooledConnection<'_, AsyncPgConnection>, StoreError> {
+        self.pool
+            .get()
+            .await
+            .map_err(|err| StoreError::Storage(err.to_string()))
+    }
+
     pub async fn upload_index(&self, upload: UploadProject) -> Result<i32, UploadError> {
-        let pool = self.pool.clone();
-        task::spawn_blocking(move || {
-            let _upload_span: tracing::span::EnteredSpan =
-                tracing::info_span!("index_upload_store").entered();
-            let mut conn = pool
-                .get()
-                .map_err(|err| UploadError::Storage(err.to_string()))?;
-            conn.transaction::<_, UploadError, _>(|conn| {
-                let _txn_span: tracing::span::EnteredSpan =
-                    tracing::info_span!("index_upload_txn").entered();
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|err| UploadError::Storage(err.to_string()))?;
+
+        let upload_span = tracing::info_span!("index_upload_store");
+        conn.transaction::<_, UploadError, _>(|conn| {
+            async move {
                 let project_name = upload.project_name.trim();
                 if project_name.is_empty() {
                     return Err(UploadError::Invalid("project_name is required".to_string()));
@@ -212,183 +212,117 @@ impl IndexStore {
                     ));
                 }
 
-                let project_id: Option<i32> = {
-                    let _span: tracing::span::EnteredSpan =
-                        tracing::info_span!("insert_project").entered();
-                    diesel::insert_into(index_schema::projects::table)
-                        .values(NewProject {
-                            project_name: project_name.to_string(),
-                            root_path: root_path.to_string(),
-                        })
-                        .on_conflict(index_schema::projects::project_name)
-                        .do_nothing()
-                        .returning(index_schema::projects::id)
-                        .get_result(conn)
-                        .optional()?
-                };
+                let project_id: Option<i32> = diesel::insert_into(index_schema::projects::table)
+                    .values(NewProject {
+                        project_name: project_name.to_string(),
+                        root_path: root_path.to_string(),
+                    })
+                    .on_conflict(index_schema::projects::project_name)
+                    .do_nothing()
+                    .returning(index_schema::projects::id)
+                    .get_result(conn)
+                    .await
+                    .optional()?;
 
                 let project_id = match project_id {
                     Some(id) => id,
                     None => return Err(UploadError::Conflict),
                 };
 
-                let object_inserts = {
-                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
-                        "build_objects",
-                        count = upload.objects.len()
-                    )
-                    .entered();
-                    build_objects(project_id, &upload.objects)?
-                };
-                let object_map = {
-                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
-                        "insert_objects",
-                        count = object_inserts.len()
-                    )
-                    .entered();
-                    insert_objects(conn, &object_inserts)?
-                };
+                let object_inserts = build_objects(project_id, &upload.objects)?;
+                let object_map = insert_objects(conn, &object_inserts).await?;
 
-                let symbol_inserts = {
-                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
-                        "build_symbols",
-                        count = upload.symbols.len()
-                    )
-                    .entered();
-                    build_symbols(project_id, &upload.symbols)?
-                };
-                let symbol_map = {
-                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
-                        "insert_symbols",
-                        count = symbol_inserts.len()
-                    )
-                    .entered();
-                    insert_symbols(conn, symbol_inserts)?
-                };
+                let symbol_inserts = build_symbols(project_id, &upload.symbols)?;
+                let symbol_map = insert_symbols(conn, symbol_inserts).await?;
 
-                let symbol_instance_rows = {
-                    let _span: tracing::span::EnteredSpan =
-                        tracing::info_span!("build_symbol_instances").entered();
-                    build_symbol_instances(&upload.objects, &object_map, &symbol_map)?
-                };
-                {
-                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
-                        "insert_symbol_instances",
-                        count = symbol_instance_rows.len()
-                    )
-                    .entered();
-                    insert_symbol_instances(conn, &symbol_instance_rows)?;
-                }
+                let symbol_instance_rows =
+                    build_symbol_instances(&upload.objects, &object_map, &symbol_map)?;
+                insert_symbol_instances(conn, &symbol_instance_rows).await?;
 
-                let symbol_ref_rows = {
-                    let _span: tracing::span::EnteredSpan =
-                        tracing::info_span!("build_symbol_refs").entered();
-                    build_symbol_refs(&upload.objects, &object_map, &symbol_map)?
-                };
-                {
-                    let _span: tracing::span::EnteredSpan = tracing::info_span!(
-                        "insert_symbol_refs",
-                        count = symbol_ref_rows.len()
-                    )
-                    .entered();
-                    insert_symbol_refs(conn, &symbol_ref_rows)?;
-                }
+                let symbol_ref_rows =
+                    build_symbol_refs(&upload.objects, &object_map, &symbol_map)?;
+                insert_symbol_refs(conn, &symbol_ref_rows).await?;
 
                 Ok(project_id)
-            })
+            }
+            .scope_boxed()
         })
+        .instrument(upload_span)
         .await
-        .map_err(|err| UploadError::Storage(err.to_string()))?
     }
 
     pub async fn list_projects(&self) -> Result<Vec<ProjectInfo>, StoreError> {
-        let pool = self.pool.clone();
-        task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(|err| StoreError::Storage(err.to_string()))?;
-            let rows: Vec<(i32, String, String)> = index_schema::projects::table
-                .select((
-                    index_schema::projects::id,
-                    index_schema::projects::project_name,
-                    index_schema::projects::root_path,
-                ))
-                .order(index_schema::projects::id)
-                .load(&mut conn)?;
-            Ok(rows
-                .into_iter()
-                .map(|(id, project_name, root_path)| ProjectInfo {
-                    id,
-                    project_name,
-                    root_path,
-                })
-                .collect())
-        })
-        .await
-        .map_err(|err| StoreError::Storage(err.to_string()))?
+        let mut conn = self.get_conn().await?;
+        let rows: Vec<(i32, String, String)> = index_schema::projects::table
+            .select((
+                index_schema::projects::id,
+                index_schema::projects::project_name,
+                index_schema::projects::root_path,
+            ))
+            .order(index_schema::projects::id)
+            .load(&mut conn)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, project_name, root_path)| ProjectInfo {
+                id,
+                project_name,
+                root_path,
+            })
+            .collect())
     }
 
     pub async fn get_project_details(
         &self,
         project_id: i32,
     ) -> Result<Option<ProjectDetails>, StoreError> {
-        let pool = self.pool.clone();
-        task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(|err| StoreError::Storage(err.to_string()))?;
+        let mut conn = self.get_conn().await?;
 
-            let project_row: Option<(i32, String, String)> = index_schema::projects::table
-                .filter(index_schema::projects::id.eq(project_id))
-                .select((
-                    index_schema::projects::id,
-                    index_schema::projects::project_name,
-                    index_schema::projects::root_path,
-                ))
-                .first(&mut conn)
-                .optional()?;
+        let project_row: Option<(i32, String, String)> = index_schema::projects::table
+            .filter(index_schema::projects::id.eq(project_id))
+            .select((
+                index_schema::projects::id,
+                index_schema::projects::project_name,
+                index_schema::projects::root_path,
+            ))
+            .first(&mut conn)
+            .await
+            .optional()?;
 
-            let (id, project_name, root_path) = match project_row {
-                Some(row) => row,
-                None => return Ok(None),
-            };
+        let (id, project_name, root_path) = match project_row {
+            Some(row) => row,
+            None => return Ok(None),
+        };
 
-            let file_count: i64 = index_schema::objects::table
-                .filter(index_schema::objects::project_id.eq(project_id))
-                .count()
-                .get_result(&mut conn)?;
+        let file_count: i64 = index_schema::objects::table
+            .filter(index_schema::objects::project_id.eq(project_id))
+            .count()
+            .get_result(&mut conn)
+            .await?;
 
-            let symbol_count: i64 = index_schema::symbols::table
-                .filter(index_schema::symbols::project_id.eq(project_id))
-                .count()
-                .get_result(&mut conn)?;
+        let symbol_count: i64 = index_schema::symbols::table
+            .filter(index_schema::symbols::project_id.eq(project_id))
+            .count()
+            .get_result(&mut conn)
+            .await?;
 
-            Ok(Some(ProjectDetails {
-                id,
-                project_name,
-                root_path,
-                file_count,
-                symbol_count,
-            }))
-        })
-        .await
-        .map_err(|err| StoreError::Storage(err.to_string()))?
+        Ok(Some(ProjectDetails {
+            id,
+            project_name,
+            root_path,
+            file_count,
+            symbol_count,
+        }))
     }
 
     pub async fn delete_project(&self, project_id: i32) -> Result<bool, StoreError> {
-        let pool = self.pool.clone();
-        task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(|err| StoreError::Storage(err.to_string()))?;
-            let deleted = diesel::delete(
-                index_schema::projects::table.filter(index_schema::projects::id.eq(project_id)),
-            )
-            .execute(&mut conn)?;
-            Ok(deleted > 0)
-        })
-        .await
-        .map_err(|err| StoreError::Storage(err.to_string()))?
+        let mut conn = self.get_conn().await?;
+        let deleted = diesel::delete(
+            index_schema::projects::table.filter(index_schema::projects::id.eq(project_id)),
+        )
+        .execute(&mut conn)
+        .await?;
+        Ok(deleted > 0)
     }
 
     pub async fn list_project_tree(
@@ -397,82 +331,74 @@ impl IndexStore {
         path: &str,
         compact: bool,
     ) -> Result<ProjectTreeResult, StoreError> {
-        let pool = self.pool.clone();
-        let path = path.to_string();
-        task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(|err| StoreError::Storage(err.to_string()))?;
+        let mut conn = self.get_conn().await?;
 
-            let exists = index_schema::projects::table
-                .filter(index_schema::projects::id.eq(project_id))
-                .select(index_schema::projects::id)
-                .first::<i32>(&mut conn)
-                .optional()?;
-            if exists.is_none() {
-                return Ok(ProjectTreeResult::ProjectNotFound);
-            }
+        let exists = index_schema::projects::table
+            .filter(index_schema::projects::id.eq(project_id))
+            .select(index_schema::projects::id)
+            .first::<i32>(&mut conn)
+            .await
+            .optional()?;
+        if exists.is_none() {
+            return Ok(ProjectTreeResult::ProjectNotFound);
+        }
 
-            let normalized = normalize_full_path(&path);
+        let normalized = normalize_full_path(path);
 
-            // Find directory symbol for the requested path
-            let dir_symbol = index_schema::symbols::table
-                .filter(index_schema::symbols::project_id.eq(project_id))
-                .filter(index_schema::symbols::symbol_type.eq(4)) // DIRECTORY
-                .filter(index_schema::symbols::name.eq(&normalized))
-                .select(index_schema::symbols::id)
-                .first::<i32>(&mut conn)
-                .optional()?;
+        let dir_symbol = index_schema::symbols::table
+            .filter(index_schema::symbols::project_id.eq(project_id))
+            .filter(index_schema::symbols::symbol_type.eq(4)) // DIRECTORY
+            .filter(index_schema::symbols::name.eq(&normalized))
+            .select(index_schema::symbols::id)
+            .first::<i32>(&mut conn)
+            .await
+            .optional()?;
 
-            // If path is "/" and no root directory symbol exists yet, that's OK
-            // (empty project or not yet indexed)
-            if dir_symbol.is_none() && normalized != "/" {
-                return Ok(ProjectTreeResult::NotDirectory);
-            }
+        if dir_symbol.is_none() && normalized != "/" {
+            return Ok(ProjectTreeResult::NotDirectory);
+        }
 
-            let (directories, files) = load_tree_children(
-                &mut conn,
-                project_id,
-                &normalized,
-                compact,
-            )?;
+        let (directories, files) = load_tree_children(
+            &mut conn,
+            project_id,
+            &normalized,
+            compact,
+        )
+        .await?;
 
-            let mut nodes = Vec::with_capacity(directories.len() + files.len());
-            for row in directories {
-                let name = path_basename(&row.path);
-                nodes.push(ProjectTreeNode {
-                    name,
-                    path: row.path,
-                    node_type: "dir".to_string(),
-                    has_children: row.has_children,
-                    file_id: None,
-                    filetype: None,
-                    compact_path: row.compact_path,
-                });
-            }
-
-            for row in files {
-                let name = path_basename(&row.path);
-                nodes.push(ProjectTreeNode {
-                    name,
-                    path: row.path,
-                    node_type: "file".to_string(),
-                    has_children: false,
-                    file_id: Some(FileId::new(row.id)),
-                    filetype: Some(row.filetype),
-                    compact_path: None,
-                });
-            }
-
-            nodes.sort_by(|a, b| {
-                let a_is_dir = a.node_type == "dir";
-                let b_is_dir = b.node_type == "dir";
-                b_is_dir.cmp(&a_is_dir).then_with(|| a.path.cmp(&b.path))
+        let mut nodes = Vec::with_capacity(directories.len() + files.len());
+        for row in directories {
+            let name = path_basename(&row.path);
+            nodes.push(ProjectTreeNode {
+                name,
+                path: row.path,
+                node_type: "dir".to_string(),
+                has_children: row.has_children,
+                file_id: None,
+                filetype: None,
+                compact_path: row.compact_path,
             });
-            Ok(ProjectTreeResult::Nodes(nodes))
-        })
-        .await
-        .map_err(|err| StoreError::Storage(err.to_string()))?
+        }
+
+        for row in files {
+            let name = path_basename(&row.path);
+            nodes.push(ProjectTreeNode {
+                name,
+                path: row.path,
+                node_type: "file".to_string(),
+                has_children: false,
+                file_id: Some(FileId::new(row.id)),
+                filetype: Some(row.filetype),
+                compact_path: None,
+            });
+        }
+
+        nodes.sort_by(|a, b| {
+            let a_is_dir = a.node_type == "dir";
+            let b_is_dir = b.node_type == "dir";
+            b_is_dir.cmp(&a_is_dir).then_with(|| a.path.cmp(&b.path))
+        });
+        Ok(ProjectTreeResult::Nodes(nodes))
     }
 
     pub async fn get_project_file_contents_by_path(
@@ -480,38 +406,28 @@ impl IndexStore {
         project_id: i32,
         path: &str,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        let pool = self.pool.clone();
-        let path = path.to_string();
-        task::spawn_blocking(move || {
-            let mut conn = pool
-                .get()
-                .map_err(|err| StoreError::Storage(err.to_string()))?;
+        let mut conn = self.get_conn().await?;
 
-            let normalized = normalize_full_path(&path);
-            let content = index_schema::object_contents::table
-                .inner_join(
-                    index_schema::objects::table
-                        .on(index_schema::object_contents::object_id.eq(index_schema::objects::id)),
-                )
-                .filter(index_schema::objects::project_id.eq(project_id))
-                .filter(index_schema::objects::filesystem_path.eq(normalized))
-                .select(index_schema::object_contents::content)
-                .first::<Vec<u8>>(&mut conn)
-                .optional()?;
+        let normalized = normalize_full_path(path);
+        let content = index_schema::object_contents::table
+            .inner_join(
+                index_schema::objects::table
+                    .on(index_schema::object_contents::object_id.eq(index_schema::objects::id)),
+            )
+            .filter(index_schema::objects::project_id.eq(project_id))
+            .filter(index_schema::objects::filesystem_path.eq(normalized))
+            .select(index_schema::object_contents::content)
+            .first::<Vec<u8>>(&mut conn)
+            .await
+            .optional()?;
 
-            Ok(content)
-        })
-        .await
-        .map_err(|err| StoreError::Storage(err.to_string()))?
+        Ok(content)
     }
 }
 
 /// Load direct child directories and files for a given parent path.
-/// Uses individual per-directory queries with static LIKE prefixes so that
-/// PostgreSQL uses the fast composite btree index (project_id, symbol_type,
-/// name text_pattern_ops) instead of falling back to the slow trigram index.
-fn load_tree_children(
-    conn: &mut PgConnection,
+async fn load_tree_children(
+    conn: &mut AsyncPgConnection,
     project_id: i32,
     parent_path: &str,
     compact: bool,
@@ -522,8 +438,6 @@ fn load_tree_children(
         format!("{}/", parent_path)
     };
 
-    // 1. Get direct child directories (depth-1 under parent).
-    //    Uses composite index via static LIKE $2||'%'.
     let child_dir_names: Vec<String> = diesel::sql_query(
         r#"
         SELECT s.name
@@ -538,23 +452,20 @@ fn load_tree_children(
     )
     .bind::<diesel::sql_types::Integer, _>(project_id)
     .bind::<diesel::sql_types::Text, _>(&prefix)
-    .load::<NameRow>(conn)?
+    .load::<NameRow>(conn)
+    .await?
     .into_iter()
     .map(|r| r.name)
     .collect();
 
-    // 2. For each child dir, get child counts with individual queries.
-    //    Each query uses the composite index (~0.1ms each).
-    //    Counts enable both has_children and compact eligibility checks.
     let mut dir_children = Vec::with_capacity(child_dir_names.len());
     for dir_name in &child_dir_names {
         let child_prefix = format!("{}/", dir_name);
-        let counts = query_child_counts(conn, project_id, &child_prefix)?;
+        let counts = query_child_counts(conn, project_id, &child_prefix).await?;
         let has_children = counts.dir_count > 0 || counts.file_count > 0;
 
-        // Only compute compact path for eligible dirs (exactly 1 subdir, 0 files).
         let compact_path = if compact && counts.dir_count == 1 && counts.file_count == 0 {
-            compute_compact_path(conn, project_id, &dir_name)?
+            compute_compact_path(conn, project_id, dir_name).await?
         } else {
             None
         };
@@ -566,15 +477,14 @@ fn load_tree_children(
         });
     }
 
-    // 4. Get direct child files.
-    let files = load_file_children(conn, project_id, &prefix)?;
+    let files = load_file_children(conn, project_id, &prefix).await?;
 
     Ok((dir_children, files))
 }
 
 /// Query direct child dir count and file count under a prefix.
-fn query_child_counts(
-    conn: &mut PgConnection,
+async fn query_child_counts(
+    conn: &mut AsyncPgConnection,
     project_id: i32,
     child_prefix: &str,
 ) -> Result<ChildCountsRow, StoreError> {
@@ -595,15 +505,14 @@ fn query_child_counts(
     )
     .bind::<diesel::sql_types::Integer, _>(project_id)
     .bind::<diesel::sql_types::Text, _>(child_prefix)
-    .get_result::<ChildCountsRow>(conn)?;
+    .get_result::<ChildCountsRow>(conn)
+    .await?;
     Ok(row)
 }
 
 /// Walk down a chain of single-child-no-files directories for compact display.
-/// Returns the deepest directory path in the chain, or None if no compaction.
-/// Caller should only invoke this for dirs with exactly 1 subdir and 0 files.
-fn compute_compact_path(
-    conn: &mut PgConnection,
+async fn compute_compact_path(
+    conn: &mut AsyncPgConnection,
     project_id: i32,
     dir_path: &str,
 ) -> Result<Option<String>, StoreError> {
@@ -611,7 +520,6 @@ fn compute_compact_path(
     for _ in 0..20 {
         let child_prefix = format!("{}/", current);
 
-        // Get up to 2 child dirs — we only need to know if there's exactly 1.
         let child_dirs: Vec<NameRow> = diesel::sql_query(
             r#"
             SELECT s.name
@@ -625,13 +533,13 @@ fn compute_compact_path(
         )
         .bind::<diesel::sql_types::Integer, _>(project_id)
         .bind::<diesel::sql_types::Text, _>(&child_prefix)
-        .load(conn)?;
+        .load(conn)
+        .await?;
 
         if child_dirs.len() != 1 {
             break;
         }
 
-        // Check for any direct child files
         let has_files = diesel::sql_query(
             r#"
             SELECT EXISTS(
@@ -645,15 +553,13 @@ fn compute_compact_path(
         )
         .bind::<diesel::sql_types::Integer, _>(project_id)
         .bind::<diesel::sql_types::Text, _>(&child_prefix)
-        .get_result::<ExistsRow>(conn)?;
+        .get_result::<ExistsRow>(conn)
+        .await?;
 
-        let single_child = child_dirs.into_iter().next().unwrap().name;
+        current = child_dirs.into_iter().next().unwrap().name;
         if has_files.exists {
-            // Has files — stop compaction but include this dir
-            current = single_child;
             break;
         }
-        current = single_child;
     }
 
     if current != dir_path {
@@ -664,8 +570,8 @@ fn compute_compact_path(
 }
 
 /// Load direct child files under a parent prefix.
-fn load_file_children(
-    conn: &mut PgConnection,
+async fn load_file_children(
+    conn: &mut AsyncPgConnection,
     project_id: i32,
     parent_prefix: &str,
 ) -> Result<Vec<FileChildRow>, StoreError> {
@@ -683,7 +589,8 @@ fn load_file_children(
     )
     .bind::<diesel::sql_types::Integer, _>(project_id)
     .bind::<diesel::sql_types::Text, _>(parent_prefix)
-    .load::<FileChildRow>(conn)?;
+    .load::<FileChildRow>(conn)
+    .await?;
     Ok(rows)
 }
 
@@ -749,8 +656,6 @@ struct SymbolInsert {
     row: NewSymbol,
 }
 
-// Directory symbols are now created by the indexer, not the server.
-
 fn build_objects(
     project_id: i32,
     objects: &[UploadObject],
@@ -793,8 +698,8 @@ fn build_objects(
     Ok(inserts)
 }
 
-fn insert_objects(
-    conn: &mut PgConnection,
+async fn insert_objects(
+    conn: &mut AsyncPgConnection,
     inserts: &[ObjectInsert],
 ) -> Result<HashMap<i64, i32>, UploadError> {
     if inserts.is_empty() {
@@ -807,7 +712,8 @@ fn insert_objects(
         let ids: Vec<i32> = diesel::insert_into(index_schema::objects::table)
             .values(&rows)
             .returning(index_schema::objects::id)
-            .get_results(conn)?;
+            .get_results(conn)
+            .await?;
 
         let mut object_contents = Vec::with_capacity(ids.len());
         for (entry, id) in chunk.iter().zip(ids.iter()) {
@@ -820,7 +726,8 @@ fn insert_objects(
 
         diesel::insert_into(index_schema::object_contents::table)
             .values(&object_contents)
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
     }
 
     Ok(object_map)
@@ -840,7 +747,6 @@ fn build_symbols(
             )));
         }
         let symbol_type = validate_symbol_type(symbol.r#type)?;
-        // symbol_scope is only meaningful for function types
         let symbol_scope = if symbol.scope != 0 {
             Some(symbol.scope)
         } else {
@@ -859,8 +765,8 @@ fn build_symbols(
     Ok(inserts)
 }
 
-fn insert_symbols(
-    conn: &mut PgConnection,
+async fn insert_symbols(
+    conn: &mut AsyncPgConnection,
     inserts: Vec<SymbolInsert>,
 ) -> Result<HashMap<i64, i32>, UploadError> {
     if inserts.is_empty() {
@@ -873,7 +779,8 @@ fn insert_symbols(
         let ids: Vec<i32> = diesel::insert_into(index_schema::symbols::table)
             .values(&rows)
             .returning(index_schema::symbols::id)
-            .get_results(conn)?;
+            .get_results(conn)
+            .await?;
         for (entry, id) in chunk.iter().zip(ids) {
             symbol_map.insert(entry.local_id, id);
         }
@@ -946,23 +853,25 @@ fn build_symbol_refs(
     Ok(rows)
 }
 
-fn insert_symbol_instances(
-    conn: &mut PgConnection,
+async fn insert_symbol_instances(
+    conn: &mut AsyncPgConnection,
     rows: &[NewSymbolInstance],
 ) -> Result<(), UploadError> {
     for chunk in rows.chunks(MAX_INSERT_ROWS) {
         diesel::insert_into(index_schema::symbol_instances::table)
             .values(chunk)
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
     }
     Ok(())
 }
 
-fn insert_symbol_refs(conn: &mut PgConnection, rows: &[NewSymbolRef]) -> Result<(), UploadError> {
+async fn insert_symbol_refs(conn: &mut AsyncPgConnection, rows: &[NewSymbolRef]) -> Result<(), UploadError> {
     for chunk in rows.chunks(MAX_INSERT_ROWS) {
         diesel::insert_into(index_schema::symbol_refs::table)
             .values(chunk)
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
     }
     Ok(())
 }
