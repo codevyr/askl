@@ -79,6 +79,7 @@ pub(crate) fn build_generic_verb(
         TypeSelector::NAME_DIRECTORY => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_DIRECTORY),
         TypeSelector::NAME_TYPE => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_TYPE),
         TypeSelector::NAME_DATA => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_DATA),
+        "_" => Ok(UnitVerb::new(verb_span)),
         unknown => Err(anyhow!("unknown verb : {}", unknown)),
     };
 
