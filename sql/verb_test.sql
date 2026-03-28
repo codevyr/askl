@@ -60,3 +60,18 @@ VALUES
     (2, 1, int4range(912, 913)),
     (3, 1, int4range(921, 922)),
     (4, 1, int4range(922, 923));
+
+-- Data symbols (type=6, global variables)
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
+VALUES
+    (7, 'config.Debug', 1, 6, 2),
+    (8, 'config.Port', 1, 6, 2);
+
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
+VALUES
+    (97, 7, 1, int4range(970, 979)),
+    (98, 8, 1, int4range(980, 989));
+
+-- Reference from function foo to data config.Debug
+INSERT INTO symbol_refs(to_symbol, from_object, from_offset_range)
+VALUES (7, 1, int4range(915, 916));

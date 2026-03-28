@@ -57,4 +57,5 @@ enum SymbolType {
   MODULE = 3;
   DIRECTORY = 4;
   TYPE = 5;
+  DATA = 6;
 }
