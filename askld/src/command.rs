@@ -96,6 +96,12 @@ impl Command {
         self.selectors().all(|verb| verb.is_unit())
     }
 
+    /// Whether all selectors in this command are non-constraining.
+    pub fn is_non_constraining(&self) -> bool {
+        self.selectors()
+            .all(|verb| verb.is_non_constraining_selector())
+    }
+
     fn labels<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Labeler> + 'a> {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_labeler().ok()))
     }

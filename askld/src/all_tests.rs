@@ -2141,3 +2141,115 @@ fn nested_func_has_parent() {
     assert!(res.nodes.as_vec().contains(&SymbolInstanceId::new(25)));
     assert!(res.nodes.as_vec().contains(&SymbolInstanceId::new(20)));
 }
+
+// --- Non-constraining / caller-chain tests ---
+//
+// Bare type selectors (@func, @mod, @type, etc. without a name) at the top
+// of a caller-chain must NOT constrain intermediate nodes. Their selection
+// is derived from children, so constraining children would be circular.
+
+#[test]
+fn non_constraining_bare_func_does_not_narrow_caller_chain() {
+    // @func {{ "baz" }} — two-level caller chain filtered to functions.
+    // baz's callers: bar. bar's callers: foo. Both are functions.
+    // Without non-constraining fix, @func would constrain intermediate
+    // nodes to functions only (circular), potentially breaking the chain.
+    const QUERY: &str = r#"@func {{ "baz" }}"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    let nodes = res.nodes.as_vec();
+    // foo (grandparent caller), bar (parent caller), baz
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz should be in results");
+}
+
+#[test]
+fn non_constraining_wrapped_bare_func_same_as_unwrapped() {
+    // { @func {{ "baz" }} } — wrapping in {} should not change behavior.
+    // The outer {} gives @func a parent, but @func is still non-constraining
+    // because its selection is child-derived (no ancestor has initial selection).
+    const QUERY: &str = r#"{ @func {{ "baz" }} }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz should be in results");
+}
+
+#[test]
+fn non_constraining_bare_mod_does_not_narrow_caller_chain() {
+    // @mod {{ "baz" }} — bare @mod filters to modules only.
+    // baz→bar→foo. callers of callers of baz = foo.
+    // @mod at root filters to modules. foo is a function, not a module.
+    // So @mod level should be empty (no modules in the caller chain),
+    // but the intermediate nodes (foo, bar, baz) should still appear.
+    const QUERY: &str = r#"@mod {{ "baz" }}"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    let nodes = res.nodes.as_vec();
+    // Intermediate nodes are preserved even though @mod finds no modules
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz should be in results");
+}
+
+#[test]
+fn non_constraining_does_not_affect_selector_with_name() {
+    // @func("foo") { "bar" } — @func with a name is a selector, not non-constraining.
+    // It should constrain children normally.
+    const QUERY: &str = r#"@func("foo") { "bar" }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    let nodes = res.nodes.as_vec();
+    // foo calls bar → both should be present
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar should be in results");
+}
+
+#[test]
+fn non_constraining_inside_selector_scope() {
+    // "foo" { @func { "baz" } } — foo calls bar, bar calls baz.
+    // @func filters to functions. The single {} level matches the 2-hop chain.
+    const QUERY: &str = r#""foo" { @func { "baz" } }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("non_constraining_inside_selector_scope: {:#?}", res.nodes);
+    let nodes = res.nodes.as_vec();
+    // foo (root selector), bar (intermediate @func), baz (leaf selector)
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz should be in results");
+}
+
+#[test]
+fn non_constraining_inside_selector_scope_extra_depth_is_empty() {
+    // "foo" { @func {{ "baz" }} } — extra {} level adds a 3rd hop,
+    // but foo→bar→baz is only 2 hops. Result should be empty.
+    const QUERY: &str = r#""foo" { @func {{ "baz" }} }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("non_constraining_inside_selector_scope_extra_depth: {:#?}", res.nodes);
+    assert_eq!(res.nodes.as_vec().len(), 0, "extra depth should yield no results");
+}
+
+#[test]
+fn non_constraining_containment_still_works() {
+    // @dir("/") @has { @func } — @func as a leaf filter inside containment
+    // should still constrain the parent (dir contains functions).
+    // @func is NOT non-constraining here because its ancestor @dir("/")
+    // has an initial selection.
+    const QUERY: &str = r#"@dir("/") @has { @func }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    println!("{:#?}", res.nodes);
+    let nodes = res.nodes.as_vec();
+    // Directory + functions (foo, bar, baz)
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz should be in results");
+}

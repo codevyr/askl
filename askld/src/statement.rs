@@ -311,9 +311,9 @@ impl Statement {
                     continue;
                 }
 
-                let is_unit_statement = statement.command().is_unit();
+                let is_non_constraining = statement.command().is_non_constraining();
 
-                if !is_unit_statement {
+                if !is_non_constraining {
                     continue;
                 }
 
@@ -660,7 +660,14 @@ impl Statement {
                 if !child.command().has_selectors() {
                     continue;
                 }
-                if child.get_state().weak {
+                // Skip weak UnitVerb children in the merge unless they have
+                // a non-weak descendant that provided real selection data.
+                // Without this, bare `{}` (UnitVerb) would contribute "everything"
+                // to the parent merge, diluting constraints.
+                if child.get_state().weak
+                    && child.command().is_unit()
+                    && child.children().all(|gc| gc.get_state().weak)
+                {
                     continue;
                 }
                 if let Some(sel) = child.get_selection(ctx) {

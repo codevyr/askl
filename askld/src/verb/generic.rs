@@ -961,6 +961,12 @@ impl Verb for TypeSelector {
         Ok(false)
     }
 
+    fn is_non_constraining_selector(&self) -> bool {
+        // Filter mode without a name pattern: this verb provides no meaningful
+        // selection or constraint — it only filters by symbol type.
+        self.filter_only && self.name_pattern.is_none()
+    }
+
     fn suppresses_default_type_filter(&self) -> bool {
         true
     }

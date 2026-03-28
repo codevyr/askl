@@ -174,6 +174,14 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
         false
     }
 
+    /// Whether this selector provides no meaningful constraint on results.
+    /// True for UnitVerb (via is_unit) and bare type selectors like `@func`
+    /// (filter mode, no name pattern). Used by mark_non_constraining to detect
+    /// statements whose selection is entirely child-derived.
+    fn is_non_constraining_selector(&self) -> bool {
+        self.is_unit()
+    }
+
     fn span(&self) -> pest::Span<'_> {
         panic!("Verb does not have a span")
     }
@@ -207,6 +215,7 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
     fn has_name_constraint(&self) -> bool {
         false
     }
+
 }
 
 pub trait Filter: std::fmt::Debug + Display + Verb {
