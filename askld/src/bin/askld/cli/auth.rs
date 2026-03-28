@@ -31,25 +31,27 @@ pub async fn run_auth_command(port: u16, command: AuthCommand) -> Result<()> {
             json,
             expires_at,
         } => {
-            let client = reqwest::Client::new();
+            let client = awc::Client::default();
             let url = format!("http://127.0.0.1:{}/auth/local/create-api-key", port);
-            let response = client
+            let mut response = client
                 .post(url)
-                .json(&CreateApiKeyRequest {
+                .send_json(&CreateApiKeyRequest {
                     email,
                     name,
                     expires_at,
                 })
-                .send()
-                .await?;
+                .await
+                .map_err(|e| anyhow!("Request failed: {}", e))?;
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
+                let body_bytes = response.body().await.map_err(|e| anyhow!("{}", e))?;
+                let body = String::from_utf8_lossy(&body_bytes);
                 return Err(anyhow!("Request failed ({}): {}", status, body));
             }
 
-            let token_response: CreateApiKeyResponse = response.json().await?;
+            let token_response: CreateApiKeyResponse =
+                response.json().await.map_err(|e| anyhow!("{}", e))?;
             if json {
                 let output = serde_json::to_string_pretty(&token_response)?;
                 println!("{}", output);
@@ -62,21 +64,23 @@ pub async fn run_auth_command(port: u16, command: AuthCommand) -> Result<()> {
             }
         }
         AuthCommand::RevokeApiKey { token_id, json } => {
-            let client = reqwest::Client::new();
+            let client = awc::Client::default();
             let url = format!("http://127.0.0.1:{}/auth/local/revoke-api-key", port);
-            let response = client
+            let mut response = client
                 .post(url)
-                .json(&RevokeApiKeyRequest { token_id })
-                .send()
-                .await?;
+                .send_json(&RevokeApiKeyRequest { token_id })
+                .await
+                .map_err(|e| anyhow!("Request failed: {}", e))?;
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
+                let body_bytes = response.body().await.map_err(|e| anyhow!("{}", e))?;
+                let body = String::from_utf8_lossy(&body_bytes);
                 return Err(anyhow!("Request failed ({}): {}", status, body));
             }
 
-            let result: RevokeApiKeyResponse = response.json().await?;
+            let result: RevokeApiKeyResponse =
+                response.json().await.map_err(|e| anyhow!("{}", e))?;
             if json {
                 let output = serde_json::to_string_pretty(&result)?;
                 println!("{}", output);
@@ -87,21 +91,23 @@ pub async fn run_auth_command(port: u16, command: AuthCommand) -> Result<()> {
             }
         }
         AuthCommand::ListApiKeys { email, json } => {
-            let client = reqwest::Client::new();
+            let client = awc::Client::default();
             let url = format!("http://127.0.0.1:{}/auth/local/list-api-keys", port);
-            let response = client
+            let mut response = client
                 .post(url)
-                .json(&ListApiKeysRequest { email })
-                .send()
-                .await?;
+                .send_json(&ListApiKeysRequest { email })
+                .await
+                .map_err(|e| anyhow!("Request failed: {}", e))?;
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
+                let body_bytes = response.body().await.map_err(|e| anyhow!("{}", e))?;
+                let body = String::from_utf8_lossy(&body_bytes);
                 return Err(anyhow!("Request failed ({}): {}", status, body));
             }
 
-            let result: ListApiKeysResponse = response.json().await?;
+            let result: ListApiKeysResponse =
+                response.json().await.map_err(|e| anyhow!("{}", e))?;
             if json {
                 let output = serde_json::to_string_pretty(&result)?;
                 println!("{}", output);

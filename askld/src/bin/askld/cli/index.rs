@@ -1,8 +1,10 @@
 use crate::args::IndexCommand;
+use actix_web::http::header::CONTENT_LENGTH;
+use actix_web::http::StatusCode;
 use anyhow::{anyhow, Result};
 use askld::proto::askl::index::Project;
 use bytes::Bytes;
-use futures::TryStreamExt;
+use futures::{Stream, TryStreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -58,12 +60,14 @@ fn normalize_base_url(url: &str) -> String {
     base_url.trim_end_matches('/').to_string()
 }
 
-fn build_client(timeout: u64) -> Result<reqwest::Client> {
-    let mut client_builder = reqwest::Client::builder().no_proxy();
+fn build_client(timeout: u64) -> awc::Client {
+    let mut builder = awc::Client::builder();
     if timeout > 0 {
-        client_builder = client_builder.timeout(Duration::from_secs(timeout));
+        builder = builder.timeout(Duration::from_secs(timeout));
+    } else {
+        builder = builder.disable_timeout();
     }
-    Ok(client_builder.build()?)
+    builder.finish()
 }
 
 fn build_progress_bar(total: u64, enabled: bool) -> Option<ProgressBar> {
@@ -99,30 +103,33 @@ fn resolve_project_selector(id: Option<i32>, name: Option<String>) -> Result<Pro
 }
 
 async fn fetch_projects(
-    client: &reqwest::Client,
+    client: &awc::Client,
     base_url: &str,
     token: &str,
 ) -> Result<Vec<ProjectInfo>> {
-    use reqwest::header as reqwest_header;
-
     let endpoint = format!("{}/v1/index/projects", base_url);
-    let response = client
+    let mut response = client
         .get(endpoint)
-        .header(reqwest_header::AUTHORIZATION, format!("Bearer {}", token))
+        .bearer_auth(token)
         .send()
-        .await?;
+        .await
+        .map_err(|e| anyhow!("Request failed: {}", e))?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body_bytes = response.body().await.map_err(|e| anyhow!("{}", e))?;
+        let body = String::from_utf8_lossy(&body_bytes);
         return Err(anyhow!("Request failed ({}): {}", status, body));
     }
 
-    Ok(response.json().await?)
+    response
+        .json()
+        .await
+        .map_err(|e| anyhow!("Failed to parse response: {}", e))
 }
 
 async fn resolve_project_id(
-    client: &reqwest::Client,
+    client: &awc::Client,
     base_url: &str,
     token: &str,
     selector: ProjectSelector,
@@ -153,15 +160,17 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
             timeout,
             json,
         } => {
-            use reqwest::header as reqwest_header;
-
             let token = resolve_token(token)?;
 
             let base_url = normalize_base_url(&url);
             let endpoint = format!("{}/v1/index/projects", base_url);
 
-            let client = build_client(timeout)?;
-            let (body, content_len, progress) = if let Some(project_name) = project {
+            let client = build_client(timeout);
+            let (stream, content_len, progress): (
+                Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Unpin>,
+                u64,
+                Option<ProgressBar>,
+            ) = if let Some(project_name) = project {
                 let payload = tokio::fs::read(&file_path)
                     .await
                     .map_err(|err| anyhow!("Failed to read {}: {}", file_path, err))?;
@@ -188,7 +197,7 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
                     }
                     Ok::<Bytes, std::io::Error>(chunk)
                 }));
-                (reqwest::Body::wrap_stream(stream), total, progress)
+                (Box::new(stream), total, progress)
             } else {
                 let file = tokio::fs::File::open(&file_path)
                     .await
@@ -209,17 +218,17 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
                     }
                     bytes.freeze()
                 });
-                (reqwest::Body::wrap_stream(stream), total, progress)
+                (Box::new(stream), total, progress)
             };
 
-            let response = client
+            let mut response = client
                 .post(endpoint)
-                .header(reqwest_header::CONTENT_TYPE, "application/x-protobuf")
-                .header(reqwest_header::AUTHORIZATION, format!("Bearer {}", token))
-                .header(reqwest_header::CONTENT_LENGTH, content_len)
-                .body(body)
-                .send()
-                .await?;
+                .content_type("application/x-protobuf")
+                .bearer_auth(&token)
+                .insert_header((CONTENT_LENGTH, content_len))
+                .send_stream(stream)
+                .await
+                .map_err(|e| anyhow!("Request failed: {}", e))?;
 
             if let Some(progress) = progress {
                 progress.finish_and_clear();
@@ -227,19 +236,21 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                if status == reqwest::StatusCode::CONFLICT {
+                let body_bytes = response.body().await.map_err(|e| anyhow!("{}", e))?;
+                let body = String::from_utf8_lossy(&body_bytes);
+                if status == StatusCode::CONFLICT {
                     let message = if body.trim().is_empty() {
                         "Project already exists".to_string()
                     } else {
-                        body
+                        body.to_string()
                     };
                     return Err(anyhow!("Request failed ({}): {}", status, message));
                 }
                 return Err(anyhow!("Request failed ({}): {}", status, body));
             }
 
-            let result: IndexUploadResponse = response.json().await?;
+            let result: IndexUploadResponse =
+                response.json().await.map_err(|e| anyhow!("{}", e))?;
             if json {
                 let output = serde_json::to_string_pretty(&result)?;
                 println!("{}", output);
@@ -256,7 +267,7 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
             let token = resolve_token(token)?;
 
             let base_url = normalize_base_url(&url);
-            let client = build_client(timeout)?;
+            let client = build_client(timeout);
 
             let projects = fetch_projects(&client, &base_url, &token).await?;
             if json {
@@ -278,29 +289,30 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
             timeout,
             json,
         } => {
-            use reqwest::header as reqwest_header;
-
             let selector = resolve_project_selector(id, name)?;
             let token = resolve_token(token)?;
             let base_url = normalize_base_url(&url);
-            let client = build_client(timeout)?;
+            let client = build_client(timeout);
 
             let (project_id, _) = resolve_project_id(&client, &base_url, &token, selector).await?;
             let endpoint = format!("{}/v1/index/projects/{}", base_url, project_id);
 
-            let response = client
+            let mut response = client
                 .get(endpoint)
-                .header(reqwest_header::AUTHORIZATION, format!("Bearer {}", token))
+                .bearer_auth(&token)
                 .send()
-                .await?;
+                .await
+                .map_err(|e| anyhow!("Request failed: {}", e))?;
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
+                let body_bytes = response.body().await.map_err(|e| anyhow!("{}", e))?;
+                let body = String::from_utf8_lossy(&body_bytes);
                 return Err(anyhow!("Request failed ({}): {}", status, body));
             }
 
-            let details: ProjectDetails = response.json().await?;
+            let details: ProjectDetails =
+                response.json().await.map_err(|e| anyhow!("{}", e))?;
             if json {
                 let output = serde_json::to_string_pretty(&details)?;
                 println!("{}", output);
@@ -327,30 +339,31 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
             timeout,
             json,
         } => {
-            use reqwest::header as reqwest_header;
-
             let selector = resolve_project_selector(id, name)?;
             let token = resolve_token(token)?;
             let base_url = normalize_base_url(&url);
-            let client = build_client(timeout)?;
+            let client = build_client(timeout);
 
             let (project_id, project_name) =
                 resolve_project_id(&client, &base_url, &token, selector).await?;
             let endpoint = format!("{}/v1/index/projects/{}", base_url, project_id);
 
-            let response = client
+            let mut response = client
                 .delete(endpoint)
-                .header(reqwest_header::AUTHORIZATION, format!("Bearer {}", token))
+                .bearer_auth(&token)
                 .send()
-                .await?;
+                .await
+                .map_err(|e| anyhow!("Request failed: {}", e))?;
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
+                let body_bytes = response.body().await.map_err(|e| anyhow!("{}", e))?;
+                let body = String::from_utf8_lossy(&body_bytes);
                 return Err(anyhow!("Request failed ({}): {}", status, body));
             }
 
-            let result: IndexDeleteResponse = response.json().await?;
+            let result: IndexDeleteResponse =
+                response.json().await.map_err(|e| anyhow!("{}", e))?;
             if json {
                 let output = serde_json::to_string_pretty(&result)?;
                 println!("{}", output);
