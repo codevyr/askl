@@ -9,6 +9,7 @@ fn shared_test_store() -> IndexStore {
     let manager = ConnectionManager::<PgConnection>::new(url);
     let pool = Pool::builder()
         .test_on_check_out(true)
+        .max_size(1)
         .build(manager)
         .unwrap();
     IndexStore::from_pool(pool)
