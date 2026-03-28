@@ -4,7 +4,7 @@ use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::{Identifier, NamedArgument, PositionalArgument, Rule};
 use crate::parser_context::{
     ParserContext, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FILE, SYMBOL_TYPE_FUNCTION,
-    SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
+    SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE, SYMBOL_TYPE_DATA,
 };
 use crate::span::Span;
 use crate::statement::Statement;
@@ -90,6 +90,7 @@ pub(crate) fn build_generic_verb(
         TypeSelector::NAME_MODULE => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_MODULE),
         TypeSelector::NAME_DIRECTORY => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_DIRECTORY),
         TypeSelector::NAME_TYPE => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_TYPE),
+        TypeSelector::NAME_DATA => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_DATA),
         unknown => Err(anyhow!("unknown verb : {}", unknown)),
     };
 
@@ -804,6 +805,7 @@ impl TypeSelector {
     pub(super) const NAME_MODULE: &'static str = "mod";
     pub(super) const NAME_DIRECTORY: &'static str = "dir";
     pub(super) const NAME_TYPE: &'static str = "type";
+    pub(super) const NAME_DATA: &'static str = "data";
 
     pub fn new(
         span: Span,
@@ -878,6 +880,7 @@ impl Verb for TypeSelector {
             SYMBOL_TYPE_MODULE => TypeSelector::NAME_MODULE,
             SYMBOL_TYPE_DIRECTORY => TypeSelector::NAME_DIRECTORY,
             SYMBOL_TYPE_TYPE => TypeSelector::NAME_TYPE,
+            SYMBOL_TYPE_DATA => TypeSelector::NAME_DATA,
             _ => "type_selector",
         }
     }
