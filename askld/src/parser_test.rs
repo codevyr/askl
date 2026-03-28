@@ -214,3 +214,15 @@ fn bare_verb_no_args() {
     let ast = parse("preamble").unwrap();
     assert_eq!(ast.scope().statements().count(), 1);
 }
+
+#[test]
+fn line_comment() {
+    let ast = parse("\"a\" // this is a comment\n\"b\"").unwrap();
+    assert_eq!(ast.scope().statements().count(), 2);
+}
+
+#[test]
+fn line_comment_at_end() {
+    let ast = parse("\"a\" // trailing comment").unwrap();
+    assert_eq!(ast.scope().statements().count(), 1);
+}

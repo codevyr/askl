@@ -1,4 +1,4 @@
-COMMENT = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+COMMENT = _{ "//" ~ (!NEWLINE ~ ANY)* | "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
 WHITESPACE = _{(" " | "\t")+}
 nl = _{ NEWLINE* }
 ident = @{ XID_START ~ XID_CONTINUE* }
