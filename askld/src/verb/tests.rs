@@ -60,8 +60,8 @@ async fn test_select_matching_name() {
 
 #[test]
 fn test_ignore_package_filter() {
-    let query = r#"@preamble {
-    @ignore(package="foo")
+    let query = r#"preamble {
+    ignore(package="foo")
 }
 "foo"
 "foo.bar"
@@ -83,7 +83,7 @@ fn test_ignore_package_filter() {
 
 #[test]
 fn test_data_verb() {
-    let res = run_query("verb_test.sql", r#"@data "Debug";"#);
+    let res = run_query("verb_test.sql", r#"data "Debug";"#);
     assert_eq!(
         res.nodes.as_vec(),
         vec![SymbolInstanceId::new(97)]
@@ -92,7 +92,7 @@ fn test_data_verb() {
 
 #[test]
 fn test_data_verb_full_name() {
-    let res = run_query("verb_test.sql", r#"@data "config.Debug";"#);
+    let res = run_query("verb_test.sql", r#"data "config.Debug";"#);
     assert_eq!(
         res.nodes.as_vec(),
         vec![SymbolInstanceId::new(97)]
@@ -101,8 +101,8 @@ fn test_data_verb_full_name() {
 
 #[test]
 fn test_ignore_package_filter_inline() {
-    // Single-line @preamble still works (backward compat)
-    let query = r#"@preamble @ignore(package="foo")
+    // Single-line preamble still works (backward compat)
+    let query = r#"preamble ignore(package="foo")
 "foo"
 "foo.bar"
 "foobar"
@@ -123,10 +123,10 @@ fn test_ignore_package_filter_inline() {
 
 #[test]
 fn test_preamble_scope_multiple_ignores() {
-    // Multiple @ignore verbs in preamble scope
-    let query = r#"@preamble {
-    @ignore(package="foo")
-    @ignore(package="bar")
+    // Multiple ignore verbs in preamble scope
+    let query = r#"preamble {
+    ignore(package="foo")
+    ignore(package="bar")
 }
 "foo"
 "foo.bar"
@@ -149,7 +149,7 @@ fn test_preamble_scope_multiple_ignores() {
 #[test]
 fn test_preamble_scope_with_semicolons() {
     // Semicolons still work as separators inside preamble scope
-    let query = r#"@preamble { @ignore(package="foo") }
+    let query = r#"preamble { ignore(package="foo") }
 "foo"
 "foo.bar"
 "foobar"
@@ -170,8 +170,8 @@ fn test_preamble_scope_with_semicolons() {
 
 #[test]
 fn test_preamble_empty_scope() {
-    // @preamble with empty scope is a no-op — should not panic
-    let query = r#"@preamble {
+    // preamble with empty scope is a no-op — should not panic
+    let query = r#"preamble {
 }
 "foo"
 "tar"

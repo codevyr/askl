@@ -27,6 +27,7 @@ mod preamble;
 pub use self::generic::{DefaultTypeFilter, GenericFilter, GenericSelector, NameSelector, UnitVerb};
 
 use self::generic::{build_generic_verb, ForcedVerb};
+use self::labels::{LabelVerb, UserVerb};
 
 pub fn build_verb(
     ctx: Rc<ParserContext>,
@@ -49,6 +50,23 @@ pub fn build_verb(
         build_generic_verb(ctx.clone(), verb)?
     } else {
         match verb.as_rule() {
+            Rule::label_shortcut => {
+                let label_ident = verb.into_inner().next().unwrap();
+                let positional = vec![label_ident.as_str().to_string()];
+                LabelVerb::new(verb_span.clone(), &positional, &HashMap::new())
+            }
+            Rule::inherit_label_shortcut => {
+                let label_ident = verb.into_inner().next().unwrap();
+                let positional = vec![label_ident.as_str().to_string()];
+                let mut named = HashMap::new();
+                named.insert("inherit".to_string(), "true".to_string());
+                LabelVerb::new(verb_span.clone(), &positional, &named)
+            }
+            Rule::use_shortcut => {
+                let label_ident = verb.into_inner().next().unwrap();
+                let positional = vec![label_ident.as_str().to_string()];
+                UserVerb::new(verb_span.clone(), &positional, &HashMap::new())
+            }
             Rule::plain_filter => {
                 let ident = verb.into_inner().next().unwrap();
                 let positional = vec![];
@@ -175,7 +193,7 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
     }
 
     /// Whether this selector provides no meaningful constraint on results.
-    /// True for UnitVerb (via is_unit) and bare type selectors like `@func`
+    /// True for UnitVerb (via is_unit) and bare type selectors like `func`
     /// (filter mode, no name pattern). Used by mark_non_constraining to detect
     /// statements whose selection is entirely child-derived.
     fn is_non_constraining_selector(&self) -> bool {
