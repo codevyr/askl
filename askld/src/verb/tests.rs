@@ -60,13 +60,13 @@ async fn test_select_matching_name() {
 
 #[test]
 fn test_ignore_package_filter() {
-    let query = r#"
-@preamble
-@ignore(package="foo");
-"foo";
-"foo.bar";
-"foobar";
-"tar";
+    let query = r#"@preamble {
+    @ignore(package="foo")
+}
+"foo"
+"foo.bar"
+"foobar"
+"tar"
 "#;
 
     let res = run_query("verb_test.sql", query);
@@ -97,4 +97,86 @@ fn test_data_verb_full_name() {
         res.nodes.as_vec(),
         vec![SymbolInstanceId::new(97)]
     );
+}
+
+#[test]
+fn test_ignore_package_filter_inline() {
+    // Single-line @preamble still works (backward compat)
+    let query = r#"@preamble @ignore(package="foo")
+"foo"
+"foo.bar"
+"foobar"
+"tar"
+"#;
+
+    let res = run_query("verb_test.sql", query);
+
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(93),
+            SymbolInstanceId::new(94),
+        ]
+    );
+}
+
+#[test]
+fn test_preamble_scope_multiple_ignores() {
+    // Multiple @ignore verbs in preamble scope
+    let query = r#"@preamble {
+    @ignore(package="foo")
+    @ignore(package="bar")
+}
+"foo"
+"foo.bar"
+"foobar"
+"tar"
+"#;
+
+    let res = run_query("verb_test.sql", query);
+
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(93),
+            SymbolInstanceId::new(94),
+        ]
+    );
+}
+
+#[test]
+fn test_preamble_scope_with_semicolons() {
+    // Semicolons still work as separators inside preamble scope
+    let query = r#"@preamble { @ignore(package="foo") }
+"foo"
+"foo.bar"
+"foobar"
+"tar"
+"#;
+
+    let res = run_query("verb_test.sql", query);
+
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(93),
+            SymbolInstanceId::new(94),
+        ]
+    );
+}
+
+#[test]
+fn test_preamble_empty_scope() {
+    // @preamble with empty scope is a no-op — should not panic
+    let query = r#"@preamble {
+}
+"foo"
+"tar"
+"#;
+
+    let res = run_query("verb_test.sql", query);
+    assert!(!res.nodes.as_vec().is_empty());
 }
