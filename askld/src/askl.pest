@@ -1,13 +1,14 @@
 COMMENT = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
-WHITESPACE = _{(" " | "\t" | NEWLINE)+}
+WHITESPACE = _{(" " | "\t")+}
+nl = _{ NEWLINE* }
 ident = @{ XID_START ~ XID_CONTINUE* }
 string = @{(!"\"" ~ ANY)*}
 quoted_string = _{ "\"" ~ string  ~ "\""}
 named_argument = ${ident ~ "=" ~ quoted_string}
-named_arguments = _{named_argument ~ ("," ~ named_argument)*}
+named_arguments = _{named_argument ~ (nl ~ "," ~ nl ~ named_argument)*}
 positional_argument = { quoted_string }
-positional_arguments = _{positional_argument ~ ("," ~ positional_argument)* }
-verb_arguments = _{ (positional_arguments ~ "," ~  named_arguments) | positional_arguments | named_arguments }
+positional_arguments = _{positional_argument ~ (nl ~ "," ~ nl ~ positional_argument)* }
+verb_arguments = _{ nl ~ ((positional_arguments ~ nl ~ "," ~ nl ~ named_arguments) | positional_arguments | named_arguments) ~ nl }
 generic_ident = ${ "@" ~ ident }
 generic_verb = { generic_ident ~ ("(" ~ verb_arguments ~ ")")?}
 plain_filter = { quoted_string }
@@ -16,6 +17,6 @@ special_verb = _{ plain_filter | forced_verb }
 verb = { generic_verb | special_verb | ident }
 scope = { "{" ~ statements ~ "}" }
 statement = {(verb* ~ scope) | (verb+) | (scope)}
-statement_terminator = _{";"}
+statement_terminator = _{";" | NEWLINE}
 statements = _{ (statement_terminator* ~ statement)* ~ statement_terminator* }
 ask = _{SOI ~ statements ~ EOI }
