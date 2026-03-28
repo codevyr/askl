@@ -226,3 +226,44 @@ fn line_comment_at_end() {
     let ast = parse("\"a\" // trailing comment").unwrap();
     assert_eq!(ast.scope().statements().count(), 1);
 }
+
+// === Underscore as UnitVerb tests ===
+
+#[test]
+fn underscore_is_unit_verb() {
+    let ast = parse(r#""foo" { _ {} }"#).unwrap();
+    let stmts: Vec<_> = ast.scope().statements().collect();
+    assert_eq!(stmts.len(), 1);
+    assert_eq!(stmts[0].scope().statements().count(), 1);
+}
+
+#[test]
+fn underscore_alone() {
+    let ast = parse("_").unwrap();
+    assert_eq!(ast.scope().statements().count(), 1);
+}
+
+#[test]
+fn underscore_with_verbs() {
+    let ast = parse(r#"_ "bar""#).unwrap();
+    assert_eq!(ast.scope().statements().count(), 1);
+}
+
+#[test]
+fn underscore_equivalent_to_bare_scope() {
+    // Both `_ {}` and `{}` parse as a single top-level statement with an empty scope
+    let with_underscore = parse("_ {}").unwrap();
+    let bare_scope = parse("{}").unwrap();
+    let us: Vec<_> = with_underscore.scope().statements().collect();
+    let bs: Vec<_> = bare_scope.scope().statements().collect();
+    assert_eq!(us.len(), 1);
+    assert_eq!(bs.len(), 1);
+}
+
+#[test]
+fn extra_semicolons_do_not_create_statements() {
+    let ast = parse(r#""foo" { "bar" ; ; ; ; ; }"#).unwrap();
+    let stmts: Vec<_> = ast.scope().statements().collect();
+    assert_eq!(stmts.len(), 1); // just "foo" + scope
+    assert_eq!(stmts[0].scope().statements().count(), 1); // just "bar"
+}

@@ -1,7 +1,7 @@
 COMMENT = _{ "//" ~ (!NEWLINE ~ ANY)* | "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
 WHITESPACE = _{(" " | "\t")+}
 nl = _{ NEWLINE* }
-ident = @{ XID_START ~ XID_CONTINUE* }
+ident = @{ ("_" | XID_START) ~ XID_CONTINUE* }
 string = @{(!"\"" ~ ANY)*}
 quoted_string = _{ "\"" ~ string  ~ "\""}
 named_argument = ${ident ~ "=" ~ quoted_string}
