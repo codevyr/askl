@@ -1,4 +1,4 @@
-use crate::cfg::{EdgeList, HasEdgeList};
+use crate::cfg::EdgeList;
 use crate::execution_context::ExecutionContext;
 use crate::statement::ExecutionResult;
 use crate::test_support::{postgres_test_image, postgres_url, wait_for_postgres};
@@ -23,14 +23,6 @@ pub fn format_edges(edges: EdgeList) -> Vec<String> {
         .as_vec()
         .into_iter()
         .map(|(f, t, _)| format!("{}-{}", f.instance_id, t.instance_id))
-        .collect()
-}
-
-pub fn format_has_edges(has_edges: HasEdgeList) -> Vec<String> {
-    has_edges
-        .as_vec()
-        .into_iter()
-        .map(|e| format!("{}-{}", e.parent, e.child))
         .collect()
 }
 
@@ -110,9 +102,7 @@ fn create_fixture(fixture: &str) -> SharedFixture {
         let rt = Runtime::new().unwrap();
         let index = rt.block_on(async {
             wait_for_postgres(&url).await.unwrap();
-            let index = Index::connect(&url).await.unwrap();
-            index.load_test_input(&fixture).await.unwrap();
-            index
+            Index::connect_with_test_input(&url, &fixture).await.unwrap()
         });
 
         SharedFixture {

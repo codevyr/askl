@@ -43,6 +43,33 @@ impl Index {
         Self::from_pool(pool)
     }
 
+    /// Connect and load test data using a direct connection for DDL work,
+    /// then create a fresh pool. This avoids stale prepared statement caches
+    /// that occur when DDL (revert+rerun migrations) happens on pooled connections.
+    pub async fn connect_with_test_input(database_url: &str, input_path: &str) -> Result<Self> {
+        // Use a direct connection for all DDL + data loading so the pool
+        // never sees stale prepared statements.
+        {
+            let connection = &mut <PgConnection as diesel::Connection>::establish(database_url)
+                .map_err(|e| anyhow::anyhow!("Failed to establish connection: {}", e))?;
+
+            connection
+                .revert_all_migrations(super::MIGRATIONS)
+                .map_err(|e| anyhow::anyhow!("Failed to revert migrations: {}", e))?;
+            connection
+                .run_pending_migrations(super::MIGRATIONS)
+                .map_err(|e| anyhow::anyhow!("Failed to run migrations: {}", e))?;
+
+            Self::load_sql(connection, input_path);
+        }
+
+        let manager = ConnectionManager::<PgConnection>::new(database_url);
+        let pool = Pool::builder()
+            .build(manager)
+            .map_err(|e| anyhow::anyhow!("Failed to create connection pool: {}", e))?;
+        Ok(Self { pool })
+    }
+
     pub async fn new_in_memory() -> Result<Self> {
         Err(anyhow::anyhow!(
             "In-memory Postgres is not supported; use Index::connect with a test database"
@@ -58,24 +85,7 @@ impl Index {
     pub const TEST_INPUT_NESTED_FUNC: &'static str = "test_input_nested_func.sql";
     pub const VERB_TEST: &'static str = "verb_test.sql";
 
-    pub async fn load_test_input(&self, input_path: &str) -> Result<()> {
-        let connection = &mut self.pool.get().unwrap();
-
-        connection.revert_all_migrations(super::MIGRATIONS).unwrap();
-        println!(
-            "Has pending migrations: {}",
-            connection.has_pending_migration(super::MIGRATIONS).unwrap()
-        );
-        connection
-            .run_pending_migrations(super::MIGRATIONS)
-            .unwrap();
-
-        // Clear prepared statement cache after DDL changes to avoid
-        // "cached plan must not change result type" errors.
-        connection
-            .batch_execute("DEALLOCATE ALL")
-            .unwrap();
-
+    fn load_sql(connection: &mut PgConnection, input_path: &str) {
         match input_path {
             "test_input_a.sql" => {
                 connection
@@ -127,6 +137,23 @@ impl Index {
             }
             _ => panic!("Impossible input file"),
         };
+    }
+
+    pub async fn load_test_input(&self, input_path: &str) -> Result<()> {
+        let connection = &mut self.pool.get().unwrap();
+
+        connection.revert_all_migrations(super::MIGRATIONS).unwrap();
+        connection
+            .run_pending_migrations(super::MIGRATIONS)
+            .unwrap();
+
+        // Clear prepared statement cache after DDL changes to avoid
+        // "cached plan must not change result type" errors.
+        connection
+            .batch_execute("DEALLOCATE ALL")
+            .unwrap();
+
+        Self::load_sql(connection, input_path);
 
         Ok(())
     }
