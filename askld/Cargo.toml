@@ -43,6 +43,7 @@ base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 uuid = { version = "1.10", features = ["v4"] }
 diesel = { workspace = true, features = ["postgres", "r2d2", "chrono", "uuid"] }
+diesel-async = { workspace = true }
 diesel_migrations = { version = "2.2", features = ["postgres"] }
 prost = { workspace = true }
 sha2 = "0.10"
