@@ -58,4 +58,5 @@ enum SymbolType {
   DIRECTORY = 4;
   TYPE = 5;
   DATA = 6;
+  MACRO = 7;
 }

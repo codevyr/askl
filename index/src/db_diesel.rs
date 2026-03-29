@@ -12,7 +12,7 @@ pub use index_impl::Index;
 pub use mixins::{
     CompoundNameMixin, CurrentQuery, SymbolInstanceIdMixin, ExactNameMixin,
     IgnoreFilterMixin, ProjectFilterMixin, SymbolSearchMixin,
-    SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_FILE, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_TYPE, SYMBOL_TYPE_DATA,
+    SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_FILE, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_TYPE, SYMBOL_TYPE_DATA, SYMBOL_TYPE_MACRO,
 };
 pub use selection::{
     ChildReference, HasChildReference, HasParentReference, ObjectFullDiesel, ParentReference,
