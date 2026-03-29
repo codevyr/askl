@@ -432,6 +432,7 @@ pub enum SymbolType {
     Directory = 4,
     Type = 5,
     Data = 6,
+    Macro = 7,
 }
 
 impl SymbolType {
@@ -449,6 +450,7 @@ impl From<i64> for SymbolType {
             x if x == SymbolType::Directory as i64 => SymbolType::Directory,
             x if x == SymbolType::Type as i64 => SymbolType::Type,
             x if x == SymbolType::Data as i64 => SymbolType::Data,
+            x if x == SymbolType::Macro as i64 => SymbolType::Macro,
             _ => panic!("Invalid symbol type value {}", value),
         }
     }
@@ -463,6 +465,7 @@ impl From<i32> for SymbolType {
             x if x == SymbolType::Directory as i32 => SymbolType::Directory,
             x if x == SymbolType::Type as i32 => SymbolType::Type,
             x if x == SymbolType::Data as i32 => SymbolType::Data,
+            x if x == SymbolType::Macro as i32 => SymbolType::Macro,
             _ => panic!("Invalid symbol type value {}", value),
         }
     }
