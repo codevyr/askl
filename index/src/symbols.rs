@@ -565,7 +565,7 @@ pub fn symbol_name_to_path(input: &str) -> String {
 }
 
 pub fn symbol_query_to_lquery(input: &str) -> Option<String> {
-    build_lquery(input, false)
+    build_lquery(input, false, true)
 }
 
 /// Like `symbol_query_to_lquery` but anchors the last token to the end of the path.
@@ -575,11 +575,29 @@ pub fn symbol_query_to_lquery(input: &str) -> Option<String> {
 /// - `"kueue"` → `"*.kueue"`
 /// - `"pkg/kueue"` → `"*.pkg.*.kueue"`
 pub fn symbol_query_to_leaf_lquery(input: &str) -> Option<String> {
-    build_lquery(input, true)
+    build_lquery(input, true, true)
 }
 
-fn build_lquery(input: &str, anchor_leaf: bool) -> Option<String> {
-    let tokens = normalize_symbol_tokens(input);
+/// Build an lquery pattern from a search string.
+///
+/// * `anchor_leaf` – when true the last token is anchored to the end of the path
+/// * `dot_is_separator` – when true dots split into separate ltree labels (functions, modules);
+///   when false dots are replaced with `_` (files, directories) matching the DB trigger behavior
+///
+/// Examples (`dot_is_separator=true`):
+/// - `"pkg/kueue"` → `"*.pkg.*.kueue.*"` (anchor_leaf=false)
+/// - `"pkg/kueue"` → `"*.pkg.*.kueue"` (anchor_leaf=true)
+///
+/// Examples (`dot_is_separator=false`):
+/// - `"log.h"` → `"*.log_h.*"`
+/// - `"src/main.go"` → `"*.src.*.main_go.*"`
+pub(crate) fn build_lquery(input: &str, anchor_leaf: bool, dot_is_separator: bool) -> Option<String> {
+    let input: std::borrow::Cow<str> = if dot_is_separator {
+        std::borrow::Cow::Borrowed(input)
+    } else {
+        std::borrow::Cow::Owned(input.replace('.', "_"))
+    };
+    let tokens = normalize_symbol_tokens(&input);
     if tokens.is_empty() {
         return None;
     }
@@ -725,5 +743,31 @@ mod tests {
     #[test]
     fn test_symbol_query_to_leaf_lquery_empty() {
         assert_eq!(symbol_query_to_leaf_lquery(""), None);
+    }
+
+    #[test]
+    fn test_lquery_no_dot_sep_simple() {
+        // "log.h" with dot_is_separator=false → dot becomes underscore
+        assert_eq!(
+            build_lquery("log.h", false, false),
+            Some("*.log_h.*".to_string())
+        );
+    }
+
+    #[test]
+    fn test_lquery_no_dot_sep_with_path() {
+        // "src/main.go" → slash still splits, dot becomes underscore
+        assert_eq!(
+            build_lquery("src/main.go", false, false),
+            Some("*.src.*.main_go.*".to_string())
+        );
+    }
+
+    #[test]
+    fn test_leaf_lquery_no_dot_sep() {
+        assert_eq!(
+            build_lquery("log.h", true, false),
+            Some("*.log_h".to_string())
+        );
     }
 }
