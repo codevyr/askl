@@ -11,7 +11,7 @@ use diesel::sql_types::{Bool, Int4range, Integer, Text};
 use crate::ltree::Ltree;
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::schema_diesel as index_schema;
-use crate::symbols::{symbol_name_to_path, symbol_query_to_leaf_lquery, symbol_query_to_lquery, SymbolInstanceId};
+use crate::symbols::{symbol_name_to_path, symbol_query_to_lquery, build_lquery, SymbolInstanceId};
 
 use super::Connection;
 
@@ -409,16 +409,17 @@ pub struct CompoundNameMixin {
 
 impl CompoundNameMixin {
     pub fn new(compound_name: &str) -> Self {
-        Self {
-            raw_name: compound_name.to_string(),
-            lquery: symbol_query_to_lquery(compound_name),
-        }
+        Self::with_options(compound_name, false, true)
     }
 
     pub fn new_leaf_anchored(compound_name: &str) -> Self {
+        Self::with_options(compound_name, true, true)
+    }
+
+    pub fn with_options(compound_name: &str, leaf_anchored: bool, dot_is_separator: bool) -> Self {
         Self {
             raw_name: compound_name.to_string(),
-            lquery: symbol_query_to_leaf_lquery(compound_name),
+            lquery: build_lquery(compound_name, leaf_anchored, dot_is_separator),
         }
     }
 }

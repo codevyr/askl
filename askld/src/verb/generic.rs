@@ -845,6 +845,9 @@ impl TypeSelector {
             SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE if name.starts_with('/') => {
                 Box::new(ExactNameMixin::new(name))
             }
+            SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE => {
+                Box::new(CompoundNameMixin::with_options(name, leaf_anchored, false))
+            }
             _ if leaf_anchored => Box::new(CompoundNameMixin::new_leaf_anchored(name)),
             _ => Box::new(CompoundNameMixin::new(name)),
         }
