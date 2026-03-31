@@ -885,7 +885,11 @@ impl Verb for TypeSelector {
     }
 
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
-        Ok(self)
+        if self.filter_only && self.name_pattern.is_none() && self.inherit {
+            Err(anyhow!("Filter-only inherited TypeSelector is not a selector"))
+        } else {
+            Ok(self)
+        }
     }
 
     fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {

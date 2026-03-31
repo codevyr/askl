@@ -75,3 +75,55 @@ VALUES
 -- Reference from function foo to data config.Debug
 INSERT INTO symbol_refs(to_symbol, from_object, from_offset_range)
 VALUES (7, 1, int4range(915, 916));
+
+-- ============================================================================
+-- Data inheritance pruning test data
+-- Models: driver → id_table → {info_a, info_b} → {config_a, config_b} → {channels_a, channels_b}
+-- Query: data(inherit="true") "driver" {{{{"channels_a"}}}}
+-- Expected: only the path driver → id_table → info_a → config_a → channels_a
+-- ============================================================================
+
+-- Data symbols (type=6): driver chain
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
+VALUES
+    (20, 'driver',     1, 6, 2),
+    (21, 'id_table',   1, 6, 2),
+    (22, 'info_a',     1, 6, 2),
+    (23, 'info_b',     1, 6, 2),
+    (24, 'config_a',   1, 6, 2),
+    (25, 'config_b',   1, 6, 2),
+    (26, 'channels_a', 1, 6, 2),
+    (27, 'channels_b', 1, 6, 2);
+
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
+VALUES
+    (200, 20, 1, int4range(100, 120)),
+    (210, 21, 1, int4range(200, 300)),
+    (220, 22, 1, int4range(300, 320)),
+    (230, 23, 1, int4range(320, 340)),
+    (240, 24, 1, int4range(340, 360)),
+    (250, 25, 1, int4range(360, 380)),
+    (260, 26, 1, int4range(380, 400)),
+    (270, 27, 1, int4range(400, 420));
+
+-- driver refs id_table
+INSERT INTO symbol_refs(to_symbol, from_object, from_offset_range)
+VALUES (21, 1, int4range(110, 115));
+
+-- id_table refs info_a AND info_b
+INSERT INTO symbol_refs(to_symbol, from_object, from_offset_range)
+VALUES
+    (22, 1, int4range(210, 215)),
+    (23, 1, int4range(220, 225));
+
+-- info_a refs config_a, info_b refs config_b
+INSERT INTO symbol_refs(to_symbol, from_object, from_offset_range)
+VALUES
+    (24, 1, int4range(310, 315)),
+    (25, 1, int4range(330, 335));
+
+-- config_a refs channels_a, config_b refs channels_b
+INSERT INTO symbol_refs(to_symbol, from_object, from_offset_range)
+VALUES
+    (26, 1, int4range(350, 355)),
+    (27, 1, int4range(370, 375));
