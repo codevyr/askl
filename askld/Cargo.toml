@@ -13,7 +13,6 @@ pest_derive = {workspace = true}
 clap = {workspace = true}
 tokio = {workspace = true}
 anyhow = {workspace = true}
-lsp-types = {workspace = true}
 url = {workspace = true}
 serde = {workspace = true}
 serde_qs = {workspace = true}

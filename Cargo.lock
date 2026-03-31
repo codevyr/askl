@@ -311,7 +311,6 @@ dependencies = [
  "itertools 0.10.5",
  "jsonrpc-core",
  "log",
- "lsp-types",
  "pest",
  "pest_derive",
  "prost",
@@ -538,40 +537,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "clang"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "clang-ast",
- "clap",
- "console",
- "diesel",
- "diesel_migrations",
- "dotenv",
- "env_logger",
- "futures",
- "index",
- "indicatif",
- "itertools 0.10.5",
- "jsonrpc-core",
- "log",
- "lsp-types",
- "pest",
- "pest_derive",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "serde_stacker",
- "shell-words",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-actix-web",
- "url",
-]
-
-[[package]]
 name = "clang-ast"
 version = "0.1.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -675,15 +640,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "create-index"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "env_logger",
 ]
 
 [[package]]
@@ -810,11 +766,8 @@ dependencies = [
  "diesel_derives",
  "downcast-rs",
  "itoa",
- "libsqlite3-sys",
  "pq-sys",
  "r2d2",
- "sqlite-wasm-rs",
- "time",
  "uuid",
 ]
 
@@ -1115,33 +1068,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gen-ast"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clang",
- "clang-ast",
- "clap",
- "console",
- "env_logger",
- "futures",
- "index",
- "indicatif",
- "itertools 0.10.5",
- "jsonrpc-core",
- "log",
- "lsp-types",
- "pest",
- "pest_derive",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "shell-words",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1226,9 +1152,6 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
-dependencies = [
- "foldhash 0.2.0",
-]
 
 [[package]]
 name = "heck"
@@ -1467,7 +1390,6 @@ dependencies = [
  "itertools 0.10.5",
  "jsonrpc-core",
  "log",
- "lsp-types",
  "pest",
  "pest_derive",
  "rand 0.8.5",
@@ -1611,16 +1533,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libsqlite3-sys"
-version = "0.36.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95b4103cffefa72eb8428cb6b47d6627161e51c2739fc5e3b734584157bc642a"
-dependencies = [
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1663,19 +1575,6 @@ name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
-
-[[package]]
-name = "lsp-types"
-version = "0.95.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e34d33a8e9b006cd3fc4fe69a921affa097bae4bb65f76271f4644f9a334365"
-dependencies = [
- "bitflags 1.3.2",
- "serde",
- "serde_json",
- "serde_repr",
- "url",
-]
 
 [[package]]
 name = "matchers"
@@ -2352,16 +2251,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
-name = "rsqlite-vfs"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8a1f2315036ef6b1fbacd1972e8ee7688030b0a2121edfc2a6550febd41574d"
-dependencies = [
- "hashbrown 0.16.1",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2476,18 +2365,7 @@ checksum = "0431a35568651e363364210c91983c1da5eb29404d9f0928b67d4ebcfa7d330c"
 dependencies = [
  "percent-encoding",
  "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "serde_repr"
-version = "0.1.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "175ee3e80ae9982737ca543e96133087cbd9a485eecc3bc4de9c1a37b47ea59c"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
+ "thiserror",
 ]
 
 [[package]]
@@ -2642,18 +2520,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sqlite-wasm-rs"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f4206ed3a67690b9c29b77d728f6acc3ce78f16bf846d83c94f76400320181b"
-dependencies = [
- "cc",
- "js-sys",
- "rsqlite-vfs",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2785,16 +2651,7 @@ version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
 dependencies = [
- "thiserror-impl 1.0.69",
-]
-
-[[package]]
-name = "thiserror"
-version = "2.0.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
-dependencies = [
- "thiserror-impl 2.0.18",
+ "thiserror-impl",
 ]
 
 [[package]]
@@ -2802,17 +2659,6 @@ name = "thiserror-impl"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "2.0.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3135,7 +2981,6 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
- "serde_derive",
 ]
 
 [[package]]
