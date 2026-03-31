@@ -1,5 +1,5 @@
 use crate::test_util::{
-    format_edges, run_query, run_query_err, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC, TEST_INPUT_TREE_BROWSER,
+    format_edges, run_query, run_query_err, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC, TEST_INPUT_TREE_BROWSER, VERB_TEST,
 };
 use index::symbols::SymbolInstanceId;
 
@@ -2252,4 +2252,54 @@ fn non_constraining_containment_still_works() {
     assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo should be in results");
     assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar should be in results");
     assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz should be in results");
+}
+
+// ============================================================================
+// Data inheritance pruning tests
+// ============================================================================
+//
+// Test data in verb_test.sql:
+//   driver(200) → id_table(210) → info_a(220), info_b(230)
+//   info_a(220) → config_a(240), info_b(230) → config_b(250)
+//   config_a(240) → channels_a(260), config_b(250) → channels_b(270)
+
+#[test]
+fn data_inherit_with_name_prunes_to_target_path() {
+    // data(inherit="true") "driver" {{{{"channels_a"}}}}
+    // Should return ONLY the path: driver → id_table → info_a → config_a → channels_a
+    // NOT info_b, config_b, channels_b
+    const QUERY: &str = r#"data(inherit="true") "driver" {{{{"channels_a"}}}}"#;
+    let res = run_query(VERB_TEST, QUERY);
+
+    println!("{:#?}", res.nodes);
+    let nodes = res.nodes.as_vec();
+
+    assert!(nodes.contains(&SymbolInstanceId::new(200)), "driver");
+    assert!(nodes.contains(&SymbolInstanceId::new(210)), "id_table");
+    assert!(nodes.contains(&SymbolInstanceId::new(220)), "info_a");
+    assert!(nodes.contains(&SymbolInstanceId::new(240)), "config_a");
+    assert!(nodes.contains(&SymbolInstanceId::new(260)), "channels_a");
+
+    assert!(!nodes.contains(&SymbolInstanceId::new(230)), "info_b should be pruned");
+    assert!(!nodes.contains(&SymbolInstanceId::new(250)), "config_b should be pruned");
+    assert!(!nodes.contains(&SymbolInstanceId::new(270)), "channels_b should be pruned");
+}
+
+#[test]
+fn data_inherit_without_name_prunes_to_target_path() {
+    // Same query without the top-level name selector — should also prune correctly.
+    // data(inherit="true") {{{{"channels_a"}}}}
+    const QUERY: &str = r#"data(inherit="true") {{{{"channels_a"}}}}"#;
+    let res = run_query(VERB_TEST, QUERY);
+
+    println!("{:#?}", res.nodes);
+    let nodes = res.nodes.as_vec();
+
+    // Should contain the path to channels_a
+    assert!(nodes.contains(&SymbolInstanceId::new(260)), "channels_a");
+
+    // Should NOT contain the info_b/config_b/channels_b branch
+    assert!(!nodes.contains(&SymbolInstanceId::new(230)), "info_b should be pruned");
+    assert!(!nodes.contains(&SymbolInstanceId::new(250)), "config_b should be pruned");
+    assert!(!nodes.contains(&SymbolInstanceId::new(270)), "channels_b should be pruned");
 }
