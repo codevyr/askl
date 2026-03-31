@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["index", "create-index", "askld", "gen-ast"]
+members = ["index", "askld"]
 
 [workspace.dependencies]
 pest="2.8"
@@ -8,7 +8,6 @@ pest_derive="2.8"
 clap = { version = "3.2", features = ["derive", "env"] }
 tokio = { version = "1.48", features = ["process", "io-std", "io-util", "macros", "rt", "rt-multi-thread", "sync", "fs"] }
 anyhow = "1.0"
-lsp-types = "0.95"
 url = "2.2"
 serde = "1.0"
 serde_qs = "0.12"

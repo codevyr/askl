@@ -186,17 +186,7 @@ pub trait Symbols {
 }
 
 #[derive(
-    Debug,
-    Default,
-    Serialize,
-    Deserialize,
-    Copy,
-    Clone,
-    Eq,
-    PartialEq,
-    Hash,
-    PartialOrd,
-    Ord,
+    Debug, Default, Serialize, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord,
 )]
 pub struct SymbolId(pub i32);
 
@@ -360,18 +350,7 @@ impl serde::Serialize for FileId {
     }
 }
 
-#[derive(
-    Debug,
-    Default,
-    Deserialize,
-    Copy,
-    Clone,
-    Eq,
-    PartialEq,
-    Hash,
-    PartialOrd,
-    Ord,
-)]
+#[derive(Debug, Default, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct SymbolInstanceId(i32);
 
 impl SymbolInstanceId {
@@ -591,7 +570,11 @@ pub fn symbol_query_to_leaf_lquery(input: &str) -> Option<String> {
 /// Examples (`dot_is_separator=false`):
 /// - `"log.h"` → `"*.log_h.*"`
 /// - `"src/main.go"` → `"*.src.*.main_go.*"`
-pub(crate) fn build_lquery(input: &str, anchor_leaf: bool, dot_is_separator: bool) -> Option<String> {
+pub(crate) fn build_lquery(
+    input: &str,
+    anchor_leaf: bool,
+    dot_is_separator: bool,
+) -> Option<String> {
     let input: std::borrow::Cow<str> = if dot_is_separator {
         std::borrow::Cow::Borrowed(input)
     } else {

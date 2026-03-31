@@ -9,13 +9,7 @@
   # https://devenv.sh/packages/
   packages = with pkgs ; [
     git
-    git
-    sqlite-web
-    sqlite
     diesel-cli
-    sqlx-cli
-    llvmPackages_12.stdenv
-    llvmPackages_12.clang-unwrapped
 
     libpq
 
