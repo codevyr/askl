@@ -16,4 +16,6 @@ perf.data.old
 
 # pre-commit
 .pre-commit-config.yaml
-index/ast.json
+
+.claude
+.codex
