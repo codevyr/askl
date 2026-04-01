@@ -660,14 +660,7 @@ impl Statement {
                 if !child.command().has_selectors() {
                     continue;
                 }
-                // Skip weak UnitVerb children in the merge unless they have
-                // a non-weak descendant that provided real selection data.
-                // Without this, bare `{}` (UnitVerb) would contribute "everything"
-                // to the parent merge, diluting constraints.
-                if child.get_state().weak
-                    && child.command().is_unit()
-                    && child.children().all(|gc| gc.get_state().weak)
-                {
+                if should_skip_in_parent_merge(&child) {
                     continue;
                 }
                 if let Some(sel) = child.get_selection(ctx) {
@@ -738,6 +731,37 @@ impl Hierarchy for Statement {
     fn children(&self) -> StatementIter {
         self.scope().statements()
     }
+}
+
+/// Whether a child should be excluded from the bottom-up parent merge.
+///
+/// A bare `{}` (weak UnitVerb) can acquire a selection in two ways:
+///
+/// 1. **Top-down echo** — a strong ancestor above derived data downward
+///    through weak intermediaries.  Including this in the parent merge would
+///    feed the parent's own data back to it, diluting constraints.
+///
+/// 2. **Bottom-up signal** — a non-weak descendant (e.g. a NameSelector)
+///    originated data that propagated upward through weak intermediaries.
+///    This is real constraining data that the parent needs.
+///
+/// We distinguish the two structurally: if every descendant of the child is
+/// weak, no node below could have originated data, so any selection is
+/// necessarily a top-down echo (case 1) — skip it.  If a non-weak descendant
+/// exists, real data could have flowed up (case 2) — include it.
+///
+/// A direct-children check (`child.children().all(weak)`) is insufficient
+/// because `mark_weak_statements` propagates weakness downward via the
+/// `parent_weak` rule: a statement can be weak (from its parent) while having
+/// a non-weak child of its own.  So a weak grandchild may still carry data
+/// from a non-weak great-grandchild.  We therefore recurse the full subtree.
+fn should_skip_in_parent_merge(child: &Statement) -> bool {
+    child.get_state().weak && child.command().is_unit() && all_descendants_weak(child)
+}
+
+fn all_descendants_weak(stmt: &Statement) -> bool {
+    stmt.children()
+        .all(|child| child.get_state().weak && all_descendants_weak(&child))
 }
 
 pub fn init_dependencies(

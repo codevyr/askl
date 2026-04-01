@@ -2303,3 +2303,25 @@ fn data_inherit_without_name_prunes_to_target_path() {
     assert!(!nodes.contains(&SymbolInstanceId::new(250)), "config_b should be pruned");
     assert!(!nodes.contains(&SymbolInstanceId::new(270)), "channels_b should be pruned");
 }
+
+#[test]
+fn data_inherit_weak_parent_derives_full_chain() {
+    // Regression: weak UnitVerb children were skipped even when the parent was also weak,
+    // preventing the full chain from being derived.
+    // data(inherit="true") {{{"channels_a"}}} — 3-level deep, all intermediate statements are weak.
+    // Expected chain: id_table → info_a → config_a → channels_a
+    const QUERY: &str = r#"data(inherit="true") {{{"channels_a"}}}"#;
+    let res = run_query(VERB_TEST, QUERY);
+
+    println!("{:#?}", res.nodes);
+    let nodes = res.nodes.as_vec();
+
+    assert!(nodes.contains(&SymbolInstanceId::new(210)), "id_table must be derived");
+    assert!(nodes.contains(&SymbolInstanceId::new(220)), "info_a");
+    assert!(nodes.contains(&SymbolInstanceId::new(240)), "config_a");
+    assert!(nodes.contains(&SymbolInstanceId::new(260)), "channels_a");
+
+    assert!(!nodes.contains(&SymbolInstanceId::new(230)), "info_b should be pruned");
+    assert!(!nodes.contains(&SymbolInstanceId::new(250)), "config_b should be pruned");
+    assert!(!nodes.contains(&SymbolInstanceId::new(270)), "channels_b should be pruned");
+}
