@@ -15,7 +15,7 @@ use std::{collections::HashMap, sync::OnceLock};
 
 use crate::{cfg::ControlFlowGraph, execution_context::ExecutionContext, statement::Statement};
 
-use super::{DeriveMethod, Labeler, Selector, SelectorState, Verb};
+use super::{DeriveMethod, Labeler, NotificationContext, Selector, SelectorState, Verb};
 use crate::verb::Filter;
 
 #[derive(Debug)]
@@ -228,7 +228,7 @@ impl Selector for UserVerb {
         _index: &Index,
         _selector_filters: &[&dyn Filter],
         parent: &Statement,
-        _rel_type: RelationshipType,
+        _notif_ctx: NotificationContext,
     ) -> Result<Option<Selection>> {
         if !self.forced {
             bail!("Cannot derive from parent when not forced");
@@ -310,8 +310,7 @@ impl Selector for UserVerb {
         index: &Index,
         selector_filters: &[&dyn Filter],
         notifier: &Statement,
-        role: DependencyRole,
-        receiver_rel_type: RelationshipType,
+        notif_ctx: NotificationContext,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         if !notifier.command().has_selectors() {
             return Ok(NotificationResult::new(false, vec![]));
@@ -322,7 +321,7 @@ impl Selector for UserVerb {
             None => return Ok(NotificationResult::new(false, vec![])),
         };
 
-        if role == DependencyRole::User {
+        if notif_ctx.role == DependencyRole::User {
             let notifier_labels = notifier.command().get_labels();
             let self_label = match self.get_label() {
                 Some(label) => label,
@@ -333,19 +332,12 @@ impl Selector for UserVerb {
             }
         }
 
-        // Determine the relationship type based on role
-        let rel_type = match role {
-            DependencyRole::Child => receiver_rel_type,
-            DependencyRole::Parent => notifier.get_relationship_type(),
-            DependencyRole::User => notifier.get_relationship_type(),
-        };
-
         // For forced parent dependencies, we always derive fake selection.
-        if !self.forced || role != DependencyRole::Child {
+        if !self.forced || notif_ctx.role != DependencyRole::Child {
             let mut changed = false;
             let constrained = selector_state_with(&mut ctx.registry, self, |state| {
                 if state.selection.is_some() {
-                    changed = state.constrain_selection(&dependency, role, rel_type);
+                    changed = state.constrain_selection(&dependency, notif_ctx.role, notif_ctx.rel_type);
                     true
                 } else {
                     false
@@ -356,7 +348,7 @@ impl Selector for UserVerb {
                 return Ok(NotificationResult::new(changed, vec![]));
             }
 
-            if role == DependencyRole::Child {
+            if notif_ctx.role == DependencyRole::Child {
                 return Err(pest::error::Error::new_from_span(
                     CustomError {
                         message: format!(
@@ -370,7 +362,7 @@ impl Selector for UserVerb {
         }
 
         let mut selection = self
-            .derive_selection(ctx, index, selector_filters, notifier, role, rel_type)
+            .derive_selection(ctx, index, selector_filters, notifier, notif_ctx)
             .await
             .map_err(|e| {
                 pest::error::Error::new_from_span(
