@@ -3,8 +3,8 @@ use crate::execution_context::ExecutionContext;
 use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::{Identifier, NamedArgument, PositionalArgument, Rule};
 use crate::parser_context::{
-    ParserContext, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FILE, SYMBOL_TYPE_FUNCTION,
-    SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE, SYMBOL_TYPE_DATA, SYMBOL_TYPE_MACRO,
+    ParserContext, SYMBOL_TYPE_DATA, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FILE, SYMBOL_TYPE_FUNCTION,
+    SYMBOL_TYPE_MACRO, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
 };
 use crate::span::Span;
 use crate::statement::Statement;
@@ -73,13 +73,28 @@ pub(crate) fn build_generic_verb(
         HasModifier::NAME => HasModifier::new(verb_span, &positional, &named),
         RefsModifier::NAME => RefsModifier::new(verb_span, &positional, &named),
         DeriveModifier::NAME => DeriveModifier::new(verb_span, &positional, &named),
-        TypeSelector::NAME_FUNCTION => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FUNCTION),
-        TypeSelector::NAME_FILE => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FILE),
-        TypeSelector::NAME_MODULE => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_MODULE),
-        TypeSelector::NAME_DIRECTORY => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_DIRECTORY),
-        TypeSelector::NAME_TYPE => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_TYPE),
-        TypeSelector::NAME_DATA => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_DATA),
-        TypeSelector::NAME_MACRO => TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_MACRO),
+        UnnestModifier::NAME => UnnestModifier::new(verb_span, &positional, &named),
+        TypeSelector::NAME_FUNCTION => {
+            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FUNCTION)
+        }
+        TypeSelector::NAME_FILE => {
+            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FILE)
+        }
+        TypeSelector::NAME_MODULE => {
+            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_MODULE)
+        }
+        TypeSelector::NAME_DIRECTORY => {
+            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_DIRECTORY)
+        }
+        TypeSelector::NAME_TYPE => {
+            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_TYPE)
+        }
+        TypeSelector::NAME_DATA => {
+            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_DATA)
+        }
+        TypeSelector::NAME_MACRO => {
+            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_MACRO)
+        }
         "_" => Ok(UnitVerb::new(verb_span)),
         unknown => Err(anyhow!("unknown verb : {}", unknown)),
     };
@@ -235,7 +250,7 @@ impl Selector for ForcedVerb {
         _index: &Index,
         _selector_filters: &[&dyn Filter],
         parent: &Statement,
-        _rel_type: RelationshipType,
+        _notif_ctx: super::NotificationContext,
     ) -> Result<Option<Selection>> {
         let parent_selection = match parent.get_selection(ctx) {
             Some(selection) => selection,
@@ -696,7 +711,10 @@ impl DeriveModifier {
             match part.trim() {
                 "refs" => rel_type = rel_type | RelationshipType::REFS,
                 "has" => rel_type = rel_type | RelationshipType::HAS,
-                other => bail!("unknown relationship type '{}' in derive (expected 'refs' or 'has')", other),
+                other => bail!(
+                    "unknown relationship type '{}' in derive (expected 'refs' or 'has')",
+                    other
+                ),
             }
         }
 
@@ -740,6 +758,95 @@ impl Verb for DeriveModifier {
 impl Display for DeriveModifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "DeriveModifier")
+    }
+}
+
+/// UnnestModifier - opts in to full transitive traversal for scope derivation.
+/// Without unnest, `{ }` shows only direct children and top-level references.
+/// With `unnest`, all levels are included (original behavior).
+#[derive(Debug)]
+pub(super) struct UnnestModifier {
+    span: Span,
+}
+
+impl UnnestModifier {
+    pub(super) const NAME: &'static str = "unnest";
+
+    pub fn new(
+        span: Span,
+        _positional: &Vec<String>,
+        _named: &HashMap<String, String>,
+    ) -> Result<Arc<dyn Verb>> {
+        Ok(Arc::new(Self { span }))
+    }
+}
+
+impl Verb for UnnestModifier {
+    fn name(&self) -> &str {
+        UnnestModifier::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Skip
+    }
+
+    fn get_tag(&self) -> Option<VerbTag> {
+        Some(VerbTag::Unnest)
+    }
+}
+
+impl Display for UnnestModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "UnnestModifier")
+    }
+}
+
+/// DirectOnlyFilter - filter verb that adds DirectOnlyMixin to the search.
+/// Added automatically when a statement has a scope and unnest is not set.
+/// Restricts children/has_children queries to direct (non-transitive) results.
+#[derive(Debug)]
+pub struct DirectOnlyFilter {
+    span: Span,
+}
+
+impl DirectOnlyFilter {
+    pub fn new(span: Span) -> Arc<dyn Verb> {
+        Arc::new(Self { span })
+    }
+}
+
+impl Verb for DirectOnlyFilter {
+    fn name(&self) -> &str {
+        "direct_only_filter"
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
+        Ok(self)
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        // Don't inherit - each statement decides based on its own unnest flag
+        DeriveMethod::Skip
+    }
+}
+
+impl Filter for DirectOnlyFilter {
+    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
+        vec![Box::new(index::db_diesel::DirectOnlyMixin)]
+    }
+}
+
+impl Display for DirectOnlyFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DirectOnlyFilter")
     }
 }
 
@@ -812,8 +919,8 @@ impl TypeSelector {
         // Default: filter mode if no name pattern, selector mode if name provided
         // Can be overridden with explicit filter="true" or filter="false"
         let filter_only = match explicit_filter {
-            Some(true) => true,   // filter="true" forces filter mode
-            Some(false) => false, // filter="false" forces selector mode
+            Some(true) => true,             // filter="true" forces filter mode
+            Some(false) => false,           // filter="false" forces selector mode
             None => name_pattern.is_none(), // default based on name presence
         };
 
@@ -840,7 +947,11 @@ impl TypeSelector {
     /// Returns the appropriate name mixin for the given name and symbol type.
     /// Directory/file types with path args (starting with '/') use exact match;
     /// all other cases use compound name (ltree) matching.
-    fn name_mixin(name: &str, symbol_type_id: i32, leaf_anchored: bool) -> Box<dyn SymbolSearchMixin> {
+    fn name_mixin(
+        name: &str,
+        symbol_type_id: i32,
+        leaf_anchored: bool,
+    ) -> Box<dyn SymbolSearchMixin> {
         match symbol_type_id {
             SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE if name.starts_with('/') => {
                 Box::new(ExactNameMixin::new(name))
@@ -856,11 +967,14 @@ impl TypeSelector {
     /// Build search mixins for this type selector.
     /// Used by both `get_filter_mixins` and `select_from_all_impl` to avoid duplication.
     fn build_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
-        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![
-            Box::new(SymbolTypeMixin::new(self.symbol_type_id)),
-        ];
+        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> =
+            vec![Box::new(SymbolTypeMixin::new(self.symbol_type_id))];
         if let Some(ref name) = self.name_pattern {
-            mixins.push(Self::name_mixin(name, self.symbol_type_id, self.leaf_anchored));
+            mixins.push(Self::name_mixin(
+                name,
+                self.symbol_type_id,
+                self.leaf_anchored,
+            ));
         }
         mixins
     }
@@ -886,7 +1000,9 @@ impl Verb for TypeSelector {
 
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
         if self.filter_only && self.name_pattern.is_none() && self.inherit {
-            Err(anyhow!("Filter-only inherited TypeSelector is not a selector"))
+            Err(anyhow!(
+                "Filter-only inherited TypeSelector is not a selector"
+            ))
         } else {
             Ok(self)
         }
@@ -948,18 +1064,6 @@ impl Verb for TypeSelector {
         };
         ctx.set_default_symbol_types(default_types);
 
-        match self.symbol_type_id {
-            // Container types: set refs+has with inherit
-            SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE | SYMBOL_TYPE_MODULE => {
-                ctx.set_relationship_type_inherited(RelationshipType::REFS | RelationshipType::HAS);
-            }
-            // func/type/macro: explicitly set REFS to override any inherited refs+has
-            SYMBOL_TYPE_FUNCTION | SYMBOL_TYPE_TYPE | SYMBOL_TYPE_MACRO => {
-                ctx.set_relationship_type_explicit(RelationshipType::REFS);
-            }
-            _ => {}
-        }
-
         // Don't consume - still add this verb to the command
         Ok(false)
     }
@@ -983,7 +1087,11 @@ impl Filter for TypeSelector {
             // mod("test", filter="true") "a" to find functions named "test.a"
             // rather than restricting to MODULE-type symbols.
             let name = self.name_pattern.as_ref().unwrap();
-            vec![Self::name_mixin(name, self.symbol_type_id, self.leaf_anchored)]
+            vec![Self::name_mixin(
+                name,
+                self.symbol_type_id,
+                self.leaf_anchored,
+            )]
         } else {
             self.build_mixins()
         }
@@ -1091,6 +1199,9 @@ impl Verb for DefaultTypeFilter {
 
 impl Filter for DefaultTypeFilter {
     fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
+        if self.symbol_type_ids.is_empty() {
+            return vec![];
+        }
         vec![Box::new(DefaultSymbolTypeMixin::new(
             self.symbol_type_ids.clone(),
         ))]
@@ -1458,5 +1569,3 @@ impl SymbolSearchMixin for DefaultSymbolTypeMixin {
         ))
     }
 }
-
-

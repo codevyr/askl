@@ -4,7 +4,7 @@ use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::Rule;
 use crate::span::Span;
 use crate::statement::Statement;
-use crate::verb::{add_verb, DeriveMethod, Filter, Labeler, Selector, Verb};
+use crate::verb::{add_verb, DeriveMethod, Filter, Labeler, NotificationContext, Selector, Verb, VerbTag};
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::{Index, Selection, SymbolSearchMixin};
@@ -92,6 +92,11 @@ impl Command {
         self.verbs.iter().any(|verb| verb.as_selector().is_ok())
     }
 
+    /// Check if any verb has the given tag.
+    pub fn has_verb_tag(&self, tag: &VerbTag) -> bool {
+        self.verbs.iter().any(|v| v.get_tag().as_ref() == Some(tag))
+    }
+
     pub fn is_unit(&self) -> bool {
         self.selectors().all(|verb| verb.is_unit())
     }
@@ -153,8 +158,7 @@ impl Command {
         ctx: &mut ExecutionContext,
         index: &Index,
         notifier: &Statement,
-        role: DependencyRole,
-        receiver_rel_type: RelationshipType,
+        notif_ctx: NotificationContext,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         // Collect filters so we can iterate over them multiple times while notifying selectors.
         let mut changed = false;
@@ -162,7 +166,7 @@ impl Command {
         let selector_filters: Vec<&dyn Filter> = self.filters().collect();
         for selector in self.selectors() {
             let res = selector
-                .accept_notification(ctx, index, &selector_filters, notifier, role, receiver_rel_type)
+                .accept_notification(ctx, index, &selector_filters, notifier, notif_ctx)
                 .await?;
             changed |= res.changed;
             warnings.extend(res.warnings);

@@ -24,7 +24,7 @@ mod generic;
 mod labels;
 mod preamble;
 
-pub use self::generic::{DefaultTypeFilter, GenericFilter, GenericSelector, NameSelector, UnitVerb};
+pub use self::generic::{DefaultTypeFilter, DirectOnlyFilter, GenericFilter, GenericSelector, NameSelector, UnitVerb};
 
 use self::generic::{build_generic_verb, ForcedVerb};
 use self::labels::{LabelVerb, UserVerb};
@@ -135,6 +135,17 @@ pub enum VerbTag {
     NameSelector,
     TypeFilter,
     GenericFilter(&'static str),
+    Unnest,
+}
+
+/// Bundles the notification parameters that always travel together through
+/// the notification chain: dependency role, resolved relationship type, and
+/// whether the receiver uses unnest mode.
+#[derive(Debug, Clone, Copy)]
+pub struct NotificationContext {
+    pub role: DependencyRole,
+    pub rel_type: RelationshipType,
+    pub unnest: bool,
 }
 
 pub fn add_verb(existing_verbs: Vec<Arc<dyn Verb>>, new_verb: Arc<dyn Verb>) -> Vec<Arc<dyn Verb>> {
@@ -407,8 +418,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         index: &Index,
         selector_filters: &[&dyn Filter],
         notifier: &Statement,
-        role: DependencyRole,
-        receiver_rel_type: RelationshipType,
+        notif_ctx: NotificationContext,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         if !notifier.command().has_selectors() {
             return Ok(NotificationResult::new(false, vec![]));
@@ -419,7 +429,7 @@ pub trait Selector: std::fmt::Debug + Verb {
             None => return Ok(NotificationResult::new(false, vec![])),
         };
 
-        if role == DependencyRole::User {
+        if notif_ctx.role == DependencyRole::User {
             let notifier_labels = notifier.command().get_labels();
             let self_label = match self.get_label() {
                 Some(label) => label,
@@ -439,21 +449,10 @@ pub trait Selector: std::fmt::Debug + Verb {
             }
         }
 
-        // Determine the relationship type based on role:
-        // - role=Child (I'm a child, notifier is parent): use receiver's (my) relationship_type
-        //   This is how I relate to my parent
-        // - role=Parent (I'm a parent, notifier is child): use notifier's (child's) relationship_type
-        //   This is how the child relates to me
-        let rel_type = match role {
-            DependencyRole::Child => receiver_rel_type,
-            DependencyRole::Parent => notifier.get_relationship_type(),
-            DependencyRole::User => notifier.get_relationship_type(),
-        };
-
         let mut changed = false;
         let (constrained, warnings) = selector_state_with(&mut ctx.registry, self, |state| {
             if state.selection.is_some() {
-                changed = state.constrain_selection(&dependency, role, rel_type);
+                changed = state.constrain_selection(&dependency, notif_ctx.role, notif_ctx.rel_type);
                 let mut warnings = vec![];
                 if changed && state.selection.as_ref().unwrap().nodes.is_empty() {
                     warnings.push(Error::new_from_span(
@@ -477,7 +476,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         }
 
         let mut selection = self
-            .derive_selection(ctx, index, selector_filters, notifier, role, rel_type)
+            .derive_selection(ctx, index, selector_filters, notifier, notif_ctx)
             .await
             .map_err(|e| {
                 Error::new_from_span(
@@ -589,16 +588,15 @@ pub trait Selector: std::fmt::Debug + Verb {
         index: &Index,
         selector_filters: &[&dyn Filter],
         notifier: &Statement,
-        role: DependencyRole,
-        rel_type: RelationshipType,
+        notif_ctx: NotificationContext,
     ) -> Result<Option<Selection>> {
-        let selection = match role {
+        let selection = match notif_ctx.role {
             DependencyRole::Child => {
-                self.derive_from_parent(ctx, index, selector_filters, notifier, rel_type)
+                self.derive_from_parent(ctx, index, selector_filters, notifier, notif_ctx)
                     .await?
             }
             DependencyRole::Parent => {
-                self.derive_from_child(ctx, index, selector_filters, notifier, rel_type)
+                self.derive_from_child(ctx, index, selector_filters, notifier, notif_ctx.rel_type)
                     .await?
             }
             DependencyRole::User => {
@@ -612,38 +610,20 @@ pub trait Selector: std::fmt::Debug + Verb {
 
     /// Derive from parent (I am a child, collect IDs from parent's children/has_children).
     /// Handles combined relationship types with union semantics.
+    /// When unnest is false, filters to direct children only.
     async fn derive_from_parent(
         &self,
         ctx: &mut ExecutionContext,
         index: &Index,
         selector_filters: &[&dyn Filter],
         parent: &Statement,
-        rel_type: RelationshipType,
+        notif_ctx: NotificationContext,
     ) -> Result<Option<Selection>> {
         let parent_sel = match parent.get_selection(&ctx) {
             Some(selection) => selection,
             None => return Ok(None),
         };
-        let capacity = if rel_type.contains(RelationshipType::REFS) { parent_sel.children.len() } else { 0 }
-            + if rel_type.contains(RelationshipType::HAS) { parent_sel.has_children.len() } else { 0 };
-        let mut decl_ids = Vec::with_capacity(capacity);
-        if rel_type.contains(RelationshipType::REFS) {
-            decl_ids.extend(
-                parent_sel
-                    .children
-                    .iter()
-                    .map(|p| SymbolInstanceId::new(p.symbol_instance.id)),
-            );
-        }
-        if rel_type.contains(RelationshipType::HAS) {
-            decl_ids.extend(
-                parent_sel
-                    .has_children
-                    .iter()
-                    .map(|p| SymbolInstanceId::new(p.child_instance.id)),
-            );
-        }
-        let decl_ids: Vec<_> = decl_ids.into_iter().unique().collect();
+        let decl_ids = collect_child_ids(&parent_sel, notif_ctx.rel_type, !notif_ctx.unnest);
 
         let selection = self
             .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
@@ -726,6 +706,172 @@ pub trait Selector: std::fmt::Debug + Verb {
 
 pub trait Labeler: std::fmt::Debug {
     fn get_label(&self) -> Option<String>;
+}
+
+// ============================================================================
+// Child ID collection for derive_from_parent
+// ============================================================================
+
+/// Collect child symbol instance IDs from a parent's selection.
+/// When `direct_only` is true, filters to direct children using spatial helpers.
+fn collect_child_ids(
+    parent_sel: &Selection,
+    rel_type: RelationshipType,
+    direct_only: bool,
+) -> Vec<SymbolInstanceId> {
+    let capacity = if rel_type.contains(RelationshipType::REFS) { parent_sel.children.len() } else { 0 }
+        + if rel_type.contains(RelationshipType::HAS) { parent_sel.has_children.len() } else { 0 };
+    let mut decl_ids = Vec::with_capacity(capacity);
+    if rel_type.contains(RelationshipType::REFS) {
+        if direct_only {
+            decl_ids.extend(
+                parent_sel
+                    .children
+                    .iter()
+                    .filter(|c| {
+                        // Skip refs originating from nested HAS children — those refs
+                        // belong to the child scope, not the parent.
+                        let from_nested = parent_sel.has_children.iter()
+                            .any(|h| h.child_instance.id == c.from_instance.id);
+                        !from_nested && is_direct_child_ref(&c.from_instance, c, &parent_sel.has_children)
+                    })
+                    .map(|p| SymbolInstanceId::new(p.symbol_instance.id)),
+            );
+        } else {
+            decl_ids.extend(
+                parent_sel
+                    .children
+                    .iter()
+                    .map(|p| SymbolInstanceId::new(p.symbol_instance.id)),
+            );
+        }
+    }
+    if rel_type.contains(RelationshipType::HAS) {
+        if direct_only {
+            decl_ids.extend(
+                parent_sel
+                    .has_children
+                    .iter()
+                    .filter(|c| is_direct_has_child(&c.parent_instance, c, &parent_sel.has_children))
+                    .map(|p| SymbolInstanceId::new(p.child_instance.id)),
+            );
+        } else {
+            decl_ids.extend(
+                parent_sel
+                    .has_children
+                    .iter()
+                    .map(|p| SymbolInstanceId::new(p.child_instance.id)),
+            );
+        }
+    }
+    decl_ids.into_iter().unique().collect()
+}
+
+// ============================================================================
+// Direct-only filtering helpers for collect_child_ids
+// ============================================================================
+
+use crate::offset_range::range_bounds_to_offsets;
+use index::db_diesel::{HasChildReference, ChildReference};
+use index::models_diesel::SymbolInstance;
+use std::ops::Bound;
+
+/// Map symbol_type id to its containment level.
+/// Higher level = broader container (directory > module > file > function).
+fn symbol_type_level(symbol_type: i32) -> i32 {
+    match symbol_type {
+        2 => 2, // file
+        3 => 3, // module
+        4 => 4, // directory
+        _ => 1, // function, type, data, macro
+    }
+}
+
+/// Check if range `outer` contains range `inner` (inclusive, like PostgreSQL @>).
+fn range_contains(
+    outer: &(Bound<i32>, Bound<i32>),
+    inner: &(Bound<i32>, Bound<i32>),
+) -> bool {
+    let Some((os, oe)) = range_bounds_to_offsets(outer) else { return false };
+    let Some((is, ie)) = range_bounds_to_offsets(inner) else { return false };
+    os <= is && ie <= oe
+}
+
+/// Check if two ranges are equal.
+fn ranges_equal(
+    a: &(Bound<i32>, Bound<i32>),
+    b: &(Bound<i32>, Bound<i32>),
+) -> bool {
+    let Some((as_, ae)) = range_bounds_to_offsets(a) else { return false };
+    let Some((bs, be)) = range_bounds_to_offsets(b) else { return false };
+    as_ == bs && ae == be
+}
+
+/// A has_child C is "direct" relative to parent P if there is no intermediate M
+/// in the has_children list that sits strictly between P and C in the
+/// containment hierarchy. Only symbols at STRICTLY nested ranges (not equal
+/// to parent or child) count as intermediaries — co-located symbols at the
+/// same range but different type levels are peers, not hierarchy barriers.
+fn is_direct_has_child(
+    parent_instance: &SymbolInstance,
+    child: &HasChildReference,
+    all_has_children: &[HasChildReference],
+) -> bool {
+    !all_has_children.iter().any(|mid| {
+        if mid.child_instance.id == child.child_instance.id {
+            return false;
+        }
+        if mid.child_instance.object_id != parent_instance.object_id {
+            return false;
+        }
+        // mid's range must be contained in parent and contain child
+        if !range_contains(&parent_instance.offset_range, &mid.child_instance.offset_range) {
+            return false;
+        }
+        if !range_contains(&mid.child_instance.offset_range, &child.child_instance.offset_range) {
+            return false;
+        }
+        // mid is only an intermediary if its range is strictly between parent and child
+        // (not equal to either). Equal-range symbols are co-located peers.
+        let below_parent = !ranges_equal(&mid.child_instance.offset_range, &parent_instance.offset_range);
+        let above_child = !ranges_equal(&mid.child_instance.offset_range, &child.child_instance.offset_range);
+        below_parent && above_child
+    })
+}
+
+/// A child ref is "direct" relative to its parent if no has_child container
+/// sits between the parent and the ref's source location. Only containers
+/// at STRICTLY nested ranges AND same-or-higher type level count as
+/// intermediaries. This ensures that lower-level containers (e.g. functions
+/// inside a module) don't block refs from appearing at the module level.
+fn is_direct_child_ref(
+    parent_instance: &SymbolInstance,
+    child_ref: &ChildReference,
+    all_has_children: &[HasChildReference],
+) -> bool {
+    let parent_level = symbol_type_level(child_ref.parent_symbol.symbol_type);
+    let ref_range = &child_ref.symbol_ref.from_offset_range;
+    !all_has_children.iter().any(|container| {
+        if container.child_instance.object_id != parent_instance.object_id {
+            return false;
+        }
+        // Container must be inside parent and contain the ref's location
+        if !range_contains(&parent_instance.offset_range, &container.child_instance.offset_range) {
+            return false;
+        }
+        if !range_contains(&container.child_instance.offset_range, ref_range) {
+            return false;
+        }
+        // Container must be at a strictly nested range (not co-located with parent)
+        if ranges_equal(&container.child_instance.offset_range, &parent_instance.offset_range) {
+            return false;
+        }
+        // Only filter refs inside containers at the same or higher abstraction level.
+        // e.g. inner function (level 1) inside outer function (level 1) → filter
+        // e.g. function (level 1) inside module (level 3) → don't filter
+        let cont_level = symbol_type_level(container.child_symbol.symbol_type);
+        cont_level >= parent_level
+    })
 }
 
 #[cfg(test)]

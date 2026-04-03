@@ -53,16 +53,23 @@ fn double_parent_query() {
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
+    // With REFS|HAS default, {} also picks up file/dir containers
     assert_eq!(
         res.nodes.as_vec(),
         vec![
             SymbolInstanceId::new(91),
             SymbolInstanceId::new(92),
-            SymbolInstanceId::new(942)
+            SymbolInstanceId::new(942),
+            SymbolInstanceId::new(1001),
+            SymbolInstanceId::new(1003),
         ]
     );
     let edges = format_edges(res.edges);
-    assert_eq!(edges, vec!["91-92", "91-92", "942-91", "942-92"]);
+    assert_eq!(edges, vec![
+        "91-92", "91-92", "942-91", "942-92",
+        "1001-91", "1001-92", "1001-92", "1001-92",
+        "1003-91", "1003-92", "1003-92", "1003-92",
+    ]);
 }
 
 // This test is ignored for now because current behavior considers children of
@@ -956,12 +963,18 @@ fn weak_grandparent() {
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
+    // With REFS|HAS default, {} also picks up file/dir containers
     assert_eq!(
         res.nodes.as_vec(),
-        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(942)]
+        vec![
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(942),
+            SymbolInstanceId::new(1001),
+            SymbolInstanceId::new(1003),
+        ]
     );
     let edges = format_edges(res.edges);
-    assert_eq!(edges, vec!["942-91"]);
+    assert_eq!(edges, vec!["942-91", "1001-91", "1003-91"]);
 }
 
 #[test]
@@ -2031,9 +2044,10 @@ fn dir_func_overrides_inherited_refs_has() {
 
 #[test]
 fn func_overrides_has_in_nested_scope() {
-    // func sets REFS explicitly, overriding inherited HAS from the has modifier.
-    // So "bar" resolves via REFS: foo calls bar → result is file + foo + bar.
-    const QUERY: &str = r#"file("/main.go") has { func { "bar" } }"#;
+    // TypeSelector (func) does NOT override the inherited relationship type.
+    // Use explicit `refs` to switch from inherited HAS back to REFS.
+    // foo calls bar → result is file + foo + bar.
+    const QUERY: &str = r#"file("/main.go") has { func refs { "bar" } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     let nodes = res.nodes.as_vec();
@@ -2324,4 +2338,133 @@ fn data_inherit_weak_parent_derives_full_chain() {
     assert!(!nodes.contains(&SymbolInstanceId::new(230)), "info_b should be pruned");
     assert!(!nodes.contains(&SymbolInstanceId::new(250)), "config_b should be pruned");
     assert!(!nodes.contains(&SymbolInstanceId::new(270)), "channels_b should be pruned");
+}
+
+// ============================================================================
+// Direct-only / unnest tests
+// ============================================================================
+//
+// TEST_INPUT_NESTED_FUNC:
+//   dir "/" [0,1000), file "/main.go" [0,1000), module "testmodule" [0,1000)
+//   foo [100,500) containing anon150 [150,300) and anon350 [350,490)
+//   bar [500,700), baz [700,900)
+//   Refs: anon150 body [160,170) → bar, bar [550,560) → baz
+
+#[test]
+fn direct_only_has_file_shows_only_direct_children() {
+    // file has { func } — only direct function children (not nested anon funcs)
+    const QUERY: &str = r#"file("/main.go") has { func }"#;
+    let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    println!("direct has func: {:?}", nodes);
+    // foo, bar, baz are direct children; anon150, anon350 are inside foo
+    assert!(nodes.contains(&SymbolInstanceId::new(510)), "file");
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar");
+    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz");
+    assert!(!nodes.contains(&SymbolInstanceId::new(25)), "anon150 should be filtered");
+    assert!(!nodes.contains(&SymbolInstanceId::new(26)), "anon350 should be filtered");
+}
+
+#[test]
+fn unnest_has_file_shows_all_children() {
+    // file has { unnest func } — all function children including nested
+    const QUERY: &str = r#"file("/main.go") has { unnest func }"#;
+    let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    println!("unnest has func: {:?}", nodes);
+    assert!(nodes.contains(&SymbolInstanceId::new(510)), "file");
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
+    assert!(nodes.contains(&SymbolInstanceId::new(25)), "anon150");
+    assert!(nodes.contains(&SymbolInstanceId::new(26)), "anon350");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar");
+    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz");
+}
+
+#[test]
+fn direct_only_refs_hides_nested_refs() {
+    // foo { } — default REFS, direct-only: ref at [160,170) is inside anon150,
+    // so bar is NOT a direct ref from foo
+    const QUERY: &str = r#""foo" { }"#;
+    let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    println!("direct refs from foo: {:?}", nodes);
+    // Only foo itself — the ref to bar is inside anon150, not direct from foo
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
+    assert!(!nodes.contains(&SymbolInstanceId::new(30)), "bar should be filtered (inside anon150)");
+}
+
+#[test]
+fn unnest_refs_shows_all_refs() {
+    // foo { unnest } — unnest REFS: all refs including nested
+    const QUERY: &str = r#""foo" { unnest }"#;
+    let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    println!("unnest refs from foo: {:?}", nodes);
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar (via anon150 ref)");
+}
+
+#[test]
+fn direct_only_has_foo_shows_nested_funcs() {
+    // foo has { } — foo's direct HAS children are anon150 and anon350
+    // (no intermediary between foo and its nested functions)
+    const QUERY: &str = r#""foo" has { }"#;
+    let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    println!("foo direct has children: {:?}", nodes);
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
+    assert!(nodes.contains(&SymbolInstanceId::new(25)), "anon150");
+    assert!(nodes.contains(&SymbolInstanceId::new(26)), "anon350");
+}
+
+#[test]
+fn direct_only_nested_scope_no_children_of_hidden() {
+    // "foo" refs { refs { } } — REFS-only at both levels.
+    // Level 1: bar is hidden (ref at [160,170) originates from inside anon150).
+    // Level 2: baz must NOT appear — bar was never in the intermediate selection,
+    // so bar→baz cannot be discovered.
+    const QUERY: &str = r#""foo" refs { refs { } }"#;
+    let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    println!("nested scope refs-only from foo: {:?}", nodes);
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
+    assert!(!nodes.contains(&SymbolInstanceId::new(30)), "bar hidden at level 1");
+    assert!(!nodes.contains(&SymbolInstanceId::new(40)), "baz must not leak from hidden bar");
+}
+
+#[test]
+fn unnest_nested_scope_shows_transitive_children() {
+    // "foo" refs { unnest refs { } } — unnest lifts the direct-only filter at level 1,
+    // so bar appears. Then level 2 (direct-only) finds bar's direct ref to baz.
+    const QUERY: &str = r#""foo" refs { unnest refs { } }"#;
+    let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    println!("unnest nested scope from foo: {:?}", nodes);
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar (via unnested ref)");
+    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz (direct ref from bar)");
+}
+
+#[test]
+fn direct_only_refs_module_shows_all_refs() {
+    // mod("testmodule") { } — REFS from module level. Functions (level 1) inside
+    // a module (level 3) are NOT intermediaries for REFS, so refs are visible.
+    const QUERY: &str = r#"mod("testmodule") { }"#;
+    let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    println!("module direct refs: {:?}", nodes);
+    // Module refs: anon150 → bar at [160,170), bar → baz at [550,560)
+    // Functions at level 1 don't block level 3 parent refs
+    assert!(nodes.contains(&SymbolInstanceId::new(10)), "testmodule");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar (via ref)");
+    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz (via ref)");
 }

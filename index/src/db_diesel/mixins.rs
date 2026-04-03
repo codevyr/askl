@@ -528,6 +528,64 @@ impl SymbolSearchMixin for ProjectFilterMixin {
     }
 }
 
+/// DirectOnlyMixin — filters children/has_children to "direct" only.
+///
+/// For HAS (containment): excludes children that have an intermediate container
+/// between the parent and child at a valid nesting level.
+///
+/// For REFS: excludes references whose source location is inside a nested
+/// container (e.g., a nested function) within the parent.
+#[derive(Debug, Clone)]
+pub struct DirectOnlyMixin;
+
+impl SymbolSearchMixin for DirectOnlyMixin {
+    fn filter_has_children<'a>(
+        &self,
+        _conn: &mut Connection,
+        query: HasChildrenQuery<'a>,
+    ) -> Result<HasChildrenQuery<'a>> {
+        // Exclude contained children that have an intermediate container between
+        // the parent (symbol_instances) and child (contained_instances).
+        // symbol_types.level is available from the outer query's JOIN on symbol_types.
+        Ok(query.filter(sql::<Bool>(
+            "NOT EXISTS (\
+                SELECT 1 FROM index.symbol_instances mid \
+                JOIN index.symbols mid_sym ON mid.symbol = mid_sym.id \
+                JOIN index.symbol_types mid_type ON mid_sym.symbol_type = mid_type.id \
+                WHERE mid.object_id = symbol_instances.object_id \
+                  AND symbol_instances.offset_range @> mid.offset_range \
+                  AND mid.offset_range @> contained_instances.offset_range \
+                  AND mid.id != symbol_instances.id \
+                  AND mid.id != contained_instances.id \
+                  AND symbol_types.level >= mid_type.level\
+            )",
+        )))
+    }
+
+    fn filter_children<'a>(
+        &self,
+        _conn: &mut Connection,
+        query: ChildrenQuery<'a>,
+    ) -> Result<ChildrenQuery<'a>> {
+        // Exclude refs whose source location is inside a nested container
+        // within the parent (parent_decls). parent_symbols is available from
+        // the outer query's JOIN.
+        Ok(query.filter(sql::<Bool>(
+            "NOT EXISTS (\
+                SELECT 1 FROM index.symbol_instances container \
+                JOIN index.symbols cont_sym ON container.symbol = cont_sym.id \
+                JOIN index.symbol_types cont_type ON cont_sym.symbol_type = cont_type.id \
+                JOIN index.symbol_types parent_type ON parent_type.id = parent_symbols.symbol_type \
+                WHERE container.object_id = parent_decls.object_id \
+                  AND parent_decls.offset_range @> container.offset_range \
+                  AND container.offset_range @> symbol_refs.from_offset_range \
+                  AND container.id != parent_decls.id \
+                  AND cont_type.level <= parent_type.level\
+            )",
+        )))
+    }
+}
+
 /// Symbol type constants
 pub const SYMBOL_TYPE_FUNCTION: i32 = 1;
 pub const SYMBOL_TYPE_FILE: i32 = 2;

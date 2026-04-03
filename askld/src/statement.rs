@@ -10,7 +10,7 @@ use crate::parser::Rule;
 use crate::parser_context::ParserContext;
 use crate::scope::{build_scope, EmptyScope, Scope, StatementIter};
 use crate::span::Span;
-use crate::verb::{build_verb, DefaultTypeFilter};
+use crate::verb::{build_verb, DefaultTypeFilter, NotificationContext, VerbTag};
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::Selection;
@@ -40,14 +40,14 @@ pub fn build_statement<'a>(
                 build_verb(sub_ctx.clone(), pair)?;
             }
             Rule::scope => {
-                // Check if a relationship modifier (has or refs) was explicitly used
-                // in this statement's verbs
                 if !sub_ctx.has_relationship_modifier() {
-                    // No relationship modifier in this statement's verbs
-                    // Reset to Refs for the scope's children
-                    sub_ctx.set_relationship_type_default(RelationshipType::REFS);
+                    // No explicit has/refs — default to both so parent-child
+                    // works regardless of whether the edge is containment or reference.
+                    sub_ctx.set_relationship_type_default(RelationshipType::REFS | RelationshipType::HAS);
                 }
-                // else: has/refs was used, keep the relationship type for children
+
+                // Allow all symbol types for children — empty vec means no type filtering.
+                sub_ctx.set_default_symbol_types(vec![]);
 
                 scope = build_scope(sub_ctx.clone(), pair)?;
                 break;
@@ -77,17 +77,19 @@ pub fn build_statement<'a>(
     }
 
     // If no explicit type selector was used, add a DefaultTypeFilter.
-    // Use inherited default types if available, otherwise default to [FUNCTION].
+    // None → no inherited default, fall back to [FUNCTION].
+    // Some(vec![]) → explicitly set to "all types", add filter with empty vec (no-op).
+    // Some(types) → filter by those types.
     if !sub_ctx.has_type_selector() {
         let default_types = inherited_default_types
-            .filter(|t| !t.is_empty())
             .unwrap_or_else(|| vec![crate::parser_context::SYMBOL_TYPE_FUNCTION]);
         sub_ctx.extend_verb(DefaultTypeFilter::new(statement_span.clone(), default_types));
     }
 
     let command = sub_ctx.command(statement_span);
     let relationship_type = sub_ctx.get_relationship_type();
-    let statement = Statement::new_with_relationship(command, scope.clone(), relationship_type);
+    let unnest = command.has_verb_tag(&VerbTag::Unnest);
+    let statement = Statement::new_full(command, scope.clone(), relationship_type, unnest);
     scope.set_parent(Rc::downgrade(&statement));
 
     Ok(statement)
@@ -102,10 +104,9 @@ pub fn build_empty_statement(ctx: Rc<ParserContext>, span: Span) -> Rc<Statement
     // The relationship type is correctly set by build_statement before calling build_scope.
 
     // Empty statements have no explicit type selector — always add DefaultTypeFilter.
-    // Use inherited default types if available, otherwise default to [FUNCTION].
+    // None → fall back to [FUNCTION]. Some(vec![]) → no-op filter (all types).
     let default_types = sub_ctx
         .get_default_symbol_types()
-        .filter(|t| !t.is_empty())
         .unwrap_or_else(|| vec![crate::parser_context::SYMBOL_TYPE_FUNCTION]);
     sub_ctx.extend_verb(DefaultTypeFilter::new(span.clone(), default_types));
 
@@ -149,11 +150,15 @@ pub struct Statement {
     /// - Refs (default): Reference-based traversal (calls)
     /// - Has: Containment-based traversal (composition)
     pub relationship_type: RelationshipType,
+    /// Whether this statement uses unnest mode for scope derivation.
+    /// When false (default), derive_from_parent filters to direct children only.
+    /// When true (unnest verb), all transitive levels are included.
+    pub unnest: bool,
 }
 
 impl Statement {
     pub fn new(command: Command, scope: Rc<dyn Scope>) -> Rc<Statement> {
-        Statement::new_with_relationship(command, scope, RelationshipType::REFS)
+        Statement::new_full(command, scope, RelationshipType::REFS, false)
     }
 
     pub fn new_with_relationship(
@@ -161,13 +166,27 @@ impl Statement {
         scope: Rc<dyn Scope>,
         relationship_type: RelationshipType,
     ) -> Rc<Statement> {
+        Statement::new_full(command, scope, relationship_type, false)
+    }
+
+    pub fn new_full(
+        command: Command,
+        scope: Rc<dyn Scope>,
+        relationship_type: RelationshipType,
+        unnest: bool,
+    ) -> Rc<Statement> {
         Rc::new(Statement {
-            command: command,
-            scope: scope,
+            command,
+            scope,
             parent: RefCell::new(None),
             execution_state: RefCell::new(ExecutionState::new()),
             relationship_type,
+            unnest,
         })
+    }
+
+    pub fn is_unnest(&self) -> bool {
+        self.unnest
     }
 
     pub fn get_relationship_type(&self) -> RelationshipType {
@@ -700,11 +719,21 @@ impl Statement {
         }
 
         // Original flow for Child and User roles.
-        let receiver_rel_type = dependent.statement.get_relationship_type();
+        // Resolve rel_type at the single call site instead of duplicating
+        // the role-based match in each accept_notification implementation.
+        let rel_type = match dependent.dependency_role {
+            DependencyRole::Child => dependent.statement.get_relationship_type(),
+            DependencyRole::Parent | DependencyRole::User => self.get_relationship_type(),
+        };
+        let notif_ctx = NotificationContext {
+            role: dependent.dependency_role,
+            rel_type,
+            unnest: dependent.statement.is_unnest(),
+        };
         let res = dependent
             .statement
             .command()
-            .accept_notification(ctx, &cfg.index, self, dependent.dependency_role, receiver_rel_type)
+            .accept_notification(ctx, &cfg.index, self, notif_ctx)
             .await?;
 
         if res.changed {
