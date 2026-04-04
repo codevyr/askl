@@ -21,16 +21,16 @@ INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
 VALUES (101, '/', 1, 4, NULL);
 
 -- File symbol instance covering entire file
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
-VALUES (1001, 100, 1, int4range(0, 10000));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES (1001, 100, 1, int4range(0, 10000), 6);
 
 -- Directory self-instance on sentinel object
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
-VALUES (1002, 101, 2, int4range(0, 0));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES (1002, 101, 2, int4range(0, 0), 4);
 
 -- Directory instance on /main.c for containment queries
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
-VALUES (1003, 101, 1, int4range(0, 10000));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES (1003, 101, 1, int4range(0, 10000), 5);
 
 -- Function symbols (type=1)
 INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
@@ -44,16 +44,16 @@ VALUES
     (7,  'g',    1, 1, 1),
     (42, 'main', 1, 1, 1);
 
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
 VALUES
-    (91,  1,  1, int4range(910, 919)),
-    (92,  2,  1, int4range(920, 929)),
-    (93,  3,  1, int4range(930, 939)),
-    (94,  4,  1, int4range(940, 949)),
-    (95,  5,  1, int4range(950, 959)),
-    (96,  6,  1, int4range(960, 969)),
-    (97,  7,  1, int4range(970, 979)),
-    (942, 42, 1, int4range(9420, 9429));
+    (91,  1,  1, int4range(910, 919), 1),
+    (92,  2,  1, int4range(920, 929), 1),
+    (93,  3,  1, int4range(930, 939), 1),
+    (94,  4,  1, int4range(940, 949), 1),
+    (95,  5,  1, int4range(950, 959), 1),
+    (96,  6,  1, int4range(960, 969), 1),
+    (97,  7,  1, int4range(970, 979), 1),
+    (942, 42, 1, int4range(9420, 9429), 1);
 
 INSERT INTO
     symbol_refs(to_symbol, from_object, from_offset_range)

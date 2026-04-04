@@ -30,26 +30,26 @@ INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope) VALUES
     (4, 'testmodule.baz', 1, 1, 1);
 
 -- Directory self-instance on sentinel object [0, 0)
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range) VALUES
-    (500, 50, 2, int4range(0, 0));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (500, 50, 2, int4range(0, 0), 4);
 
 -- Directory instance on /main.go for containment queries
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range) VALUES
-    (501, 50, 1, int4range(0, 1000));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (501, 50, 1, int4range(0, 1000), 5);
 
 -- File instance covers entire file [0, 1000)
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range) VALUES
-    (510, 51, 1, int4range(0, 1000));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (510, 51, 1, int4range(0, 1000), 6);
 
 -- Module instance covers entire file [0, 1000)
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range) VALUES
-    (10, 1, 1, int4range(0, 1000));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (10, 1, 1, int4range(0, 1000), 5);
 
 -- Function instances within file
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range) VALUES
-    (20, 2, 1, int4range(100, 200)),   -- foo
-    (30, 3, 1, int4range(200, 300)),   -- bar
-    (40, 4, 1, int4range(300, 400));   -- baz
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (20, 2, 1, int4range(100, 200), 1),   -- foo
+    (30, 3, 1, int4range(200, 300), 1),   -- bar
+    (40, 4, 1, int4range(300, 400), 1);   -- baz
 
 -- References: foo -> bar, bar -> baz (reference-based calls)
 INSERT INTO symbol_refs(to_symbol, from_object, from_offset_range) VALUES

@@ -23,16 +23,16 @@ INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
 VALUES (101, '/', 1, 4, NULL);
 
 -- File instance
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
-VALUES (1001, 100, 1, int4range(0, 1000));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES (1001, 100, 1, int4range(0, 1000), 6);
 
 -- Directory self-instance on sentinel object
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
-VALUES (1002, 101, 2, int4range(0, 0));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES (1002, 101, 2, int4range(0, 0), 4);
 
 -- Directory instance on /main.c for containment
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
-VALUES (1003, 101, 1, int4range(0, 1000));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES (1003, 101, 1, int4range(0, 1000), 5);
 
 -- Function symbols (type=1)
 INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
@@ -44,14 +44,14 @@ VALUES
     (5, 'sort.IsSorted', 1, 1, 1),
     (6, 'sort.Sort', 1, 1, 1);
 
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
 VALUES
-    (91, 1, 1, int4range(910, 919)),
-    (92, 2, 1, int4range(920, 929)),
-    (93, 3, 1, int4range(930, 939)),
-    (94, 4, 1, int4range(940, 949)),
-    (95, 5, 1, int4range(950, 959)),
-    (96, 6, 1, int4range(960, 969));
+    (91, 1, 1, int4range(910, 919), 1),
+    (92, 2, 1, int4range(920, 929), 1),
+    (93, 3, 1, int4range(930, 939), 1),
+    (94, 4, 1, int4range(940, 949), 1),
+    (95, 5, 1, int4range(950, 959), 1),
+    (96, 6, 1, int4range(960, 969), 1);
 
 INSERT INTO
     symbol_refs(to_symbol, from_object, from_offset_range)
@@ -67,10 +67,10 @@ VALUES
     (7, 'config.Debug', 1, 6, 2),
     (8, 'config.Port', 1, 6, 2);
 
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
 VALUES
-    (97, 7, 1, int4range(970, 979)),
-    (98, 8, 1, int4range(980, 989));
+    (97, 7, 1, int4range(970, 979), 1),
+    (98, 8, 1, int4range(980, 989), 1);
 
 -- Reference from function foo to data config.Debug
 INSERT INTO symbol_refs(to_symbol, from_object, from_offset_range)
@@ -95,16 +95,16 @@ VALUES
     (26, 'channels_a', 1, 6, 2),
     (27, 'channels_b', 1, 6, 2);
 
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
 VALUES
-    (200, 20, 1, int4range(100, 120)),
-    (210, 21, 1, int4range(200, 300)),
-    (220, 22, 1, int4range(300, 320)),
-    (230, 23, 1, int4range(320, 340)),
-    (240, 24, 1, int4range(340, 360)),
-    (250, 25, 1, int4range(360, 380)),
-    (260, 26, 1, int4range(380, 400)),
-    (270, 27, 1, int4range(400, 420));
+    (200, 20, 1, int4range(100, 120), 1),
+    (210, 21, 1, int4range(200, 300), 1),
+    (220, 22, 1, int4range(300, 320), 1),
+    (230, 23, 1, int4range(320, 340), 1),
+    (240, 24, 1, int4range(340, 360), 1),
+    (250, 25, 1, int4range(360, 380), 1),
+    (260, 26, 1, int4range(380, 400), 1),
+    (270, 27, 1, int4range(400, 420), 1);
 
 -- driver refs id_table
 INSERT INTO symbol_refs(to_symbol, from_object, from_offset_range)
