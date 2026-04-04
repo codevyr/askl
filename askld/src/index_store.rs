@@ -660,6 +660,7 @@ fn validate_instance_type(proto_type: i32) -> Result<i32, UploadError> {
         index::db_diesel::INSTANCE_TYPE_HEADER,
         index::db_diesel::INSTANCE_TYPE_BUILD,
         index::db_diesel::INSTANCE_TYPE_FILE,
+        index::db_diesel::INSTANCE_TYPE_DOCUMENTATION,
     ];
     if VALID_TYPES.contains(&proto_type) {
         Ok(proto_type)

@@ -606,4 +606,5 @@ pub const INSTANCE_TYPE_SOURCE: i32 = 6;
 pub const INSTANCE_TYPE_HEADER: i32 = 7;
 pub const INSTANCE_TYPE_BUILD: i32 = 8;
 pub const INSTANCE_TYPE_FILE: i32 = 9;
+pub const INSTANCE_TYPE_DOCUMENTATION: i32 = 10;
 
