@@ -594,4 +594,5 @@ pub const SYMBOL_TYPE_DIRECTORY: i32 = 4;
 pub const SYMBOL_TYPE_TYPE: i32 = 5;
 pub const SYMBOL_TYPE_DATA: i32 = 6;
 pub const SYMBOL_TYPE_MACRO: i32 = 7;
+pub const SYMBOL_TYPE_FIELD: i32 = 8;
 

@@ -95,6 +95,8 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
         result_graph.add_has_edge(HasEdge::new(
             has_edge.parent,
             has_edge.child,
+            has_edge.parent_instance,
+            has_edge.child_instance,
         ));
     }
 

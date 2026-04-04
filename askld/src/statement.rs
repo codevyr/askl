@@ -586,6 +586,8 @@ impl Statement {
                 let edge = HasEdge {
                     parent: SymbolId::new(parent_sym),
                     child: SymbolId::new(child_sym),
+                    parent_instance: parent_id,
+                    child_instance: child_id,
                 };
 
                 best_per_child

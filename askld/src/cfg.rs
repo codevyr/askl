@@ -72,6 +72,8 @@ impl EdgeList {
 pub struct HasEdge {
     pub parent: SymbolId,
     pub child: SymbolId,
+    pub parent_instance: SymbolInstanceId,
+    pub child_instance: SymbolInstanceId,
 }
 
 pub struct HasEdgeList(pub HashSet<HasEdge>);
@@ -87,7 +89,13 @@ impl HasEdgeList {
 
     pub fn as_vec(&self) -> Vec<HasEdge> {
         let mut res: Vec<_> = self.0.iter().cloned().collect();
-        res.sort_by(|a, b| a.parent.cmp(&b.parent).then_with(|| a.child.cmp(&b.child)));
+        res.sort_by(|a, b| {
+            a.parent
+                .cmp(&b.parent)
+                .then_with(|| a.child.cmp(&b.child))
+                .then_with(|| a.parent_instance.cmp(&b.parent_instance))
+                .then_with(|| a.child_instance.cmp(&b.child_instance))
+        });
         res
     }
 }
