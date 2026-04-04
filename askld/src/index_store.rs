@@ -108,6 +108,7 @@ struct NewSymbolInstance {
     symbol: i32,
     object_id: i32,
     offset_range: std::ops::Range<i32>,
+    instance_type: i32,
 }
 
 #[derive(Insertable, Clone)]
@@ -647,6 +648,29 @@ fn validate_symbol_type(proto_type: i32) -> Result<i32, UploadError> {
     }
 }
 
+/// Validates proto instance type against known instance type constants.
+fn validate_instance_type(proto_type: i32) -> Result<i32, UploadError> {
+    const VALID_TYPES: &[i32] = &[
+        index::db_diesel::INSTANCE_TYPE_DEFINITION,
+        index::db_diesel::INSTANCE_TYPE_DECLARATION,
+        index::db_diesel::INSTANCE_TYPE_EXPANSION,
+        index::db_diesel::INSTANCE_TYPE_SENTINEL,
+        index::db_diesel::INSTANCE_TYPE_CONTAINMENT,
+        index::db_diesel::INSTANCE_TYPE_SOURCE,
+        index::db_diesel::INSTANCE_TYPE_HEADER,
+        index::db_diesel::INSTANCE_TYPE_BUILD,
+        index::db_diesel::INSTANCE_TYPE_FILE,
+    ];
+    if VALID_TYPES.contains(&proto_type) {
+        Ok(proto_type)
+    } else {
+        Err(UploadError::Invalid(format!(
+            "invalid instance type {}",
+            proto_type
+        )))
+    }
+}
+
 struct ObjectInsert {
     local_id: i64,
     content: Vec<u8>,
@@ -813,10 +837,16 @@ fn build_symbol_instances(
                         instance.symbol_local_id
                     ))
                 })?;
+            let instance_type = if instance.instance_type != 0 {
+                validate_instance_type(instance.instance_type)?
+            } else {
+                index::db_diesel::INSTANCE_TYPE_DEFINITION
+            };
             rows.push(NewSymbolInstance {
                 symbol: *symbol_id,
                 object_id: *object_id,
                 offset_range: instance.start_offset..instance.end_offset,
+                instance_type,
             });
         }
     }

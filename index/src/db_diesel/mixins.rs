@@ -67,7 +67,7 @@ pub type CurrentQuery<'a> = BoxedSelectStatement<
     Pg,
 >;
 
-type SymbolInstanceColumnsSqlType = (Integer, Integer, Integer, Int4range);
+type SymbolInstanceColumnsSqlType = (Integer, Integer, Integer, Int4range, Integer);
 
 type SymbolColumnsSqlType = (Integer, Text, Ltree, Integer, Integer, diesel::sql_types::Nullable<Integer>);  // (id, name, symbol_path, project_id, symbol_type, symbol_scope)
 
@@ -595,4 +595,15 @@ pub const SYMBOL_TYPE_TYPE: i32 = 5;
 pub const SYMBOL_TYPE_DATA: i32 = 6;
 pub const SYMBOL_TYPE_MACRO: i32 = 7;
 pub const SYMBOL_TYPE_FIELD: i32 = 8;
+
+/// Instance type constants
+pub const INSTANCE_TYPE_DEFINITION: i32 = 1;
+pub const INSTANCE_TYPE_DECLARATION: i32 = 2;
+pub const INSTANCE_TYPE_EXPANSION: i32 = 3;
+pub const INSTANCE_TYPE_SENTINEL: i32 = 4;
+pub const INSTANCE_TYPE_CONTAINMENT: i32 = 5;
+pub const INSTANCE_TYPE_SOURCE: i32 = 6;
+pub const INSTANCE_TYPE_HEADER: i32 = 7;
+pub const INSTANCE_TYPE_BUILD: i32 = 8;
+pub const INSTANCE_TYPE_FILE: i32 = 9;
 
