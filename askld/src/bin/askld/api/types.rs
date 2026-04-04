@@ -1,6 +1,6 @@
 use askld::cfg::ControlFlowGraph;
 use askld::parser::Rule;
-use index::symbols::{FileId, SymbolId, SymbolInstanceId, SymbolType};
+use index::symbols::{FileId, InstanceType, SymbolId, SymbolInstanceId, SymbolType};
 use serde::{Deserialize, Serialize, Serializer};
 
 pub struct AsklData {
@@ -21,6 +21,7 @@ pub struct NodeSymbolInstance {
     pub object_id: String,
     pub project_id: String,
     pub symbol_type: SymbolType,
+    pub instance_type: InstanceType,
     pub start_offset: i32,
     pub end_offset: i32,
 }

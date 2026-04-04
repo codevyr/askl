@@ -39,38 +39,38 @@ INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope) VALUES
     (205, '/docs/readme.md', 1, 2, NULL);
 
 -- Directory self-instances on sentinel objects [0, 0)
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range) VALUES
-    (1000, 100, 100, int4range(0, 0)),
-    (1010, 101, 101, int4range(0, 0)),
-    (1020, 102, 102, int4range(0, 0)),
-    (1030, 103, 103, int4range(0, 0)),
-    (1040, 104, 104, int4range(0, 0));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (1000, 100, 100, int4range(0, 0), 4),
+    (1010, 101, 101, int4range(0, 0), 4),
+    (1020, 102, 102, int4range(0, 0), 4),
+    (1030, 103, 103, int4range(0, 0), 4),
+    (1040, 104, 104, int4range(0, 0), 4);
 
 -- Directory instances on direct child files (for containment queries).
 -- "/src" claims /src/main.go
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range) VALUES
-    (1011, 101, 1, int4range(0, 1000));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (1011, 101, 1, int4range(0, 1000), 5);
 
 -- "/docs" claims /docs/readme.md
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range) VALUES
-    (1021, 102, 5, int4range(0, 1000));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (1021, 102, 5, int4range(0, 1000), 5);
 
 -- "/src/util" claims util.go and helper.go
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range) VALUES
-    (1031, 103, 2, int4range(0, 1000)),
-    (1032, 103, 3, int4range(0, 1000));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (1031, 103, 2, int4range(0, 1000), 5),
+    (1032, 103, 3, int4range(0, 1000), 5);
 
 -- "/src/config" claims config.go
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range) VALUES
-    (1041, 104, 4, int4range(0, 1000));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (1041, 104, 4, int4range(0, 1000), 5);
 
 -- File instances (each file on its own content object)
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range) VALUES
-    (2010, 201, 1, int4range(0, 1000)),
-    (2020, 202, 2, int4range(0, 1000)),
-    (2030, 203, 3, int4range(0, 1000)),
-    (2040, 204, 4, int4range(0, 1000)),
-    (2050, 205, 5, int4range(0, 1000));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (2010, 201, 1, int4range(0, 1000), 6),
+    (2020, 202, 2, int4range(0, 1000), 6),
+    (2030, 203, 3, int4range(0, 1000), 6),
+    (2040, 204, 4, int4range(0, 1000), 6),
+    (2050, 205, 5, int4range(0, 1000), 6);
 
 -- Directory→directory hierarchy via symbol_refs.
 -- from_object = parent's sentinel object.

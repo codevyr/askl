@@ -21,16 +21,16 @@ INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
 VALUES (101, '/', 1, 4, NULL);
 
 -- File instance
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
-VALUES (1001, 100, 1, int4range(0, 100));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES (1001, 100, 1, int4range(0, 100), 6);
 
 -- Directory self-instance on sentinel object
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
-VALUES (1002, 101, 2, int4range(0, 0));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES (1002, 101, 2, int4range(0, 0), 4);
 
 -- Directory instance on /kube.go for containment
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
-VALUES (1003, 101, 1, int4range(0, 100));
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES (1003, 101, 1, int4range(0, 100), 5);
 
 -- Function symbols (type=1)
 INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
@@ -53,10 +53,10 @@ VALUES
         2
     );
 
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range)
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
 VALUES
-    (1, 1, 1, int4range(0, 5)),
-    (2, 2, 1, int4range(10, 15)),
-    (3, 3, 1, int4range(20, 25)),
-    (4, 4, 1, int4range(30, 35)),
-    (5, 5, 1, int4range(40, 45));
+    (1, 1, 1, int4range(0, 5), 1),
+    (2, 2, 1, int4range(10, 15), 1),
+    (3, 3, 1, int4range(20, 25), 1),
+    (4, 4, 1, int4range(30, 35), 1),
+    (5, 5, 1, int4range(40, 45), 1);

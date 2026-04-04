@@ -2,7 +2,7 @@ use actix_web::{get, post, web, HttpResponse, Responder};
 use askld::execution_context::ExecutionContext;
 use askld::offset_range::range_bounds_to_offsets;
 use askld::parser::parse;
-use index::symbols::{SymbolInstanceId, FileId, SymbolId, SymbolType};
+use index::symbols::{InstanceType, SymbolInstanceId, FileId, SymbolId, SymbolType};
 use log::{debug, info};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -115,6 +115,7 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
                     object_id: FileId::new(n.object.id).to_string(),
                     project_id: n.object.project_id.to_string(),
                     symbol_type: SymbolType::from(symbol.symbol_type),
+                    instance_type: InstanceType::from(n.symbol_instance.instance_type),
                     start_offset,
                     end_offset,
                 }

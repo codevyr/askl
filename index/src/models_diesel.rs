@@ -20,6 +20,7 @@ pub struct SymbolInstance {
     pub symbol: i32,
     pub object_id: i32,
     pub offset_range: (Bound<i32>, Bound<i32>),
+    pub instance_type: i32,
 }
 
 #[derive(Clone, Queryable, Selectable, Identifiable, Associations, Debug, PartialEq, Eq, Hash)]
