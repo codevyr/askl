@@ -3,8 +3,8 @@ use crate::execution_context::ExecutionContext;
 use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::{Identifier, NamedArgument, PositionalArgument, Rule};
 use crate::parser_context::{
-    ParserContext, SYMBOL_TYPE_DATA, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FILE, SYMBOL_TYPE_FUNCTION,
-    SYMBOL_TYPE_MACRO, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
+    ParserContext, SYMBOL_TYPE_DATA, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FIELD, SYMBOL_TYPE_FILE,
+    SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MACRO, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
 };
 use crate::span::Span;
 use crate::statement::Statement;
@@ -94,6 +94,9 @@ pub(crate) fn build_generic_verb(
         }
         TypeSelector::NAME_MACRO => {
             TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_MACRO)
+        }
+        TypeSelector::NAME_FIELD | TypeSelector::NAME_METHOD => {
+            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FIELD)
         }
         "_" => Ok(UnitVerb::new(verb_span)),
         unknown => Err(anyhow!("unknown verb : {}", unknown)),
@@ -904,6 +907,8 @@ impl TypeSelector {
     pub(super) const NAME_TYPE: &'static str = "type";
     pub(super) const NAME_DATA: &'static str = "data";
     pub(super) const NAME_MACRO: &'static str = "macro";
+    pub(super) const NAME_FIELD: &'static str = "field";
+    pub(super) const NAME_METHOD: &'static str = "method";
 
     pub fn new(
         span: Span,
@@ -990,6 +995,7 @@ impl Verb for TypeSelector {
             SYMBOL_TYPE_TYPE => TypeSelector::NAME_TYPE,
             SYMBOL_TYPE_DATA => TypeSelector::NAME_DATA,
             SYMBOL_TYPE_MACRO => TypeSelector::NAME_MACRO,
+            SYMBOL_TYPE_FIELD => TypeSelector::NAME_FIELD,
             _ => "type_selector",
         }
     }
@@ -1056,6 +1062,7 @@ impl Verb for TypeSelector {
         let default_types = match self.symbol_type_id {
             SYMBOL_TYPE_FUNCTION => vec![SYMBOL_TYPE_FUNCTION],
             SYMBOL_TYPE_TYPE => vec![SYMBOL_TYPE_TYPE],
+            SYMBOL_TYPE_FIELD => vec![SYMBOL_TYPE_FUNCTION],
             SYMBOL_TYPE_MACRO => vec![SYMBOL_TYPE_MACRO, SYMBOL_TYPE_FUNCTION],
             SYMBOL_TYPE_MODULE => vec![SYMBOL_TYPE_MODULE, SYMBOL_TYPE_FUNCTION],
             SYMBOL_TYPE_FILE => vec![SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MODULE],
@@ -1129,6 +1136,7 @@ impl Display for TypeSelector {
             SYMBOL_TYPE_TYPE => write!(f, "TypeSelector(type)"),
             SYMBOL_TYPE_DATA => write!(f, "TypeSelector(data)"),
             SYMBOL_TYPE_MACRO => write!(f, "TypeSelector(macro)"),
+            SYMBOL_TYPE_FIELD => write!(f, "TypeSelector(field)"),
             _ => write!(f, "TypeSelector({})", self.symbol_type_id),
         }
     }
@@ -1317,6 +1325,7 @@ fn parse_symbol_types(s: &str) -> Result<Vec<i32>> {
                 "type" => Ok(SYMBOL_TYPE_TYPE),
                 "data" => Ok(SYMBOL_TYPE_DATA),
                 "macro" => Ok(SYMBOL_TYPE_MACRO),
+                TypeSelector::NAME_FIELD | TypeSelector::NAME_METHOD => Ok(SYMBOL_TYPE_FIELD),
                 other => bail!("Unknown symbol type: '{}'", other),
             }
         })

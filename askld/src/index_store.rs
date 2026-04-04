@@ -635,6 +635,7 @@ fn validate_symbol_type(proto_type: i32) -> Result<i32, UploadError> {
         index::db_diesel::SYMBOL_TYPE_TYPE,
         index::db_diesel::SYMBOL_TYPE_DATA,
         index::db_diesel::SYMBOL_TYPE_MACRO,
+        index::db_diesel::SYMBOL_TYPE_FIELD,
     ];
     if VALID_TYPES.contains(&proto_type) {
         Ok(proto_type)

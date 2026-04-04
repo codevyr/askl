@@ -1,6 +1,6 @@
 use askld::cfg::ControlFlowGraph;
 use askld::parser::Rule;
-use index::symbols::{FileId, SymbolId, SymbolType};
+use index::symbols::{FileId, SymbolId, SymbolInstanceId, SymbolType};
 use serde::{Deserialize, Serialize, Serializer};
 
 pub struct AsklData {
@@ -83,14 +83,23 @@ pub struct HasEdge {
     parent: SymbolId,
     #[serde(serialize_with = "symbolid_as_string")]
     child: SymbolId,
+    parent_instance: String,
+    child_instance: String,
 }
 
 impl HasEdge {
-    pub fn new(parent: SymbolId, child: SymbolId) -> Self {
+    pub fn new(
+        parent: SymbolId,
+        child: SymbolId,
+        parent_instance: SymbolInstanceId,
+        child_instance: SymbolInstanceId,
+    ) -> Self {
         Self {
-            id: format!("has-{}-{}", parent, child),
+            id: format!("has-{}-{}-{}-{}", parent, child, parent_instance, child_instance),
             parent,
             child,
+            parent_instance: parent_instance.to_string(),
+            child_instance: child_instance.to_string(),
         }
     }
 }
