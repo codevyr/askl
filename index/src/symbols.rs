@@ -428,6 +428,7 @@ pub enum InstanceType {
     Header = 7,
     Build = 8,
     File = 9,
+    Documentation = 10,
 }
 
 impl InstanceType {
@@ -448,6 +449,7 @@ impl From<i64> for InstanceType {
             x if x == InstanceType::Header as i64 => InstanceType::Header,
             x if x == InstanceType::Build as i64 => InstanceType::Build,
             x if x == InstanceType::File as i64 => InstanceType::File,
+            x if x == InstanceType::Documentation as i64 => InstanceType::Documentation,
             _ => panic!("Invalid instance type value {}", value),
         }
     }
@@ -465,6 +467,7 @@ impl From<i32> for InstanceType {
             x if x == InstanceType::Header as i32 => InstanceType::Header,
             x if x == InstanceType::Build as i32 => InstanceType::Build,
             x if x == InstanceType::File as i32 => InstanceType::File,
+            x if x == InstanceType::Documentation as i32 => InstanceType::Documentation,
             _ => panic!("Invalid instance type value {}", value),
         }
     }

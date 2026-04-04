@@ -73,4 +73,5 @@ enum InstanceType {
   HEADER = 7;
   BUILD = 8;
   INST_FILE = 9;
+  DOCUMENTATION = 10;
 }
