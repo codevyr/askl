@@ -6,7 +6,7 @@ use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgRangeExpressionMethods;
 use diesel_migrations::MigrationHarness;
 
-use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
+use crate::models_diesel::{ContentRow, Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::symbols::FileId;
 
 use super::mixins::{
@@ -159,29 +159,34 @@ impl Index {
     }
 
     pub async fn get_file_contents(&self, object_id: FileId) -> Result<String> {
-        use crate::schema_diesel::*;
-
         let connection = &mut self
             .pool
             .get()
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let object_id: i32 = object_id.into();
-        let result = object_contents::dsl::object_contents
-            .filter(object_contents::dsl::object_id.eq(object_id))
-            .select(object_contents::dsl::content)
-            .first::<Vec<u8>>(connection)
-            .optional()
-            .map_err(|e| anyhow::anyhow!("Failed to query file contents: {}", e))?;
+        let result: Option<Vec<u8>> = diesel::sql_query(
+            r#"
+            SELECT COALESCE(oc.content, cs.content) AS content
+            FROM index.objects o
+            LEFT JOIN index.object_contents oc ON oc.object_id = o.id
+            LEFT JOIN index.content_store cs ON cs.content_hash = o.content_hash
+            WHERE o.id = $1
+            "#,
+        )
+        .bind::<diesel::sql_types::Integer, _>(object_id)
+        .get_result::<ContentRow>(connection)
+        .optional()
+        .map_err(|e| anyhow::anyhow!("Failed to query file contents: {}", e))?
+        .map(|row| row.content);
 
-        if result.is_none() {
-            return Err(anyhow::anyhow!(
+        match result {
+            Some(content) => Ok(String::from_utf8_lossy(&content).to_string()),
+            None => Err(anyhow::anyhow!(
                 "File contents not found for object_id {}",
                 object_id
-            ));
+            )),
         }
-
-        Ok(String::from_utf8_lossy(&result.unwrap()).to_string())
     }
 
     pub async fn find_symbol(

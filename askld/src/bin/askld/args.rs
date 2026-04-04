@@ -80,9 +80,8 @@ pub struct IndexArgs {
 #[derive(Subcommand, Debug)]
 pub enum IndexCommand {
     Upload {
-        /// Path to protobuf payload file
-        #[clap(long = "file")]
-        file_path: String,
+        /// Path to index: a file (single Project .pb) or directory (multi-file output)
+        index: String,
         /// askld base URL
         #[clap(long, default_value = "http://127.0.0.1:80")]
         url: String,
