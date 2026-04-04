@@ -415,6 +415,61 @@ pub enum SymbolType {
     Field = 8,
 }
 
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[repr(i32)]
+pub enum InstanceType {
+    Definition = 1,
+    Declaration = 2,
+    Expansion = 3,
+    Sentinel = 4,
+    Containment = 5,
+    Source = 6,
+    Header = 7,
+    Build = 8,
+    File = 9,
+}
+
+impl InstanceType {
+    pub fn as_i64(&self) -> i64 {
+        return *self as i64;
+    }
+}
+
+impl From<i64> for InstanceType {
+    fn from(value: i64) -> Self {
+        match value {
+            x if x == InstanceType::Definition as i64 => InstanceType::Definition,
+            x if x == InstanceType::Declaration as i64 => InstanceType::Declaration,
+            x if x == InstanceType::Expansion as i64 => InstanceType::Expansion,
+            x if x == InstanceType::Sentinel as i64 => InstanceType::Sentinel,
+            x if x == InstanceType::Containment as i64 => InstanceType::Containment,
+            x if x == InstanceType::Source as i64 => InstanceType::Source,
+            x if x == InstanceType::Header as i64 => InstanceType::Header,
+            x if x == InstanceType::Build as i64 => InstanceType::Build,
+            x if x == InstanceType::File as i64 => InstanceType::File,
+            _ => panic!("Invalid instance type value {}", value),
+        }
+    }
+}
+
+impl From<i32> for InstanceType {
+    fn from(value: i32) -> Self {
+        match value {
+            x if x == InstanceType::Definition as i32 => InstanceType::Definition,
+            x if x == InstanceType::Declaration as i32 => InstanceType::Declaration,
+            x if x == InstanceType::Expansion as i32 => InstanceType::Expansion,
+            x if x == InstanceType::Sentinel as i32 => InstanceType::Sentinel,
+            x if x == InstanceType::Containment as i32 => InstanceType::Containment,
+            x if x == InstanceType::Source as i32 => InstanceType::Source,
+            x if x == InstanceType::Header as i32 => InstanceType::Header,
+            x if x == InstanceType::Build as i32 => InstanceType::Build,
+            x if x == InstanceType::File as i32 => InstanceType::File,
+            _ => panic!("Invalid instance type value {}", value),
+        }
+    }
+}
+
 impl SymbolType {
     pub fn as_i64(&self) -> i64 {
         return *self as i64;
