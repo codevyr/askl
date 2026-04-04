@@ -36,6 +36,13 @@ diesel::table! {
 }
 
 diesel::table! {
+    index.content_store (content_hash) {
+        content_hash -> Text,
+        content -> Binary,
+    }
+}
+
+diesel::table! {
     use diesel::sql_types::*;
 
     index.objects (id) {
@@ -104,6 +111,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     symbol_instances,
     symbol_types,
     // directories removed
+    content_store,
     object_contents,
     objects,
     projects,

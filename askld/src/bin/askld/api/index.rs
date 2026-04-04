@@ -1,7 +1,7 @@
 use actix_web::{delete, get, http::header, web, HttpRequest, HttpResponse, Responder};
 use askld::auth::AuthIdentity;
 use askld::index_store::{IndexStore, ProjectTreeResult, StoreError, UploadError};
-use askld::proto::askl::index::Project;
+use askld::proto::askl::index::{ContentBatch, Project};
 use futures::future::join_all;
 use log::{error, warn};
 use prost::Message;
@@ -37,6 +37,19 @@ pub fn max_upload_bytes() -> usize {
     }
 }
 
+fn require_protobuf(req: &HttpRequest) -> Result<(), HttpResponse> {
+    let content_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if content_type.starts_with("application/x-protobuf") {
+        Ok(())
+    } else {
+        Err(HttpResponse::UnsupportedMediaType().body("Expected application/x-protobuf"))
+    }
+}
+
 pub async fn upload_index(
     _identity: AuthIdentity,
     store: web::Data<IndexStore>,
@@ -45,13 +58,8 @@ pub async fn upload_index(
 ) -> impl Responder {
     let _upload_span: tracing::span::EnteredSpan =
         tracing::info_span!("index_upload", bytes = body.len()).entered();
-    let content_type = req
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    if !content_type.starts_with("application/x-protobuf") {
-        return HttpResponse::UnsupportedMediaType().body("Expected application/x-protobuf");
+    if let Err(resp) = require_protobuf(&req) {
+        return resp;
     }
 
     let upload = match Project::decode(body.as_ref()) {
@@ -71,6 +79,37 @@ pub async fn upload_index(
         Err(UploadError::Storage(message)) => {
             error!("Index upload failed: {}", message);
             HttpResponse::InternalServerError().body("Failed to upload index")
+        }
+    }
+}
+
+pub async fn upload_contents(
+    _identity: AuthIdentity,
+    store: web::Data<IndexStore>,
+    req: HttpRequest,
+    body: web::Bytes,
+) -> impl Responder {
+    if let Err(resp) = require_protobuf(&req) {
+        return resp;
+    }
+
+    let batch = match ContentBatch::decode(body.as_ref()) {
+        Ok(batch) => batch,
+        Err(err) => {
+            return HttpResponse::BadRequest()
+                .body(format!("Failed to decode protobuf payload: {}", err));
+        }
+    };
+
+    match store.upload_contents(batch).await {
+        Ok(new_count) => HttpResponse::Ok().json(serde_json::json!({ "new_entries": new_count })),
+        Err(UploadError::Invalid(message)) => HttpResponse::BadRequest().body(message),
+        Err(UploadError::Storage(message)) => {
+            error!("Content upload failed: {}", message);
+            HttpResponse::InternalServerError().body("Failed to upload contents")
+        }
+        Err(UploadError::Conflict) => {
+            HttpResponse::InternalServerError().body("Unexpected conflict")
         }
     }
 }

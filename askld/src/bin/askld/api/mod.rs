@@ -21,6 +21,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route(web::get().to(index::list_index_projects))
                 .route(web::post().to(index::upload_index)),
         )
+        .service(
+            web::resource("/v1/index/contents")
+                .app_data(web::PayloadConfig::new(index::max_upload_bytes()))
+                .route(web::post().to(index::upload_contents)),
+        )
         .service(index::get_index_project)
         .service(index::delete_index_project)
         .service(index::get_project_tree)

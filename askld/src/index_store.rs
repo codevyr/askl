@@ -9,7 +9,8 @@ use serde::Serialize;
 use tracing::Instrument;
 use sha2::{Digest, Sha256};
 
-use crate::proto::askl::index::{Object as UploadObject, Project as UploadProject, Symbol as UploadSymbol};
+use crate::proto::askl::index::{ContentBatch, Object as UploadObject, Project as UploadProject, Symbol as UploadSymbol};
+use index::models_diesel::ContentRow;
 use index::schema_diesel as index_schema;
 use index::symbols::FileId;
 
@@ -90,6 +91,13 @@ struct NewObject {
 #[diesel(table_name = index_schema::object_contents)]
 struct NewObjectContent {
     object_id: i32,
+    content: Vec<u8>,
+}
+
+#[derive(Insertable, Clone)]
+#[diesel(table_name = index_schema::content_store)]
+struct NewContentStoreRow {
+    content_hash: String,
     content: Vec<u8>,
 }
 
@@ -230,8 +238,39 @@ impl IndexStore {
                     None => return Err(UploadError::Conflict),
                 };
 
-                let object_inserts = build_objects(project_id, &upload.objects)?;
-                let object_map = insert_objects(conn, &object_inserts).await?;
+                let mut object_inserts = build_objects(project_id, &upload.objects)?;
+
+                // Upfront validation: verify all hash-only objects have content in content_store
+                let hash_only_hashes: Vec<String> = object_inserts
+                    .iter()
+                    .filter(|oi| oi.content.is_none() && !oi.row.content_hash.is_empty())
+                    .map(|oi| oi.row.content_hash.clone())
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
+
+                if !hash_only_hashes.is_empty() {
+                    let existing: Vec<String> = index_schema::content_store::table
+                        .filter(index_schema::content_store::content_hash.eq_any(&hash_only_hashes))
+                        .select(index_schema::content_store::content_hash)
+                        .load(conn)
+                        .await?;
+                    let existing_set: HashSet<&str> = existing.iter().map(|s| s.as_str()).collect();
+                    let missing: Vec<&str> = hash_only_hashes
+                        .iter()
+                        .filter(|h| !existing_set.contains(h.as_str()))
+                        .map(|h| h.as_str())
+                        .collect();
+                    if !missing.is_empty() {
+                        return Err(UploadError::Invalid(format!(
+                            "missing content for {} hash(es): {}",
+                            missing.len(),
+                            missing.join(", ")
+                        )));
+                    }
+                }
+
+                let object_map = insert_objects(conn, &mut object_inserts).await?;
 
                 let symbol_inserts = build_symbols(project_id, &upload.symbols)?;
                 let symbol_map = insert_symbols(conn, symbol_inserts).await?;
@@ -410,19 +449,68 @@ impl IndexStore {
         let mut conn = self.get_conn().await?;
 
         let normalized = normalize_full_path(path);
-        let content = index_schema::object_contents::table
-            .inner_join(
-                index_schema::objects::table
-                    .on(index_schema::object_contents::object_id.eq(index_schema::objects::id)),
-            )
-            .filter(index_schema::objects::project_id.eq(project_id))
-            .filter(index_schema::objects::filesystem_path.eq(normalized))
-            .select(index_schema::object_contents::content)
-            .first::<Vec<u8>>(&mut conn)
-            .await
-            .optional()?;
+        let content: Option<Vec<u8>> = diesel::sql_query(
+            r#"
+            SELECT COALESCE(oc.content, cs.content) AS content
+            FROM index.objects o
+            LEFT JOIN index.object_contents oc ON oc.object_id = o.id
+            LEFT JOIN index.content_store cs ON cs.content_hash = o.content_hash
+            WHERE o.project_id = $1
+              AND o.filesystem_path = $2
+            LIMIT 1
+            "#,
+        )
+        .bind::<diesel::sql_types::Integer, _>(project_id)
+        .bind::<diesel::sql_types::Text, _>(normalized)
+        .get_result::<ContentRow>(&mut conn)
+        .await
+        .optional()?
+        .map(|row| row.content);
 
         Ok(content)
+    }
+
+    pub async fn upload_contents(&self, batch: ContentBatch) -> Result<usize, UploadError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|err| UploadError::Storage(err.to_string()))?;
+
+        // Validate all hashes upfront before any inserts
+        let mut rows = Vec::with_capacity(batch.contents.len());
+        for entry in &batch.contents {
+            let expected_hash = entry.content_hash.trim();
+            if expected_hash.is_empty() {
+                return Err(UploadError::Invalid(
+                    "content_hash is required on ObjectContent".to_string(),
+                ));
+            }
+            let actual_hash = hash_bytes(&entry.content);
+            if actual_hash != expected_hash {
+                return Err(UploadError::Invalid(format!(
+                    "content_hash mismatch: expected {}, got {}",
+                    expected_hash, actual_hash
+                )));
+            }
+            rows.push(NewContentStoreRow {
+                content_hash: entry.content_hash.clone(),
+                content: entry.content.clone(),
+            });
+        }
+
+        let mut new_count = 0usize;
+        for chunk in rows.chunks(MAX_INSERT_ROWS) {
+            let inserted = diesel::insert_into(index_schema::content_store::table)
+                .values(chunk)
+                .on_conflict(index_schema::content_store::content_hash)
+                .do_nothing()
+                .execute(&mut conn)
+                .await?;
+            new_count += inserted;
+        }
+
+        Ok(new_count)
     }
 }
 
@@ -674,7 +762,7 @@ fn validate_instance_type(proto_type: i32) -> Result<i32, UploadError> {
 
 struct ObjectInsert {
     local_id: i64,
-    content: Vec<u8>,
+    content: Option<Vec<u8>>,
     row: NewObject,
 }
 
@@ -710,15 +798,23 @@ fn build_objects(
             )));
         }
         let filesystem_path = normalize_full_path(filesystem_path_raw);
+        let (content, content_hash) = if !object.content_hash.is_empty() && object.content.is_empty() {
+            // Hash-only object: content lives in content_store
+            (None, object.content_hash.clone())
+        } else {
+            // Inline content (legacy or new with content)
+            let hash = hash_bytes(&object.content);
+            (Some(object.content.clone()), hash)
+        };
         inserts.push(ObjectInsert {
             local_id: object.local_id,
-            content: object.content.clone(),
+            content,
             row: NewObject {
                 project_id,
                 module_path: object.module_path.clone(),
                 filesystem_path,
                 filetype: object.filetype.clone(),
-                content_hash: hash_bytes(&object.content),
+                content_hash,
             },
         });
     }
@@ -727,14 +823,14 @@ fn build_objects(
 
 async fn insert_objects(
     conn: &mut AsyncPgConnection,
-    inserts: &[ObjectInsert],
+    inserts: &mut [ObjectInsert],
 ) -> Result<HashMap<i64, i32>, UploadError> {
     if inserts.is_empty() {
         return Ok(HashMap::new());
     }
 
     let mut object_map = HashMap::new();
-    for chunk in inserts.chunks(MAX_INSERT_ROWS) {
+    for chunk in inserts.chunks_mut(MAX_INSERT_ROWS) {
         let rows: Vec<NewObject> = chunk.iter().map(|entry| entry.row.clone()).collect();
         let ids: Vec<i32> = diesel::insert_into(index_schema::objects::table)
             .values(&rows)
@@ -742,19 +838,38 @@ async fn insert_objects(
             .get_results(conn)
             .await?;
 
-        let mut object_contents = Vec::with_capacity(ids.len());
-        for (entry, id) in chunk.iter().zip(ids.iter()) {
+        let mut object_contents = Vec::new();
+        let mut content_store_rows = Vec::new();
+        for (entry, id) in chunk.iter_mut().zip(ids.iter()) {
             object_map.insert(entry.local_id, *id);
-            object_contents.push(NewObjectContent {
-                object_id: *id,
-                content: entry.content.clone(),
-            });
+            if let Some(content) = entry.content.take() {
+                // Inline content: insert into object_contents (legacy) and content_store (dedup)
+                content_store_rows.push(NewContentStoreRow {
+                    content_hash: entry.row.content_hash.clone(),
+                    content: content.clone(),
+                });
+                object_contents.push(NewObjectContent {
+                    object_id: *id,
+                    content, // moved, no extra clone
+                });
+            }
+            // Hash-only objects: no insert into object_contents — content lives in content_store
         }
 
-        diesel::insert_into(index_schema::object_contents::table)
-            .values(&object_contents)
-            .execute(conn)
-            .await?;
+        if !object_contents.is_empty() {
+            diesel::insert_into(index_schema::object_contents::table)
+                .values(&object_contents)
+                .execute(conn)
+                .await?;
+        }
+        if !content_store_rows.is_empty() {
+            diesel::insert_into(index_schema::content_store::table)
+                .values(&content_store_rows)
+                .on_conflict(index_schema::content_store::content_hash)
+                .do_nothing()
+                .execute(conn)
+                .await?;
+        }
     }
 
     Ok(object_map)

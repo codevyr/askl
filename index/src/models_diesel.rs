@@ -1,4 +1,5 @@
 use diesel::prelude::*;
+use diesel::QueryableByName;
 use std::collections::Bound;
 
 #[derive(Clone, Queryable, Selectable, Identifiable, Debug, PartialEq, Eq, Hash)]
@@ -68,6 +69,12 @@ pub struct Symbol {
     pub project_id: i32,
     pub symbol_type: i32,
     pub symbol_scope: Option<i32>,
+}
+
+#[derive(Debug, QueryableByName)]
+pub struct ContentRow {
+    #[diesel(sql_type = diesel::sql_types::Binary)]
+    pub content: Vec<u8>,
 }
 
 #[derive(Clone, Queryable, Selectable, Debug, PartialEq)]
