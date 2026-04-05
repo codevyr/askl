@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 pub struct AsklData {
     pub cfg: ControlFlowGraph,
+    pub query_timeout: std::time::Duration,
 }
 
 fn symbolid_as_string<S>(x: &SymbolId, s: S) -> Result<S::Ok, S::Error>

@@ -32,6 +32,10 @@ pub struct ServeArgs {
     /// Enable tracing. Provide a file path to write the trace to.
     #[clap(short, long, action)]
     pub trace: Option<String>,
+
+    /// Query timeout in seconds (PG statement_timeout + tokio timeout)
+    #[clap(long, default_value = "5", env = "ASKL_QUERY_TIMEOUT")]
+    pub query_timeout: u64,
 }
 
 #[derive(ClapArgs, Debug)]

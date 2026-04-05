@@ -3,14 +3,14 @@ use askld::execution_context::ExecutionContext;
 use askld::offset_range::range_bounds_to_offsets;
 use askld::parser::parse;
 use index::symbols::{InstanceType, SymbolInstanceId, FileId, SymbolId, SymbolType};
-use log::{debug, info};
+use log::{debug, info, warn};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use tokio::time::{timeout, Duration};
+use tokio::time::timeout;
 
 use super::types::{AsklData, Edge, ErrorResponse, Graph, GraphObjectEntry, HasEdge, Node, NodeSymbolInstance};
 
-const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_RESPONSE_BYTES: usize = 1_024 * 1_024; // 1 MB
 
 #[post("/query")]
 pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
@@ -39,10 +39,15 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
     let res = {
         let _query_execute = tracing::info_span!("query_execute").entered();
         let execute_future = ast.execute(&mut ctx, &data.cfg);
-        match timeout(QUERY_TIMEOUT, execute_future).await {
+        match timeout(data.query_timeout, execute_future).await {
             Ok(Err(err)) => {
+                let msg = err.to_string();
+                if msg.contains("statement timeout") {
+                    warn!("Query timed out (PG statement_timeout)");
+                    return HttpResponse::GatewayTimeout().body("Query timed out");
+                }
                 let json_err = serde_json::to_string(&ErrorResponse {
-                    message: err.to_string(),
+                    message: msg,
                     location: err.location.clone().into(),
                     line_col: err.line_col.clone().into(),
                     path: err.path().map(|p| p.to_string()),
@@ -52,7 +57,8 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
             }
             Ok(Ok(res)) => res,
             Err(_) => {
-                return HttpResponse::RequestTimeout().body("Query timed out");
+                warn!("Query timed out (tokio timeout after {:?})", data.query_timeout);
+                return HttpResponse::GatewayTimeout().body("Query timed out");
             }
         }
     };
@@ -137,6 +143,9 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
     result_graph.add_warnings(res.warnings);
 
     let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();
+    if json_graph.len() > MAX_RESPONSE_BYTES {
+        return HttpResponse::PayloadTooLarge().body("Response too large");
+    }
     HttpResponse::Ok().body(json_graph)
 }
 
