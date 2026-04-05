@@ -16,6 +16,7 @@ pub const TEST_INPUT_MODULES: &'static str = index::db_diesel::Index::TEST_INPUT
 pub const TEST_INPUT_CONTAINMENT: &'static str = index::db_diesel::Index::TEST_INPUT_CONTAINMENT;
 pub const TEST_INPUT_TREE_BROWSER: &'static str = index::db_diesel::Index::TEST_INPUT_TREE_BROWSER;
 pub const TEST_INPUT_NESTED_FUNC: &'static str = index::db_diesel::Index::TEST_INPUT_NESTED_FUNC;
+pub const TEST_INPUT_TYPE_FILTER: &'static str = index::db_diesel::Index::TEST_INPUT_TYPE_FILTER;
 pub const VERB_TEST: &'static str = index::db_diesel::Index::VERB_TEST;
 
 pub fn format_edges(edges: EdgeList) -> Vec<String> {
@@ -81,6 +82,7 @@ const ALL_FIXTURES: &[&str] = &[
     TEST_INPUT_CONTAINMENT,
     TEST_INPUT_TREE_BROWSER,
     TEST_INPUT_NESTED_FUNC,
+    TEST_INPUT_TYPE_FILTER,
     VERB_TEST,
 ];
 

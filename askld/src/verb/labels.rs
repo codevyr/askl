@@ -1,6 +1,6 @@
 use crate::{
     command::NotificationResult, execution_context::selector_state_with,
-    execution_state::{DependencyRole, RelationshipType}, parser::Rule, span::Span,
+    execution_state::DependencyRole, parser::Rule, span::Span,
 };
 use anyhow::{bail, Result};
 use async_trait::async_trait;
@@ -281,7 +281,7 @@ impl Selector for UserVerb {
         _index: &Index,
         _selector_filters: &[&dyn Filter],
         child: &Statement,
-        _rel_type: RelationshipType,
+        _notif_ctx: NotificationContext,
     ) -> Result<Option<Selection>> {
         let child = match child.get_selection(&ctx) {
             Some(selection) => selection,

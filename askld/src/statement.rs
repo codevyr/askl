@@ -89,7 +89,8 @@ pub fn build_statement<'a>(
     let command = sub_ctx.command(statement_span);
     let relationship_type = sub_ctx.get_relationship_type();
     let unnest = command.has_verb_tag(&VerbTag::Unnest);
-    let statement = Statement::new_full(command, scope.clone(), relationship_type, unnest);
+    let flatten = command.has_verb_tag(&VerbTag::Flatten);
+    let statement = Statement::new_full(command, scope.clone(), relationship_type, unnest, flatten);
     scope.set_parent(Rc::downgrade(&statement));
 
     Ok(statement)
@@ -154,11 +155,16 @@ pub struct Statement {
     /// When false (default), derive_from_parent filters to direct children only.
     /// When true (unnest verb), all transitive levels are included.
     pub unnest: bool,
+    /// Whether this statement uses flatten mode for HAS derivation.
+    /// When false (default), upward HAS derivation returns only innermost parents,
+    /// and downward returns only direct children.
+    /// When true (flatten verb), all containment levels are included.
+    pub flatten: bool,
 }
 
 impl Statement {
     pub fn new(command: Command, scope: Rc<dyn Scope>) -> Rc<Statement> {
-        Statement::new_full(command, scope, RelationshipType::REFS, false)
+        Statement::new_full(command, scope, RelationshipType::REFS, false, false)
     }
 
     pub fn new_with_relationship(
@@ -166,7 +172,7 @@ impl Statement {
         scope: Rc<dyn Scope>,
         relationship_type: RelationshipType,
     ) -> Rc<Statement> {
-        Statement::new_full(command, scope, relationship_type, false)
+        Statement::new_full(command, scope, relationship_type, false, false)
     }
 
     pub fn new_full(
@@ -174,6 +180,7 @@ impl Statement {
         scope: Rc<dyn Scope>,
         relationship_type: RelationshipType,
         unnest: bool,
+        flatten: bool,
     ) -> Rc<Statement> {
         Rc::new(Statement {
             command,
@@ -182,11 +189,16 @@ impl Statement {
             execution_state: RefCell::new(ExecutionState::new()),
             relationship_type,
             unnest,
+            flatten,
         })
     }
 
     pub fn is_unnest(&self) -> bool {
         self.unnest
+    }
+
+    pub fn is_flatten(&self) -> bool {
+        self.flatten
     }
 
     pub fn get_relationship_type(&self) -> RelationshipType {
@@ -697,6 +709,7 @@ impl Statement {
             // Use the notifying child's relationship type (all siblings share it).
             let rel_type = self.get_relationship_type();
 
+            let flatten = dependent.statement.is_flatten();
             let res = dependent
                 .statement
                 .command()
@@ -706,6 +719,7 @@ impl Statement {
                     &merged,
                     DependencyRole::Parent,
                     rel_type,
+                    flatten,
                 )
                 .await?;
 
@@ -731,6 +745,7 @@ impl Statement {
             role: dependent.dependency_role,
             rel_type,
             unnest: dependent.statement.is_unnest(),
+            flatten: dependent.statement.is_flatten(),
         };
         let res = dependent
             .statement

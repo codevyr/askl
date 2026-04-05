@@ -74,6 +74,7 @@ pub(crate) fn build_generic_verb(
         RefsModifier::NAME => RefsModifier::new(verb_span, &positional, &named),
         DeriveModifier::NAME => DeriveModifier::new(verb_span, &positional, &named),
         UnnestModifier::NAME => UnnestModifier::new(verb_span, &positional, &named),
+        FlattenModifier::NAME => FlattenModifier::new(verb_span, &positional, &named),
         TypeSelector::NAME_FUNCTION => {
             TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FUNCTION)
         }
@@ -805,6 +806,51 @@ impl Verb for UnnestModifier {
 impl Display for UnnestModifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "UnnestModifier")
+    }
+}
+
+/// FlattenModifier - overrides innermost-only filtering for HAS derivation.
+/// Without flatten, upward HAS derivation returns only the innermost parent,
+/// and downward HAS derivation returns only direct children.
+/// With flatten, all containment levels are included.
+#[derive(Debug)]
+pub(super) struct FlattenModifier {
+    span: Span,
+}
+
+impl FlattenModifier {
+    pub(super) const NAME: &'static str = "flatten";
+
+    pub fn new(
+        span: Span,
+        _positional: &Vec<String>,
+        _named: &HashMap<String, String>,
+    ) -> Result<Arc<dyn Verb>> {
+        Ok(Arc::new(Self { span }))
+    }
+}
+
+impl Verb for FlattenModifier {
+    fn name(&self) -> &str {
+        FlattenModifier::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Skip
+    }
+
+    fn get_tag(&self) -> Option<VerbTag> {
+        Some(VerbTag::Flatten)
+    }
+}
+
+impl Display for FlattenModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FlattenModifier")
     }
 }
 
