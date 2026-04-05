@@ -13,15 +13,17 @@ use index::symbols::SymbolInstanceId;
 //
 // Containment (HAS) is determined by offset range nesting.
 // data_macro_only's has_parents: macro_m, func_a, file_x, dir_root
+//
+// Root-level default: all types (no filtering).
 
 #[test]
 fn has_parent_innermost_only() {
     // { "data_macro_only" } — upward derivation from data_macro_only.
     //
     // data_macro_only's has_parents: macro_m, func_a, file_x, dir_root.
-    // With innermost filtering: only macro_m is derived.
-    // Outer {} has DefaultTypeFilter([FUNCTION]) → macro_m (type 7) is filtered out.
-    // So func_a must NOT appear (it would only appear if all parents were derived).
+    // With innermost filtering: only macro_m is derived via HAS.
+    // REFS parents also appear (file_x, dir_root contain the ref origin).
+    // Root has DefaultTypeFilter([]) → all types pass.
     const QUERY: &str = r#"{ "data_macro_only" }"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
@@ -90,11 +92,12 @@ fn upward_derivation_skips_intermediate() {
     // 1. data_macro_only computes: [data_macro_only]
     // 2. Inner {} derives innermost has_parent: [macro_m]
     //    (inner has DefaultTypeFilter([]) — all types pass)
-    // 3. Outer {} derives innermost has_parent of macro_m: [func_a]
-    //    (func_a passes DefaultTypeFilter([FUNCTION]))
+    // 3. Outer {} derives parents of macro_m:
+    //    - HAS innermost: func_a
+    //    - REFS parents: func_a (from ref [200,210)), file_x, dir_root
+    //    Outer has DefaultTypeFilter([]) — all types pass
     //
-    // Each upward hop traverses exactly one containment level.
-    // file_x and dir_root should NOT appear (they are not innermost).
+    // file_x and dir_root appear via REFS parents with all-types default.
     const QUERY: &str = r#"{ { "data_macro_only" } }"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
@@ -105,28 +108,23 @@ fn upward_derivation_skips_intermediate() {
     assert!(nodes.contains(&SymbolInstanceId::new(105)), "macro_m (one hop up)");
     assert!(nodes.contains(&SymbolInstanceId::new(103)), "func_a (two hops up)");
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(102)),
-        "file_x should NOT appear (not innermost parent of macro_m)"
-    );
-    assert!(
-        !nodes.contains(&SymbolInstanceId::new(101)),
-        "dir_root should NOT appear (not innermost parent of anything)"
+        nodes.contains(&SymbolInstanceId::new(102)),
+        "file_x appears via REFS parents with all-types default"
     );
 }
 
 #[test]
-fn flatten_overrides_innermost() {
-    // flatten { "data_macro_only" } — find parents with flatten.
+fn unnest_overrides_innermost() {
+    // unnest { "data_macro_only" } — find parents with unnest.
     //
-    // With flatten, ALL has_parents are returned instead of just innermost.
-    // Outer has DefaultTypeFilter([FUNCTION]) → func_a (type 1) passes.
-    // Without flatten (test 1), func_a would NOT appear because innermost
-    // is macro_m which gets filtered by the [FUNCTION] type filter.
-    const QUERY: &str = r#"flatten { "data_macro_only" }"#;
+    // With unnest, ALL has_parents are returned instead of just innermost.
+    // Root has DefaultTypeFilter([]) → all types pass.
+    // func_a appears because all containment levels are included.
+    const QUERY: &str = r#"unnest { "data_macro_only" }"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
     let nodes = res.nodes.as_vec();
-    println!("flatten_overrides_innermost nodes: {:?}", nodes);
+    println!("unnest_overrides_innermost nodes: {:?}", nodes);
 
     assert!(
         nodes.contains(&SymbolInstanceId::new(107)),
@@ -134,30 +132,30 @@ fn flatten_overrides_innermost() {
     );
     assert!(
         nodes.contains(&SymbolInstanceId::new(103)),
-        "func_a should be found with flatten (skips innermost filtering)"
+        "func_a should be found with unnest (skips innermost filtering)"
     );
 }
 
 #[test]
-fn flatten_downward_does_not_affect_child() {
-    // func("func_a") flatten {} — flatten is on the parent statement.
+fn unnest_downward_does_not_affect_child() {
+    // func("func_a") unnest {} — unnest is on the parent statement.
     //
-    // The child {} reads its own flatten flag (false) for downward derivation,
+    // The child {} reads its own unnest flag (false) for downward derivation,
     // so direct_only filtering still applies. data_macro_only should NOT appear
     // because it's inside macro_m, not directly inside func_a.
-    // flatten on the parent only affects upward (parent merge) derivation.
-    const QUERY: &str = r#"func("func_a") flatten {}"#;
+    // unnest on the parent only affects upward (parent merge) derivation.
+    const QUERY: &str = r#"func("func_a") unnest {}"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
     let nodes = res.nodes.as_vec();
-    println!("flatten_downward_does_not_affect_child nodes: {:?}", nodes);
+    println!("unnest_downward_does_not_affect_child nodes: {:?}", nodes);
 
     assert!(nodes.contains(&SymbolInstanceId::new(103)), "func_a");
     assert!(nodes.contains(&SymbolInstanceId::new(105)), "macro_m (direct child)");
     assert!(nodes.contains(&SymbolInstanceId::new(106)), "data_d (direct child)");
     assert!(
         !nodes.contains(&SymbolInstanceId::new(107)),
-        "data_macro_only should NOT appear (flatten on parent doesn't affect child derivation)"
+        "data_macro_only should NOT appear (unnest on parent doesn't affect child derivation)"
     );
 }
 
@@ -172,10 +170,9 @@ fn three_hop_upward() {
     //    - REFS parents: func_a (from ref [200,210)), file_x, dir_root
     //    Middle has DefaultTypeFilter([]) → all pass → [func_a, file_x, dir_root]
     // 4. Outer {} derives parents of [func_a, file_x, dir_root]:
-    //    Has DefaultTypeFilter([FUNCTION]) → only functions pass at outermost level.
+    //    Has DefaultTypeFilter([]) → all types pass at outermost level.
     //
-    // Final result = union of all levels. Middle level's file_x and dir_root
-    // persist in the final result because intermediate DefaultTypeFilter([]) allows them.
+    // Final result = union of all levels.
     const QUERY: &str = r#"{ { { "data_macro_only" } } }"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
@@ -185,8 +182,6 @@ fn three_hop_upward() {
     assert!(nodes.contains(&SymbolInstanceId::new(107)), "data_macro_only");
     assert!(nodes.contains(&SymbolInstanceId::new(105)), "macro_m (one hop)");
     assert!(nodes.contains(&SymbolInstanceId::new(103)), "func_a (two hops)");
-    // file_x and dir_root appear because middle level has DefaultTypeFilter([])
-    // and REFS parents of macro_m include them (ref from [200,210) is inside file_x/dir_root)
     assert!(
         nodes.contains(&SymbolInstanceId::new(102)),
         "file_x appears via REFS parents at intermediate level"
@@ -199,7 +194,8 @@ fn innermost_from_data_d() {
     //
     // data_d's has_parents: func_a, file_x, dir_root.
     // Innermost is func_a (directly contains data_d, no intermediary).
-    // Outer {} has DefaultTypeFilter([FUNCTION]) → func_a (type 1) passes.
+    // REFS parents include func_a, file_x, dir_root (ref from [150,160) contained by all).
+    // Root has DefaultTypeFilter([]) → all types pass.
     const QUERY: &str = r#"{ "data_d" }"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
@@ -209,15 +205,11 @@ fn innermost_from_data_d() {
     assert!(nodes.contains(&SymbolInstanceId::new(106)), "data_d");
     assert!(
         nodes.contains(&SymbolInstanceId::new(103)),
-        "func_a should appear (innermost has_parent of data_d, passes FUNCTION filter)"
+        "func_a should appear (innermost HAS parent and REFS parent)"
     );
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(102)),
-        "file_x should NOT appear (not innermost)"
-    );
-    assert!(
-        !nodes.contains(&SymbolInstanceId::new(101)),
-        "dir_root should NOT appear (not innermost)"
+        nodes.contains(&SymbolInstanceId::new(102)),
+        "file_x appears via REFS parents with all-types default"
     );
 }
 
@@ -227,8 +219,7 @@ fn upward_from_func_b() {
     //
     // func_b's has_parents: file_x, dir_root.
     // Innermost is file_x (directly contains func_b).
-    // Outer {} has DefaultTypeFilter([FUNCTION]) → file_x (type 2) is filtered out.
-    // So no parent appears in the final result (only func_b itself).
+    // Root has DefaultTypeFilter([]) → all types pass → file_x appears.
     const QUERY: &str = r#"{ "func_b" }"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
@@ -237,12 +228,8 @@ fn upward_from_func_b() {
 
     assert!(nodes.contains(&SymbolInstanceId::new(104)), "func_b");
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(102)),
-        "file_x should be filtered by DefaultTypeFilter([FUNCTION])"
-    );
-    assert!(
-        !nodes.contains(&SymbolInstanceId::new(101)),
-        "dir_root should NOT appear (not innermost, and filtered)"
+        nodes.contains(&SymbolInstanceId::new(102)),
+        "file_x should appear (innermost HAS parent, passes all-types filter)"
     );
 }
 
@@ -251,8 +238,7 @@ fn has_only_upward_innermost() {
     // has { "data_macro_only" } — upward using only HAS (containment), no REFS.
     //
     // Innermost has_parent of data_macro_only: macro_m.
-    // Outer {} has DefaultTypeFilter([FUNCTION]) → macro_m (type 7) is filtered out.
-    // Same result as has_parent_innermost_only, but explicitly using `has` verb.
+    // Root has DefaultTypeFilter([]) → macro_m (type 7) passes.
     const QUERY: &str = r#"has { "data_macro_only" }"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
@@ -264,8 +250,12 @@ fn has_only_upward_innermost() {
         "data_macro_only should be in results"
     );
     assert!(
+        nodes.contains(&SymbolInstanceId::new(105)),
+        "macro_m should appear (innermost HAS parent, passes all-types filter)"
+    );
+    assert!(
         !nodes.contains(&SymbolInstanceId::new(103)),
-        "func_a should NOT appear (innermost is macro_m, filtered by [FUNCTION])"
+        "func_a should NOT appear (not innermost via HAS-only)"
     );
 }
 
@@ -276,8 +266,8 @@ fn refs_parents_from_macro_m() {
     // macro_m's has_parents: func_a, file_x, dir_root.
     // Innermost is func_a.
     // macro_m also has REFS parents: func_a refs macro_m from [200,210).
-    // func_a is both REFS parent and innermost HAS parent.
-    // Outer {} has DefaultTypeFilter([FUNCTION]) → func_a passes.
+    // REFS parents include func_a, file_x, dir_root (all contain [200,210)).
+    // Root has DefaultTypeFilter([]) → all types pass.
     const QUERY: &str = r#"{ "macro_m" }"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
@@ -290,34 +280,31 @@ fn refs_parents_from_macro_m() {
         "func_a should appear (innermost HAS parent and REFS parent)"
     );
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(102)),
-        "file_x should NOT appear (not innermost)"
+        nodes.contains(&SymbolInstanceId::new(102)),
+        "file_x appears via REFS parents with all-types default"
     );
 }
 
 #[test]
-fn flatten_all_parents_from_data_d() {
-    // flatten { "data_d" } — all parents with flatten.
+fn unnest_all_parents_from_data_d() {
+    // unnest { "data_d" } — all parents with unnest.
     //
     // data_d's has_parents: func_a, file_x, dir_root.
-    // With flatten, all are returned. DefaultTypeFilter([FUNCTION]) at outer level
-    // filters to only func_a (type 1).
-    // Without flatten (innermost_from_data_d test), same result since func_a
-    // is already the innermost. This test ensures flatten doesn't break simple cases.
-    const QUERY: &str = r#"flatten { "data_d" }"#;
+    // With unnest, all are returned. DefaultTypeFilter([]) at outer level
+    // means all types pass.
+    const QUERY: &str = r#"unnest { "data_d" }"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
     let nodes = res.nodes.as_vec();
-    println!("flatten_all_parents_from_data_d nodes: {:?}", nodes);
+    println!("unnest_all_parents_from_data_d nodes: {:?}", nodes);
 
     assert!(nodes.contains(&SymbolInstanceId::new(106)), "data_d");
     assert!(
         nodes.contains(&SymbolInstanceId::new(103)),
-        "func_a should appear (passes FUNCTION filter)"
+        "func_a should appear"
     );
-    // file_x and dir_root are returned by flatten but filtered by DefaultTypeFilter([FUNCTION])
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(102)),
-        "file_x filtered by DefaultTypeFilter([FUNCTION])"
+        nodes.contains(&SymbolInstanceId::new(102)),
+        "file_x should appear (unnest returns all parents)"
     );
 }

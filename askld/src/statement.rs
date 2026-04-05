@@ -77,20 +77,20 @@ pub fn build_statement<'a>(
     }
 
     // If no explicit type selector was used, add a DefaultTypeFilter.
-    // None → no inherited default, fall back to [FUNCTION].
-    // Some(vec![]) → explicitly set to "all types", add filter with empty vec (no-op).
+    // None → no inherited default, all types (no filtering needed, skip verb).
+    // Some(vec![]) → explicitly set to "all types" (no filtering needed, skip verb).
     // Some(types) → filter by those types.
     if !sub_ctx.has_type_selector() {
-        let default_types = inherited_default_types
-            .unwrap_or_else(|| vec![crate::parser_context::SYMBOL_TYPE_FUNCTION]);
-        sub_ctx.extend_verb(DefaultTypeFilter::new(statement_span.clone(), default_types));
+        let default_types = inherited_default_types.unwrap_or_default();
+        if !default_types.is_empty() {
+            sub_ctx.extend_verb(DefaultTypeFilter::new(statement_span.clone(), default_types));
+        }
     }
 
     let command = sub_ctx.command(statement_span);
     let relationship_type = sub_ctx.get_relationship_type();
     let unnest = command.has_verb_tag(&VerbTag::Unnest);
-    let flatten = command.has_verb_tag(&VerbTag::Flatten);
-    let statement = Statement::new_full(command, scope.clone(), relationship_type, unnest, flatten);
+    let statement = Statement::new_full(command, scope.clone(), relationship_type, unnest);
     scope.set_parent(Rc::downgrade(&statement));
 
     Ok(statement)
@@ -104,12 +104,12 @@ pub fn build_empty_statement(ctx: Rc<ParserContext>, span: Span) -> Rc<Statement
     // For {} without has, the parent context already reset to Refs.
     // The relationship type is correctly set by build_statement before calling build_scope.
 
-    // Empty statements have no explicit type selector — always add DefaultTypeFilter.
-    // None → fall back to [FUNCTION]. Some(vec![]) → no-op filter (all types).
-    let default_types = sub_ctx
-        .get_default_symbol_types()
-        .unwrap_or_else(|| vec![crate::parser_context::SYMBOL_TYPE_FUNCTION]);
-    sub_ctx.extend_verb(DefaultTypeFilter::new(span.clone(), default_types));
+    // Empty statements have no explicit type selector — add DefaultTypeFilter if needed.
+    // None → all types (no filtering needed, skip verb). Some(vec![]) → same, skip.
+    let default_types = sub_ctx.get_default_symbol_types().unwrap_or_default();
+    if !default_types.is_empty() {
+        sub_ctx.extend_verb(DefaultTypeFilter::new(span.clone(), default_types));
+    }
 
     let command = sub_ctx.command(span);
     let relationship_type = sub_ctx.get_relationship_type();
@@ -152,19 +152,15 @@ pub struct Statement {
     /// - Has: Containment-based traversal (composition)
     pub relationship_type: RelationshipType,
     /// Whether this statement uses unnest mode for scope derivation.
-    /// When false (default), derive_from_parent filters to direct children only.
+    /// When false (default), derive_from_parent filters to direct children only
+    /// and upward HAS derivation returns only innermost parents.
     /// When true (unnest verb), all transitive levels are included.
     pub unnest: bool,
-    /// Whether this statement uses flatten mode for HAS derivation.
-    /// When false (default), upward HAS derivation returns only innermost parents,
-    /// and downward returns only direct children.
-    /// When true (flatten verb), all containment levels are included.
-    pub flatten: bool,
 }
 
 impl Statement {
     pub fn new(command: Command, scope: Rc<dyn Scope>) -> Rc<Statement> {
-        Statement::new_full(command, scope, RelationshipType::REFS, false, false)
+        Statement::new_full(command, scope, RelationshipType::REFS, false)
     }
 
     pub fn new_with_relationship(
@@ -172,7 +168,7 @@ impl Statement {
         scope: Rc<dyn Scope>,
         relationship_type: RelationshipType,
     ) -> Rc<Statement> {
-        Statement::new_full(command, scope, relationship_type, false, false)
+        Statement::new_full(command, scope, relationship_type, false)
     }
 
     pub fn new_full(
@@ -180,7 +176,6 @@ impl Statement {
         scope: Rc<dyn Scope>,
         relationship_type: RelationshipType,
         unnest: bool,
-        flatten: bool,
     ) -> Rc<Statement> {
         Rc::new(Statement {
             command,
@@ -189,16 +184,11 @@ impl Statement {
             execution_state: RefCell::new(ExecutionState::new()),
             relationship_type,
             unnest,
-            flatten,
         })
     }
 
     pub fn is_unnest(&self) -> bool {
         self.unnest
-    }
-
-    pub fn is_flatten(&self) -> bool {
-        self.flatten
     }
 
     pub fn get_relationship_type(&self) -> RelationshipType {
@@ -709,7 +699,7 @@ impl Statement {
             // Use the notifying child's relationship type (all siblings share it).
             let rel_type = self.get_relationship_type();
 
-            let flatten = dependent.statement.is_flatten();
+            let unnest = dependent.statement.is_unnest();
             let res = dependent
                 .statement
                 .command()
@@ -719,7 +709,7 @@ impl Statement {
                     &merged,
                     DependencyRole::Parent,
                     rel_type,
-                    flatten,
+                    unnest,
                 )
                 .await?;
 
@@ -745,7 +735,6 @@ impl Statement {
             role: dependent.dependency_role,
             rel_type,
             unnest: dependent.statement.is_unnest(),
-            flatten: dependent.statement.is_flatten(),
         };
         let res = dependent
             .statement

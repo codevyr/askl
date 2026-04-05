@@ -74,7 +74,7 @@ pub(crate) fn build_generic_verb(
         RefsModifier::NAME => RefsModifier::new(verb_span, &positional, &named),
         DeriveModifier::NAME => DeriveModifier::new(verb_span, &positional, &named),
         UnnestModifier::NAME => UnnestModifier::new(verb_span, &positional, &named),
-        FlattenModifier::NAME => FlattenModifier::new(verb_span, &positional, &named),
+        AnyModifier::NAME => AnyModifier::new(verb_span, &positional, &named),
         TypeSelector::NAME_FUNCTION => {
             TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FUNCTION)
         }
@@ -809,17 +809,16 @@ impl Display for UnnestModifier {
     }
 }
 
-/// FlattenModifier - overrides innermost-only filtering for HAS derivation.
-/// Without flatten, upward HAS derivation returns only the innermost parent,
-/// and downward HAS derivation returns only direct children.
-/// With flatten, all containment levels are included.
+/// AnyModifier - removes inherited type filtering from parent scopes.
+/// When added to a statement, it strips any verbs that suppress the default
+/// type filter (i.e. inherited TypeSelectors), allowing all symbol types to match.
 #[derive(Debug)]
-pub(super) struct FlattenModifier {
+pub(super) struct AnyModifier {
     span: Span,
 }
 
-impl FlattenModifier {
-    pub(super) const NAME: &'static str = "flatten";
+impl AnyModifier {
+    pub(super) const NAME: &'static str = "any";
 
     pub fn new(
         span: Span,
@@ -830,9 +829,9 @@ impl FlattenModifier {
     }
 }
 
-impl Verb for FlattenModifier {
+impl Verb for AnyModifier {
     fn name(&self) -> &str {
-        FlattenModifier::NAME
+        AnyModifier::NAME
     }
 
     fn span(&self) -> pest::Span<'_> {
@@ -843,14 +842,23 @@ impl Verb for FlattenModifier {
         DeriveMethod::Skip
     }
 
-    fn get_tag(&self) -> Option<VerbTag> {
-        Some(VerbTag::Flatten)
+    /// Removes inherited TypeSelectors (verbs where suppresses_default_type_filter is true).
+    fn add_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
+        existing_verbs
+            .into_iter()
+            .filter(|v| !v.suppresses_default_type_filter())
+            .collect()
+    }
+
+    fn update_context(&self, _ctx: &ParserContext) -> Result<bool> {
+        // Not consumed — must reach add_verb to strip inherited type selectors.
+        Ok(false)
     }
 }
 
-impl Display for FlattenModifier {
+impl Display for AnyModifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "FlattenModifier")
+        write!(f, "AnyModifier")
     }
 }
 
@@ -975,10 +983,12 @@ impl TypeSelector {
             None => name_pattern.is_none(), // default based on name presence
         };
 
+        // Bare type selectors (no name) inherit by default so they propagate
+        // the type filter into child scopes. Named type selectors don't inherit.
         let inherit = named
             .get("inherit")
             .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .unwrap_or(name_pattern.is_none());
 
         let leaf_anchored = match named.get("match").map(|v| v.as_str()) {
             Some("contains") => false,
@@ -1094,11 +1104,13 @@ impl Verb for TypeSelector {
     }
 
     fn add_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
-        if self.filter_only && self.name_pattern.is_some() {
-            self.replace_verb(existing_verbs)
-        } else {
-            self.extend_verb(existing_verbs)
-        }
+        // Any type selector replaces inherited type selectors.
+        // e.g. `data` or `data("foo")` inside a `func` scope replaces the
+        // inherited func filter rather than AND'ing with it.
+        existing_verbs
+            .into_iter()
+            .filter(|v| !v.suppresses_default_type_filter())
+            .collect()
     }
 
     /// Set default symbol types and relationship type for child scopes.

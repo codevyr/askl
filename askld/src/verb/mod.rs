@@ -136,18 +136,16 @@ pub enum VerbTag {
     TypeFilter,
     GenericFilter(&'static str),
     Unnest,
-    Flatten,
 }
 
 /// Bundles the notification parameters that always travel together through
 /// the notification chain: dependency role, resolved relationship type, and
-/// whether the receiver uses unnest/flatten mode.
+/// whether the receiver uses unnest mode.
 #[derive(Debug, Clone, Copy)]
 pub struct NotificationContext {
     pub role: DependencyRole,
     pub rel_type: RelationshipType,
     pub unnest: bool,
-    pub flatten: bool,
 }
 
 pub fn add_verb(existing_verbs: Vec<Arc<dyn Verb>>, new_verb: Arc<dyn Verb>) -> Vec<Arc<dyn Verb>> {
@@ -511,7 +509,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         dependency: &Selection,
         role: DependencyRole,
         rel_type: RelationshipType,
-        flatten: bool,
+        unnest: bool,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         let mut changed = false;
         let (constrained, warnings) = selector_state_with(&mut ctx.registry, self, |state| {
@@ -542,7 +540,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         if role != DependencyRole::Parent {
             return Ok(NotificationResult::new(false, vec![]));
         }
-        let decl_ids = collect_parent_ids(dependency, rel_type, !flatten);
+        let decl_ids = collect_parent_ids(dependency, rel_type, !unnest);
 
         let mut selection = self
             .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
@@ -607,7 +605,7 @@ pub trait Selector: std::fmt::Debug + Verb {
             Some(selection) => selection,
             None => return Ok(None),
         };
-        let decl_ids = collect_child_ids(&parent_sel, notif_ctx.rel_type, !notif_ctx.unnest && !notif_ctx.flatten);
+        let decl_ids = collect_child_ids(&parent_sel, notif_ctx.rel_type, !notif_ctx.unnest);
 
         let selection = self
             .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
@@ -618,7 +616,7 @@ pub trait Selector: std::fmt::Debug + Verb {
 
     /// Derive from child (I am a parent, collect IDs from child's parents/has_parents).
     /// Handles combined relationship types with union semantics.
-    /// When flatten is false, only innermost has_parents are included.
+    /// When unnest is false, only innermost has_parents are included.
     async fn derive_from_child(
         &self,
         ctx: &mut ExecutionContext,
@@ -631,7 +629,7 @@ pub trait Selector: std::fmt::Debug + Verb {
             Some(selection) => selection,
             None => return Ok(None),
         };
-        let decl_ids = collect_parent_ids(&child_sel, notif_ctx.rel_type, !notif_ctx.flatten);
+        let decl_ids = collect_parent_ids(&child_sel, notif_ctx.rel_type, !notif_ctx.unnest);
 
         let selection = self
             .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
