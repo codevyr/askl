@@ -132,6 +132,7 @@ impl Command {
         dependency: &Selection,
         role: DependencyRole,
         rel_type: RelationshipType,
+        flatten: bool,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         let mut changed = false;
         let mut warnings = vec![];
@@ -145,6 +146,7 @@ impl Command {
                     dependency,
                     role,
                     rel_type,
+                    flatten,
                 )
                 .await?;
             changed |= res.changed;

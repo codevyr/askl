@@ -83,6 +83,7 @@ impl Index {
     pub const TEST_INPUT_CONTAINMENT: &'static str = "test_input_containment.sql";
     pub const TEST_INPUT_TREE_BROWSER: &'static str = "test_input_tree_browser.sql";
     pub const TEST_INPUT_NESTED_FUNC: &'static str = "test_input_nested_func.sql";
+    pub const TEST_INPUT_TYPE_FILTER: &'static str = "test_input_type_filter.sql";
     pub const VERB_TEST: &'static str = "verb_test.sql";
 
     fn load_sql(connection: &mut PgConnection, input_path: &str) {
@@ -132,6 +133,12 @@ impl Index {
             "test_input_nested_func.sql" => {
                 connection
                     .batch_execute(include_str!("../../../sql/test_input_nested_func.sql"))
+                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
+                    .unwrap();
+            }
+            "test_input_type_filter.sql" => {
+                connection
+                    .batch_execute(include_str!("../../../sql/test_input_type_filter.sql"))
                     .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
                     .unwrap();
             }

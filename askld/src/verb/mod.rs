@@ -136,16 +136,18 @@ pub enum VerbTag {
     TypeFilter,
     GenericFilter(&'static str),
     Unnest,
+    Flatten,
 }
 
 /// Bundles the notification parameters that always travel together through
 /// the notification chain: dependency role, resolved relationship type, and
-/// whether the receiver uses unnest mode.
+/// whether the receiver uses unnest/flatten mode.
 #[derive(Debug, Clone, Copy)]
 pub struct NotificationContext {
     pub role: DependencyRole,
     pub rel_type: RelationshipType,
     pub unnest: bool,
+    pub flatten: bool,
 }
 
 pub fn add_verb(existing_verbs: Vec<Arc<dyn Verb>>, new_verb: Arc<dyn Verb>) -> Vec<Arc<dyn Verb>> {
@@ -509,6 +511,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         dependency: &Selection,
         role: DependencyRole,
         rel_type: RelationshipType,
+        flatten: bool,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         let mut changed = false;
         let (constrained, warnings) = selector_state_with(&mut ctx.registry, self, |state| {
@@ -539,26 +542,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         if role != DependencyRole::Parent {
             return Ok(NotificationResult::new(false, vec![]));
         }
-        let capacity = if rel_type.contains(RelationshipType::REFS) { dependency.parents.len() } else { 0 }
-            + if rel_type.contains(RelationshipType::HAS) { dependency.has_parents.len() } else { 0 };
-        let mut decl_ids = Vec::with_capacity(capacity);
-        if rel_type.contains(RelationshipType::REFS) {
-            decl_ids.extend(
-                dependency
-                    .parents
-                    .iter()
-                    .map(|p| SymbolInstanceId::new(p.from_instance.id)),
-            );
-        }
-        if rel_type.contains(RelationshipType::HAS) {
-            decl_ids.extend(
-                dependency
-                    .has_parents
-                    .iter()
-                    .map(|p| SymbolInstanceId::new(p.parent_instance.id)),
-            );
-        }
-        let decl_ids: Vec<_> = decl_ids.into_iter().unique().collect();
+        let decl_ids = collect_parent_ids(dependency, rel_type, !flatten);
 
         let mut selection = self
             .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
@@ -596,7 +580,7 @@ pub trait Selector: std::fmt::Debug + Verb {
                     .await?
             }
             DependencyRole::Parent => {
-                self.derive_from_child(ctx, index, selector_filters, notifier, notif_ctx.rel_type)
+                self.derive_from_child(ctx, index, selector_filters, notifier, notif_ctx)
                     .await?
             }
             DependencyRole::User => {
@@ -623,7 +607,7 @@ pub trait Selector: std::fmt::Debug + Verb {
             Some(selection) => selection,
             None => return Ok(None),
         };
-        let decl_ids = collect_child_ids(&parent_sel, notif_ctx.rel_type, !notif_ctx.unnest);
+        let decl_ids = collect_child_ids(&parent_sel, notif_ctx.rel_type, !notif_ctx.unnest && !notif_ctx.flatten);
 
         let selection = self
             .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
@@ -634,38 +618,20 @@ pub trait Selector: std::fmt::Debug + Verb {
 
     /// Derive from child (I am a parent, collect IDs from child's parents/has_parents).
     /// Handles combined relationship types with union semantics.
+    /// When flatten is false, only innermost has_parents are included.
     async fn derive_from_child(
         &self,
         ctx: &mut ExecutionContext,
         index: &Index,
         selector_filters: &[&dyn Filter],
         child: &Statement,
-        rel_type: RelationshipType,
+        notif_ctx: NotificationContext,
     ) -> Result<Option<Selection>> {
         let child_sel = match child.get_selection(&ctx) {
             Some(selection) => selection,
             None => return Ok(None),
         };
-        let capacity = if rel_type.contains(RelationshipType::REFS) { child_sel.parents.len() } else { 0 }
-            + if rel_type.contains(RelationshipType::HAS) { child_sel.has_parents.len() } else { 0 };
-        let mut decl_ids = Vec::with_capacity(capacity);
-        if rel_type.contains(RelationshipType::REFS) {
-            decl_ids.extend(
-                child_sel
-                    .parents
-                    .iter()
-                    .map(|p| SymbolInstanceId::new(p.from_instance.id)),
-            );
-        }
-        if rel_type.contains(RelationshipType::HAS) {
-            decl_ids.extend(
-                child_sel
-                    .has_parents
-                    .iter()
-                    .map(|p| SymbolInstanceId::new(p.parent_instance.id)),
-            );
-        }
-        let decl_ids: Vec<_> = decl_ids.into_iter().unique().collect();
+        let decl_ids = collect_parent_ids(&child_sel, notif_ctx.rel_type, !notif_ctx.flatten);
 
         let selection = self
             .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
@@ -767,12 +733,52 @@ fn collect_child_ids(
     decl_ids.into_iter().unique().collect()
 }
 
+/// Collect parent symbol instance IDs from a child's selection.
+/// When `innermost_only` is true, filters HAS parents to innermost using spatial helpers.
+/// Symmetrical to `collect_child_ids` but for the upward direction.
+fn collect_parent_ids(
+    child_sel: &Selection,
+    rel_type: RelationshipType,
+    innermost_only: bool,
+) -> Vec<SymbolInstanceId> {
+    let capacity = if rel_type.contains(RelationshipType::REFS) { child_sel.parents.len() } else { 0 }
+        + if rel_type.contains(RelationshipType::HAS) { child_sel.has_parents.len() } else { 0 };
+    let mut decl_ids = Vec::with_capacity(capacity);
+    if rel_type.contains(RelationshipType::REFS) {
+        decl_ids.extend(
+            child_sel
+                .parents
+                .iter()
+                .map(|p| SymbolInstanceId::new(p.from_instance.id)),
+        );
+    }
+    if rel_type.contains(RelationshipType::HAS) {
+        if innermost_only {
+            decl_ids.extend(
+                child_sel
+                    .has_parents
+                    .iter()
+                    .filter(|p| is_innermost_has_parent(p, &child_sel.has_parents))
+                    .map(|p| SymbolInstanceId::new(p.parent_instance.id)),
+            );
+        } else {
+            decl_ids.extend(
+                child_sel
+                    .has_parents
+                    .iter()
+                    .map(|p| SymbolInstanceId::new(p.parent_instance.id)),
+            );
+        }
+    }
+    decl_ids.into_iter().unique().collect()
+}
+
 // ============================================================================
 // Direct-only filtering helpers for collect_child_ids
 // ============================================================================
 
 use crate::offset_range::range_bounds_to_offsets;
-use index::db_diesel::{HasChildReference, ChildReference};
+use index::db_diesel::{HasChildReference, HasParentReference, ChildReference};
 use index::models_diesel::SymbolInstance;
 use std::ops::Bound;
 
@@ -871,6 +877,34 @@ fn is_direct_child_ref(
         // e.g. function (level 1) inside module (level 3) → don't filter
         let cont_level = symbol_type_level(container.child_symbol.symbol_type);
         cont_level >= parent_level
+    })
+}
+
+/// A has_parent P is "innermost" relative to child C if there is no other
+/// has_parent P' that sits strictly between C and P in the containment hierarchy.
+/// Symmetrical to `is_direct_has_child` but for the upward direction.
+fn is_innermost_has_parent(
+    parent: &HasParentReference,
+    all_has_parents: &[HasParentReference],
+) -> bool {
+    let child_range = &parent.child_instance.offset_range;
+    let parent_range = &parent.parent_instance.offset_range;
+
+    !all_has_parents.iter().any(|other| {
+        // Skip self
+        if other.parent_instance.id == parent.parent_instance.id {
+            return false;
+        }
+        // Must be in the same object (file)
+        if other.parent_instance.object_id != parent.parent_instance.object_id {
+            return false;
+        }
+        let other_range = &other.parent_instance.offset_range;
+        // other.parent must be inside parent AND contain child (strictly between)
+        range_contains(parent_range, other_range)
+            && range_contains(other_range, child_range)
+            && !ranges_equal(other_range, parent_range)
+            && !ranges_equal(other_range, child_range)
     })
 }
 
