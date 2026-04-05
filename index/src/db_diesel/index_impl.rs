@@ -2,8 +2,10 @@ use anyhow::Result;
 use diesel::connection::SimpleConnection;
 use diesel::pg::{Pg, PgConnection};
 use diesel::prelude::*;
-use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgRangeExpressionMethods;
+use diesel_async::pooled_connection::bb8;
+use diesel_async::pooled_connection::AsyncDieselConnectionManager;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use diesel_migrations::MigrationHarness;
 
 use crate::models_diesel::{ContentRow, Object, Project, Symbol, SymbolInstance, SymbolRef};
@@ -15,32 +17,40 @@ use super::mixins::{
     CONTAINED_INSTANCE_ALIAS, CONTAINED_SYMBOL_ALIAS, CONTAINED_TYPE_ALIAS,
 };
 use super::selection::{ChildReference, HasChildReference, HasParentReference, ParentReference, Selection, SelectionNode};
-use super::Connection;
 
 #[derive(Clone)]
 pub struct Index {
-    pub(super) pool: Pool<ConnectionManager<PgConnection>>,
+    pub(super) pool: bb8::Pool<AsyncPgConnection>,
+    /// Stored for test helpers that need sync DDL connections (migrations, batch_execute).
+    database_url: Option<String>,
 }
 
 impl Index {
-    pub fn from_pool(pool: Pool<ConnectionManager<PgConnection>>) -> Result<Self> {
-        let connection = &mut pool
-            .get()
-            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
-        connection
-            .run_pending_migrations(super::MIGRATIONS)
-            .map_err(|e| anyhow::anyhow!("Failed to run migrations: {}", e))?;
-        Ok(Self { pool })
+    pub fn from_pool(pool: bb8::Pool<AsyncPgConnection>) -> Self {
+        Self { pool, database_url: None }
+    }
+
+    fn build_async_manager(database_url: &str) -> AsyncDieselConnectionManager<AsyncPgConnection> {
+        AsyncDieselConnectionManager::new(database_url)
     }
 
     pub async fn connect(database_url: &str) -> Result<Self> {
-        let manager = ConnectionManager::<PgConnection>::new(database_url);
-        let pool = Pool::builder()
+        // Run migrations with a sync connection
+        {
+            let connection = &mut <PgConnection as diesel::Connection>::establish(database_url)
+                .map_err(|e| anyhow::anyhow!("Failed to establish connection: {}", e))?;
+            connection
+                .run_pending_migrations(super::MIGRATIONS)
+                .map_err(|e| anyhow::anyhow!("Failed to run migrations: {}", e))?;
+        }
+
+        let manager = Self::build_async_manager(database_url);
+        let pool = bb8::Pool::builder()
             .test_on_check_out(true)
             .build(manager)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to create connection pool: {}", e))?;
-
-        Self::from_pool(pool)
+        Ok(Self { pool, database_url: Some(database_url.to_string()) })
     }
 
     /// Connect and load test data using a direct connection for DDL work,
@@ -63,11 +73,13 @@ impl Index {
             Self::load_sql(connection, input_path);
         }
 
-        let manager = ConnectionManager::<PgConnection>::new(database_url);
-        let pool = Pool::builder()
+        let manager = Self::build_async_manager(database_url);
+        let pool = bb8::Pool::builder()
+            .test_on_check_out(true)
             .build(manager)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to create connection pool: {}", e))?;
-        Ok(Self { pool })
+        Ok(Self { pool, database_url: Some(database_url.to_string()) })
     }
 
     pub async fn new_in_memory() -> Result<Self> {
@@ -147,7 +159,10 @@ impl Index {
     }
 
     pub async fn load_test_input(&self, input_path: &str) -> Result<()> {
-        let connection = &mut self.pool.get().unwrap();
+        let database_url = self.database_url.as_ref()
+            .expect("load_test_input requires Index created via connect/connect_with_test_input");
+        let connection = &mut <PgConnection as diesel::Connection>::establish(database_url)
+            .map_err(|e| anyhow::anyhow!("Failed to establish connection: {}", e))?;
 
         connection.revert_all_migrations(super::MIGRATIONS).unwrap();
         connection
@@ -162,6 +177,16 @@ impl Index {
 
         Self::load_sql(connection, input_path);
 
+        // Also clear async pool connections' prepared statement caches
+        {
+            let mut async_conn = self.pool.get().await
+                .map_err(|e| anyhow::anyhow!("Failed to get async connection: {}", e))?;
+            diesel::sql_query("DEALLOCATE ALL")
+                .execute(&mut *async_conn)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to deallocate: {}", e))?;
+        }
+
         Ok(())
     }
 
@@ -169,6 +194,7 @@ impl Index {
         let connection = &mut self
             .pool
             .get()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let object_id: i32 = object_id.into();
@@ -182,7 +208,8 @@ impl Index {
             "#,
         )
         .bind::<diesel::sql_types::Integer, _>(object_id)
-        .get_result::<ContentRow>(connection)
+        .get_result::<ContentRow>(&mut *connection)
+        .await
         .optional()
         .map_err(|e| anyhow::anyhow!("Failed to query file contents: {}", e))?
         .map(|row| row.content);
@@ -202,10 +229,12 @@ impl Index {
     ) -> Result<Selection> {
         use crate::schema_diesel::*;
 
-        let connection: &mut Connection = &mut self
+        let connection = &mut self
             .pool
             .get()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+        let connection: &mut AsyncPgConnection = &mut *connection;
 
         for mixin in mixins.iter_mut() {
             mixin.enter(connection)?;
@@ -238,6 +267,7 @@ impl Index {
 
             joined_query
                 .load::<(Symbol, SymbolInstance, Object, Project)>(connection)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?
         };
 
@@ -293,6 +323,7 @@ impl Index {
 
             parents_query
                 .load::<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)>(connection)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
         };
 
@@ -346,6 +377,7 @@ impl Index {
 
             children_query
                 .load::<(Symbol, Symbol, SymbolInstance, SymbolInstance, SymbolRef, Object)>(connection)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
         };
 
@@ -420,6 +452,7 @@ impl Index {
 
             has_parents_query
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance)>(connection)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to load containment parents: {}", e))?
         };
 
@@ -491,6 +524,7 @@ impl Index {
 
             has_children_query
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(connection)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?
         };
 

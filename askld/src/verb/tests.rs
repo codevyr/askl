@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_select_matching_name() {
-    let index = get_shared_index(VERB_TEST);
+    let index = get_shared_index(VERB_TEST).await;
     let cfg = ControlFlowGraph::from_symbols(index);
 
     let test_cases = vec![

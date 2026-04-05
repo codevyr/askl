@@ -4,10 +4,11 @@ use askld::auth::{self, AuthStore};
 use askld::cfg::ControlFlowGraph;
 use askld::index_store::IndexStore;
 use diesel::pg::PgConnection;
-use diesel::r2d2::{ConnectionManager, Pool};
 use diesel_async::pooled_connection::bb8::Pool as AsyncPool;
-use diesel_async::pooled_connection::AsyncDieselConnectionManager;
-use diesel_async::AsyncPgConnection;
+use diesel_async::pooled_connection::{AsyncDieselConnectionManager, ManagerConfig};
+use diesel_async::{AsyncConnection, AsyncPgConnection};
+use diesel_migrations::MigrationHarness;
+use futures::FutureExt;
 
 use index::db_diesel::Index;
 use log::info;
@@ -79,19 +80,47 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
         None
     };
 
-    // Sync pool for Index (which uses sync diesel throughout)
-    let sync_manager = ConnectionManager::<PgConnection>::new(&serve_args.database_url);
-    let sync_pool = Pool::builder()
-        .build(sync_manager)
-        .expect("Failed to build sync database pool");
+    // Run migrations with a sync connection
+    {
+        use diesel::Connection;
+        let mut connection = PgConnection::establish(&serve_args.database_url)
+            .expect("Failed to establish migration connection");
+        connection
+            .run_pending_migrations(index::db_diesel::MIGRATIONS)
+            .expect("Failed to run migrations");
+    }
 
-    // Async pool for IndexStore and AuthStore
+    // Async pool for IndexStore and AuthStore (no statement_timeout)
     let async_config =
         AsyncDieselConnectionManager::<AsyncPgConnection>::new(&serve_args.database_url);
     let async_pool: AsyncPool<AsyncPgConnection> = AsyncPool::builder()
         .build(async_config)
         .await
         .expect("Failed to build async database pool");
+
+    // Async pool for Index queries (with statement_timeout)
+    let query_timeout_secs = serve_args.query_timeout;
+    let query_timeout_ms = query_timeout_secs * 1000;
+    let mut index_pool_config = ManagerConfig::<AsyncPgConnection>::default();
+    index_pool_config.custom_setup = Box::new(move |url| {
+        async move {
+            let mut conn = AsyncPgConnection::establish(url).await?;
+            diesel_async::RunQueryDsl::<AsyncPgConnection>::execute(
+                diesel::sql_query(&format!("SET statement_timeout = {}", query_timeout_ms)),
+                &mut conn,
+            )
+            .await
+            .map_err(diesel::ConnectionError::CouldntSetupConfiguration)?;
+            Ok(conn)
+        }
+        .boxed()
+    });
+    let index_config =
+        AsyncDieselConnectionManager::new_with_config(&serve_args.database_url, index_pool_config);
+    let index_pool: AsyncPool<AsyncPgConnection> = AsyncPool::builder()
+        .build(index_config)
+        .await
+        .expect("Failed to build index database pool");
 
     let auth_store = AuthStore::from_pool(async_pool.clone(), &serve_args.database_url)
         .expect("Failed to initialize auth store");
@@ -100,9 +129,10 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
     let index_store = IndexStore::from_pool(async_pool.clone());
     let index_store = web::Data::new(index_store);
 
-    let index_query = Index::from_pool(sync_pool).expect("Failed to initialize index");
+    let index_query = Index::from_pool(index_pool);
     let askl_data = web::Data::new(AsklData {
         cfg: ControlFlowGraph::from_symbols(index_query),
+        query_timeout: std::time::Duration::from_secs(query_timeout_secs),
     });
 
     info!(

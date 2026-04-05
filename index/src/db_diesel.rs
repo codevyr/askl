@@ -1,5 +1,4 @@
-use diesel::pg::PgConnection;
-use diesel::r2d2::{ConnectionManager, PooledConnection};
+use diesel_async::AsyncPgConnection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations};
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("../migrations");
@@ -20,4 +19,4 @@ pub use selection::{
     ReferenceFullDiesel, ReferenceResult, Selection, SelectionNode, SymbolInstanceFullDiesel,
 };
 
-pub type Connection = PooledConnection<ConnectionManager<PgConnection>>;
+pub type Connection = AsyncPgConnection;

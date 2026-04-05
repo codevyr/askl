@@ -32,12 +32,10 @@ pub fn format_edges(edges: EdgeList) -> Vec<String> {
 struct SharedFixture {
     _container: Container<'static, GenericImage>,
     url: String,
-    index: Index,
 }
 
 // Safety: The Cli is leaked to 'static, so Container<'static, GenericImage> holds no
-// dangling borrow. After OnceLock initialization, only shared & references are used
-// (no mutation). Index wraps an Arc-based r2d2 pool which is Send+Sync.
+// dangling borrow. After OnceLock initialization, only shared & references are used.
 unsafe impl Send for SharedFixture {}
 unsafe impl Sync for SharedFixture {}
 
@@ -102,15 +100,16 @@ fn create_fixture(fixture: &str) -> SharedFixture {
         let url = postgres_url(port);
 
         let rt = Runtime::new().unwrap();
-        let index = rt.block_on(async {
+        rt.block_on(async {
             wait_for_postgres(&url).await.unwrap();
-            Index::connect_with_test_input(&url, &fixture).await.unwrap()
+            // Use connect_with_test_input to load DDL + data via sync connection.
+            // The pool created here will be discarded; each test creates its own.
+            Index::connect_with_test_input(&url, &fixture).await.unwrap();
         });
 
         SharedFixture {
             _container: container,
             url,
-            index,
         }
     })
     .join()
@@ -124,8 +123,9 @@ fn get_shared_fixture(fixture: &str) -> &'static SharedFixture {
     lock.get_or_init(|| create_fixture(fixture))
 }
 
-pub fn get_shared_index(fixture: &str) -> Index {
-    get_shared_fixture(fixture).index.clone()
+pub async fn get_shared_index(fixture: &str) -> Index {
+    let url = &get_shared_fixture(fixture).url;
+    Index::connect(url).await.unwrap()
 }
 
 pub fn get_shared_db_url(fixture: &str) -> &'static str {
@@ -133,7 +133,7 @@ pub fn get_shared_db_url(fixture: &str) -> &'static str {
 }
 
 pub async fn run_query_async_err(askl_input: &str, askl_query: &str) -> Result<ExecutionResult> {
-    let index = get_shared_index(askl_input);
+    let index = get_shared_index(askl_input).await;
     let cfg = ControlFlowGraph::from_symbols(index);
 
     let ast = parse(askl_query)?;

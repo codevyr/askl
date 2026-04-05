@@ -379,6 +379,10 @@ impl Statement {
         self.mark_weak_statements(&statements);
 
         while !statements.iter().all(|s| s.get_state().completed) {
+            // Yield to the runtime so tokio::time::timeout can fire if the
+            // query has exceeded its deadline.
+            tokio::task::yield_now().await;
+
             let _statement_iteration: tracing::span::EnteredSpan =
                 tracing::info_span!("statement_iteration").entered();
 
