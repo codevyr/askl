@@ -33,6 +33,8 @@ fn single_child_query() {
 
 #[test]
 fn single_parent_query() {
+    // Root-level {} has no type filter (default is all types), so parents of "a"
+    // include function main(942), file /main.c(1001), and directory /(1003).
     const QUERY: &str = r#"{"a"}"#;
     let res = run_query(TEST_INPUT_A, QUERY);
 
@@ -40,10 +42,15 @@ fn single_parent_query() {
     println!("{:#?}", res.edges);
     assert_eq!(
         res.nodes.as_vec(),
-        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(942)]
+        vec![
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(942),
+            SymbolInstanceId::new(1001),
+            SymbolInstanceId::new(1003),
+        ]
     );
     let edges = format_edges(res.edges);
-    assert_eq!(edges, vec!["942-91"]);
+    assert_eq!(edges, vec!["942-91", "1001-91", "1003-91"]);
 }
 
 #[test]
@@ -360,19 +367,30 @@ fn ignore_node_sibling() {
 
 #[test]
 fn ignore_node_parent_no_result() {
+    // Root-level {} has no type filter (all types), so parents of "e" include
+    // d(94) which is ignored, plus file /main.c(1001) and directory /(1003).
     const QUERY: &str = r#"ignore("d") {"e"}"#;
     let res = run_query(TEST_INPUT_A, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(95)]);
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![
+            SymbolInstanceId::new(95),
+            SymbolInstanceId::new(1001),
+            SymbolInstanceId::new(1003),
+        ]
+    );
     let edges = format_edges(res.edges);
-    assert_eq!(edges, Vec::<String>::new());
+    assert_eq!(edges, vec!["1001-95", "1003-95"]);
 }
 
 #[test]
 fn ignore_node_parent_no_result_2() {
+    // Second command: ignore("d") {"f" {ignore("asdf")}} — parents of "f" (all types)
+    // include d(94) which is ignored, plus file(1001) and directory(1003).
     const QUERY: &str = r#" {ignore("a") "a"{}}; ignore("d") {"f" {ignore("asdf")}};"#;
     let res = run_query(TEST_INPUT_A, QUERY);
 
@@ -381,10 +399,15 @@ fn ignore_node_parent_no_result_2() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![SymbolInstanceId::new(96), SymbolInstanceId::new(97)]
+        vec![
+            SymbolInstanceId::new(96),
+            SymbolInstanceId::new(97),
+            SymbolInstanceId::new(1001),
+            SymbolInstanceId::new(1003),
+        ]
     );
     let edges = format_edges(res.edges);
-    assert_eq!(edges, vec!["96-97"]);
+    assert_eq!(edges, vec!["96-97", "1001-96", "1001-97", "1003-96", "1003-97"]);
     println!("{:#?}", res.warnings);
     assert_eq!(res.warnings.len(), 1);
 }
@@ -404,6 +427,8 @@ fn ignore_node_parent_no_result_3() {
 
 #[test]
 fn ignore_node_parent_no_result_4() {
+    // Root-level {} has no type filter (all types), so parents of "f" include
+    // d(94) which is ignored, plus file(1001) and directory(1003).
     const QUERY: &str = r#"ignore("d") {"f" {ignore("asdf")}};"#;
     let res = run_query(TEST_INPUT_A, QUERY);
 
@@ -412,14 +437,21 @@ fn ignore_node_parent_no_result_4() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![SymbolInstanceId::new(96), SymbolInstanceId::new(97)]
+        vec![
+            SymbolInstanceId::new(96),
+            SymbolInstanceId::new(97),
+            SymbolInstanceId::new(1001),
+            SymbolInstanceId::new(1003),
+        ]
     );
     let edges = format_edges(res.edges);
-    assert_eq!(edges, vec!["96-97"]);
+    assert_eq!(edges, vec!["96-97", "1001-96", "1001-97", "1003-96", "1003-97"]);
 }
 
 #[test]
 fn ignore_node_wrong_parent() {
+    // Root-level {} has no type filter (all types), so parents of "e" include
+    // d(94) plus file(1001) and directory(1003). "a" is ignored but isn't a parent of "e".
     const QUERY: &str = r#"ignore("a") {"e"}"#;
     let res = run_query(TEST_INPUT_A, QUERY);
 
@@ -428,10 +460,15 @@ fn ignore_node_wrong_parent() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![SymbolInstanceId::new(94), SymbolInstanceId::new(95)]
+        vec![
+            SymbolInstanceId::new(94),
+            SymbolInstanceId::new(95),
+            SymbolInstanceId::new(1001),
+            SymbolInstanceId::new(1003),
+        ]
     );
     let edges = format_edges(res.edges);
-    assert_eq!(edges, vec!["94-95"]);
+    assert_eq!(edges, vec!["94-95", "1001-95", "1003-95"]);
 }
 
 #[test]
@@ -979,6 +1016,8 @@ fn weak_grandparent() {
 
 #[test]
 fn weak_grandparent_2() {
+    // Root-level {} has no type filter (default is all types), so parents of "main"
+    // include file /main.c(1001) and directory /(1003) in addition to any function parents.
     const QUERY: &str = r#"{"main"{"a"}}"#;
     let res = run_query(TEST_INPUT_A, QUERY);
 
@@ -987,10 +1026,15 @@ fn weak_grandparent_2() {
 
     assert_eq!(
         res.nodes.as_vec(),
-        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(942)]
+        vec![
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(942),
+            SymbolInstanceId::new(1001),
+            SymbolInstanceId::new(1003),
+        ]
     );
     let edges = format_edges(res.edges);
-    assert_eq!(edges, vec!["942-91"]);
+    assert_eq!(edges, vec!["942-91", "1001-91", "1003-91"]);
 }
 
 #[test]
@@ -1026,47 +1070,48 @@ fn non_existent_child_warning() {
 #[test]
 fn has_children_query() {
     // mod("testmodule") has { file has { "foo" } }
-    // With direct-children-only: module(3) → file(2) → function(1)
-    // Returns: module "testmodule", file, and function "testmodule.foo"
+    // Bare `file` (no name) now inherits FILE type filter into children (inherit=true).
+    // "foo" inherits the FILE type filter, but foo is a FUNCTION — type mismatch.
+    // "foo" (strong) finds nothing → constrains file away → constrains mod away.
+    // Result: 0 nodes.
     const QUERY: &str = r#"mod("testmodule") has { file has { "foo" } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // Should have module (10), file (510), and foo (20)
-    assert_eq!(res.nodes.as_vec().len(), 3);
+    assert_eq!(res.nodes.as_vec().len(), 0);
 }
 
 #[test]
 fn has_parents_query() {
     // file has { "foo" }
-    // With direct-children-only: file(2) → function(1)
-    // Returns: function "foo" and its containing file
+    // Bare `file` (no name) now inherits FILE type filter into children (inherit=true).
+    // "foo" inherits the FILE type filter, but foo is a FUNCTION — type mismatch.
+    // "foo" (strong) finds nothing → constrains file away. Result: 0 nodes.
     const QUERY: &str = r#"file has { "foo" }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // Should have file (510) and foo (20)
-    assert_eq!(res.nodes.as_vec().len(), 2);
+    assert_eq!(res.nodes.as_vec().len(), 0);
 }
 
 #[test]
 fn mixed_has_refs_query() {
     // mod("testmodule") has { file has { "foo" refs {} } }
-    // With direct-children-only: module(3) → file(2) → function(1), then refs
-    // Returns: module, file, foo in file, and foo's callees (bar)
-    // Note: refs is needed to override inherited has for the inner scope
+    // Bare `file` (no name) now inherits FILE type filter into children (inherit=true).
+    // "foo" inherits the FILE type filter, but foo is a FUNCTION — type mismatch.
+    // "foo" (strong) finds nothing → constrains file away → constrains mod away.
+    // Result: 0 nodes.
     const QUERY: &str = r#"mod("testmodule") has { file has { "foo" refs {} } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // Should have module (10), file (510), foo (20), and bar (30)
-    assert_eq!(res.nodes.as_vec().len(), 4);
+    assert_eq!(res.nodes.as_vec().len(), 0);
 }
 
 #[test]
@@ -1143,16 +1188,17 @@ fn has_propagates_by_default() {
 
 #[test]
 fn has_with_explicit_refs_override() {
-    // To get the old behavior (has then refs), use explicit refs on the inner scope
     // file has { "foo" refs { "bar" } }
+    // Bare `file` (no name) now inherits FILE type filter into children (inherit=true).
+    // "foo" inherits the FILE type filter, but foo is a FUNCTION — type mismatch.
+    // "foo" (strong) finds nothing → constrains file away. Result: 0 nodes.
     const QUERY: &str = r#"file has { "foo" refs { "bar" } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // file contains foo (has), foo calls bar (refs) — all three found
-    assert_eq!(res.nodes.as_vec().len(), 3);
+    assert_eq!(res.nodes.as_vec().len(), 0);
 }
 
 // ============================================================================
@@ -1216,15 +1262,14 @@ fn has_vs_refs_function_to_function() {
 #[test]
 fn has_vs_refs_all_children() {
     // Test has vs refs behavior comparison
-    // has: directory contains file(s) and transitively contains functions
+    // has: Bare `func` replaces inherited `file` type filter, finds functions.
+    // dir(2 instances) + file + func(3: foo,bar,baz) = 6 nodes.
     const HAS_QUERY: &str = r#"dir("/") has { file has { func } }"#;
     let has_res = run_query(TEST_INPUT_CONTAINMENT, HAS_QUERY);
 
     println!("has result: {:#?}", has_res.nodes);
 
-    // Directory "/" contains file "/main.go" which contains foo, bar, baz
-    // Results: directory + file + 3 functions = 5 nodes
-    assert_eq!(has_res.nodes.as_vec().len(), 5);
+    assert_eq!(has_res.nodes.as_vec().len(), 6);
 
     // refs: test function-to-function refs
     // foo calls bar, bar calls baz
@@ -1434,59 +1479,58 @@ fn file_contains_specific_function() {
 #[test]
 fn directory_contains_file() {
     // dir("/") has { mod has { file } }
-    // With direct-children-only: directory(4) → module(3) → file(2)
-    // Returns: directory /, module, and file
+    // Bare `file` replaces inherited `mod` type filter, so it finds /main.go.
+    // dir(2 instances) + module + file = 4 nodes.
     const QUERY: &str = r#"dir("/") has { mod has { file } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // Directory + module + file = 3 nodes
-    assert_eq!(res.nodes.as_vec().len(), 3);
+    assert_eq!(res.nodes.as_vec().len(), 4);
 }
 
 #[test]
 fn directory_contains_module() {
     // dir("/") has { mod }
-    // Returns: directory / and modules contained in it
+    // dir("/") has 2 instances (self-instance 500 and containment instance 501).
+    // Bare `mod` filters to MODULE type, finding testmodule(10).
+    // Result: dir(2 instances) + module = 3 nodes.
     const QUERY: &str = r#"dir("/") has { mod }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // Directory + module = 2 nodes
-    assert_eq!(res.nodes.as_vec().len(), 2);
+    assert_eq!(res.nodes.as_vec().len(), 3);
 }
 
 #[test]
 fn directory_contains_function() {
     // dir("/") has { mod has { file has { func } } }
-    // With direct-children-only: directory(4) → module(3) → file(2) → function(1)
-    // Returns: directory, module, file, and all functions
+    // Each bare type selector replaces the inherited one from its parent scope:
+    // file replaces mod, func replaces file.
+    // dir(2 instances) + mod + file + func(3: foo,bar,baz) = 7 nodes.
     const QUERY: &str = r#"dir("/") has { mod has { file has { func } } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // Directory + module + file + 3 functions = 6 nodes
-    assert_eq!(res.nodes.as_vec().len(), 6);
+    assert_eq!(res.nodes.as_vec().len(), 7);
 }
 
 #[test]
 fn full_hierarchy_query() {
     // dir("/") has { mod has { file("/main.go") has { "foo" } } }
-    // With direct-children-only: directory(4) → module(3) → file(2) → function(1)
-    // Returns: directory, module, file /main.go, and foo
+    // Named file("/main.go") replaces inherited mod type filter, finds /main.go.
+    // "foo" found inside the file. dir(2 instances) + mod + file + foo = 4 nodes.
     const QUERY: &str = r#"dir("/") has { mod has { file("/main.go") has { "foo" } } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // Directory + module + file + foo = 4 nodes
     assert_eq!(res.nodes.as_vec().len(), 4);
 }
 
@@ -1551,19 +1595,20 @@ fn directory_type_selector_filter_at_root() {
 #[test]
 fn directory_src_util_contains_its_direct_files() {
     // dir("/src/util") has { file }
-    // /src/util has instances in objects 2,3 (util.go, helper.go)
-    // Files in those objects: util.go (obj 2), helper.go (obj 3)
+    // /src/util has instances: 1030 (self on obj 103), 1031 (on obj 2), 1032 (on obj 3).
+    // Files: util.go(2020 on obj 2), helper.go(2030 on obj 3).
+    // Bare `file` (no name, inherit=true) doesn't affect selection since file is a leaf.
+    // Result: dir(3 instances) + 2 files = 5 nodes.
     const QUERY: &str = r#"dir("/src/util") has { file }"#;
     let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // /src/util directory + 2 files = 4 nodes (directory constrained to instances matching children)
     assert_eq!(
         res.nodes.as_vec().len(),
-        4,
-        "/src/util should have directory + 2 file instances = 4 nodes. Got {}.",
+        5,
+        "/src/util should have 3 directory instances + 2 file instances = 5 nodes. Got {}.",
         res.nodes.as_vec().len()
     );
 }
@@ -1571,18 +1616,20 @@ fn directory_src_util_contains_its_direct_files() {
 #[test]
 fn directory_docs_contains_its_direct_file() {
     // dir("/docs") has { file }
-    // /docs has 1 instance (in object 5 for readme.md)
+    // /docs has instances: 1020 (self on obj 102) and 1021 (on obj 5).
+    // File: readme.md(2050 on obj 5).
+    // Bare `file` (no name, inherit=true) doesn't affect selection since file is a leaf.
+    // Result: dir(2 instances) + 1 file = 3 nodes.
     const QUERY: &str = r#"dir("/docs") has { file }"#;
     let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // /docs directory + 1 file = 2 nodes
     assert_eq!(
         res.nodes.as_vec().len(),
-        2,
-        "/docs should have directory + 1 file instance = 2 nodes. Got {}.",
+        3,
+        "/docs should have 2 directory instances + 1 file instance = 3 nodes. Got {}.",
         res.nodes.as_vec().len()
     );
 }
@@ -1830,24 +1877,24 @@ fn generic_filter_with_name_selector() {
 
 #[test]
 fn generic_select_queries_all_types_without_type_filter() {
-    // Bug 3 characterization: filter("compound_name", ...) select queries ALL types
-    // because GenericSelector uses only captured filters, ignoring DefaultTypeFilter.
-    // This is by design — select without filter("type") is explicitly unfiltered.
+    // Both GenericSelector and NameSelector now query all types at root level
+    // because the root-level default type filter is [] (no filtering).
+    // GenericSelector with filter("compound_name", ...) select finds all types.
+    // NameSelector ("testmodule") also finds all types (no DefaultTypeFilter restriction).
     const QUERY_GENERIC: &str = r#"filter("compound_name", "testmodule") select"#;
     let res_generic = run_query(TEST_INPUT_CONTAINMENT, QUERY_GENERIC);
 
-    // Contrast: "testmodule" (NameSelector) gets DefaultTypeFilter([FUNCTION])
     const QUERY_PLAIN: &str = r#""testmodule""#;
     let res_plain = run_query(TEST_INPUT_CONTAINMENT, QUERY_PLAIN);
 
-    // GenericSelector finds module (all types), NameSelector finds only functions
+    // Both should find the module since there's no type filter at root level
     assert!(
         res_generic.nodes.as_vec().contains(&SymbolInstanceId::new(10)),
         "GenericSelector should find module (queries all types)"
     );
     assert!(
-        !res_plain.nodes.as_vec().contains(&SymbolInstanceId::new(10)),
-        "NameSelector should NOT find module (DefaultTypeFilter restricts to functions)"
+        res_plain.nodes.as_vec().contains(&SymbolInstanceId::new(10)),
+        "NameSelector should also find module (root-level default type filter is empty)"
     );
 }
 
@@ -2196,19 +2243,17 @@ fn non_constraining_wrapped_bare_func_same_as_unwrapped() {
 
 #[test]
 fn non_constraining_bare_mod_does_not_narrow_caller_chain() {
-    // mod {{ "baz" }} — bare mod filters to modules only.
-    // baz→bar→foo. callers of callers of baz = foo.
-    // mod at root filters to modules. foo is a function, not a module.
-    // So mod level should be empty (no modules in the caller chain),
-    // but the intermediate nodes (foo, bar, baz) should still appear.
+    // mod {{ "baz" }} — bare mod now inherits MODULE type into children (inherit=true).
+    // The inherited MODULE type propagates through the intermediate {} scope to "baz".
+    // "baz" is a FUNCTION — type mismatch with inherited MODULE filter.
+    // "baz" (strong) finds nothing → constrains intermediate away → constrains mod away.
+    // Result: 0 nodes.
     const QUERY: &str = r#"mod {{ "baz" }}"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
     let nodes = res.nodes.as_vec();
-    // Intermediate nodes are preserved even though mod finds no modules
-    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz should be in results");
+    assert_eq!(nodes.len(), 0, "inherited MODULE type filter blocks FUNCTION baz");
 }
 
 #[test]
