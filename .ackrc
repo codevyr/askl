@@ -1,2 +1,3 @@
 --ignore-dir=target
 --ignore-dir=traces
+--ignore-dir=.claude
