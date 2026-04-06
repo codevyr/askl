@@ -12,6 +12,15 @@ use super::types::{AsklData, Edge, ErrorResponse, Graph, GraphObjectEntry, HasEd
 
 const MAX_RESPONSE_BYTES: usize = 1_024 * 1_024; // 1 MB
 
+fn is_statement_timeout(err: &pest::error::Error<askld::parser::Rule>) -> bool {
+    match &err.variant {
+        pest::error::ErrorVariant::CustomError { message } => {
+            message.contains("statement timeout")
+        }
+        _ => false,
+    }
+}
+
 #[post("/query")]
 pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     let _query = tracing::info_span!("query").entered();
@@ -21,14 +30,7 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
         Ok(ast) => ast,
         Err(err) => {
             println!("Parse error: {}", err);
-            let json_err = serde_json::to_string(&ErrorResponse {
-                message: err.to_string(),
-                location: err.location.clone().into(),
-                line_col: err.line_col.clone().into(),
-                path: err.path().map(|p| p.to_string()),
-                line: err.line().to_string(),
-            })
-            .unwrap();
+            let json_err = serde_json::to_string(&ErrorResponse::from_pest(&err)).unwrap();
             return HttpResponse::BadRequest().body(json_err);
         }
     };
@@ -41,23 +43,26 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
         let execute_future = ast.execute(&mut ctx, &data.cfg);
         match timeout(data.query_timeout, execute_future).await {
             Ok(Err(err)) => {
-                let msg = err.to_string();
-                if msg.contains("statement timeout") {
+                let json_err = serde_json::to_string(&ErrorResponse::from_pest(&err)).unwrap();
+                if is_statement_timeout(&err) {
                     warn!("Query timed out (PG statement_timeout)");
-                    return HttpResponse::GatewayTimeout().body("Query timed out");
+                    return HttpResponse::GatewayTimeout().body(json_err);
                 }
-                let json_err = serde_json::to_string(&ErrorResponse {
-                    message: msg,
-                    location: err.location.clone().into(),
-                    line_col: err.line_col.clone().into(),
-                    path: err.path().map(|p| p.to_string()),
-                    line: err.line().to_string(),
-                });
-                return HttpResponse::BadRequest().body(json_err.unwrap());
+                return HttpResponse::BadRequest().body(json_err);
             }
             Ok(Ok(res)) => res,
             Err(_) => {
                 warn!("Query timed out (tokio timeout after {:?})", data.query_timeout);
+                if let Some(span) = &ctx.current_statement_span {
+                    let err = pest::error::Error::<askld::parser::Rule>::new_from_span(
+                        pest::error::ErrorVariant::CustomError {
+                            message: format!("Query exceeded the {:?} time limit while executing this statement", data.query_timeout),
+                        },
+                        span.as_pest_span(),
+                    );
+                    let json_err = serde_json::to_string(&ErrorResponse::from_pest(&err)).unwrap();
+                    return HttpResponse::GatewayTimeout().body(json_err);
+                }
                 return HttpResponse::GatewayTimeout().body("Query timed out");
             }
         }

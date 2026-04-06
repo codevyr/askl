@@ -285,18 +285,20 @@ impl Statement {
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         statements: &Vec<Rc<Statement>>,
-    ) {
+    ) -> Result<(), pest::error::Error<Rule>> {
         let _select_nodes: tracing::span::EnteredSpan =
             tracing::info_span!("select_nodes").entered();
 
         for statement in statements.iter() {
-            let warnings = statement.command().compute_selected(ctx, cfg).await;
+            ctx.current_statement_span = Some(statement.command().span().clone());
+            let warnings = statement.command().compute_selected(ctx, cfg).await?;
 
             statement.get_state_mut().warnings.extend(warnings);
             if !statement.command().has_selectors() {
                 statement.get_state_mut().completed = true;
             }
         }
+        Ok(())
     }
 
     fn init_dependencies(
@@ -372,7 +374,7 @@ impl Statement {
         })?;
 
         // First, execute all selectors
-        self.compute_selectors(ctx, cfg, &statements).await;
+        self.compute_selectors(ctx, cfg, &statements).await?;
 
         self.init_dependencies(&labeled_statements)?;
 

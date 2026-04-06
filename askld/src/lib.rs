@@ -31,4 +31,6 @@ mod test_util;
 #[cfg(test)]
 mod tree_browser_test;
 #[cfg(test)]
+mod timeout_test;
+#[cfg(test)]
 mod type_filter_test;

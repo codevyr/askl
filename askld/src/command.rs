@@ -184,12 +184,12 @@ impl Command {
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-    ) -> Vec<pest::error::Error<Rule>> {
+    ) -> Result<Vec<pest::error::Error<Rule>>, pest::error::Error<Rule>> {
         let selectors: Vec<&dyn Selector> = self.selectors().collect();
 
         // Nothing to do
         if selectors.len() == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let mut warnings = vec![];
@@ -218,7 +218,14 @@ impl Command {
             let mut current_selection = selector
                 .select_from_all(ctx, cfg, search_mixins)
                 .await
-                .unwrap();
+                .map_err(|e| {
+                    pest::error::Error::new_from_span(
+                        pest::error::ErrorVariant::CustomError {
+                            message: e.to_string(),
+                        },
+                        self.span().as_pest_span(),
+                    )
+                })?;
             if let Some(selection) = &mut current_selection {
                 self.filter(selection);
                 if selection.is_empty() {
@@ -235,7 +242,7 @@ impl Command {
             }
             ctx.registry.add(selector, current_selection);
         }
-        warnings
+        Ok(warnings)
     }
 }
 

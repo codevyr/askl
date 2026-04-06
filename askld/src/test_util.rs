@@ -4,6 +4,10 @@ use crate::statement::ExecutionResult;
 use crate::test_support::{postgres_test_image, postgres_url, wait_for_postgres};
 use crate::{cfg::ControlFlowGraph, parser::parse};
 use anyhow::Result;
+use diesel_async::pooled_connection::bb8::Pool as AsyncPool;
+use diesel_async::pooled_connection::{AsyncDieselConnectionManager, ManagerConfig};
+use diesel_async::{AsyncConnection, AsyncPgConnection};
+use futures::FutureExt;
 use index::db_diesel::Index;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, Once, OnceLock};
@@ -162,4 +166,27 @@ pub fn run_query(askl_input: &str, askl_query: &str) -> ExecutionResult {
     local.block_on(&mut rt, async {
         run_query_async(askl_input, askl_query).await
     })
+}
+
+pub async fn create_index_with_timeout(url: &str, timeout_ms: u64) -> Index {
+    let mut config = ManagerConfig::<AsyncPgConnection>::default();
+    config.custom_setup = Box::new(move |url| {
+        async move {
+            let mut conn = AsyncPgConnection::establish(url).await?;
+            diesel_async::RunQueryDsl::<AsyncPgConnection>::execute(
+                diesel::sql_query(&format!("SET statement_timeout = {}", timeout_ms)),
+                &mut conn,
+            )
+            .await
+            .map_err(diesel::ConnectionError::CouldntSetupConfiguration)?;
+            Ok(conn)
+        }
+        .boxed()
+    });
+    let manager = AsyncDieselConnectionManager::new_with_config(url, config);
+    let pool: AsyncPool<AsyncPgConnection> = AsyncPool::builder()
+        .build(manager)
+        .await
+        .expect("Failed to build timeout pool");
+    Index::from_pool(pool)
 }
