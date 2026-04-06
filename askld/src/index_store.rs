@@ -688,17 +688,24 @@ fn normalize_posix(path: &str) -> String {
 }
 
 fn normalize_full_path(path: &str) -> String {
-    let mut normalized = normalize_posix(path);
+    let normalized = normalize_posix(path);
     let has_leading = normalized.starts_with('/');
-    let parts: Vec<&str> = normalized.split('/').filter(|p| !p.is_empty()).collect();
-    normalized = parts.join("/");
+    let mut stack: Vec<&str> = Vec::new();
+    for part in normalized.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => { stack.pop(); }
+            _ => stack.push(part),
+        }
+    }
+    let mut result = stack.join("/");
     if has_leading {
-        normalized.insert(0, '/');
+        result.insert(0, '/');
     }
-    if normalized.is_empty() && has_leading {
-        normalized.push('/');
+    if result.is_empty() {
+        result.push('/');
     }
-    normalized
+    result
 }
 
 fn path_basename(path: &str) -> String {
@@ -798,6 +805,12 @@ fn build_objects(
             )));
         }
         let filesystem_path = normalize_full_path(filesystem_path_raw);
+        if filesystem_path.split('/').any(|c| c == "..") {
+            return Err(UploadError::Invalid(format!(
+                "filesystem_path contains '..' after normalization for object {}",
+                object.local_id
+            )));
+        }
         let (content, content_hash) = if !object.content_hash.is_empty() && object.content.is_empty() {
             // Hash-only object: content lives in content_store
             (None, object.content_hash.clone())
@@ -1034,4 +1047,51 @@ fn hash_bytes(bytes: &[u8]) -> String {
         let _ = write!(&mut out, "{:02x}", byte);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_resolves_dotdot() {
+        assert_eq!(normalize_full_path("/a/b/../c"), "/a/c");
+        assert_eq!(normalize_full_path("/a/b/../../c"), "/c");
+    }
+
+    #[test]
+    fn normalize_resolves_dot() {
+        assert_eq!(normalize_full_path("/a/./b"), "/a/b");
+        assert_eq!(normalize_full_path("/a/./b/./c"), "/a/b/c");
+    }
+
+    #[test]
+    fn normalize_collapses_slashes() {
+        assert_eq!(normalize_full_path("/a//b///c"), "/a/b/c");
+    }
+
+    #[test]
+    fn normalize_root_edge_cases() {
+        assert_eq!(normalize_full_path("/"), "/");
+        assert_eq!(normalize_full_path("/../a"), "/a");
+        assert_eq!(normalize_full_path("/a/b/../../.."), "/");
+    }
+
+    #[test]
+    fn normalize_real_world_bug_report() {
+        assert_eq!(
+            normalize_full_path("/home/user/project/common/mmu/../../include/header.h"),
+            "/home/user/project/include/header.h"
+        );
+    }
+
+    #[test]
+    fn normalize_backslash_conversion() {
+        assert_eq!(normalize_full_path("/a\\b/c"), "/a/b/c");
+    }
+
+    #[test]
+    fn normalize_mixed() {
+        assert_eq!(normalize_full_path("/a/./b/../c//d"), "/a/c/d");
+    }
 }
