@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use index::db_diesel::Selection;
 
+use crate::span::Span;
 use crate::verb::{Selector, SelectorId, SelectorState};
 
 pub struct SelectorRegistry(HashMap<SelectorId, SelectorState>);
@@ -61,12 +62,14 @@ where
 
 pub struct ExecutionContext {
     pub registry: SelectorRegistry,
+    pub current_statement_span: Option<Span>,
 }
 
 impl ExecutionContext {
     pub fn new() -> Self {
         Self {
             registry: SelectorRegistry::new(),
+            current_statement_span: None,
         }
     }
 }

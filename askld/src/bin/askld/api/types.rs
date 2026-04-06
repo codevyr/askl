@@ -146,15 +146,8 @@ impl Graph {
     }
 
     pub fn add_warnings(&mut self, warnings: Vec<pest::error::Error<Rule>>) {
-        for warning in warnings {
-            let error_response = ErrorResponse {
-                message: warning.to_string(),
-                location: warning.location.clone().into(),
-                line_col: warning.line_col.clone().into(),
-                path: warning.path().map(|p| p.to_string()),
-                line: warning.line().to_string(),
-            };
-            self.warnings.push(error_response);
+        for warning in &warnings {
+            self.warnings.push(ErrorResponse::from_pest(warning));
         }
     }
 }
@@ -202,6 +195,18 @@ pub struct ErrorResponse {
     pub line_col: LineColLocation,
     pub path: Option<String>,
     pub line: String,
+}
+
+impl ErrorResponse {
+    pub fn from_pest(err: &pest::error::Error<Rule>) -> Self {
+        Self {
+            message: err.to_string(),
+            location: err.location.clone().into(),
+            line_col: err.line_col.clone().into(),
+            path: err.path().map(|p| p.to_string()),
+            line: err.line().to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
