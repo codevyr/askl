@@ -2513,3 +2513,269 @@ fn direct_only_refs_module_shows_all_refs() {
     assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar (via ref)");
     assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz (via ref)");
 }
+
+// ============================================================================
+// Scoped children tests — verify that {} uses only parent-scoped instances
+// ============================================================================
+//
+// Test data (in test_input_b.sql): macro M has expansion instances inside two
+// different functions (e, g) in the same file.  M-in-e references data x;
+// M-in-g references data y.  Querying children of M scoped to e should only
+// return x, and scoped to g should only return y.
+
+#[test]
+fn scoped_children_e_m() {
+    // "e" { "M" {} } — M has instances inside both e [950,959) and g [970,979).
+    // The {} on M should only find children of M's instance inside e (x),
+    // not M's instance inside g (y).
+    const QUERY: &str = r#""e" { "M" {} }"#;
+    let res = run_query(TEST_INPUT_B, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(95)), "e should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(200)), "M inside e should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(210)), "x should be in results (child of M in e)");
+    assert!(!nodes.contains(&SymbolInstanceId::new(201)), "M inside g should NOT be in results");
+    assert!(!nodes.contains(&SymbolInstanceId::new(211)), "y should NOT be in results (child of M in g)");
+}
+
+#[test]
+fn scoped_children_g_m() {
+    // Symmetric: "g" { "M" {} } should only find y, not x.
+    const QUERY: &str = r#""g" { "M" {} }"#;
+    let res = run_query(TEST_INPUT_B, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(97)), "g should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(201)), "M inside g should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(211)), "y should be in results (child of M in g)");
+    assert!(!nodes.contains(&SymbolInstanceId::new(200)), "M inside e should NOT be in results");
+    assert!(!nodes.contains(&SymbolInstanceId::new(210)), "x should NOT be in results (child of M in e)");
+}
+
+// ============================================================================
+// Scoped derivation with labels
+// ============================================================================
+// These tests verify that the DB-based derivation (find_child_instance_ids /
+// find_parent_instance_ids) works correctly when labels (@label / #label)
+// connect separately-scoped query branches.
+
+#[test]
+fn label_scoped_children_e_m() {
+    // Label the scoped M-children inside e, reference from another branch.
+    // @res "e" { "M" { @found } }; #found
+    // The labeled node should only contain x (child of M in e), never y.
+    const QUERY: &str = r#"@res "e" { "M" { @found } }; #found"#;
+    let res = run_query(TEST_INPUT_B, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(95)), "e");
+    assert!(nodes.contains(&SymbolInstanceId::new(200)), "M inside e");
+    assert!(nodes.contains(&SymbolInstanceId::new(210)), "x (child of M in e)");
+    assert!(!nodes.contains(&SymbolInstanceId::new(201)), "M inside g should NOT appear");
+    assert!(!nodes.contains(&SymbolInstanceId::new(211)), "y should NOT appear (child of M in g)");
+}
+
+#[test]
+fn label_scoped_children_g_m() {
+    // Symmetric: label the scoped M-children inside g.
+    const QUERY: &str = r#"@res "g" { "M" { @found } }; #found"#;
+    let res = run_query(TEST_INPUT_B, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(97)), "g");
+    assert!(nodes.contains(&SymbolInstanceId::new(201)), "M inside g");
+    assert!(nodes.contains(&SymbolInstanceId::new(211)), "y (child of M in g)");
+    assert!(!nodes.contains(&SymbolInstanceId::new(200)), "M inside e should NOT appear");
+    assert!(!nodes.contains(&SymbolInstanceId::new(210)), "x should NOT appear (child of M in e)");
+}
+
+#[test]
+fn label_refs_scoped_to_parent() {
+    // Label "a" and use it: d→{e,f}, label e's children, check the label
+    // only reflects e's refs (f), not all symbols.
+    // @src "d" { @children }; #children
+    const QUERY: &str = r#"@src "d" { @children }; #children"#;
+    let res = run_query(TEST_INPUT_B, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(94)), "d");
+    // d calls e and f
+    assert!(nodes.contains(&SymbolInstanceId::new(95)), "e (child of d)");
+    assert!(nodes.contains(&SymbolInstanceId::new(96)), "f (child of d)");
+    // The label #children should expose e and f
+    // but NOT a, b, c, g, or main
+    assert!(!nodes.contains(&SymbolInstanceId::new(91)), "a should NOT appear");
+    assert!(!nodes.contains(&SymbolInstanceId::new(92)), "b should NOT appear");
+    assert!(!nodes.contains(&SymbolInstanceId::new(97)), "g should NOT appear");
+}
+
+#[test]
+fn label_two_branches_different_scopes() {
+    // Two labeled branches scoping different parents, verify they don't leak.
+    // @a_branch "e" { "M" {} }; @b_branch "g" { "M" {} }
+    // Both branches exist independently; each M-scope is isolated.
+    const QUERY: &str = r#"@a_branch "e" { "M" {} }; @b_branch "g" { "M" {} }"#;
+    let res = run_query(TEST_INPUT_B, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    // e-branch: e, M-in-e, x
+    assert!(nodes.contains(&SymbolInstanceId::new(95)), "e");
+    assert!(nodes.contains(&SymbolInstanceId::new(200)), "M inside e");
+    assert!(nodes.contains(&SymbolInstanceId::new(210)), "x");
+    // g-branch: g, M-in-g, y
+    assert!(nodes.contains(&SymbolInstanceId::new(97)), "g");
+    assert!(nodes.contains(&SymbolInstanceId::new(201)), "M inside g");
+    assert!(nodes.contains(&SymbolInstanceId::new(211)), "y");
+}
+
+#[test]
+fn label_parent_derivation_scoped() {
+    // Derive parent from scoped child: find who calls e, scoped within the graph.
+    // "d" { @callee "e" }; #callee
+    // d→e, so #callee should include e but the derivation result still includes d + e.
+    const QUERY: &str = r#""d" { @callee "e" }; #callee"#;
+    let res = run_query(TEST_INPUT_B, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(94)), "d");
+    assert!(nodes.contains(&SymbolInstanceId::new(95)), "e (labeled)");
+}
+
+#[test]
+fn label_with_has_derivation() {
+    // Use HAS derivation with labels: dir has { file has { @funcs func } }; #funcs
+    // The labeled @funcs should contain functions found via containment.
+    const QUERY: &str = r#"dir("/") has { file has { @funcs func } }; #funcs"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    // The containment data has: dir → file → {foo(20), bar(30), baz(40)}
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo via HAS");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar via HAS");
+    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz via HAS");
+}
+
+#[test]
+fn label_with_unnest_has_derivation() {
+    // Use unnest HAS: dir has { unnest @all }; #all
+    // Unnest should find all descendants, not just direct children.
+    const QUERY: &str = r#"dir("/") has { unnest @all }; #all"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    // unnest HAS from dir: finds module, file, foo, bar, baz
+    assert!(nodes.contains(&SymbolInstanceId::new(10)), "testmodule via unnest HAS");
+    assert!(nodes.contains(&SymbolInstanceId::new(510)), "file via unnest HAS");
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo via unnest HAS");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar via unnest HAS");
+    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz via unnest HAS");
+}
+
+#[test]
+fn scoped_children_unnest_m() {
+    // "e" { "M" { unnest } } — with unnest, should still be scoped to M-in-e.
+    const QUERY: &str = r#""e" { "M" { unnest } }"#;
+    let res = run_query(TEST_INPUT_B, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(95)), "e");
+    assert!(nodes.contains(&SymbolInstanceId::new(200)), "M inside e");
+    assert!(nodes.contains(&SymbolInstanceId::new(210)), "x (child of M in e)");
+    assert!(!nodes.contains(&SymbolInstanceId::new(201)), "M inside g should NOT appear");
+    assert!(!nodes.contains(&SymbolInstanceId::new(211)), "y should NOT appear");
+}
+
+#[test]
+fn scoped_parent_derivation_from_child() {
+    // Derive parent from child: "M" scoped under "e" should find e as parent.
+    // "e" has { "M" } — M constrained to M-in-e, check e is the parent.
+    const QUERY: &str = r#""e" has { "M" }"#;
+    let res = run_query(TEST_INPUT_B, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(95)), "e");
+    assert!(nodes.contains(&SymbolInstanceId::new(200)), "M inside e");
+    assert!(!nodes.contains(&SymbolInstanceId::new(201)), "M inside g should NOT appear");
+}
+
+#[test]
+fn scoped_children_refs_only() {
+    // "e" refs { "f" } — REFS-only derivation. e calls f, so f appears.
+    // M is not a ref child of e — it's only a HAS child (macro expansion),
+    // so M should not appear.
+    const QUERY: &str = r#""e" refs { "f" }"#;
+    let res = run_query(TEST_INPUT_B, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(95)), "e");
+    // e refs f (via ref at [951,952)), so f should appear
+    assert!(nodes.contains(&SymbolInstanceId::new(96)), "f (ref child of e)");
+    // M is not reachable via refs-only
+    assert!(!nodes.contains(&SymbolInstanceId::new(200)), "M should NOT appear via refs");
+}
+
+#[test]
+fn scoped_has_children_only() {
+    // "e" has { "M" } — HAS-only derivation. M is a macro expansion inside e,
+    // so M-in-e should appear.
+    const QUERY: &str = r#""e" has { "M" }"#;
+    let res = run_query(TEST_INPUT_B, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(95)), "e");
+    assert!(nodes.contains(&SymbolInstanceId::new(200)), "M inside e via HAS");
+    assert!(!nodes.contains(&SymbolInstanceId::new(201)), "M inside g should NOT appear");
+}
+
+#[test]
+fn nested_has_refs_scope_isolation() {
+    // Three-level query: dir has { mod has { func } }.
+    // Each level uses HAS derivation. Functions should be scoped to the module,
+    // which is scoped to the directory.
+    const QUERY: &str = r#"dir("/") has { mod has { func } }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    // dir has module, module has functions
+    assert!(nodes.contains(&SymbolInstanceId::new(10)), "testmodule");
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar");
+    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz");
+}
+
+#[test]
+fn label_scoped_nested_has_chain() {
+    // Label at the deepest HAS level, verify scope isolation through the chain.
+    // dir("/") has { mod has { @fns func } }; #fns
+    const QUERY: &str = r#"dir("/") has { mod has { @fns func } }; #fns"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo labeled");
+    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar labeled");
+    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz labeled");
+}
+
+#[test]
+fn label_forced_with_scoped_derivation() {
+    // Forced label use with scoped derivation:
+    // "e" label("parent") { "M" {} }; "g" { use("parent", forced="true") }
+    // The forced use should inject e's children into g's scope, constraining
+    // to only M-children visible from e.
+    const QUERY: &str = r#""e" label("parent") { "M" {} }; "g" { use("parent", forced="true") }"#;
+    let res = run_query(TEST_INPUT_B, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(95)), "e");
+    assert!(nodes.contains(&SymbolInstanceId::new(97)), "g");
+    // e's scoped M children (x) should appear
+    assert!(nodes.contains(&SymbolInstanceId::new(200)), "M inside e");
+    assert!(nodes.contains(&SymbolInstanceId::new(210)), "x (child of M in e)");
+}

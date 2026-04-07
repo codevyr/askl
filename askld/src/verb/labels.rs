@@ -1,11 +1,11 @@
 use crate::{
     command::NotificationResult, execution_context::selector_state_with,
-    execution_state::DependencyRole, parser::Rule, span::Span,
+    execution_state::{DependencyRole, RelationshipType}, parser::Rule, span::Span,
 };
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::{
-    db_diesel::{Index, ParentReference, Selection, SymbolSearchMixin},
+    db_diesel::{InnermostOnlyMixin, Index, ParentReference, Selection, SymbolSearchMixin},
     models_diesel::SymbolRef,
 };
 use pest::error::ErrorVariant::CustomError;
@@ -278,10 +278,10 @@ impl Selector for UserVerb {
     async fn derive_from_child(
         &self,
         ctx: &mut ExecutionContext,
-        _index: &Index,
+        index: &Index,
         _selector_filters: &[&dyn Filter],
         child: &Statement,
-        _notif_ctx: NotificationContext,
+        notif_ctx: NotificationContext,
     ) -> Result<Option<Selection>> {
         let child = match child.get_selection(&ctx) {
             Some(selection) => selection,
@@ -294,12 +294,24 @@ impl Selector for UserVerb {
             return Ok(Some(Selection::new()));
         };
 
-        cached_selection.nodes.retain(|s| {
-            child
-                .parents
-                .iter()
-                .any(|p| p.to_instance.id == s.symbol_instance.id)
-        });
+        // Use DB query instead of stale child.parents vector
+        let child_ids = child.get_instance_ids();
+        let mut find_mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![];
+        if !notif_ctx.unnest {
+            find_mixins.push(Box::new(InnermostOnlyMixin));
+        }
+        let parent_ids = index.find_parent_instance_ids(
+            &child_ids,
+            notif_ctx.rel_type.contains(RelationshipType::REFS),
+            notif_ctx.rel_type.contains(RelationshipType::HAS),
+            &mut find_mixins,
+        ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
+        let parent_id_set: std::collections::HashSet<i32> =
+            parent_ids.into_iter().map(Into::<i32>::into).collect();
+
+        cached_selection.nodes.retain(|s|
+            parent_id_set.contains(&s.symbol_instance.id)
+        );
 
         Ok(Some(cached_selection))
     }

@@ -8,9 +8,11 @@ use crate::span::Span;
 use crate::statement::Statement;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use index::db_diesel::{SymbolInstanceIdMixin, Index, Selection, SymbolSearchMixin};
+use index::db_diesel::{
+    DirectOnlyMixin, InnermostOnlyMixin, OuterParentFilterMixin,
+    SymbolInstanceIdMixin, Index, Selection, SymbolSearchMixin,
+};
 use index::symbols::SymbolInstanceId;
-use itertools::Itertools;
 use log::debug;
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
@@ -540,7 +542,24 @@ pub trait Selector: std::fmt::Debug + Verb {
         if role != DependencyRole::Parent {
             return Ok(NotificationResult::new(false, vec![]));
         }
-        let decl_ids = collect_parent_ids(dependency, rel_type, !unnest);
+        let child_ids = dependency.get_instance_ids();
+        let mut find_mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![];
+        if !unnest {
+            find_mixins.push(Box::new(InnermostOnlyMixin));
+        }
+        let decl_ids = index.find_parent_instance_ids(
+            &child_ids,
+            rel_type.contains(RelationshipType::REFS),
+            rel_type.contains(RelationshipType::HAS),
+            &mut find_mixins,
+        ).await.map_err(|e| {
+            Error::new_from_span(
+                CustomError {
+                    message: format!("Failed to find parent instance IDs: {}", e),
+                },
+                self.span(),
+            )
+        })?;
 
         let mut selection = self
             .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
@@ -605,7 +624,18 @@ pub trait Selector: std::fmt::Debug + Verb {
             Some(selection) => selection,
             None => return Ok(None),
         };
-        let decl_ids = collect_child_ids(&parent_sel, notif_ctx.rel_type, !notif_ctx.unnest);
+        let parent_ids = parent_sel.get_instance_ids();
+        let mut find_mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![];
+        if !notif_ctx.unnest {
+            find_mixins.push(Box::new(DirectOnlyMixin));
+            find_mixins.push(Box::new(OuterParentFilterMixin::new(&parent_ids)));
+        }
+        let decl_ids = index.find_child_instance_ids(
+            &parent_ids,
+            notif_ctx.rel_type.contains(RelationshipType::REFS),
+            notif_ctx.rel_type.contains(RelationshipType::HAS),
+            &mut find_mixins,
+        ).await.map_err(|e| anyhow::anyhow!("Failed to find child instance IDs: {}", e))?;
 
         let selection = self
             .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
@@ -629,7 +659,17 @@ pub trait Selector: std::fmt::Debug + Verb {
             Some(selection) => selection,
             None => return Ok(None),
         };
-        let decl_ids = collect_parent_ids(&child_sel, notif_ctx.rel_type, !notif_ctx.unnest);
+        let child_ids = child_sel.get_instance_ids();
+        let mut find_mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![];
+        if !notif_ctx.unnest {
+            find_mixins.push(Box::new(InnermostOnlyMixin));
+        }
+        let decl_ids = index.find_parent_instance_ids(
+            &child_ids,
+            notif_ctx.rel_type.contains(RelationshipType::REFS),
+            notif_ctx.rel_type.contains(RelationshipType::HAS),
+            &mut find_mixins,
+        ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
 
         let selection = self
             .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
@@ -670,240 +710,6 @@ pub trait Selector: std::fmt::Debug + Verb {
 
 pub trait Labeler: std::fmt::Debug {
     fn get_label(&self) -> Option<String>;
-}
-
-// ============================================================================
-// Child ID collection for derive_from_parent
-// ============================================================================
-
-/// Collect child symbol instance IDs from a parent's selection.
-/// When `direct_only` is true, filters to direct children using spatial helpers.
-fn collect_child_ids(
-    parent_sel: &Selection,
-    rel_type: RelationshipType,
-    direct_only: bool,
-) -> Vec<SymbolInstanceId> {
-    let capacity = if rel_type.contains(RelationshipType::REFS) { parent_sel.children.len() } else { 0 }
-        + if rel_type.contains(RelationshipType::HAS) { parent_sel.has_children.len() } else { 0 };
-    let mut decl_ids = Vec::with_capacity(capacity);
-    if rel_type.contains(RelationshipType::REFS) {
-        if direct_only {
-            decl_ids.extend(
-                parent_sel
-                    .children
-                    .iter()
-                    .filter(|c| {
-                        // Skip refs originating from nested HAS children — those refs
-                        // belong to the child scope, not the parent.
-                        let from_nested = parent_sel.has_children.iter()
-                            .any(|h| h.child_instance.id == c.from_instance.id);
-                        !from_nested && is_direct_child_ref(&c.from_instance, c, &parent_sel.has_children)
-                    })
-                    .map(|p| SymbolInstanceId::new(p.symbol_instance.id)),
-            );
-        } else {
-            decl_ids.extend(
-                parent_sel
-                    .children
-                    .iter()
-                    .map(|p| SymbolInstanceId::new(p.symbol_instance.id)),
-            );
-        }
-    }
-    if rel_type.contains(RelationshipType::HAS) {
-        if direct_only {
-            decl_ids.extend(
-                parent_sel
-                    .has_children
-                    .iter()
-                    .filter(|c| is_direct_has_child(&c.parent_instance, c, &parent_sel.has_children))
-                    .map(|p| SymbolInstanceId::new(p.child_instance.id)),
-            );
-        } else {
-            decl_ids.extend(
-                parent_sel
-                    .has_children
-                    .iter()
-                    .map(|p| SymbolInstanceId::new(p.child_instance.id)),
-            );
-        }
-    }
-    decl_ids.into_iter().unique().collect()
-}
-
-/// Collect parent symbol instance IDs from a child's selection.
-/// When `innermost_only` is true, filters HAS parents to innermost using spatial helpers.
-/// Symmetrical to `collect_child_ids` but for the upward direction.
-fn collect_parent_ids(
-    child_sel: &Selection,
-    rel_type: RelationshipType,
-    innermost_only: bool,
-) -> Vec<SymbolInstanceId> {
-    let capacity = if rel_type.contains(RelationshipType::REFS) { child_sel.parents.len() } else { 0 }
-        + if rel_type.contains(RelationshipType::HAS) { child_sel.has_parents.len() } else { 0 };
-    let mut decl_ids = Vec::with_capacity(capacity);
-    if rel_type.contains(RelationshipType::REFS) {
-        decl_ids.extend(
-            child_sel
-                .parents
-                .iter()
-                .map(|p| SymbolInstanceId::new(p.from_instance.id)),
-        );
-    }
-    if rel_type.contains(RelationshipType::HAS) {
-        if innermost_only {
-            decl_ids.extend(
-                child_sel
-                    .has_parents
-                    .iter()
-                    .filter(|p| is_innermost_has_parent(p, &child_sel.has_parents))
-                    .map(|p| SymbolInstanceId::new(p.parent_instance.id)),
-            );
-        } else {
-            decl_ids.extend(
-                child_sel
-                    .has_parents
-                    .iter()
-                    .map(|p| SymbolInstanceId::new(p.parent_instance.id)),
-            );
-        }
-    }
-    decl_ids.into_iter().unique().collect()
-}
-
-// ============================================================================
-// Direct-only filtering helpers for collect_child_ids
-// ============================================================================
-
-use crate::offset_range::range_bounds_to_offsets;
-use index::db_diesel::{HasChildReference, HasParentReference, ChildReference};
-use index::models_diesel::SymbolInstance;
-use std::ops::Bound;
-
-/// Map symbol_type id to its containment level.
-/// Higher level = broader container (directory > module > file > function).
-fn symbol_type_level(symbol_type: i32) -> i32 {
-    match symbol_type {
-        2 => 2, // file
-        3 => 3, // module
-        4 => 4, // directory
-        _ => 1, // function, type, data, macro
-    }
-}
-
-/// Check if range `outer` contains range `inner` (inclusive, like PostgreSQL @>).
-fn range_contains(
-    outer: &(Bound<i32>, Bound<i32>),
-    inner: &(Bound<i32>, Bound<i32>),
-) -> bool {
-    let Some((os, oe)) = range_bounds_to_offsets(outer) else { return false };
-    let Some((is, ie)) = range_bounds_to_offsets(inner) else { return false };
-    os <= is && ie <= oe
-}
-
-/// Check if two ranges are equal.
-fn ranges_equal(
-    a: &(Bound<i32>, Bound<i32>),
-    b: &(Bound<i32>, Bound<i32>),
-) -> bool {
-    let Some((as_, ae)) = range_bounds_to_offsets(a) else { return false };
-    let Some((bs, be)) = range_bounds_to_offsets(b) else { return false };
-    as_ == bs && ae == be
-}
-
-/// A has_child C is "direct" relative to parent P if there is no intermediate M
-/// in the has_children list that sits strictly between P and C in the
-/// containment hierarchy. Only symbols at STRICTLY nested ranges (not equal
-/// to parent or child) count as intermediaries — co-located symbols at the
-/// same range but different type levels are peers, not hierarchy barriers.
-fn is_direct_has_child(
-    parent_instance: &SymbolInstance,
-    child: &HasChildReference,
-    all_has_children: &[HasChildReference],
-) -> bool {
-    !all_has_children.iter().any(|mid| {
-        if mid.child_instance.id == child.child_instance.id {
-            return false;
-        }
-        if mid.child_instance.object_id != parent_instance.object_id {
-            return false;
-        }
-        // mid's range must be contained in parent and contain child
-        if !range_contains(&parent_instance.offset_range, &mid.child_instance.offset_range) {
-            return false;
-        }
-        if !range_contains(&mid.child_instance.offset_range, &child.child_instance.offset_range) {
-            return false;
-        }
-        // mid is only an intermediary if its range is strictly between parent and child
-        // (not equal to either). Equal-range symbols are co-located peers.
-        let below_parent = !ranges_equal(&mid.child_instance.offset_range, &parent_instance.offset_range);
-        let above_child = !ranges_equal(&mid.child_instance.offset_range, &child.child_instance.offset_range);
-        below_parent && above_child
-    })
-}
-
-/// A child ref is "direct" relative to its parent if no has_child container
-/// sits between the parent and the ref's source location. Only containers
-/// at STRICTLY nested ranges AND same-or-higher type level count as
-/// intermediaries. This ensures that lower-level containers (e.g. functions
-/// inside a module) don't block refs from appearing at the module level.
-fn is_direct_child_ref(
-    parent_instance: &SymbolInstance,
-    child_ref: &ChildReference,
-    all_has_children: &[HasChildReference],
-) -> bool {
-    let parent_level = symbol_type_level(child_ref.parent_symbol.symbol_type);
-    let ref_range = &child_ref.symbol_ref.from_offset_range;
-    !all_has_children.iter().any(|container| {
-        if container.child_instance.object_id != parent_instance.object_id {
-            return false;
-        }
-        // Container must be inside parent and contain the ref's location
-        if !range_contains(&parent_instance.offset_range, &container.child_instance.offset_range) {
-            return false;
-        }
-        if !range_contains(&container.child_instance.offset_range, ref_range) {
-            return false;
-        }
-        // Container must be at a strictly nested range (not co-located with parent)
-        if ranges_equal(&container.child_instance.offset_range, &parent_instance.offset_range) {
-            return false;
-        }
-        // Only filter refs inside containers at the same or higher abstraction level.
-        // e.g. inner function (level 1) inside outer function (level 1) → filter
-        // e.g. function (level 1) inside module (level 3) → don't filter
-        let cont_level = symbol_type_level(container.child_symbol.symbol_type);
-        cont_level >= parent_level
-    })
-}
-
-/// A has_parent P is "innermost" relative to child C if there is no other
-/// has_parent P' that sits strictly between C and P in the containment hierarchy.
-/// Symmetrical to `is_direct_has_child` but for the upward direction.
-fn is_innermost_has_parent(
-    parent: &HasParentReference,
-    all_has_parents: &[HasParentReference],
-) -> bool {
-    let child_range = &parent.child_instance.offset_range;
-    let parent_range = &parent.parent_instance.offset_range;
-
-    !all_has_parents.iter().any(|other| {
-        // Skip self
-        if other.parent_instance.id == parent.parent_instance.id {
-            return false;
-        }
-        // Must be in the same object (file)
-        if other.parent_instance.object_id != parent.parent_instance.object_id {
-            return false;
-        }
-        let other_range = &other.parent_instance.offset_range;
-        // other.parent must be inside parent AND contain child (strictly between)
-        range_contains(parent_range, other_range)
-            && range_contains(other_range, child_range)
-            && !ranges_equal(other_range, parent_range)
-            && !ranges_equal(other_range, child_range)
-    })
 }
 
 #[cfg(test)]
