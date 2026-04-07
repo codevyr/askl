@@ -12,11 +12,249 @@ use crate::models_diesel::{ContentRow, Object, Project, Symbol, SymbolInstance, 
 use crate::symbols::FileId;
 
 use super::mixins::{
-    SymbolSearchMixin, PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
+    SymbolSearchMixin,
+    PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
     CONTAINER_INSTANCE_ALIAS, CONTAINER_SYMBOL_ALIAS, CONTAINER_TYPE_ALIAS,
     CONTAINED_INSTANCE_ALIAS, CONTAINED_SYMBOL_ALIAS, CONTAINED_TYPE_ALIAS,
+    ParentsQuery, ChildrenQuery, HasParentsQuery, HasChildrenQuery,
 };
 use super::selection::{ChildReference, HasChildReference, HasParentReference, ParentReference, Selection, SelectionNode};
+use super::Connection;
+
+// ============================================================================
+// Shared query builders — used by both find_symbol and find_*_instance_ids
+// ============================================================================
+
+fn build_parents_query(
+    source_ids: Vec<i32>,
+    mixins: &[Box<dyn SymbolSearchMixin>],
+    conn: &mut Connection,
+) -> Result<ParentsQuery<'static>> {
+    use crate::schema_diesel::*;
+
+    let parent_decls = PARENT_DECLS_ALIAS;
+    let parent_symbols = PARENT_SYMBOLS_ALIAS;
+
+    let mut query = symbol_refs::dsl::symbol_refs
+        .inner_join(
+            symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::dsl::id)),
+        )
+        .inner_join(
+            symbol_instances::dsl::symbol_instances
+                .on(symbols::dsl::id.eq(symbol_instances::dsl::symbol)),
+        )
+        .inner_join(
+            parent_decls.on(parent_decls
+                .field(symbol_instances::dsl::object_id)
+                .eq(symbol_refs::dsl::from_object)),
+        )
+        .inner_join(
+            parent_symbols.on(parent_symbols
+                .field(symbols::dsl::id)
+                .eq(parent_decls.field(symbol_instances::dsl::symbol))),
+        )
+        .filter(
+            parent_decls
+                .field(symbol_instances::dsl::offset_range)
+                .contains_range(symbol_refs::dsl::from_offset_range),
+        )
+        .filter(
+            symbol_instances::dsl::id.eq_any(source_ids),
+        )
+        .select((
+            SymbolRef::as_select(),
+            Symbol::as_select(),
+            SymbolInstance::as_select(),
+            parent_decls.fields(crate::schema_diesel::symbol_instances::all_columns),
+        ))
+        .into_boxed::<Pg>();
+
+    for mixin in mixins.iter() {
+        query = mixin.filter_parents(conn, query)?;
+    }
+
+    Ok(query)
+}
+
+fn build_children_query(
+    source_ids: Vec<i32>,
+    mixins: &[Box<dyn SymbolSearchMixin>],
+    conn: &mut Connection,
+) -> Result<ChildrenQuery<'static>> {
+    use crate::schema_diesel::*;
+
+    let parent_decls = PARENT_DECLS_ALIAS;
+    let parent_symbols = PARENT_SYMBOLS_ALIAS;
+
+    let mut query = symbol_refs::dsl::symbol_refs
+        .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::id)))
+        .inner_join(
+            symbol_instances::dsl::symbol_instances.on(symbols::dsl::id.eq(symbol_instances::symbol)),
+        )
+        .inner_join(
+            parent_decls.on(parent_decls
+                .field(symbol_instances::dsl::object_id)
+                .eq(symbol_refs::dsl::from_object)),
+        )
+        .filter(
+            parent_decls
+                .field(symbol_instances::dsl::offset_range)
+                .contains_range(symbol_refs::dsl::from_offset_range),
+        )
+        .filter(
+            parent_decls
+                .field(symbol_instances::dsl::id)
+                .eq_any(source_ids),
+        )
+        .inner_join(
+            parent_symbols.on(parent_symbols
+                .field(symbols::dsl::id)
+                .eq(parent_decls.field(symbol_instances::dsl::symbol))),
+        )
+        .inner_join(
+            objects::dsl::objects
+                .on(objects::dsl::id.eq(parent_decls.field(symbol_instances::dsl::object_id))),
+        )
+        .select((
+            parent_symbols.fields(crate::schema_diesel::symbols::all_columns),
+            Symbol::as_select(),
+            SymbolInstance::as_select(),
+            parent_decls.fields(crate::schema_diesel::symbol_instances::all_columns),
+            SymbolRef::as_select(),
+            Object::as_select(),
+        ))
+        .into_boxed::<Pg>();
+
+    for mixin in mixins.iter() {
+        query = mixin.filter_children(conn, query)?;
+    }
+
+    Ok(query)
+}
+
+fn build_has_parents_query(
+    source_ids: Vec<i32>,
+    mixins: &[Box<dyn SymbolSearchMixin>],
+    conn: &mut Connection,
+) -> Result<HasParentsQuery<'static>> {
+    use crate::schema_diesel::*;
+
+    let container_instance = CONTAINER_INSTANCE_ALIAS;
+    let container_symbol = CONTAINER_SYMBOL_ALIAS;
+    let container_type = CONTAINER_TYPE_ALIAS;
+
+    let mut query = symbol_instances::dsl::symbol_instances
+        .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
+        .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
+        .filter(symbol_instances::dsl::id.eq_any(source_ids))
+        .inner_join(
+            container_instance.on(
+                container_instance.field(symbol_instances::dsl::object_id)
+                    .eq(symbol_instances::dsl::object_id)
+            ),
+        )
+        .inner_join(
+            container_symbol.on(
+                container_symbol.field(symbols::dsl::id)
+                    .eq(container_instance.field(symbol_instances::dsl::symbol))
+            ),
+        )
+        .inner_join(
+            container_type.on(
+                container_type.field(symbol_types::dsl::id)
+                    .eq(container_symbol.field(symbols::dsl::symbol_type))
+            ),
+        )
+        .filter(
+            diesel::dsl::sql::<diesel::sql_types::Bool>(
+                "container_instances.offset_range @> symbol_instances.offset_range"
+            )
+        )
+        .filter(
+            container_type.field(symbol_types::dsl::level)
+                .ge(symbol_types::dsl::level)
+        )
+        .filter(
+            container_instance.field(symbol_instances::dsl::id)
+                .ne(symbol_instances::dsl::id)
+        )
+        .select((
+            Symbol::as_select(),
+            SymbolInstance::as_select(),
+            container_symbol.fields(crate::schema_diesel::symbols::all_columns),
+            container_instance.fields(crate::schema_diesel::symbol_instances::all_columns),
+        ))
+        .into_boxed::<Pg>();
+
+    for mixin in mixins.iter() {
+        query = mixin.filter_has_parents(conn, query)?;
+    }
+
+    Ok(query)
+}
+
+fn build_has_children_query(
+    source_ids: Vec<i32>,
+    mixins: &[Box<dyn SymbolSearchMixin>],
+    conn: &mut Connection,
+) -> Result<HasChildrenQuery<'static>> {
+    use crate::schema_diesel::*;
+
+    let contained_instance = CONTAINED_INSTANCE_ALIAS;
+    let contained_symbol = CONTAINED_SYMBOL_ALIAS;
+    let contained_type = CONTAINED_TYPE_ALIAS;
+
+    let mut query = symbol_instances::dsl::symbol_instances
+        .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
+        .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
+        .filter(symbol_instances::dsl::id.eq_any(source_ids))
+        .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(symbol_instances::dsl::object_id)))
+        .inner_join(
+            contained_instance.on(
+                contained_instance.field(symbol_instances::dsl::object_id)
+                    .eq(symbol_instances::dsl::object_id)
+            ),
+        )
+        .inner_join(
+            contained_symbol.on(
+                contained_symbol.field(symbols::dsl::id)
+                    .eq(contained_instance.field(symbol_instances::dsl::symbol))
+            ),
+        )
+        .inner_join(
+            contained_type.on(
+                contained_type.field(symbol_types::dsl::id)
+                    .eq(contained_symbol.field(symbols::dsl::symbol_type))
+            ),
+        )
+        .filter(
+            diesel::dsl::sql::<diesel::sql_types::Bool>(
+                "symbol_instances.offset_range @> contained_instances.offset_range"
+            )
+        )
+        .filter(
+            symbol_types::dsl::level
+                .ge(contained_type.field(symbol_types::dsl::level))
+        )
+        .filter(
+            symbol_instances::dsl::id
+                .ne(contained_instance.field(symbol_instances::dsl::id))
+        )
+        .select((
+            Symbol::as_select(),
+            SymbolInstance::as_select(),
+            contained_symbol.fields(crate::schema_diesel::symbols::all_columns),
+            contained_instance.fields(crate::schema_diesel::symbol_instances::all_columns),
+            Object::as_select(),
+        ))
+        .into_boxed::<Pg>();
+
+    for mixin in mixins.iter() {
+        query = mixin.filter_has_children(conn, query)?;
+    }
+
+    Ok(query)
+}
 
 #[derive(Clone)]
 pub struct Index {
@@ -225,7 +463,7 @@ impl Index {
 
     pub async fn find_symbol(
         &self,
-        mixins: &mut [Box<dyn SymbolSearchMixin>],
+        mixins: &[Box<dyn SymbolSearchMixin>],
     ) -> Result<Selection> {
         use crate::schema_diesel::*;
 
@@ -236,7 +474,7 @@ impl Index {
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
         let connection: &mut AsyncPgConnection = &mut *connection;
 
-        for mixin in mixins.iter_mut() {
+        for mixin in mixins.iter() {
             mixin.enter(connection)?;
         }
 
@@ -261,7 +499,7 @@ impl Index {
                 ))
                 .into_boxed::<Pg>();
 
-            for mixin in mixins.iter_mut() {
+            for mixin in mixins.iter() {
                 joined_query = mixin.filter_current(connection, joined_query)?;
             }
 
@@ -271,9 +509,6 @@ impl Index {
                 .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?
         };
 
-        let parent_decls = PARENT_DECLS_ALIAS;
-        let parent_symbols = PARENT_SYMBOLS_ALIAS;
-
         // Use the IDs that survived current's filters (type, name, etc.)
         // so that parents/children queries don't process instances that current excluded.
         let current_instance_ids: Vec<i32> =
@@ -282,44 +517,10 @@ impl Index {
         let parents = {
             let _parents_span: tracing::span::EnteredSpan =
                 tracing::info_span!("select_parents").entered();
-            let mut parents_query = symbol_refs::dsl::symbol_refs
-                .inner_join(
-                    symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::dsl::id)),
-                )
-                .inner_join(
-                    symbol_instances::dsl::symbol_instances
-                        .on(symbols::dsl::id.eq(symbol_instances::dsl::symbol)),
-                )
-                .inner_join(
-                    parent_decls.on(parent_decls
-                        .field(symbol_instances::dsl::object_id)
-                        .eq(symbol_refs::dsl::from_object)),
-                )
-                // Join the parent's symbol (caller) to enable type filtering via mixin
-                .inner_join(
-                    parent_symbols.on(parent_symbols
-                        .field(symbols::dsl::id)
-                        .eq(parent_decls.field(symbol_instances::dsl::symbol))),
-                )
-                .filter(
-                    parent_decls
-                        .field(symbol_instances::dsl::offset_range)
-                        .contains_range(symbol_refs::dsl::from_offset_range),
-                )
-                .filter(
-                    symbol_instances::dsl::id.eq_any(&current_instance_ids),
-                )
-                .select((
-                    SymbolRef::as_select(),
-                    Symbol::as_select(),
-                    SymbolInstance::as_select(),
-                    parent_decls.fields(crate::schema_diesel::symbol_instances::all_columns),
-                ))
-                .into_boxed::<Pg>();
 
-            for mixin in mixins.iter_mut() {
-                parents_query = mixin.filter_parents(connection, parents_query)?;
-            }
+            let parents_query = build_parents_query(
+                current_instance_ids.clone(), mixins, connection,
+            )?;
 
             parents_query
                 .load::<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)>(connection)
@@ -331,49 +532,9 @@ impl Index {
             let _select_children: tracing::span::EnteredSpan =
                 tracing::info_span!("select_children").entered();
 
-            let mut children_query = symbol_refs::dsl::symbol_refs
-                .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::id)))
-                .inner_join(
-                    symbol_instances::dsl::symbol_instances.on(symbols::dsl::id.eq(symbol_instances::symbol)),
-                )
-                .inner_join(
-                    parent_decls.on(parent_decls
-                        .field(symbol_instances::dsl::object_id)
-                        .eq(symbol_refs::dsl::from_object)),
-                )
-                .filter(
-                    parent_decls
-                        .field(symbol_instances::dsl::offset_range)
-                        .contains_range(symbol_refs::dsl::from_offset_range),
-                )
-                .filter(
-                    parent_decls
-                        .field(symbol_instances::dsl::id)
-                        .eq_any(&current_instance_ids),
-                )
-                // Join the parent's symbol (caller) to enable type filtering via mixin
-                .inner_join(
-                    parent_symbols.on(parent_symbols
-                        .field(symbols::dsl::id)
-                        .eq(parent_decls.field(symbol_instances::dsl::symbol))),
-                )
-                .inner_join(
-                    objects::dsl::objects
-                        .on(objects::dsl::id.eq(parent_decls.field(symbol_instances::dsl::object_id))),
-                )
-                .select((
-                    parent_symbols.fields(crate::schema_diesel::symbols::all_columns),
-                    Symbol::as_select(),
-                    SymbolInstance::as_select(),
-                    parent_decls.fields(crate::schema_diesel::symbol_instances::all_columns),
-                    SymbolRef::as_select(),
-                    Object::as_select(),
-                ))
-                .into_boxed::<Pg>();
-
-            for mixin in mixins.iter_mut() {
-                children_query = mixin.filter_children(connection, children_query)?;
-            }
+            let children_query = build_children_query(
+                current_instance_ids.clone(), mixins, connection,
+            )?;
 
             children_query
                 .load::<(Symbol, Symbol, SymbolInstance, SymbolInstance, SymbolRef, Object)>(connection)
@@ -381,74 +542,13 @@ impl Index {
                 .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
         };
 
-        // Query for containment: find containers (parents that contain current symbols)
-        // A container contains the current symbol if:
-        // 1. They share the same object_id
-        // 2. Container's offset_range @> current's offset_range
-        // 3. Container's type level > current's type level
-        let container_instance = CONTAINER_INSTANCE_ALIAS;
-        let container_symbol = CONTAINER_SYMBOL_ALIAS;
-        let container_type = CONTAINER_TYPE_ALIAS;
-
         let has_parents = {
             let _has_parents_span: tracing::span::EnteredSpan =
                 tracing::info_span!("select_has_parents").entered();
 
-            // For each current symbol instance, find container instances
-            // that have: same object_id, container.offset_range @> current.offset_range,
-            // container.type.level > current.type.level
-            let mut has_parents_query = symbol_instances::dsl::symbol_instances
-                .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
-                .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
-                .filter(symbol_instances::dsl::id.eq_any(&current_instance_ids))
-                .inner_join(
-                    container_instance.on(
-                        container_instance.field(symbol_instances::dsl::object_id)
-                            .eq(symbol_instances::dsl::object_id)
-                    ),
-                )
-                .inner_join(
-                    container_symbol.on(
-                        container_symbol.field(symbols::dsl::id)
-                            .eq(container_instance.field(symbol_instances::dsl::symbol))
-                    ),
-                )
-                .inner_join(
-                    container_type.on(
-                        container_type.field(symbol_types::dsl::id)
-                            .eq(container_symbol.field(symbols::dsl::symbol_type))
-                    ),
-                )
-                .filter(
-                    // Container's range contains current's range
-                    diesel::dsl::sql::<diesel::sql_types::Bool>(
-                        "container_instances.offset_range @> symbol_instances.offset_range"
-                    )
-                )
-                .filter(
-                    // Container's type level >= current's type level
-                    // directory(4) > module(3) > file(2) > function(1)
-                    // Using >= to support function-contains-function (nested/anonymous functions)
-                    container_type.field(symbol_types::dsl::level)
-                        .ge(symbol_types::dsl::level)
-                )
-                .filter(
-                    // Prevent self-containment: container instance must differ from current instance
-                    container_instance.field(symbol_instances::dsl::id)
-                        .ne(symbol_instances::dsl::id)
-                )
-                .select((
-                    Symbol::as_select(),                    // child_symbol (current)
-                    SymbolInstance::as_select(),            // child_instance (current)
-                    container_symbol.fields(crate::schema_diesel::symbols::all_columns),  // parent_symbol
-                    container_instance.fields(crate::schema_diesel::symbol_instances::all_columns), // parent_instance
-                ))
-                .into_boxed::<Pg>();
-
-            // Apply mixin filters to constrain to current symbols
-            for mixin in mixins.iter_mut() {
-                has_parents_query = mixin.filter_has_parents(connection, has_parents_query)?;
-            }
+            let has_parents_query = build_has_parents_query(
+                current_instance_ids.clone(), mixins, connection,
+            )?;
 
             has_parents_query
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance)>(connection)
@@ -456,71 +556,13 @@ impl Index {
                 .map_err(|e| anyhow::anyhow!("Failed to load containment parents: {}", e))?
         };
 
-        // Query for containment: find contained symbols (children that are contained by current symbols)
-        let contained_instance = CONTAINED_INSTANCE_ALIAS;
-        let contained_symbol = CONTAINED_SYMBOL_ALIAS;
-        let contained_type = CONTAINED_TYPE_ALIAS;
-
         let has_children = {
             let _has_children_span: tracing::span::EnteredSpan =
                 tracing::info_span!("select_has_children").entered();
 
-            // For each current symbol instance (parent), find contained instances (children)
-            // that have: same object_id, current.offset_range @> contained.offset_range,
-            // current.type.level > contained.type.level
-            let mut has_children_query = symbol_instances::dsl::symbol_instances
-                .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
-                .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
-                .filter(symbol_instances::dsl::id.eq_any(&current_instance_ids))
-                .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(symbol_instances::dsl::object_id)))
-                .inner_join(
-                    contained_instance.on(
-                        contained_instance.field(symbol_instances::dsl::object_id)
-                            .eq(symbol_instances::dsl::object_id)
-                    ),
-                )
-                .inner_join(
-                    contained_symbol.on(
-                        contained_symbol.field(symbols::dsl::id)
-                            .eq(contained_instance.field(symbol_instances::dsl::symbol))
-                    ),
-                )
-                .inner_join(
-                    contained_type.on(
-                        contained_type.field(symbol_types::dsl::id)
-                            .eq(contained_symbol.field(symbols::dsl::symbol_type))
-                    ),
-                )
-                .filter(
-                    // Current's range contains contained's range
-                    diesel::dsl::sql::<diesel::sql_types::Bool>(
-                        "symbol_instances.offset_range @> contained_instances.offset_range"
-                    )
-                )
-                .filter(
-                    // Current's type level >= contained's type level
-                    // Using >= to support function-contains-function (nested/anonymous functions)
-                    symbol_types::dsl::level
-                        .ge(contained_type.field(symbol_types::dsl::level))
-                )
-                .filter(
-                    // Prevent self-containment: current instance must differ from contained instance
-                    symbol_instances::dsl::id
-                        .ne(contained_instance.field(symbol_instances::dsl::id))
-                )
-                .select((
-                    Symbol::as_select(),                    // parent_symbol (current)
-                    SymbolInstance::as_select(),            // parent_instance (current)
-                    contained_symbol.fields(crate::schema_diesel::symbols::all_columns),  // child_symbol
-                    contained_instance.fields(crate::schema_diesel::symbol_instances::all_columns), // child_instance
-                    Object::as_select(),                    // parent_object
-                ))
-                .into_boxed::<Pg>();
-
-            // Apply mixin filters to constrain to current symbols
-            for mixin in mixins.iter_mut() {
-                has_children_query = mixin.filter_has_children(connection, has_children_query)?;
-            }
+            let has_children_query = build_has_children_query(
+                current_instance_ids, mixins, connection,
+            )?;
 
             has_children_query
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(connection)
@@ -609,6 +651,111 @@ impl Index {
         };
 
         selection
+    }
+
+    /// Query child instance IDs directly from DB given parent instance IDs.
+    /// Uses shared query builders + mixins — single source of truth for filtering.
+    ///
+    /// Callers construct their own mixin vector (e.g., `DirectOnlyMixin`,
+    /// `OuterParentFilterMixin`) for composability. Directional mixins only
+    /// implement the relevant `filter_*` methods; the rest are default no-ops,
+    /// so one mixin list safely applies to both HAS and REFS sub-queries.
+    ///
+    /// Note: queries load full tuples (not just IDs) because the mixin trait
+    /// methods are typed to specific query types. The overhead is negligible
+    /// for typical result-set sizes on a local Postgres connection, and is
+    /// dwarfed by the follow-up `find_symbol` call that loads full tuples anyway.
+    pub async fn find_child_instance_ids(
+        &self,
+        parent_ids: &[i32],
+        include_refs: bool,
+        include_has: bool,
+        mixins: &[Box<dyn SymbolSearchMixin>],
+    ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
+        let connection = &mut self
+            .pool
+            .get()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+
+        for m in mixins.iter() { m.enter(&mut *connection)?; }
+
+        let mut all_ids: Vec<i32> = Vec::new();
+
+        if include_has {
+            let query = build_has_children_query(
+                parent_ids.to_vec(), mixins, &mut *connection,
+            )?;
+            let results = query
+                .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(&mut *connection)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to find has-child instance IDs: {}", e))?;
+            all_ids.extend(results.iter().map(|(_, _, _, child_inst, _)| child_inst.id));
+        }
+
+        if include_refs {
+            let query = build_children_query(
+                parent_ids.to_vec(), mixins, &mut *connection,
+            )?;
+            let results = query
+                .load::<(Symbol, Symbol, SymbolInstance, SymbolInstance, SymbolRef, Object)>(
+                    &mut *connection,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to find ref-child instance IDs: {}", e))?;
+            all_ids.extend(results.iter().map(|(_, _, callee_inst, _, _, _)| callee_inst.id));
+        }
+
+        all_ids.sort_unstable();
+        all_ids.dedup();
+        Ok(all_ids.into_iter().map(crate::symbols::SymbolInstanceId::new).collect())
+    }
+
+    /// Query parent instance IDs directly from DB given child instance IDs.
+    /// Uses shared query builders + mixins — single source of truth for filtering.
+    /// See `find_child_instance_ids` for design notes.
+    pub async fn find_parent_instance_ids(
+        &self,
+        child_ids: &[i32],
+        include_refs: bool,
+        include_has: bool,
+        mixins: &[Box<dyn SymbolSearchMixin>],
+    ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
+        let connection = &mut self
+            .pool
+            .get()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+
+        for m in mixins.iter() { m.enter(&mut *connection)?; }
+
+        let mut all_ids: Vec<i32> = Vec::new();
+
+        if include_refs {
+            let query = build_parents_query(
+                child_ids.to_vec(), mixins, &mut *connection,
+            )?;
+            let results = query
+                .load::<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)>(&mut *connection)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to find ref-parent instance IDs: {}", e))?;
+            all_ids.extend(results.iter().map(|(_, _, _, parent_inst)| parent_inst.id));
+        }
+
+        if include_has {
+            let query = build_has_parents_query(
+                child_ids.to_vec(), mixins, &mut *connection,
+            )?;
+            let results = query
+                .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance)>(&mut *connection)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to find has-parent instance IDs: {}", e))?;
+            all_ids.extend(results.iter().map(|(_, _, _, container_inst)| container_inst.id));
+        }
+
+        all_ids.sort_unstable();
+        all_ids.dedup();
+        Ok(all_ids.into_iter().map(crate::symbols::SymbolInstanceId::new).collect())
     }
 
 }

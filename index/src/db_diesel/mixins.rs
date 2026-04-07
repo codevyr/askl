@@ -288,7 +288,7 @@ fn ltree_filter_sql(column: &str, lquery: &str) -> String {
 /// `filter_parents`. Do NOT re-filter the current symbol in follow-up methods;
 /// `current_instance_ids` already handles that.
 pub trait SymbolSearchMixin: std::fmt::Debug {
-    fn enter(&mut self, _connection: &mut Connection) -> Result<()> {
+    fn enter(&self, _connection: &mut Connection) -> Result<()> {
         Ok(())
     }
 
@@ -555,6 +555,8 @@ impl SymbolSearchMixin for DirectOnlyMixin {
                 WHERE mid.object_id = symbol_instances.object_id \
                   AND symbol_instances.offset_range @> mid.offset_range \
                   AND mid.offset_range @> contained_instances.offset_range \
+                  AND mid.offset_range != symbol_instances.offset_range \
+                  AND mid.offset_range != contained_instances.offset_range \
                   AND mid.id != symbol_instances.id \
                   AND mid.id != contained_instances.id \
                   AND symbol_types.level >= mid_type.level\
@@ -579,10 +581,83 @@ impl SymbolSearchMixin for DirectOnlyMixin {
                 WHERE container.object_id = parent_decls.object_id \
                   AND parent_decls.offset_range @> container.offset_range \
                   AND container.offset_range @> symbol_refs.from_offset_range \
+                  AND container.offset_range != parent_decls.offset_range \
                   AND container.id != parent_decls.id \
                   AND cont_type.level <= parent_type.level\
             )",
         )))
+    }
+}
+
+/// InnermostOnlyMixin — filters has_parents to innermost container only.
+///
+/// Analogous to DirectOnlyMixin but for has_parents: excludes containers
+/// that have an intermediate container between them and the child.
+#[derive(Debug, Clone)]
+pub struct InnermostOnlyMixin;
+
+impl SymbolSearchMixin for InnermostOnlyMixin {
+    fn filter_has_parents<'a>(
+        &self,
+        _conn: &mut Connection,
+        query: HasParentsQuery<'a>,
+    ) -> Result<HasParentsQuery<'a>> {
+        Ok(query.filter(sql::<Bool>(
+            "NOT EXISTS (\
+                SELECT 1 FROM index.symbol_instances mid \
+                WHERE mid.object_id = container_instances.object_id \
+                  AND container_instances.offset_range @> mid.offset_range \
+                  AND mid.offset_range @> symbol_instances.offset_range \
+                  AND mid.offset_range != container_instances.offset_range \
+                  AND mid.offset_range != symbol_instances.offset_range \
+                  AND mid.id != container_instances.id \
+                  AND mid.id != symbol_instances.id\
+            )",
+        )))
+    }
+}
+
+/// OuterParentFilterMixin — filters out nested parent instances from REFS queries.
+///
+/// When `find_child_instance_ids` receives parent IDs that include nested instances
+/// (e.g., `[foo, anon_in_foo]`), DirectOnlyMixin correctly excludes refs inside
+/// `anon_in_foo` from `foo`'s perspective, but `anon_in_foo` independently contributes
+/// its own direct refs — causing double-counting. This mixin excludes any parent
+/// instance that is contained within another parent instance in the input set.
+#[derive(Debug, Clone)]
+pub struct OuterParentFilterMixin {
+    parent_ids: Vec<i32>,
+}
+
+impl OuterParentFilterMixin {
+    pub fn new(parent_ids: &[i32]) -> Self {
+        Self { parent_ids: parent_ids.to_vec() }
+    }
+}
+
+impl SymbolSearchMixin for OuterParentFilterMixin {
+    fn filter_children<'a>(
+        &self,
+        _conn: &mut Connection,
+        query: ChildrenQuery<'a>,
+    ) -> Result<ChildrenQuery<'a>> {
+        if self.parent_ids.is_empty() {
+            return Ok(query);
+        }
+        let ids_csv = self.parent_ids.iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        Ok(query.filter(sql::<Bool>(&format!(
+            "NOT EXISTS (\
+                SELECT 1 FROM index.symbol_instances op \
+                WHERE op.id IN ({ids_csv}) \
+                  AND op.id != parent_decls.id \
+                  AND op.object_id = parent_decls.object_id \
+                  AND op.offset_range @> parent_decls.offset_range \
+                  AND op.offset_range != parent_decls.offset_range\
+            )"
+        ))))
     }
 }
 

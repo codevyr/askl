@@ -82,3 +82,23 @@ VALUES
 -- {a c} -> b
 -- b -> d -> {e f}
 -- g -> e -> f
+
+-- === Scoped-children test data ===
+-- Macro M has expansion instances inside two different functions (e, g) in the
+-- same file.  M-in-e references data symbol x; M-in-g references data symbol y.
+-- Query "e" { "M" {} } should only return x, never y.
+
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope) VALUES
+    (200, 'M', 1, 7, 1),   -- macro
+    (201, 'x', 1, 6, 1),   -- data
+    (202, 'y', 1, 6, 1);   -- data
+
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (200, 200, 1, int4range(953, 957), 3),   -- M expansion inside e [950,959)
+    (201, 200, 1, int4range(973, 977), 3),   -- M expansion inside g [970,979)
+    (210, 201, 1, int4range(800, 810), 1),   -- x definition
+    (211, 202, 1, int4range(820, 830), 1);   -- y definition
+
+INSERT INTO symbol_refs (to_symbol, from_object, from_offset_range) VALUES
+    (201, 1, int4range(954, 956)),   -- ref to x inside M-in-e
+    (202, 1, int4range(974, 976));   -- ref to y inside M-in-g
