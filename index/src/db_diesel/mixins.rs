@@ -11,7 +11,7 @@ use diesel::sql_types::{Bool, Int4range, Integer, Text};
 use crate::ltree::Ltree;
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::schema_diesel as index_schema;
-use crate::symbols::{symbol_name_to_path, symbol_query_to_lquery, build_lquery, SymbolInstanceId};
+use crate::symbols::{symbol_name_to_path, symbol_query_to_lquery, build_lquery, normalize_symbol_tokens, SymbolInstanceId};
 
 use super::Connection;
 
@@ -69,7 +69,7 @@ pub type CurrentQuery<'a> = BoxedSelectStatement<
 
 type SymbolInstanceColumnsSqlType = (Integer, Integer, Integer, Int4range, Integer);
 
-type SymbolColumnsSqlType = (Integer, Text, Ltree, Integer, Integer, diesel::sql_types::Nullable<Integer>);  // (id, name, symbol_path, project_id, symbol_type, symbol_scope)
+type SymbolColumnsSqlType = (Integer, Text, Ltree, Integer, Integer, diesel::sql_types::Nullable<Integer>, Text);  // (id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name)
 
 type ParentSelectionTuple = (
     AsSelect<SymbolRef, Pg>,
@@ -401,10 +401,27 @@ impl SymbolSearchMixin for IgnoreFilterMixin {
     // the current symbol, which is already constrained by current_instance_ids.
 }
 
+/// Extract the last normalized token from a symbol name, matching the DB trigger's
+/// `subpath(symbol_path, nlevel(symbol_path) - 1)` computation.
+/// Falls back to "unknown" to match `symbol_name_to_ltree`'s COALESCE behavior.
+fn extract_leaf_token(name: &str, dot_is_separator: bool) -> String {
+    use std::borrow::Cow;
+    let normalized: Cow<str> = if dot_is_separator {
+        Cow::Borrowed(name)
+    } else {
+        Cow::Owned(name.replace('.', "_"))
+    };
+    normalize_symbol_tokens(&normalized).pop()
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 #[derive(Debug, Clone)]
 pub struct CompoundNameMixin {
-    pub raw_name: String,
     lquery: Option<String>,
+    /// Only set when leaf_anchored=true — the last token MUST be the leaf label,
+    /// so `leaf_name = last_token` is a correct pre-filter (no false negatives).
+    /// The B-tree index on (project_id, symbol_type, leaf_name) drives the scan.
+    leaf_token: Option<String>,
 }
 
 impl CompoundNameMixin {
@@ -417,9 +434,14 @@ impl CompoundNameMixin {
     }
 
     pub fn with_options(compound_name: &str, leaf_anchored: bool, dot_is_separator: bool) -> Self {
+        let leaf_token = if leaf_anchored {
+            Some(extract_leaf_token(compound_name, dot_is_separator))
+        } else {
+            None
+        };
         Self {
-            raw_name: compound_name.to_string(),
             lquery: build_lquery(compound_name, leaf_anchored, dot_is_separator),
+            leaf_token,
         }
     }
 }
@@ -430,6 +452,13 @@ impl SymbolSearchMixin for CompoundNameMixin {
         _connection: &mut Connection,
         query: CurrentQuery<'a>,
     ) -> Result<CurrentQuery<'a>> {
+        // When leaf-anchored, add leaf_name pre-filter so B-tree drives the scan
+        let query = if let Some(ref leaf) = self.leaf_token {
+            use index_schema::symbols;
+            query.filter(symbols::dsl::leaf_name.eq(leaf.clone()))
+        } else {
+            query
+        };
         if let Some(lquery) = &self.lquery {
             let filter_sql = ltree_filter_sql("symbols.symbol_path", lquery);
             Ok(query.filter(sql::<Bool>(&filter_sql)))
@@ -440,6 +469,31 @@ impl SymbolSearchMixin for CompoundNameMixin {
 
     // No filter_parents/filter_children/filter_has_*: these would only re-filter
     // the current symbol, which is already constrained by current_instance_ids.
+}
+
+/// LeafNameMixin - filters symbols by the last label of their symbol_path.
+/// Used for simple (non-compound) name queries, hitting the B-tree index
+/// on (project_id, symbol_type, leaf_name) for ~0.1ms lookups.
+#[derive(Debug, Clone)]
+pub struct LeafNameMixin {
+    pub leaf_name: String,
+}
+
+impl LeafNameMixin {
+    pub fn new(name: &str, dot_is_separator: bool) -> Self {
+        Self { leaf_name: extract_leaf_token(name, dot_is_separator) }
+    }
+}
+
+impl SymbolSearchMixin for LeafNameMixin {
+    fn filter_current<'a>(
+        &self,
+        _connection: &mut Connection,
+        query: CurrentQuery<'a>,
+    ) -> Result<CurrentQuery<'a>> {
+        use index_schema::symbols;
+        Ok(query.filter(symbols::dsl::leaf_name.eq(self.leaf_name.clone())))
+    }
 }
 
 /// ExactNameMixin - filters symbols by exact name match.

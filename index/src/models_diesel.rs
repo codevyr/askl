@@ -69,6 +69,7 @@ pub struct Symbol {
     pub project_id: i32,
     pub symbol_type: i32,
     pub symbol_scope: Option<i32>,
+    pub leaf_name: String,
 }
 
 #[derive(Debug, QueryableByName)]
