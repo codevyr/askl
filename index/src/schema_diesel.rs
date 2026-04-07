@@ -92,6 +92,7 @@ diesel::table! {
         project_id -> Integer,
         symbol_type -> Integer,
         symbol_scope -> Nullable<Integer>,
+        leaf_name -> Text,
     }
 }
 

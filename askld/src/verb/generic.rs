@@ -11,7 +11,7 @@ use crate::statement::Statement;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    CompoundNameMixin, ExactNameMixin, IgnoreFilterMixin, Index, ParentReference,
+    CompoundNameMixin, ExactNameMixin, LeafNameMixin, IgnoreFilterMixin, Index, ParentReference,
     ProjectFilterMixin, Selection, SymbolSearchMixin,
 };
 use index::models_diesel::SymbolRef;
@@ -114,6 +114,17 @@ pub(crate) fn build_generic_verb(
     }
 }
 
+/// Returns a name mixin for the type-agnostic case (bare selectors).
+/// Treats '.' as a separator (code symbol convention).
+fn name_search_mixin(name: &str) -> Box<dyn SymbolSearchMixin> {
+    let is_compound = name.contains('.') || name.contains('/') || name.contains(':');
+    if is_compound {
+        Box::new(CompoundNameMixin::new(name))
+    } else {
+        Box::new(LeafNameMixin::new(name, true))
+    }
+}
+
 #[derive(Debug)]
 pub struct NameSelector {
     span: Span,
@@ -162,7 +173,7 @@ impl Selector for NameSelector {
         search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
     ) -> Result<Option<Selection>> {
         let mut search_mixins = search_mixins;
-        search_mixins.push(Box::new(CompoundNameMixin::new(&self.name)));
+        search_mixins.push(name_search_mixin(&self.name));
         // Type filtering is handled by DefaultTypeFilter added in statement.rs.
         // NameSelector does not add its own type filter to avoid conflicting
         // with inherited default types from parent scopes.
@@ -233,7 +244,7 @@ impl Selector for ForcedVerb {
         search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
     ) -> Result<Option<Selection>> {
         let mut search_mixins = search_mixins;
-        search_mixins.push(Box::new(CompoundNameMixin::new(&self.name)));
+        search_mixins.push(name_search_mixin(&self.name));
         // Type filtering is handled by DefaultTypeFilter added in statement.rs.
         let selection = cfg.index.find_symbol(&mut search_mixins).await?;
 
@@ -1006,22 +1017,41 @@ impl TypeSelector {
     }
 
     /// Returns the appropriate name mixin for the given name and symbol type.
-    /// Directory/file types with path args (starting with '/') use exact match;
-    /// all other cases use compound name (ltree) matching.
+    /// Simple names (no separators) use LeafNameMixin for B-tree lookups (~0.1ms).
+    /// Compound names use CompoundNameMixin with lquery (leaf-anchored gets B-tree pre-filter).
+    /// Directory/file types with absolute paths use ExactNameMixin.
     fn name_mixin(
         name: &str,
         symbol_type_id: i32,
         leaf_anchored: bool,
     ) -> Box<dyn SymbolSearchMixin> {
         match symbol_type_id {
+            // Files/directories with absolute path -> exact match
             SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE if name.starts_with('/') => {
                 Box::new(ExactNameMixin::new(name))
             }
+            // Files/directories: '.' is NOT a separator, only '/' and ':' are
             SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE => {
-                Box::new(CompoundNameMixin::with_options(name, leaf_anchored, false))
+                let is_compound = name.contains('/') || name.contains(':');
+                if is_compound {
+                    Box::new(CompoundNameMixin::with_options(name, leaf_anchored, false))
+                } else {
+                    Box::new(LeafNameMixin::new(name, false))
+                }
             }
-            _ if leaf_anchored => Box::new(CompoundNameMixin::new_leaf_anchored(name)),
-            _ => Box::new(CompoundNameMixin::new(name)),
+            // Code symbols: '.', '/', ':' are all separators
+            _ => {
+                let is_compound = name.contains('.') || name.contains('/') || name.contains(':');
+                if is_compound {
+                    if leaf_anchored {
+                        Box::new(CompoundNameMixin::new_leaf_anchored(name))
+                    } else {
+                        Box::new(CompoundNameMixin::new(name))
+                    }
+                } else {
+                    Box::new(LeafNameMixin::new(name, true))
+                }
+            }
         }
     }
 
@@ -1151,12 +1181,14 @@ impl Filter for TypeSelector {
             // only constrain by name pattern, not by type. This allows
             // mod("test", filter="true") "a" to find functions named "test.a"
             // rather than restricting to MODULE-type symbols.
+            // Always use CompoundNameMixin here — the name acts as a path component
+            // filter (*.test.*), not a leaf name match.
             let name = self.name_pattern.as_ref().unwrap();
-            vec![Self::name_mixin(
-                name,
+            let dot_is_separator = !matches!(
                 self.symbol_type_id,
-                self.leaf_anchored,
-            )]
+                SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE
+            );
+            vec![Box::new(CompoundNameMixin::with_options(name, false, dot_is_separator))]
         } else {
             self.build_mixins()
         }

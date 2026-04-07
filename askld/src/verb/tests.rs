@@ -16,7 +16,7 @@ async fn test_select_matching_name() {
     let test_cases = vec![
         ("sort.Sort", vec![96]),
         ("sort.IsSorted", vec![95]),
-        ("foo", vec![91, 92]),
+        ("foo", vec![91]),
         ("bar", vec![92]),
         ("foo.bar", vec![92]),
         ("FOO.bar", vec![]),
