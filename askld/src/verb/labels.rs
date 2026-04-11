@@ -1,5 +1,5 @@
 use crate::{
-    command::NotificationResult, execution_context::selector_state_with,
+    execution_context::{selector_state_with, SelectorRegistry},
     execution_state::{DependencyRole, RelationshipType}, parser::Rule, span::Span,
 };
 use anyhow::{bail, Result};
@@ -15,7 +15,7 @@ use std::{collections::HashMap, sync::OnceLock};
 
 use crate::{cfg::ControlFlowGraph, execution_context::ExecutionContext, statement::Statement};
 
-use super::{DeriveMethod, Labeler, NotificationContext, Selector, SelectorState, Verb};
+use super::{ConstraintAction, DeriveMethod, Labeler, NotificationContext, Selector, SelectorState, Verb};
 use crate::verb::Filter;
 
 #[derive(Debug)]
@@ -323,42 +323,19 @@ impl Selector for UserVerb {
         Ok(Some(cached_selection))
     }
 
-    async fn accept_notification(
+    fn try_constrain_notification(
         &self,
-        ctx: &mut ExecutionContext,
-        index: &Index,
-        selector_filters: &[&dyn Filter],
-        notifier: &Statement,
+        registry: &mut SelectorRegistry,
+        dependency: &Selection,
         notif_ctx: NotificationContext,
-        parent_scope: ScopeContext,
-        children_scope: ScopeContext,
-    ) -> Result<NotificationResult, pest::error::Error<Rule>> {
-        if !notifier.command().has_selectors() {
-            return Ok(NotificationResult::new(false, vec![]));
-        }
-
-        let dependency = match notifier.get_selection(&ctx) {
-            Some(selection) => selection,
-            None => return Ok(NotificationResult::new(false, vec![])),
-        };
-
-        if notif_ctx.role == DependencyRole::User {
-            let notifier_labels = notifier.command().get_labels();
-            let self_label = match self.get_label() {
-                Some(label) => label,
-                None => return Ok(NotificationResult::new(false, vec![])),
-            };
-            if !notifier_labels.contains(&self_label) {
-                return Ok(NotificationResult::new(false, vec![]));
-            }
-        }
-
+        _notifier: &Statement,
+    ) -> Result<ConstraintAction, pest::error::Error<Rule>> {
         // For forced parent dependencies, we always derive fake selection.
         if !self.forced || notif_ctx.role != DependencyRole::Child {
             let mut changed = false;
-            let constrained = selector_state_with(&mut ctx.registry, self, |state| {
+            let constrained = selector_state_with(registry, self, |state| {
                 if state.selection.is_some() {
-                    changed = state.constrain_selection(&dependency, notif_ctx.role, notif_ctx.rel_type);
+                    changed = state.constrain_selection(dependency, notif_ctx.role, notif_ctx.rel_type);
                     true
                 } else {
                     false
@@ -366,7 +343,7 @@ impl Selector for UserVerb {
             });
 
             if constrained {
-                return Ok(NotificationResult::new(changed, vec![]));
+                return Ok(ConstraintAction::Constrained(changed, vec![]));
             }
 
             if notif_ctx.role == DependencyRole::Child {
@@ -381,29 +358,7 @@ impl Selector for UserVerb {
                 ));
             }
         }
-
-        let mut selection = self
-            .derive_selection(ctx, index, selector_filters, notifier, notif_ctx, parent_scope, children_scope)
-            .await
-            .map_err(|e| {
-                pest::error::Error::new_from_span(
-                    CustomError {
-                        message: format!("Error deriving selection for user verb: {}", e),
-                    },
-                    self.span.as_pest_span(),
-                )
-            })?;
-
-        if let Some(ref mut selection) = selection {
-            selector_filters.iter().for_each(|f| {
-                f.filter(selection);
-            });
-        }
-
-        selector_state_with(&mut ctx.registry, self, |state| {
-            state.selection = selection;
-        });
-        Ok(NotificationResult::new(true, vec![]))
+        Ok(ConstraintAction::Derive)
     }
 
     fn get_label(&self) -> Option<String> {
