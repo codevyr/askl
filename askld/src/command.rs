@@ -1,13 +1,13 @@
 use crate::cfg::ControlFlowGraph;
-use crate::execution_context::ExecutionContext;
+use crate::execution_context::{selector_state_with, ExecutionContext};
 use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::Rule;
 use crate::span::Span;
 use crate::statement::Statement;
-use crate::verb::{add_verb, DeriveMethod, Filter, Labeler, NotificationContext, Selector, Verb, VerbTag};
+use crate::verb::{add_verb, ConstraintAction, DeriveMethod, Filter, Labeler, NotificationContext, Selector, Verb, VerbTag, find_symbol_by_instance_id};
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{CompositeFilter, Index, ScopeContext, Selection};
+use index::db_diesel::{CompositeFilter, InnermostOnlyMixin, Index, ScopeContext, Selection};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -143,22 +143,66 @@ impl Command {
         let mut changed = false;
         let mut warnings = vec![];
         let selector_filters: Vec<&dyn Filter> = self.filters().collect();
+        let mut derivation_ids = None;
         for selector in self.selectors() {
-            let res = selector
-                .accept_notification_from_selection(
-                    ctx,
-                    index,
-                    &selector_filters,
-                    dependency,
-                    role,
-                    rel_type,
-                    unnest,
-                    parent_scope.clone(),
-                    children_scope.clone(),
-                )
-                .await?;
-            changed |= res.changed;
-            warnings.extend(res.warnings);
+            let span = selector.span();
+            let (constrained, sel_changed, sel_warnings) = selector_state_with(&mut ctx.registry, selector, |state| {
+                state.constrain_with_warning(dependency, role, rel_type, span, "children")
+            });
+            changed |= sel_changed;
+            warnings.extend(sel_warnings);
+
+            if constrained {
+                continue;
+            }
+
+            // Derivation path: derive parent's selection from merged children.
+            if role != DependencyRole::Parent {
+                continue;
+            }
+
+            if derivation_ids.is_none() {
+                let child_ids = dependency.get_instance_ids();
+                let mut find_parts: Vec<CompositeFilter> = vec![];
+                if !unnest {
+                    find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin));
+                }
+                let find_filter = CompositeFilter::and(find_parts);
+                derivation_ids = Some(index.find_parent_instance_ids(
+                    &child_ids,
+                    rel_type.contains(RelationshipType::REFS),
+                    rel_type.contains(RelationshipType::HAS),
+                    &find_filter,
+                ).await.map_err(|e| {
+                    pest::error::Error::new_from_span(
+                        pest::error::ErrorVariant::CustomError {
+                            message: format!("Failed to find parent instance IDs: {}", e),
+                        },
+                        selector.span(),
+                    )
+                })?);
+            }
+            let decl_ids = derivation_ids.as_ref().unwrap();
+
+            let mut selection = find_symbol_by_instance_id(index, &selector_filters, decl_ids, parent_scope.clone(), children_scope.clone())
+                .await
+                .map_err(|e| {
+                    pest::error::Error::new_from_span(
+                        pest::error::ErrorVariant::CustomError {
+                            message: format!("Failed to derive selection: {}", e),
+                        },
+                        selector.span(),
+                    )
+                })?;
+
+            selector_filters.iter().for_each(|f| {
+                f.filter(&mut selection);
+            });
+
+            selector_state_with(&mut ctx.registry, selector, |state| {
+                state.selection = Some(selection);
+            });
+            changed = true;
         }
         Ok(NotificationResult::new(changed, warnings))
     }
@@ -172,16 +216,79 @@ impl Command {
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
-        // Collect filters so we can iterate over them multiple times while notifying selectors.
+        if !notifier.command().has_selectors() {
+            return Ok(NotificationResult::new(false, vec![]));
+        }
+
+        let dependency = match notifier.get_selection(&ctx) {
+            Some(selection) => selection,
+            None => return Ok(NotificationResult::new(false, vec![])),
+        };
+
         let mut changed = false;
         let mut warnings = vec![];
         let selector_filters: Vec<&dyn Filter> = self.filters().collect();
+        let notifier_labels = if notif_ctx.role == DependencyRole::User {
+            Some(notifier.command().get_labels())
+        } else {
+            None
+        };
+
         for selector in self.selectors() {
-            let res = selector
-                .accept_notification(ctx, index, &selector_filters, notifier, notif_ctx, parent_scope.clone(), children_scope.clone())
-                .await?;
-            changed |= res.changed;
-            warnings.extend(res.warnings);
+            if let Some(ref notifier_labels) = notifier_labels {
+                let self_label = match selector.get_label() {
+                    Some(label) => label,
+                    None => continue,
+                };
+                if !notifier_labels.contains(&self_label) {
+                    continue;
+                }
+            }
+
+            match selector.try_constrain_notification(&mut ctx.registry, &dependency, notif_ctx, notifier)? {
+                ConstraintAction::Skip => continue,
+                ConstraintAction::Constrained(sel_changed, sel_warnings) => {
+                    changed |= sel_changed;
+                    warnings.extend(sel_warnings);
+                    continue;
+                }
+                ConstraintAction::Derive => {} // fall through to derivation
+            }
+
+            // Derive selection: dispatch based on dependency role
+            let mut selection = match notif_ctx.role {
+                DependencyRole::Child => {
+                    selector.derive_from_parent(ctx, index, &selector_filters, notifier, notif_ctx, parent_scope.clone(), children_scope.clone())
+                        .await
+                }
+                DependencyRole::Parent => {
+                    selector.derive_from_child(ctx, index, &selector_filters, notifier, notif_ctx, parent_scope.clone(), children_scope.clone())
+                        .await
+                }
+                DependencyRole::User => {
+                    selector.derive_from_provider(ctx, index, &selector_filters, notifier)
+                        .await
+                }
+            }
+            .map_err(|e| {
+                pest::error::Error::new_from_span(
+                    pest::error::ErrorVariant::CustomError {
+                        message: format!("Failed to derive selection: {}", e),
+                    },
+                    selector.span(),
+                )
+            })?;
+
+            if let Some(ref mut sel) = selection {
+                selector_filters.iter().for_each(|f| {
+                    f.filter(sel);
+                });
+            }
+
+            selector_state_with(&mut ctx.registry, selector, |state| {
+                state.selection = selection;
+            });
+            changed = true;
         }
         Ok(NotificationResult::new(changed, warnings))
     }
@@ -232,8 +339,11 @@ impl Command {
         for selector in selectors.into_iter() {
             let filter = CompositeFilter::and(filter_parts.clone());
 
+            let select_from_all_name = format!("{:?}", selector);
+            let _select_from_all =
+                tracing::info_span!("select_from_all", name = %select_from_all_name).entered();
             let mut current_selection = selector
-                .select_from_all(ctx, cfg, filter, parent_scope.clone(), children_scope.clone())
+                .select_from_all_impl(ctx, cfg, filter, parent_scope.clone(), children_scope.clone())
                 .await
                 .map_err(|e| {
                     pest::error::Error::new_from_span(

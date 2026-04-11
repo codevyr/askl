@@ -1,6 +1,5 @@
 use crate::cfg::ControlFlowGraph;
-use crate::command::NotificationResult;
-use crate::execution_context::{selector_state_with, ExecutionContext};
+use crate::execution_context::{selector_state_with, ExecutionContext, SelectorRegistry};
 use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::Rule;
 use crate::parser_context::ParserContext;
@@ -336,6 +335,36 @@ impl SelectorState {
         });
     }
 
+    /// Constrain selection and produce a warning if the result is empty.
+    /// Returns `(constrained, changed, warnings)` where `constrained` means a selection
+    /// existed to constrain, `changed` means it was actually narrowed.
+    pub fn constrain_with_warning(
+        &mut self,
+        dependency: &Selection,
+        role: DependencyRole,
+        rel_type: RelationshipType,
+        span: pest::Span<'_>,
+        context: &str,
+    ) -> (bool, bool, Vec<Error<Rule>>) {
+        if self.selection.is_none() {
+            return (false, false, vec![]);
+        }
+        let changed = self.constrain_selection(dependency, role, rel_type);
+        let mut warnings = vec![];
+        if changed && self.selection.as_ref().unwrap().nodes.is_empty() {
+            warnings.push(Error::new_from_span(
+                CustomError {
+                    message: format!(
+                        "Statement did not match any symbols after applying constraints from {}.",
+                        context,
+                    ),
+                },
+                span,
+            ));
+        }
+        (true, changed, warnings)
+    }
+
     fn constrain_by_owner(&mut self, owner: &Selection) {
         let selection = self.selection.as_mut().unwrap();
         selection.nodes.retain(|u| {
@@ -349,6 +378,16 @@ impl SelectorState {
 }
 
 pub type SelectorId = usize;
+
+/// Result of per-selector constraint logic in `try_constrain_notification`.
+pub enum ConstraintAction {
+    /// Selector should be skipped (e.g., weak statement already has selection).
+    Skip,
+    /// Selection was constrained. Contains (changed, warnings).
+    Constrained(bool, Vec<pest::error::Error<Rule>>),
+    /// No existing selection to constrain; proceed to derive.
+    Derive,
+}
 
 #[async_trait(?Send)]
 pub trait Selector: std::fmt::Debug + Verb {
@@ -386,18 +425,36 @@ pub trait Selector: std::fmt::Debug + Verb {
         state.selection.as_ref()
     }
 
-    async fn select_from_all(
+    /// Per-selector constraint logic for `accept_notification`.
+    /// Returns whether to skip, constrain, or derive for this notification.
+    /// Override to customize constraint behavior (e.g. UserVerb's forced/circular logic).
+    fn try_constrain_notification(
         &self,
-        _ctx: &mut ExecutionContext,
-        cfg: &ControlFlowGraph,
-        filter: CompositeFilter,
-        parent_scope: ScopeContext,
-        children_scope: ScopeContext,
-    ) -> Result<Option<Selection>> {
-        let select_from_all_name = format!("{:?}", self);
-        let _select_from_all =
-            tracing::info_span!("select_from_all", name = %select_from_all_name).entered();
-        self.select_from_all_impl(_ctx, cfg, filter, parent_scope, children_scope).await
+        registry: &mut SelectorRegistry,
+        dependency: &Selection,
+        notif_ctx: NotificationContext,
+        notifier: &Statement,
+    ) -> Result<ConstraintAction, pest::error::Error<Rule>> {
+        // Weak statements do not constrain the selection of their dependencies.
+        if notifier.get_state().weak {
+            let state_exists =
+                selector_state_with(registry, self, |state| state.selection.is_some());
+            if state_exists {
+                return Ok(ConstraintAction::Skip);
+            }
+        }
+
+        let span = self.span();
+        let context = format!("{}", notifier.command().span());
+        let (constrained, changed, warnings) = selector_state_with(registry, self, |state| {
+            state.constrain_with_warning(dependency, notif_ctx.role, notif_ctx.rel_type, span, &context)
+        });
+
+        if constrained {
+            Ok(ConstraintAction::Constrained(changed, warnings))
+        } else {
+            Ok(ConstraintAction::Derive)
+        }
     }
 
     async fn select_from_all_impl(
@@ -410,206 +467,6 @@ pub trait Selector: std::fmt::Debug + Verb {
     ) -> Result<Option<Selection>> {
         let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope).await?;
         Ok(Some(selection))
-    }
-
-    async fn accept_notification(
-        &self,
-        ctx: &mut ExecutionContext,
-        index: &Index,
-        selector_filters: &[&dyn Filter],
-        notifier: &Statement,
-        notif_ctx: NotificationContext,
-        parent_scope: ScopeContext,
-        children_scope: ScopeContext,
-    ) -> Result<NotificationResult, pest::error::Error<Rule>> {
-        if !notifier.command().has_selectors() {
-            return Ok(NotificationResult::new(false, vec![]));
-        }
-
-        let dependency = match notifier.get_selection(&ctx) {
-            Some(selection) => selection,
-            None => return Ok(NotificationResult::new(false, vec![])),
-        };
-
-        if notif_ctx.role == DependencyRole::User {
-            let notifier_labels = notifier.command().get_labels();
-            let self_label = match self.get_label() {
-                Some(label) => label,
-                None => return Ok(NotificationResult::new(false, vec![])),
-            };
-            if !notifier_labels.contains(&self_label) {
-                return Ok(NotificationResult::new(false, vec![]));
-            }
-        }
-
-        // Weak statements do not constrain the selection of their dependencies.
-        if notifier.get_state().weak {
-            let state_exists =
-                selector_state_with(&mut ctx.registry, self, |state| state.selection.is_some());
-            if state_exists {
-                return Ok(NotificationResult::new(false, vec![]));
-            }
-        }
-
-        let mut changed = false;
-        let (constrained, warnings) = selector_state_with(&mut ctx.registry, self, |state| {
-            if state.selection.is_some() {
-                changed = state.constrain_selection(&dependency, notif_ctx.role, notif_ctx.rel_type);
-                let mut warnings = vec![];
-                if changed && state.selection.as_ref().unwrap().nodes.is_empty() {
-                    warnings.push(Error::new_from_span(
-                        CustomError {
-                            message: format!(
-                                "Statement did not match any symbols after applying constraints from {}.",
-                                notifier.command().span(),
-                            ),
-                        },
-                        self.span(),
-                    ));
-                }
-                (true, warnings)
-            } else {
-                (false, vec![])
-            }
-        });
-
-        if constrained {
-            return Ok(NotificationResult::new(changed, warnings));
-        }
-
-        let mut selection = self
-            .derive_selection(ctx, index, selector_filters, notifier, notif_ctx, parent_scope, children_scope)
-            .await
-            .map_err(|e| {
-                Error::new_from_span(
-                    CustomError {
-                        message: format!("Failed to derive selection: {}", e),
-                    },
-                    self.span(),
-                )
-            })?;
-
-        if let Some(ref mut selection) = selection {
-            selector_filters.iter().for_each(|f| {
-                f.filter(selection);
-            });
-        }
-
-        selector_state_with(&mut ctx.registry, self, |state| {
-            state.selection = selection;
-        });
-        Ok(NotificationResult::new(true, vec![]))
-    }
-
-    async fn accept_notification_from_selection(
-        &self,
-        ctx: &mut ExecutionContext,
-        index: &Index,
-        selector_filters: &[&dyn Filter],
-        dependency: &Selection,
-        role: DependencyRole,
-        rel_type: RelationshipType,
-        unnest: bool,
-        parent_scope: ScopeContext,
-        children_scope: ScopeContext,
-    ) -> Result<NotificationResult, pest::error::Error<Rule>> {
-        let mut changed = false;
-        let (constrained, warnings) = selector_state_with(&mut ctx.registry, self, |state| {
-            if state.selection.is_some() {
-                changed = state.constrain_selection(dependency, role, rel_type);
-                let mut warnings = vec![];
-                if changed && state.selection.as_ref().unwrap().nodes.is_empty() {
-                    warnings.push(Error::new_from_span(
-                        CustomError {
-                            message: format!(
-                                "Statement did not match any symbols after applying constraints from children.",
-                            ),
-                        },
-                        self.span(),
-                    ));
-                }
-                (true, warnings)
-            } else {
-                (false, vec![])
-            }
-        });
-
-        if constrained {
-            return Ok(NotificationResult::new(changed, warnings));
-        }
-
-        // Derivation path: derive parent's selection from merged children.
-        if role != DependencyRole::Parent {
-            return Ok(NotificationResult::new(false, vec![]));
-        }
-        let child_ids = dependency.get_instance_ids();
-        let mut find_parts: Vec<CompositeFilter> = vec![];
-        if !unnest {
-            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin));
-        }
-        let find_filter = CompositeFilter::and(find_parts);
-        let decl_ids = index.find_parent_instance_ids(
-            &child_ids,
-            rel_type.contains(RelationshipType::REFS),
-            rel_type.contains(RelationshipType::HAS),
-            &find_filter,
-        ).await.map_err(|e| {
-            Error::new_from_span(
-                CustomError {
-                    message: format!("Failed to find parent instance IDs: {}", e),
-                },
-                self.span(),
-            )
-        })?;
-
-        let mut selection = self
-            .find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope)
-            .await
-            .map_err(|e| {
-                Error::new_from_span(
-                    CustomError {
-                        message: format!("Failed to derive selection: {}", e),
-                    },
-                    self.span(),
-                )
-            })?;
-
-        selector_filters.iter().for_each(|f| {
-            f.filter(&mut selection);
-        });
-
-        selector_state_with(&mut ctx.registry, self, |state| {
-            state.selection = Some(selection);
-        });
-        Ok(NotificationResult::new(true, vec![]))
-    }
-
-    async fn derive_selection(
-        &self,
-        ctx: &mut ExecutionContext,
-        index: &Index,
-        selector_filters: &[&dyn Filter],
-        notifier: &Statement,
-        notif_ctx: NotificationContext,
-        parent_scope: ScopeContext,
-        children_scope: ScopeContext,
-    ) -> Result<Option<Selection>> {
-        let selection = match notif_ctx.role {
-            DependencyRole::Child => {
-                self.derive_from_parent(ctx, index, selector_filters, notifier, notif_ctx, parent_scope, children_scope)
-                    .await?
-            }
-            DependencyRole::Parent => {
-                self.derive_from_child(ctx, index, selector_filters, notifier, notif_ctx, parent_scope, children_scope)
-                    .await?
-            }
-            DependencyRole::User => {
-                self.derive_from_provider(ctx, index, selector_filters, notifier)
-                    .await?
-            }
-        };
-
-        Ok(selection)
     }
 
     async fn derive_from_parent(
@@ -640,8 +497,7 @@ pub trait Selector: std::fmt::Debug + Verb {
             &find_filter,
         ).await.map_err(|e| anyhow::anyhow!("Failed to find child instance IDs: {}", e))?;
 
-        let selection = self
-            .find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope)
+        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope)
             .await?;
 
         Ok(Some(selection))
@@ -674,8 +530,7 @@ pub trait Selector: std::fmt::Debug + Verb {
             &find_filter,
         ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
 
-        let selection = self
-            .find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope)
+        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope)
             .await?;
 
         Ok(Some(selection))
@@ -695,22 +550,22 @@ pub trait Selector: std::fmt::Debug + Verb {
         Ok(Some(provider.clone()))
     }
 
-    async fn find_symbol_by_instance_id(
-        &self,
-        index: &Index,
-        selector_filters: &[&dyn Filter],
-        instances: &Vec<SymbolInstanceId>,
-        parent_scope: ScopeContext,
-        children_scope: ScopeContext,
-    ) -> Result<Selection> {
-        let mut parts: Vec<CompositeFilter> = selector_filters
-            .iter()
-            .filter_map(|f| f.get_composite_filter())
-            .collect();
-        parts.push(CompositeFilter::leaf(SymbolInstanceIdMixin::new(instances)));
-        let filter = CompositeFilter::and(parts);
-        index.find_symbol(&filter, parent_scope, children_scope).await
-    }
+}
+
+pub(crate) async fn find_symbol_by_instance_id(
+    index: &Index,
+    selector_filters: &[&dyn Filter],
+    instances: &Vec<SymbolInstanceId>,
+    parent_scope: ScopeContext,
+    children_scope: ScopeContext,
+) -> Result<Selection> {
+    let mut parts: Vec<CompositeFilter> = selector_filters
+        .iter()
+        .filter_map(|f| f.get_composite_filter())
+        .collect();
+    parts.push(CompositeFilter::leaf(SymbolInstanceIdMixin::new(instances)));
+    let filter = CompositeFilter::and(parts);
+    index.find_symbol(&filter, parent_scope, children_scope).await
 }
 
 pub trait Labeler: std::fmt::Debug {

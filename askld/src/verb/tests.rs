@@ -33,7 +33,7 @@ async fn test_select_matching_name() {
         let result = selector
             .as_selector()
             .unwrap()
-            .select_from_all(&mut ctx, &cfg, index::db_diesel::CompositeFilter::And(vec![]), index::db_diesel::ScopeContext::Skip, index::db_diesel::ScopeContext::Skip)
+            .select_from_all_impl(&mut ctx, &cfg, index::db_diesel::CompositeFilter::And(vec![]), index::db_diesel::ScopeContext::Skip, index::db_diesel::ScopeContext::Skip)
             .await
             .unwrap();
 
