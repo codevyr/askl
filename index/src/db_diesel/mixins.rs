@@ -1,19 +1,19 @@
-use anyhow::Result;
-use diesel::dsl::{sql, Eq};
-use diesel::expression::SqlLiteral;
+use std::marker::PhantomData;
+
+use diesel::dsl::Eq;
+use diesel::expression::{BoxableExpression, ValidGrouping, is_aggregate};
 use diesel::helper_types::{AsSelect, InnerJoinQuerySource};
 use diesel::internal::table_macro::{BoxedSelectStatement, FromClause};
 use diesel::pg::Pg;
 use diesel::prelude::*;
+use diesel::query_builder::{AstPass, QueryFragment, QueryId};
 use diesel::query_source::{Alias, AliasedField};
 use diesel::sql_types::{Bool, Int4range, Integer, Text};
 
 use crate::ltree::Ltree;
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::schema_diesel as index_schema;
-use crate::symbols::{symbol_name_to_path, symbol_query_to_lquery, build_lquery, normalize_symbol_tokens, SymbolInstanceId};
-
-use super::Connection;
+use crate::symbols::{symbol_name_to_path, build_lquery, normalize_symbol_tokens, SymbolInstanceId};
 
 diesel::alias! {
     pub const PARENT_SYMBOLS_ALIAS: Alias<ParentSymbolsAlias> =
@@ -277,147 +277,214 @@ fn ltree_filter_sql(column: &str, lquery: &str) -> String {
     format!("{} ~ '{}'::lquery", column, lquery)
 }
 
-/// Trait for composable query filters used by `find_symbol()`.
-///
-/// `filter_current` constrains which symbols the initial query matches.
-/// After the current query runs, `find_symbol()` extracts the surviving instance IDs
-/// (`current_instance_ids`) and applies them as inline filters to all follow-up queries.
-///
-/// Because of this, follow-up methods (`filter_parents`, `filter_children`, etc.) should
-/// only add filters that constrain the *relationship* side — e.g. the caller's type in
-/// `filter_parents`. Do NOT re-filter the current symbol in follow-up methods;
-/// `current_instance_ids` already handles that.
-/// Helper trait enabling `Clone` for `Box<dyn SymbolSearchMixin>`.
-/// Blanket-implemented for all `SymbolSearchMixin + Clone + 'static` types.
-pub trait SymbolSearchMixinClone {
-    fn clone_box(&self) -> Box<dyn SymbolSearchMixin>;
+// ============================================================================
+// OwnedSql — an owned raw SQL expression for use in boxed trait objects
+// ============================================================================
+
+/// Owned SQL literal expression. Unlike `diesel::dsl::sql()` which borrows,
+/// this owns its string and can be boxed as `'static` trait object.
+/// Used for raw SQL predicates (ltree queries, NOT EXISTS subqueries).
+#[derive(Debug, Clone)]
+pub(crate) struct OwnedSql<ST> {
+    sql: String,
+    _marker: PhantomData<ST>,
 }
 
-impl<T: 'static + SymbolSearchMixin + Clone> SymbolSearchMixinClone for T {
-    fn clone_box(&self) -> Box<dyn SymbolSearchMixin> {
+impl<ST> OwnedSql<ST> {
+    pub(crate) fn new(sql: String) -> Self {
+        Self { sql, _marker: PhantomData }
+    }
+}
+
+impl<ST: 'static + Send + diesel::sql_types::SingleValue> Expression for OwnedSql<ST> {
+    type SqlType = ST;
+}
+
+impl<ST: 'static + Send> QueryFragment<Pg> for OwnedSql<ST> {
+    fn walk_ast<'b>(&'b self, mut pass: AstPass<'_, 'b, Pg>) -> diesel::QueryResult<()> {
+        pass.push_sql(&self.sql);
+        Ok(())
+    }
+}
+
+impl<ST: 'static + Send + diesel::sql_types::SingleValue, QS> SelectableExpression<QS> for OwnedSql<ST> {}
+impl<ST: 'static + Send + diesel::sql_types::SingleValue, QS> AppearsOnTable<QS> for OwnedSql<ST> {}
+
+impl<ST> QueryId for OwnedSql<ST> {
+    type QueryId = ();
+    const HAS_STATIC_QUERY_ID: bool = false;
+}
+
+impl<ST: 'static + Send + diesel::sql_types::SingleValue, GB> ValidGrouping<GB> for OwnedSql<ST> {
+    type IsAggregate = is_aggregate::No;
+}
+
+// ============================================================================
+// Bool expression type aliases — one per query context
+// ============================================================================
+
+type CurrentQS = SymbolInstanceProjectObjectJoin;
+type ParentsQS = SymbolRefSymbolInstanceParentInstanceParentSymbolJoin;
+type ChildrenQS = SymbolRefSymbolInstanceParentInstanceParentSymbolObjectJoin;
+type HasParentsQS = HasParentsJoinSource;
+type HasChildrenQS = HasChildrenJoinSource;
+
+pub type CurrentBoolExpr = Box<dyn BoxableExpression<CurrentQS, Pg, SqlType = Bool>>;
+pub type ParentsBoolExpr = Box<dyn BoxableExpression<ParentsQS, Pg, SqlType = Bool>>;
+pub type ChildrenBoolExpr = Box<dyn BoxableExpression<ChildrenQS, Pg, SqlType = Bool>>;
+pub type HasParentsBoolExpr = Box<dyn BoxableExpression<HasParentsQS, Pg, SqlType = Bool>>;
+pub type HasChildrenBoolExpr = Box<dyn BoxableExpression<HasChildrenQS, Pg, SqlType = Bool>>;
+
+// ============================================================================
+// FilterLeaf trait and CompositeFilter
+// ============================================================================
+
+/// Helper trait enabling `Clone` for `Box<dyn FilterLeaf>`.
+/// Automatically implemented for all `FilterLeaf + Clone` types.
+pub trait FilterLeafClone {
+    fn clone_box(&self) -> Box<dyn FilterLeaf>;
+}
+
+impl<T: 'static + FilterLeaf + Clone> FilterLeafClone for T {
+    fn clone_box(&self) -> Box<dyn FilterLeaf> {
         Box::new(self.clone())
     }
 }
 
-impl Clone for Box<dyn SymbolSearchMixin> {
+impl Clone for Box<dyn FilterLeaf> {
     fn clone(&self) -> Self {
         self.clone_box()
     }
 }
 
-pub trait SymbolSearchMixin: std::fmt::Debug + SymbolSearchMixinClone {
-    fn enter(&self, _connection: &mut Connection) -> Result<()> {
-        Ok(())
+/// A leaf filter that produces Diesel boolean expressions for each query context.
+/// Each method returns `None` if this leaf does not constrain that query context.
+pub trait FilterLeaf: std::fmt::Debug + FilterLeafClone + Send + Sync {
+    fn current_expr(&self) -> Option<CurrentBoolExpr> { None }
+    fn parents_expr(&self) -> Option<ParentsBoolExpr> { None }
+    fn children_expr(&self) -> Option<ChildrenBoolExpr> { None }
+    fn has_parents_expr(&self) -> Option<HasParentsBoolExpr> { None }
+    fn has_children_expr(&self) -> Option<HasChildrenBoolExpr> { None }
+}
+
+/// Composable filter tree (AND, OR, NOT, Leaf) for building Diesel WHERE clauses.
+#[derive(Clone, Debug)]
+pub enum CompositeFilter {
+    And(Vec<CompositeFilter>),
+    Or(Vec<CompositeFilter>),
+    Not(Box<CompositeFilter>),
+    Leaf(Box<dyn FilterLeaf>),
+}
+
+impl CompositeFilter {
+    /// Shorthand: wrap a FilterLeaf in a Leaf variant.
+    pub fn leaf(leaf: impl FilterLeaf + 'static) -> Self {
+        CompositeFilter::Leaf(Box::new(leaf))
     }
 
-    fn filter_current<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: CurrentQuery<'a>,
-    ) -> Result<CurrentQuery<'a>> {
-        Ok(query)
+    /// Shorthand: AND of children. Flattens single-child case.
+    pub fn and(children: Vec<CompositeFilter>) -> Self {
+        match children.len() {
+            0 => CompositeFilter::And(vec![]),
+            1 => children.into_iter().next().unwrap(),
+            _ => CompositeFilter::And(children),
+        }
     }
 
-    fn filter_parents<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: ParentsQuery<'a>,
-    ) -> Result<ParentsQuery<'a>> {
-        Ok(query)
+    /// Shorthand: OR of children. Flattens single-child case.
+    pub fn or(children: Vec<CompositeFilter>) -> Self {
+        match children.len() {
+            0 => CompositeFilter::Or(vec![]),
+            1 => children.into_iter().next().unwrap(),
+            _ => CompositeFilter::Or(children),
+        }
     }
 
-    fn filter_children<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: ChildrenQuery<'a>,
-    ) -> Result<ChildrenQuery<'a>> {
-        Ok(query)
-    }
-
-    /// Filter has_parents query (find containers of current symbols)
-    /// The "current" symbol is the child in the containment relationship.
-    fn filter_has_parents<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: HasParentsQuery<'a>,
-    ) -> Result<HasParentsQuery<'a>> {
-        Ok(query)
-    }
-
-    /// Filter has_children query (find symbols contained by current symbols)
-    /// The "current" symbol is the parent in the containment relationship.
-    fn filter_has_children<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: HasChildrenQuery<'a>,
-    ) -> Result<HasChildrenQuery<'a>> {
-        Ok(query)
+    /// Shorthand: NOT. Eliminates double negation.
+    pub fn not(inner: CompositeFilter) -> Self {
+        match inner {
+            CompositeFilter::Not(inner_inner) => *inner_inner,
+            _ => CompositeFilter::Not(Box::new(inner)),
+        }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct IgnoreFilterMixin {
-    name_lquery: Option<String>,
-    package_path: Option<String>,
+// Fold helpers — compose N boxed bool expressions with AND or OR.
+fn fold_and<QS: 'static>(
+    exprs: Vec<Box<dyn BoxableExpression<QS, Pg, SqlType = Bool>>>
+) -> Option<Box<dyn BoxableExpression<QS, Pg, SqlType = Bool>>> {
+    let mut iter = exprs.into_iter();
+    let first = iter.next()?;
+    Some(iter.fold(first, |acc, e| {
+        Box::new(acc.and(e)) as Box<dyn BoxableExpression<QS, Pg, SqlType = Bool>>
+    }))
 }
 
-impl IgnoreFilterMixin {
-    pub fn new(name: Option<&str>, package: Option<&str>) -> Self {
-        let name_lquery = name.and_then(symbol_query_to_lquery);
-        let mut package_path = None;
-        if let Some(value) = package {
-            let path = symbol_name_to_path(value);
-            if path != "unknown" {
-                package_path = Some(path);
+fn fold_or<QS: 'static>(
+    exprs: Vec<Box<dyn BoxableExpression<QS, Pg, SqlType = Bool>>>
+) -> Option<Box<dyn BoxableExpression<QS, Pg, SqlType = Bool>>> {
+    let mut iter = exprs.into_iter();
+    let first = iter.next()?;
+    Some(iter.fold(first, |acc, e| {
+        Box::new(acc.or(e)) as Box<dyn BoxableExpression<QS, Pg, SqlType = Bool>>
+    }))
+}
+
+// Composition methods — produce a single Diesel expression from the filter tree.
+//
+// Semantics of None:
+//   None = "no constraint on this query context" = match everything.
+//
+// For AND: dropping None children is correct (identity element).
+// For OR:  if ANY child is None (unconstrained), the whole OR is unconstrained.
+// For NOT: not(None) = None — negating "no constraint" is still "no constraint"
+//          (we can't negate something that doesn't apply to this context).
+macro_rules! compose_method {
+    ($method:ident, $leaf_method:ident, $expr_type:ty) => {
+        pub fn $method(&self) -> Option<$expr_type> {
+            match self {
+                CompositeFilter::Leaf(leaf) => leaf.$leaf_method(),
+                CompositeFilter::And(children) => {
+                    // None children are dropped (no constraint = identity for AND).
+                    // Empty result from fold_and = None = match everything.
+                    let exprs: Vec<_> = children.iter().filter_map(|c| c.$method()).collect();
+                    fold_and(exprs)
+                }
+                CompositeFilter::Or(children) => {
+                    if children.is_empty() {
+                        // Empty OR = match nothing.
+                        return Some(Box::new(OwnedSql::<Bool>::new("FALSE".into())) as $expr_type);
+                    }
+                    let mut exprs = Vec::with_capacity(children.len());
+                    for child in children {
+                        match child.$method() {
+                            // A child with no constraint means "match everything" —
+                            // OR with "everything" is "everything".
+                            None => return None,
+                            Some(expr) => exprs.push(expr),
+                        }
+                    }
+                    fold_or(exprs)
+                }
+                CompositeFilter::Not(inner) => {
+                    inner.$method().map(|e| Box::new(diesel::dsl::not(e)) as $expr_type)
+                }
             }
         }
-        Self {
-            name_lquery,
-            package_path,
-        }
-    }
-
-    fn apply_filter<Q>(mut query: Q, column: &str, lquery: &Option<String>) -> Q
-    where
-        Q: diesel::query_dsl::methods::FilterDsl<SqlLiteral<Bool>, Output = Q>,
-    {
-        if let Some(lquery) = lquery {
-            let filter_sql = format!("NOT ({})", ltree_filter_sql(column, lquery));
-            query = diesel::query_dsl::methods::FilterDsl::filter(query, sql::<Bool>(&filter_sql));
-        }
-        query
-    }
-
-    fn apply_package_filter<Q>(mut query: Q, column: &str, base_path: &Option<String>) -> Q
-    where
-        Q: diesel::query_dsl::methods::FilterDsl<SqlLiteral<Bool>, Output = Q>,
-    {
-        if let Some(base_path) = base_path {
-            // Exclude descendants of the package path, but keep the exact match.
-            let filter_sql = format!(
-                "NOT (( '{}'::ltree @> {} ) AND ({} <> '{}'))",
-                base_path, column, column, base_path
-            );
-            query = diesel::query_dsl::methods::FilterDsl::filter(query, sql::<Bool>(&filter_sql));
-        }
-        query
     }
 }
 
-impl SymbolSearchMixin for IgnoreFilterMixin {
-    fn filter_current<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: CurrentQuery<'a>,
-    ) -> Result<CurrentQuery<'a>> {
-        let query = Self::apply_filter(query, "symbols.symbol_path", &self.name_lquery);
-        let query = Self::apply_package_filter(query, "symbols.symbol_path", &self.package_path);
-        Ok(query)
-    }
-
-    // No filter_parents/filter_children: these would only re-filter
-    // the current symbol, which is already constrained by current_instance_ids.
+impl CompositeFilter {
+    compose_method!(compose_current, current_expr, CurrentBoolExpr);
+    compose_method!(compose_parents, parents_expr, ParentsBoolExpr);
+    compose_method!(compose_children, children_expr, ChildrenBoolExpr);
+    compose_method!(compose_has_parents, has_parents_expr, HasParentsBoolExpr);
+    compose_method!(compose_has_children, has_children_expr, HasChildrenBoolExpr);
 }
+
+// ============================================================================
+// FilterLeaf implementations — one per mixin struct
+// ============================================================================
 
 /// Extract the last normalized token from a symbol name, matching the DB trigger's
 /// `subpath(symbol_path, nlevel(symbol_path) - 1)` computation.
@@ -436,9 +503,6 @@ fn extract_leaf_token(name: &str, dot_is_separator: bool) -> String {
 #[derive(Debug, Clone)]
 pub struct CompoundNameMixin {
     lquery: Option<String>,
-    /// Only set when leaf_anchored=true — the last token MUST be the leaf label,
-    /// so `leaf_name = last_token` is a correct pre-filter (no false negatives).
-    /// The B-tree index on (project_id, symbol_type, leaf_name) drives the scan.
     leaf_token: Option<String>,
 }
 
@@ -464,37 +528,25 @@ impl CompoundNameMixin {
     }
 }
 
-impl SymbolSearchMixin for CompoundNameMixin {
-    fn filter_current<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: CurrentQuery<'a>,
-    ) -> Result<CurrentQuery<'a>> {
-        // When leaf-anchored, add leaf_name pre-filter so B-tree drives the scan
-        let query = if let Some(ref leaf) = self.leaf_token {
-            use index_schema::symbols;
-            query.filter(symbols::dsl::leaf_name.eq(leaf.clone()))
-        } else {
-            query
-        };
-        if let Some(lquery) = &self.lquery {
-            let filter_sql = ltree_filter_sql("symbols.symbol_path", lquery);
-            Ok(query.filter(sql::<Bool>(&filter_sql)))
-        } else {
-            Ok(query)
+impl FilterLeaf for CompoundNameMixin {
+    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+        let mut parts: Vec<CurrentBoolExpr> = vec![];
+        if let Some(ref leaf) = self.leaf_token {
+            parts.push(Box::new(index_schema::symbols::dsl::leaf_name.eq(leaf.clone())));
         }
+        if let Some(ref lquery) = self.lquery {
+            parts.push(Box::new(OwnedSql::<Bool>::new(
+                ltree_filter_sql("symbols.symbol_path", lquery)
+            )));
+        }
+        fold_and(parts)
     }
-
-    // No filter_parents/filter_children/filter_has_*: these would only re-filter
-    // the current symbol, which is already constrained by current_instance_ids.
 }
 
 /// LeafNameMixin - filters symbols by the last label of their symbol_path.
-/// Used for simple (non-compound) name queries, hitting the B-tree index
-/// on (project_id, symbol_type, leaf_name) for ~0.1ms lookups.
 #[derive(Debug, Clone)]
 pub struct LeafNameMixin {
-    pub leaf_name: String,
+    leaf_name: String,
 }
 
 impl LeafNameMixin {
@@ -503,22 +555,16 @@ impl LeafNameMixin {
     }
 }
 
-impl SymbolSearchMixin for LeafNameMixin {
-    fn filter_current<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: CurrentQuery<'a>,
-    ) -> Result<CurrentQuery<'a>> {
-        use index_schema::symbols;
-        Ok(query.filter(symbols::dsl::leaf_name.eq(self.leaf_name.clone())))
+impl FilterLeaf for LeafNameMixin {
+    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+        Some(Box::new(index_schema::symbols::dsl::leaf_name.eq(self.leaf_name.clone())))
     }
 }
 
 /// ExactNameMixin - filters symbols by exact name match.
-/// Used for directory and file selectors where paths should match exactly.
 #[derive(Debug, Clone)]
 pub struct ExactNameMixin {
-    pub name: String,
+    name: String,
 }
 
 impl ExactNameMixin {
@@ -529,24 +575,15 @@ impl ExactNameMixin {
     }
 }
 
-impl SymbolSearchMixin for ExactNameMixin {
-    fn filter_current<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: CurrentQuery<'a>,
-    ) -> Result<CurrentQuery<'a>> {
-        use index_schema::symbols;
-        let name = self.name.clone();
-        Ok(query.filter(symbols::dsl::name.eq(name)))
+impl FilterLeaf for ExactNameMixin {
+    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+        Some(Box::new(index_schema::symbols::dsl::name.eq(self.name.clone())))
     }
-
-    // No filter_parents/filter_children/filter_has_*: these would only re-filter
-    // the current symbol, which is already constrained by current_instance_ids.
 }
 
 #[derive(Debug, Clone)]
 pub struct SymbolInstanceIdMixin {
-    pub instance_ids: Vec<i32>,
+    instance_ids: Vec<i32>,
 }
 
 impl SymbolInstanceIdMixin {
@@ -557,27 +594,17 @@ impl SymbolInstanceIdMixin {
     }
 }
 
-impl SymbolSearchMixin for SymbolInstanceIdMixin {
-    fn filter_current<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: CurrentQuery<'a>,
-    ) -> Result<CurrentQuery<'a>> {
-        use crate::schema_diesel::symbol_instances;
-
-        Ok(query.filter(symbol_instances::dsl::id.eq_any(self.instance_ids.clone())))
+impl FilterLeaf for SymbolInstanceIdMixin {
+    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+        Some(Box::new(
+            index_schema::symbol_instances::dsl::id.eq_any(self.instance_ids.clone())
+        ))
     }
-
-    // No filter_parents/filter_children/filter_has_*: current_instance_ids
-    // is applied inline in find_symbol() after the current query resolves.
 }
-
-// ModuleFilterMixin removed - modules are now symbols with type=MODULE
-// Use symbol name filtering to find module symbols instead
 
 #[derive(Debug, Clone)]
 pub struct ProjectFilterMixin {
-    pub project_name: String,
+    project_name: String,
 }
 
 impl ProjectFilterMixin {
@@ -588,114 +615,80 @@ impl ProjectFilterMixin {
     }
 }
 
-impl SymbolSearchMixin for ProjectFilterMixin {
-    fn filter_current<'a>(
-        &self,
-        _connection: &mut Connection,
-        query: CurrentQuery<'a>,
-    ) -> Result<CurrentQuery<'a>> {
-        use crate::schema_diesel::projects;
-
-        Ok(query.filter(projects::dsl::project_name.eq(self.project_name.clone())))
+impl FilterLeaf for ProjectFilterMixin {
+    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+        Some(Box::new(
+            index_schema::projects::dsl::project_name.eq(self.project_name.clone())
+        ))
     }
 }
 
 /// DirectOnlyMixin — filters children/has_children to "direct" only.
-///
-/// For HAS (containment): excludes children that have an intermediate container
-/// between the parent and child at a valid nesting level.
-///
-/// For REFS: excludes references whose source location is inside a nested
-/// container (e.g., a nested function) within the parent.
 #[derive(Debug, Clone)]
 pub struct DirectOnlyMixin;
 
-impl SymbolSearchMixin for DirectOnlyMixin {
-    fn filter_has_children<'a>(
-        &self,
-        _conn: &mut Connection,
-        query: HasChildrenQuery<'a>,
-    ) -> Result<HasChildrenQuery<'a>> {
-        // Exclude contained children that have an intermediate container between
-        // the parent (symbol_instances) and child (contained_instances).
-        // symbol_types.level is available from the outer query's JOIN on symbol_types.
-        Ok(query.filter(sql::<Bool>(
-            "NOT EXISTS (\
-                SELECT 1 FROM index.symbol_instances mid \
-                JOIN index.symbols mid_sym ON mid.symbol = mid_sym.id \
-                JOIN index.symbol_types mid_type ON mid_sym.symbol_type = mid_type.id \
-                WHERE mid.object_id = symbol_instances.object_id \
-                  AND symbol_instances.offset_range @> mid.offset_range \
-                  AND mid.offset_range @> contained_instances.offset_range \
-                  AND mid.offset_range != symbol_instances.offset_range \
-                  AND mid.offset_range != contained_instances.offset_range \
-                  AND mid.id != symbol_instances.id \
-                  AND mid.id != contained_instances.id \
-                  AND symbol_types.level >= mid_type.level\
-            )",
-        )))
+const DIRECT_ONLY_HAS_CHILDREN_SQL: &str = "\
+    NOT EXISTS (\
+        SELECT 1 FROM index.symbol_instances mid \
+        JOIN index.symbols mid_sym ON mid.symbol = mid_sym.id \
+        JOIN index.symbol_types mid_type ON mid_sym.symbol_type = mid_type.id \
+        WHERE mid.object_id = symbol_instances.object_id \
+          AND symbol_instances.offset_range @> mid.offset_range \
+          AND mid.offset_range @> contained_instances.offset_range \
+          AND mid.offset_range != symbol_instances.offset_range \
+          AND mid.offset_range != contained_instances.offset_range \
+          AND mid.id != symbol_instances.id \
+          AND mid.id != contained_instances.id \
+          AND symbol_types.level >= mid_type.level\
+    )";
+
+const DIRECT_ONLY_CHILDREN_SQL: &str = "\
+    NOT EXISTS (\
+        SELECT 1 FROM index.symbol_instances container \
+        JOIN index.symbols cont_sym ON container.symbol = cont_sym.id \
+        JOIN index.symbol_types cont_type ON cont_sym.symbol_type = cont_type.id \
+        JOIN index.symbol_types parent_type ON parent_type.id = parent_symbols.symbol_type \
+        WHERE container.object_id = parent_decls.object_id \
+          AND parent_decls.offset_range @> container.offset_range \
+          AND container.offset_range @> symbol_refs.from_offset_range \
+          AND container.offset_range != parent_decls.offset_range \
+          AND container.id != parent_decls.id \
+          AND cont_type.level <= parent_type.level\
+    )";
+
+impl FilterLeaf for DirectOnlyMixin {
+    fn has_children_expr(&self) -> Option<HasChildrenBoolExpr> {
+        Some(Box::new(OwnedSql::<Bool>::new(DIRECT_ONLY_HAS_CHILDREN_SQL.to_string())))
     }
 
-    fn filter_children<'a>(
-        &self,
-        _conn: &mut Connection,
-        query: ChildrenQuery<'a>,
-    ) -> Result<ChildrenQuery<'a>> {
-        // Exclude refs whose source location is inside a nested container
-        // within the parent (parent_decls). parent_symbols is available from
-        // the outer query's JOIN.
-        Ok(query.filter(sql::<Bool>(
-            "NOT EXISTS (\
-                SELECT 1 FROM index.symbol_instances container \
-                JOIN index.symbols cont_sym ON container.symbol = cont_sym.id \
-                JOIN index.symbol_types cont_type ON cont_sym.symbol_type = cont_type.id \
-                JOIN index.symbol_types parent_type ON parent_type.id = parent_symbols.symbol_type \
-                WHERE container.object_id = parent_decls.object_id \
-                  AND parent_decls.offset_range @> container.offset_range \
-                  AND container.offset_range @> symbol_refs.from_offset_range \
-                  AND container.offset_range != parent_decls.offset_range \
-                  AND container.id != parent_decls.id \
-                  AND cont_type.level <= parent_type.level\
-            )",
-        )))
+    fn children_expr(&self) -> Option<ChildrenBoolExpr> {
+        Some(Box::new(OwnedSql::<Bool>::new(DIRECT_ONLY_CHILDREN_SQL.to_string())))
     }
 }
 
 /// InnermostOnlyMixin — filters has_parents to innermost container only.
-///
-/// Analogous to DirectOnlyMixin but for has_parents: excludes containers
-/// that have an intermediate container between them and the child.
 #[derive(Debug, Clone)]
 pub struct InnermostOnlyMixin;
 
-impl SymbolSearchMixin for InnermostOnlyMixin {
-    fn filter_has_parents<'a>(
-        &self,
-        _conn: &mut Connection,
-        query: HasParentsQuery<'a>,
-    ) -> Result<HasParentsQuery<'a>> {
-        Ok(query.filter(sql::<Bool>(
-            "NOT EXISTS (\
-                SELECT 1 FROM index.symbol_instances mid \
-                WHERE mid.object_id = container_instances.object_id \
-                  AND container_instances.offset_range @> mid.offset_range \
-                  AND mid.offset_range @> symbol_instances.offset_range \
-                  AND mid.offset_range != container_instances.offset_range \
-                  AND mid.offset_range != symbol_instances.offset_range \
-                  AND mid.id != container_instances.id \
-                  AND mid.id != symbol_instances.id\
-            )",
-        )))
+const INNERMOST_ONLY_SQL: &str = "\
+    NOT EXISTS (\
+        SELECT 1 FROM index.symbol_instances mid \
+        WHERE mid.object_id = container_instances.object_id \
+          AND container_instances.offset_range @> mid.offset_range \
+          AND mid.offset_range @> symbol_instances.offset_range \
+          AND mid.offset_range != container_instances.offset_range \
+          AND mid.offset_range != symbol_instances.offset_range \
+          AND mid.id != container_instances.id \
+          AND mid.id != symbol_instances.id\
+    )";
+
+impl FilterLeaf for InnermostOnlyMixin {
+    fn has_parents_expr(&self) -> Option<HasParentsBoolExpr> {
+        Some(Box::new(OwnedSql::<Bool>::new(INNERMOST_ONLY_SQL.to_string())))
     }
 }
 
 /// OuterParentFilterMixin — filters out nested parent instances from REFS queries.
-///
-/// When `find_child_instance_ids` receives parent IDs that include nested instances
-/// (e.g., `[foo, anon_in_foo]`), DirectOnlyMixin correctly excludes refs inside
-/// `anon_in_foo` from `foo`'s perspective, but `anon_in_foo` independently contributes
-/// its own direct refs — causing double-counting. This mixin excludes any parent
-/// instance that is contained within another parent instance in the input set.
 #[derive(Debug, Clone)]
 pub struct OuterParentFilterMixin {
     parent_ids: Vec<i32>,
@@ -707,20 +700,16 @@ impl OuterParentFilterMixin {
     }
 }
 
-impl SymbolSearchMixin for OuterParentFilterMixin {
-    fn filter_children<'a>(
-        &self,
-        _conn: &mut Connection,
-        query: ChildrenQuery<'a>,
-    ) -> Result<ChildrenQuery<'a>> {
+impl FilterLeaf for OuterParentFilterMixin {
+    fn children_expr(&self) -> Option<ChildrenBoolExpr> {
         if self.parent_ids.is_empty() {
-            return Ok(query);
+            return None;
         }
         let ids_csv = self.parent_ids.iter()
             .map(|id| id.to_string())
             .collect::<Vec<_>>()
             .join(",");
-        Ok(query.filter(sql::<Bool>(&format!(
+        Some(Box::new(OwnedSql::<Bool>::new(format!(
             "NOT EXISTS (\
                 SELECT 1 FROM index.symbol_instances op \
                 WHERE op.id IN ({ids_csv}) \
@@ -729,6 +718,70 @@ impl SymbolSearchMixin for OuterParentFilterMixin {
                   AND op.offset_range @> parent_decls.offset_range \
                   AND op.offset_range != parent_decls.offset_range\
             )"
+        ))))
+    }
+}
+
+/// SymbolTypeMixin - filters symbols by type ID.
+#[derive(Debug, Clone)]
+pub struct SymbolTypeMixin {
+    symbol_type_id: i32,
+}
+
+impl SymbolTypeMixin {
+    pub fn new(symbol_type_id: i32) -> Self {
+        Self { symbol_type_id }
+    }
+}
+
+impl FilterLeaf for SymbolTypeMixin {
+    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+        Some(Box::new(index_schema::symbols::dsl::symbol_type.eq(self.symbol_type_id)))
+    }
+}
+
+/// DefaultSymbolTypeMixin - filters symbols by multiple type IDs (OR condition).
+#[derive(Debug, Clone)]
+pub struct DefaultSymbolTypeMixin {
+    symbol_type_ids: Vec<i32>,
+}
+
+impl DefaultSymbolTypeMixin {
+    pub fn new(symbol_type_ids: Vec<i32>) -> Self {
+        Self { symbol_type_ids }
+    }
+}
+
+impl FilterLeaf for DefaultSymbolTypeMixin {
+    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+        Some(Box::new(index_schema::symbols::dsl::symbol_type.eq_any(self.symbol_type_ids.clone())))
+    }
+}
+
+/// PackageDescendantLeaf — matches descendants of a package path (excluding exact match).
+/// Used by IgnoreVerb for package exclusion via `Not(Leaf(PackageDescendantLeaf))`.
+#[derive(Debug, Clone)]
+pub struct PackageDescendantLeaf {
+    base_path: String,
+}
+
+impl PackageDescendantLeaf {
+    pub fn new(package: &str) -> Option<Self> {
+        let path = symbol_name_to_path(package);
+        if path == "unknown" {
+            None
+        } else {
+            Some(Self { base_path: path })
+        }
+    }
+}
+
+impl FilterLeaf for PackageDescendantLeaf {
+    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+        // "descendants only, not exact match" — sanitized via symbol_name_to_path
+        Some(Box::new(OwnedSql::<Bool>::new(format!(
+            "( '{}'::ltree @> symbols.symbol_path ) AND (symbols.symbol_path <> '{}')",
+            self.base_path, self.base_path
         ))))
     }
 }
@@ -754,4 +807,3 @@ pub const INSTANCE_TYPE_HEADER: i32 = 7;
 pub const INSTANCE_TYPE_BUILD: i32 = 8;
 pub const INSTANCE_TYPE_FILE: i32 = 9;
 pub const INSTANCE_TYPE_DOCUMENTATION: i32 = 10;
-

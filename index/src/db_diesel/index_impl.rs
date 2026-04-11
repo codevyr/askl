@@ -12,7 +12,7 @@ use crate::models_diesel::{ContentRow, Object, Project, Symbol, SymbolInstance, 
 use crate::symbols::FileId;
 
 use super::mixins::{
-    SymbolSearchMixin, CurrentQuery,
+    CompositeFilter, CurrentQuery,
     PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
     CONTAINER_INSTANCE_ALIAS, CONTAINER_SYMBOL_ALIAS, CONTAINER_TYPE_ALIAS,
     CONTAINED_INSTANCE_ALIAS, CONTAINED_SYMBOL_ALIAS, CONTAINED_TYPE_ALIAS,
@@ -28,25 +28,21 @@ use super::Connection;
 /// Controls how parent/children queries are scoped in `find_symbol`.
 #[derive(Clone)]
 pub enum ScopeContext {
-    /// Filter by known IDs and/or resolved mixins.
+    /// Filter by known IDs and/or a composite filter.
     /// - ids only (selected instances) → fast eq_any filter
-    /// - mixins only (unselected, Phase 1 fallback) → resolve to IDs via CurrentQuery
-    /// - both (partial selection) → resolve mixins + union with known IDs
-    /// Mixins: outer Vec = OR across selectors, inner Vec = AND within one selector.
+    /// - filter only (unselected, fallback) → resolve to IDs via CurrentQuery
+    /// - both (partial selection) → resolve filter + union with known IDs
     Scope {
         ids: Vec<i32>,
-        mixins: Vec<Vec<Box<dyn SymbolSearchMixin>>>,
+        filter: Option<CompositeFilter>,
     },
     /// No parent/child statement — skip the query entirely.
     Skip,
-    /// Run the query without any scope constraint. Used when the parent/child
-    /// exists but we have no information to narrow the query (e.g., root-level
-    /// statements, or parents with no selection yet and no meaningful selectors).
+    /// Run the query without any scope constraint.
     Unscoped,
 }
 
 /// Build a base CurrentQuery (symbols ⋈ instances ⋈ projects ⋈ objects).
-/// Extracted from `find_symbol` for reuse in `resolve_mixins_to_ids`.
 fn build_current_query() -> CurrentQuery<'static> {
     use crate::schema_diesel::*;
     symbols::dsl::symbols
@@ -67,39 +63,34 @@ fn build_current_query() -> CurrentQuery<'static> {
         .into_boxed::<Pg>()
 }
 
-/// Resolve mixin sets to instance IDs. Each inner Vec is ANDed (applied
-/// sequentially via filter_current). Outer Vec is ORed (results unioned).
-async fn resolve_mixins_to_ids(
-    mixins: &[Vec<Box<dyn SymbolSearchMixin>>],
+/// Resolve a CompositeFilter to instance IDs by running a CurrentQuery.
+async fn resolve_filter_to_ids(
+    filter: &CompositeFilter,
     conn: &mut Connection,
 ) -> Result<Vec<i32>> {
-    let mut candidate_ids = Vec::new();
-    for mixin_set in mixins {
-        let mut query = build_current_query();
-        for mixin in mixin_set {
-            mixin.enter(conn)?;
-            query = mixin.filter_current(conn, query)?;
-        }
-        let results = query
-            .load::<(Symbol, SymbolInstance, Object, Project)>(conn)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to resolve mixins to IDs: {}", e))?;
-        candidate_ids.extend(results.iter().map(|(_, inst, _, _)| inst.id));
+    let mut query = build_current_query();
+    if let Some(expr) = filter.compose_current() {
+        query = query.filter(expr);
     }
-    candidate_ids.sort_unstable();
-    candidate_ids.dedup();
-    Ok(candidate_ids)
+    let results = query
+        .load::<(Symbol, SymbolInstance, Object, Project)>(conn)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to resolve filter to IDs: {}", e))?;
+    let mut ids: Vec<i32> = results.iter().map(|(_, inst, _, _)| inst.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
 }
 
 /// Resolve a Scope's fields into a set of instance IDs for filtering.
 async fn resolve_scope_ids(
     ids: &[i32],
-    mixins: &[Vec<Box<dyn SymbolSearchMixin>>],
+    filter: &Option<CompositeFilter>,
     conn: &mut Connection,
 ) -> Result<Vec<i32>> {
     let mut all_ids = ids.to_vec();
-    if !mixins.is_empty() {
-        all_ids.extend(resolve_mixins_to_ids(mixins, conn).await?);
+    if let Some(ref f) = filter {
+        all_ids.extend(resolve_filter_to_ids(f, conn).await?);
         all_ids.sort_unstable();
         all_ids.dedup();
     }
@@ -112,15 +103,13 @@ async fn resolve_scope_ids(
 
 fn build_parents_query(
     source_ids: Vec<i32>,
-    mixins: &[Box<dyn SymbolSearchMixin>],
-    conn: &mut Connection,
-) -> Result<ParentsQuery<'static>> {
+) -> ParentsQuery<'static> {
     use crate::schema_diesel::*;
 
     let parent_decls = PARENT_DECLS_ALIAS;
     let parent_symbols = PARENT_SYMBOLS_ALIAS;
 
-    let mut query = symbol_refs::dsl::symbol_refs
+    symbol_refs::dsl::symbol_refs
         .inner_join(
             symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::dsl::id)),
         )
@@ -152,26 +141,18 @@ fn build_parents_query(
             SymbolInstance::as_select(),
             parent_decls.fields(crate::schema_diesel::symbol_instances::all_columns),
         ))
-        .into_boxed::<Pg>();
-
-    for mixin in mixins.iter() {
-        query = mixin.filter_parents(conn, query)?;
-    }
-
-    Ok(query)
+        .into_boxed::<Pg>()
 }
 
 fn build_children_query(
     source_ids: Vec<i32>,
-    mixins: &[Box<dyn SymbolSearchMixin>],
-    conn: &mut Connection,
-) -> Result<ChildrenQuery<'static>> {
+) -> ChildrenQuery<'static> {
     use crate::schema_diesel::*;
 
     let parent_decls = PARENT_DECLS_ALIAS;
     let parent_symbols = PARENT_SYMBOLS_ALIAS;
 
-    let mut query = symbol_refs::dsl::symbol_refs
+    symbol_refs::dsl::symbol_refs
         .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::id)))
         .inner_join(
             symbol_instances::dsl::symbol_instances.on(symbols::dsl::id.eq(symbol_instances::symbol)),
@@ -208,27 +189,19 @@ fn build_children_query(
             SymbolRef::as_select(),
             Object::as_select(),
         ))
-        .into_boxed::<Pg>();
-
-    for mixin in mixins.iter() {
-        query = mixin.filter_children(conn, query)?;
-    }
-
-    Ok(query)
+        .into_boxed::<Pg>()
 }
 
 fn build_has_parents_query(
     source_ids: Vec<i32>,
-    mixins: &[Box<dyn SymbolSearchMixin>],
-    conn: &mut Connection,
-) -> Result<HasParentsQuery<'static>> {
+) -> HasParentsQuery<'static> {
     use crate::schema_diesel::*;
 
     let container_instance = CONTAINER_INSTANCE_ALIAS;
     let container_symbol = CONTAINER_SYMBOL_ALIAS;
     let container_type = CONTAINER_TYPE_ALIAS;
 
-    let mut query = symbol_instances::dsl::symbol_instances
+    symbol_instances::dsl::symbol_instances
         .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
         .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
         .filter(symbol_instances::dsl::id.eq_any(source_ids))
@@ -269,27 +242,19 @@ fn build_has_parents_query(
             container_symbol.fields(crate::schema_diesel::symbols::all_columns),
             container_instance.fields(crate::schema_diesel::symbol_instances::all_columns),
         ))
-        .into_boxed::<Pg>();
-
-    for mixin in mixins.iter() {
-        query = mixin.filter_has_parents(conn, query)?;
-    }
-
-    Ok(query)
+        .into_boxed::<Pg>()
 }
 
 fn build_has_children_query(
     source_ids: Vec<i32>,
-    mixins: &[Box<dyn SymbolSearchMixin>],
-    conn: &mut Connection,
-) -> Result<HasChildrenQuery<'static>> {
+) -> HasChildrenQuery<'static> {
     use crate::schema_diesel::*;
 
     let contained_instance = CONTAINED_INSTANCE_ALIAS;
     let contained_symbol = CONTAINED_SYMBOL_ALIAS;
     let contained_type = CONTAINED_TYPE_ALIAS;
 
-    let mut query = symbol_instances::dsl::symbol_instances
+    symbol_instances::dsl::symbol_instances
         .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
         .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
         .filter(symbol_instances::dsl::id.eq_any(source_ids))
@@ -332,13 +297,7 @@ fn build_has_children_query(
             contained_instance.fields(crate::schema_diesel::symbol_instances::all_columns),
             Object::as_select(),
         ))
-        .into_boxed::<Pg>();
-
-    for mixin in mixins.iter() {
-        query = mixin.filter_has_children(conn, query)?;
-    }
-
-    Ok(query)
+        .into_boxed::<Pg>()
 }
 
 #[derive(Clone)]
@@ -548,7 +507,7 @@ impl Index {
 
     pub async fn find_symbol(
         &self,
-        mixins: &[Box<dyn SymbolSearchMixin>],
+        filter: &CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<Selection> {
@@ -561,18 +520,14 @@ impl Index {
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
         let connection: &mut AsyncPgConnection = &mut *connection;
 
-        for mixin in mixins.iter() {
-            mixin.enter(connection)?;
-        }
-
         let current = {
             let _select_current: tracing::span::EnteredSpan =
                 tracing::info_span!("select_current").entered();
 
             let mut joined_query = build_current_query();
 
-            for mixin in mixins.iter() {
-                joined_query = mixin.filter_current(connection, joined_query)?;
+            if let Some(expr) = filter.compose_current() {
+                joined_query = joined_query.filter(expr);
             }
 
             joined_query
@@ -591,20 +546,25 @@ impl Index {
             ScopeContext::Unscoped => {
                 let _parents_span: tracing::span::EnteredSpan =
                     tracing::info_span!("select_parents").entered();
-                build_parents_query(current_instance_ids.clone(), mixins, connection)?
+                let mut parents_query = build_parents_query(current_instance_ids.clone());
+                if let Some(expr) = filter.compose_parents() {
+                    parents_query = parents_query.filter(expr);
+                }
+                parents_query
                     .load::<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)>(connection)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
             }
-            ScopeContext::Scope { ref ids, mixins: ref scope_mixins } => {
+            ScopeContext::Scope { ref ids, filter: ref scope_filter } => {
                 let _parents_span: tracing::span::EnteredSpan =
                     tracing::info_span!("select_parents").entered();
 
-                let scope_ids = resolve_scope_ids(ids, scope_mixins, connection).await?;
+                let scope_ids = resolve_scope_ids(ids, scope_filter, connection).await?;
 
-                let mut parents_query = build_parents_query(
-                    current_instance_ids.clone(), mixins, connection,
-                )?;
+                let mut parents_query = build_parents_query(current_instance_ids.clone());
+                if let Some(expr) = filter.compose_parents() {
+                    parents_query = parents_query.filter(expr);
+                }
 
                 // Always apply scope filter. When scope_ids is empty, eq_any([])
                 // correctly returns zero rows (scope specified but matched nothing).
@@ -625,23 +585,27 @@ impl Index {
             ScopeContext::Unscoped => {
                 let _select_children: tracing::span::EnteredSpan =
                     tracing::info_span!("select_children").entered();
-                build_children_query(current_instance_ids.clone(), mixins, connection)?
+                let mut children_query = build_children_query(current_instance_ids.clone());
+                if let Some(expr) = filter.compose_children() {
+                    children_query = children_query.filter(expr);
+                }
+                children_query
                     .load::<(Symbol, Symbol, SymbolInstance, SymbolInstance, SymbolRef, Object)>(connection)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
             }
-            ScopeContext::Scope { ref ids, mixins: ref scope_mixins } => {
+            ScopeContext::Scope { ref ids, filter: ref scope_filter } => {
                 let _select_children: tracing::span::EnteredSpan =
                     tracing::info_span!("select_children").entered();
 
-                let scope_ids = resolve_scope_ids(ids, scope_mixins, connection).await?;
+                let scope_ids = resolve_scope_ids(ids, scope_filter, connection).await?;
 
-                let mut children_query = build_children_query(
-                    current_instance_ids.clone(), mixins, connection,
-                )?;
+                let mut children_query = build_children_query(current_instance_ids.clone());
+                if let Some(expr) = filter.compose_children() {
+                    children_query = children_query.filter(expr);
+                }
 
-                // Always apply scope filter. When scope_ids is empty, eq_any([])
-                // correctly returns zero rows (scope specified but matched nothing).
+                // Always apply scope filter.
                 children_query = children_query.filter(
                     symbol_instances::dsl::id.eq_any(scope_ids)
                 );
@@ -657,9 +621,10 @@ impl Index {
             let _has_parents_span: tracing::span::EnteredSpan =
                 tracing::info_span!("select_has_parents").entered();
 
-            let has_parents_query = build_has_parents_query(
-                current_instance_ids.clone(), mixins, connection,
-            )?;
+            let mut has_parents_query = build_has_parents_query(current_instance_ids.clone());
+            if let Some(expr) = filter.compose_has_parents() {
+                has_parents_query = has_parents_query.filter(expr);
+            }
 
             has_parents_query
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance)>(connection)
@@ -671,9 +636,10 @@ impl Index {
             let _has_children_span: tracing::span::EnteredSpan =
                 tracing::info_span!("select_has_children").entered();
 
-            let has_children_query = build_has_children_query(
-                current_instance_ids, mixins, connection,
-            )?;
+            let mut has_children_query = build_has_children_query(current_instance_ids);
+            if let Some(expr) = filter.compose_has_children() {
+                has_children_query = has_children_query.filter(expr);
+            }
 
             has_children_query
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(connection)
@@ -765,23 +731,12 @@ impl Index {
     }
 
     /// Query child instance IDs directly from DB given parent instance IDs.
-    /// Uses shared query builders + mixins — single source of truth for filtering.
-    ///
-    /// Callers construct their own mixin vector (e.g., `DirectOnlyMixin`,
-    /// `OuterParentFilterMixin`) for composability. Directional mixins only
-    /// implement the relevant `filter_*` methods; the rest are default no-ops,
-    /// so one mixin list safely applies to both HAS and REFS sub-queries.
-    ///
-    /// Note: queries load full tuples (not just IDs) because the mixin trait
-    /// methods are typed to specific query types. The overhead is negligible
-    /// for typical result-set sizes on a local Postgres connection, and is
-    /// dwarfed by the follow-up `find_symbol` call that loads full tuples anyway.
     pub async fn find_child_instance_ids(
         &self,
         parent_ids: &[i32],
         include_refs: bool,
         include_has: bool,
-        mixins: &[Box<dyn SymbolSearchMixin>],
+        filter: &CompositeFilter,
     ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
         let connection = &mut self
             .pool
@@ -789,14 +744,13 @@ impl Index {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
-        for m in mixins.iter() { m.enter(&mut *connection)?; }
-
         let mut all_ids: Vec<i32> = Vec::new();
 
         if include_has {
-            let query = build_has_children_query(
-                parent_ids.to_vec(), mixins, &mut *connection,
-            )?;
+            let mut query = build_has_children_query(parent_ids.to_vec());
+            if let Some(expr) = filter.compose_has_children() {
+                query = query.filter(expr);
+            }
             let results = query
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(&mut *connection)
                 .await
@@ -805,9 +759,10 @@ impl Index {
         }
 
         if include_refs {
-            let query = build_children_query(
-                parent_ids.to_vec(), mixins, &mut *connection,
-            )?;
+            let mut query = build_children_query(parent_ids.to_vec());
+            if let Some(expr) = filter.compose_children() {
+                query = query.filter(expr);
+            }
             let results = query
                 .load::<(Symbol, Symbol, SymbolInstance, SymbolInstance, SymbolRef, Object)>(
                     &mut *connection,
@@ -823,14 +778,12 @@ impl Index {
     }
 
     /// Query parent instance IDs directly from DB given child instance IDs.
-    /// Uses shared query builders + mixins — single source of truth for filtering.
-    /// See `find_child_instance_ids` for design notes.
     pub async fn find_parent_instance_ids(
         &self,
         child_ids: &[i32],
         include_refs: bool,
         include_has: bool,
-        mixins: &[Box<dyn SymbolSearchMixin>],
+        filter: &CompositeFilter,
     ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
         let connection = &mut self
             .pool
@@ -838,14 +791,13 @@ impl Index {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
-        for m in mixins.iter() { m.enter(&mut *connection)?; }
-
         let mut all_ids: Vec<i32> = Vec::new();
 
         if include_refs {
-            let query = build_parents_query(
-                child_ids.to_vec(), mixins, &mut *connection,
-            )?;
+            let mut query = build_parents_query(child_ids.to_vec());
+            if let Some(expr) = filter.compose_parents() {
+                query = query.filter(expr);
+            }
             let results = query
                 .load::<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)>(&mut *connection)
                 .await
@@ -854,9 +806,10 @@ impl Index {
         }
 
         if include_has {
-            let query = build_has_parents_query(
-                child_ids.to_vec(), mixins, &mut *connection,
-            )?;
+            let mut query = build_has_parents_query(child_ids.to_vec());
+            if let Some(expr) = filter.compose_has_parents() {
+                query = query.filter(expr);
+            }
             let results = query
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance)>(&mut *connection)
                 .await
@@ -870,11 +823,6 @@ impl Index {
     }
 
     /// Discover all reference edges between a set of selected instances.
-    /// Returns (from_instance_id, to_instance_id, symbol_ref_id, to_symbol, from_object, from_offset_range).
-    ///
-    /// Query design: starts from `from_inst` (the referencing side, always selective),
-    /// then finds refs originating within it, then checks if the target instance
-    /// is also in the selected set.
     pub async fn find_edges_between(
         &self,
         instance_ids: &[i32],
@@ -891,14 +839,6 @@ impl Index {
 
         let _span = tracing::info_span!("find_edges_between", count = instance_ids.len()).entered();
 
-        // Use a raw SQL query for the specific join structure we need.
-        // The query starts from from_inst (small set of selected IDs), finds refs
-        // originating within those instances, then checks if the target instance
-        // is also in the selected set. Uses $1 bind parameter (integer array)
-        // instead of string interpolation to prevent SQL injection.
-        // DISTINCT ON (from_inst.id, sr.id) ensures at most one target instance
-        // per reference, avoiding duplicate edges when a symbol has multiple
-        // selected instances (e.g., definition + declaration).
         let results = diesel::sql_query(
             "SELECT DISTINCT ON (from_inst.id, sr.id) \
                     sr.id AS ref_id, sr.to_symbol, sr.from_object, sr.from_offset_range, \

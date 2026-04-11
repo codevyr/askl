@@ -1,4 +1,4 @@
-use crate::db_diesel::{CompoundNameMixin, ScopeContext, SymbolSearchMixin};
+use crate::db_diesel::{CompositeFilter, CompoundNameMixin, ScopeContext};
 use crate::symbols::{package_match, partial_name_match, Symbol, SymbolId};
 use diesel::pg::PgConnection;
 use diesel::Connection;
@@ -92,10 +92,8 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
     let index = Index::connect(&url).await?;
 
     // Test with empty database first
-    let mut empty_mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![
-        Box::new(CompoundNameMixin::new("nonexistent")),
-    ];
-    let empty_selection = index.find_symbol(&mut empty_mixins, ScopeContext::Skip, ScopeContext::Skip).await?;
+    let empty_filter = CompositeFilter::leaf(CompoundNameMixin::new("nonexistent"));
+    let empty_selection = index.find_symbol(&empty_filter, ScopeContext::Skip, ScopeContext::Skip).await?;
     assert!(empty_selection.nodes.is_empty());
     assert!(empty_selection.parents.is_empty());
     assert!(empty_selection.children.is_empty());
@@ -104,20 +102,16 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
     index.load_test_input(Index::TEST_INPUT_A).await?;
 
     // Test searching for symbols - use "a" which we know exists
-    let mut a_mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![
-        Box::new(CompoundNameMixin::new("a")),
-    ];
-    let selection = index.find_symbol(&mut a_mixins, ScopeContext::Skip, ScopeContext::Skip).await?;
+    let a_filter = CompositeFilter::leaf(CompoundNameMixin::new("a"));
+    let selection = index.find_symbol(&a_filter, ScopeContext::Skip, ScopeContext::Skip).await?;
     assert!(
         !selection.nodes.is_empty(),
         "Should find symbols with 'a' in the name"
     );
 
     // Test searching for symbols - use "main" which we know exists
-    let mut mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![
-        Box::new(CompoundNameMixin::new("main")),
-    ];
-    let selection = index.find_symbol(&mut mixins, ScopeContext::Skip, ScopeContext::Skip).await?;
+    let main_filter = CompositeFilter::leaf(CompoundNameMixin::new("main"));
+    let selection = index.find_symbol(&main_filter, ScopeContext::Skip, ScopeContext::Skip).await?;
     assert!(
         !selection.nodes.is_empty(),
         "Should find symbols with 'main' in the name"
@@ -134,10 +128,8 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
     }
 
     // Test compound name search
-    let mut compound_mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![
-        Box::new(CompoundNameMixin::new("mai.n")),
-    ];
-    let compound_selection = index.find_symbol(&mut compound_mixins, ScopeContext::Skip, ScopeContext::Skip).await?;
+    let compound_filter = CompositeFilter::leaf(CompoundNameMixin::new("mai.n"));
+    let compound_selection = index.find_symbol(&compound_filter, ScopeContext::Skip, ScopeContext::Skip).await?;
     assert!(
         compound_selection.nodes.is_empty(),
         "Should find no symbols with compound name search"
@@ -160,10 +152,8 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
         .await?;
 
     let long_name = format!("kubelet.{}.run", "a".repeat(11));
-    let mut mixins1: Vec<Box<dyn SymbolSearchMixin>> = vec![
-        Box::new(CompoundNameMixin::new("kubelet.run")),
-    ];
-    let selection = index.find_symbol(&mut mixins1, ScopeContext::Skip, ScopeContext::Skip).await?;
+    let filter1 = CompositeFilter::leaf(CompoundNameMixin::new("kubelet.run"));
+    let selection = index.find_symbol(&filter1, ScopeContext::Skip, ScopeContext::Skip).await?;
     let mut found_names: Vec<String> = selection
         .nodes
         .iter()
@@ -178,10 +168,8 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
     );
 
     let kubelet_run = "(*k8s.io/kubernetes/pkg/kubelet.Kubelet).Run".to_string();
-    let mut mixins2: Vec<Box<dyn SymbolSearchMixin>> = vec![
-        Box::new(CompoundNameMixin::new("kubelet")),
-    ];
-    let selection = index.find_symbol(&mut mixins2, ScopeContext::Skip, ScopeContext::Skip).await?;
+    let filter2 = CompositeFilter::leaf(CompoundNameMixin::new("kubelet"));
+    let selection = index.find_symbol(&filter2, ScopeContext::Skip, ScopeContext::Skip).await?;
     let mut found_names: Vec<String> = selection
         .nodes
         .iter()
@@ -195,10 +183,8 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
         "Expected only exact-token ordered match"
     );
 
-    let mut mixins3: Vec<Box<dyn SymbolSearchMixin>> = vec![
-        Box::new(CompoundNameMixin::new("run.kubelet")),
-    ];
-    let reverse_selection = index.find_symbol(&mut mixins3, ScopeContext::Skip, ScopeContext::Skip).await?;
+    let filter3 = CompositeFilter::leaf(CompoundNameMixin::new("run.kubelet"));
+    let reverse_selection = index.find_symbol(&filter3, ScopeContext::Skip, ScopeContext::Skip).await?;
     assert!(
         reverse_selection.nodes.is_empty(),
         "Expected token order mismatch to return no results"

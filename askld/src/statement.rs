@@ -13,7 +13,7 @@ use crate::span::Span;
 use crate::verb::{build_verb, DefaultTypeFilter, NotificationContext, VerbTag};
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{ScopeContext, Selection};
+use index::db_diesel::{CompositeFilter, ScopeContext, Selection};
 use index::symbols::{SymbolInstanceId, FileId, Occurrence, SymbolId};
 use std::collections::HashMap;
 use pest::error::Error;
@@ -834,7 +834,7 @@ impl Statement {
             let parent_scope = build_parent_scope(&dependent.statement, ctx);
             let children_scope = ScopeContext::Scope {
                 ids: merged.get_instance_ids(),
-                mixins: vec![],
+                filter: None,
             };
             let res = dependent
                 .statement
@@ -948,21 +948,16 @@ fn build_parent_scope(statement: &Statement, ctx: &ExecutionContext) -> ScopeCon
         Some(parent) => {
             if parent.is_computed(ctx) {
                 match parent.get_selection(ctx) {
-                    Some(sel) => ScopeContext::Scope { ids: sel.get_instance_ids(), mixins: vec![] },
+                    Some(sel) => ScopeContext::Scope { ids: sel.get_instance_ids(), filter: None },
                     // None = parent has no opinion (filter-only, unit, or no selectors).
                     // Run unscoped — the parent is transparent.
                     None => ScopeContext::Unscoped,
                 }
             } else {
-                // Parent not yet computed — fall back to mixin-based scoping
-                let mixin_sets: Vec<Vec<_>> = parent.command().get_selector_mixin_sets()
-                    .into_iter()
-                    .filter(|ms| !ms.is_empty())
-                    .collect();
-                if mixin_sets.is_empty() {
-                    ScopeContext::Unscoped // No filter info available
-                } else {
-                    ScopeContext::Scope { ids: vec![], mixins: mixin_sets }
+                // Parent not yet computed — fall back to filter-based scoping
+                match parent.command().get_selector_composite_filter() {
+                    Some(f) => ScopeContext::Scope { ids: vec![], filter: Some(f) },
+                    None => ScopeContext::Unscoped,
                 }
             }
         },
@@ -971,15 +966,14 @@ fn build_parent_scope(statement: &Statement, ctx: &ExecutionContext) -> ScopeCon
 }
 
 /// Build scope context for the children side of a statement's children query.
-/// Collects instance IDs from already-selected children + mixin sets from unselected children.
+/// Collects instance IDs from already-selected children + filters from unselected children.
 /// If no children exist, return Skip.
 fn build_children_scope(statement: &Statement, ctx: &ExecutionContext) -> ScopeContext {
-    // Single pass over children to collect all needed state.
     let mut has_children = false;
     let mut any_uncomputed = false;
-    let mut any_transparent = false; // computed child with None selection (filter-only, unit, etc.)
+    let mut any_transparent = false;
     let mut selected_ids: Vec<i32> = Vec::new();
-    let mut unselected_mixins: Vec<Vec<Box<dyn index::db_diesel::SymbolSearchMixin>>> = Vec::new();
+    let mut unselected_filters: Vec<CompositeFilter> = Vec::new();
 
     for child in statement.children() {
         has_children = true;
@@ -990,11 +984,8 @@ fn build_children_scope(statement: &Statement, ctx: &ExecutionContext) -> ScopeC
             }
         } else {
             any_uncomputed = true;
-            // Gather mixins from uncomputed children for mixin-based scoping.
-            for ms in child.command().get_selector_mixin_sets() {
-                if !ms.is_empty() {
-                    unselected_mixins.push(ms);
-                }
+            if let Some(f) = child.command().get_selector_composite_filter() {
+                unselected_filters.push(f);
             }
         }
     }
@@ -1002,14 +993,21 @@ fn build_children_scope(statement: &Statement, ctx: &ExecutionContext) -> ScopeC
     if !has_children {
         return ScopeContext::Skip;
     }
-    if selected_ids.is_empty() && unselected_mixins.is_empty() {
+
+    let combined_filter = if unselected_filters.is_empty() {
+        None
+    } else {
+        Some(CompositeFilter::or(unselected_filters))
+    };
+
+    if selected_ids.is_empty() && combined_filter.is_none() {
         if any_uncomputed || any_transparent {
             ScopeContext::Unscoped
         } else {
-            ScopeContext::Skip // All children genuinely found nothing
+            ScopeContext::Skip
         }
     } else {
-        ScopeContext::Scope { ids: selected_ids, mixins: unselected_mixins }
+        ScopeContext::Scope { ids: selected_ids, filter: combined_filter }
     }
 }
 

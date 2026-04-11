@@ -7,7 +7,7 @@ use crate::statement::Statement;
 use crate::verb::{add_verb, DeriveMethod, Filter, Labeler, NotificationContext, Selector, Verb, VerbTag};
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{Index, ScopeContext, Selection, SymbolSearchMixin};
+use index::db_diesel::{CompositeFilter, Index, ScopeContext, Selection};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -106,13 +106,17 @@ impl Command {
         self.labels().flat_map(|m| m.get_label()).collect()
     }
 
-    /// Build mixin sets for all selectors. Each inner Vec represents one selector's
-    /// filter criteria (ANDed). Outer Vec is ORed across selectors.
+    /// Build a composite filter from all selectors (ORed across selectors).
     /// Used by scope builders to construct ScopeContext.
-    pub fn get_selector_mixin_sets(&self) -> Vec<Vec<Box<dyn SymbolSearchMixin>>> {
-        self.selectors()
-            .map(|sel| sel.build_search_mixins(self))
-            .collect()
+    pub fn get_selector_composite_filter(&self) -> Option<CompositeFilter> {
+        let parts: Vec<_> = self.selectors()
+            .filter_map(|sel| sel.build_composite_filter(self))
+            .collect();
+        match parts.len() {
+            0 => None,
+            1 => parts.into_iter().next(),
+            _ => Some(CompositeFilter::or(parts)),
+        }
     }
 
     pub fn filter(&self, selection: &mut Selection) {
@@ -222,12 +226,14 @@ impl Command {
             }
         }
 
+        let filter_parts: Vec<CompositeFilter> =
+            self.filters().filter_map(|f| f.get_composite_filter()).collect();
+
         for selector in selectors.into_iter() {
-            let search_mixins: Vec<Box<dyn SymbolSearchMixin>> =
-                self.filters().flat_map(|f| f.get_filter_mixins()).collect();
+            let filter = CompositeFilter::and(filter_parts.clone());
 
             let mut current_selection = selector
-                .select_from_all(ctx, cfg, search_mixins, parent_scope.clone(), children_scope.clone())
+                .select_from_all(ctx, cfg, filter, parent_scope.clone(), children_scope.clone())
                 .await
                 .map_err(|e| {
                     pest::error::Error::new_from_span(
