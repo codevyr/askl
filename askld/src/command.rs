@@ -74,15 +74,6 @@ impl Command {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_selector().ok()))
     }
 
-    /// Return cloned Arcs of verbs that implement Filter.
-    pub fn filter_verbs(&self) -> Vec<Arc<dyn Verb>> {
-        self.verbs
-            .iter()
-            .filter(|v| v.as_filter().is_ok())
-            .cloned()
-            .collect()
-    }
-
     /// Check if any verb suppresses the default type filter.
     pub fn has_suppress_default_type_filter(&self) -> bool {
         self.verbs.iter().any(|v| v.suppresses_default_type_filter())
@@ -215,12 +206,12 @@ impl Command {
         let mut warnings = vec![];
 
         // Validate: each selector that requires a name constraint must have one
-        // in its own captured filters (per-selector, not command-wide).
+        // command-wide (any filter verb on the command counts).
         for selector in selectors.iter() {
             if !selector.requires_name_constraint() {
                 continue;
             }
-            let has_name = selector.has_name_constraint();
+            let has_name = self.verbs.iter().any(|v| v.has_name_constraint());
             if !has_name {
                 warnings.push(pest::error::Error::new_from_span(
                     pest::error::ErrorVariant::CustomError {

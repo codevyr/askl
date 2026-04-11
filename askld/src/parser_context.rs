@@ -209,9 +209,4 @@ impl ParserContext {
         self.command.borrow().has_suppress_default_type_filter()
     }
 
-    /// Get filter verb Arcs from the current command.
-    /// Used by GenericSelector to capture its positional filter set.
-    pub fn get_filter_verbs(&self) -> Vec<Arc<dyn Verb>> {
-        self.command.borrow().filter_verbs()
-    }
 }

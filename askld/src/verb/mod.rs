@@ -137,6 +137,7 @@ pub enum VerbTag {
     NameSelector,
     TypeFilter,
     GenericFilter(&'static str),
+    GenericSelector,
     Unnest,
 }
 

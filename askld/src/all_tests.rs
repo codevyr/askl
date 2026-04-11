@@ -1899,20 +1899,18 @@ fn generic_select_queries_all_types_without_type_filter() {
 }
 
 #[test]
-fn generic_select_positional_capture_two_selectors() {
+fn generic_select_is_idempotent() {
     // filter("compound_name", "foo") select filter("compound_name", "bar") select {}
-    // Positional capture: first select captures filter("compound_name", "foo"),
-    // second select captures both filters (foo and bar, but bar replaces foo due to same tag)
+    // select is now a simple marker — multiple selects collapse to one.
+    // compound_name tag-dedup means the second filter replaces the first → only bar (30).
     const QUERY: &str =
         r#"filter("compound_name", "foo") select filter("compound_name", "bar") select {}"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
-    // First select finds "foo", second select finds "bar" (compound_name replaces)
-    // Both foo (20) and bar (30) should be in results
     let nodes = res.nodes.as_vec();
-    assert!(nodes.contains(&SymbolInstanceId::new(20)), "Should include foo");
     assert!(nodes.contains(&SymbolInstanceId::new(30)), "Should include bar");
+    assert!(!nodes.contains(&SymbolInstanceId::new(20)), "Should NOT include foo (replaced by bar)");
 }
 
 // ============================================================================
