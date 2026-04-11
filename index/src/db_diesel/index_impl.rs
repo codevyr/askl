@@ -12,7 +12,7 @@ use crate::models_diesel::{ContentRow, Object, Project, Symbol, SymbolInstance, 
 use crate::symbols::FileId;
 
 use super::mixins::{
-    CompositeFilter, CurrentQuery,
+    CompositeFilter, CurrentQuery, OwnedSql,
     PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
     CONTAINER_INSTANCE_ALIAS, CONTAINER_SYMBOL_ALIAS, CONTAINER_TYPE_ALIAS,
     CONTAINED_INSTANCE_ALIAS, CONTAINED_SYMBOL_ALIAS, CONTAINED_TYPE_ALIAS,
@@ -42,6 +42,14 @@ pub enum ScopeContext {
     Unscoped,
 }
 
+/// Constrains scope resolution to instances reachable via references.
+enum ScopeRole {
+    /// Resolved instances must be children of these parent IDs.
+    Children(Vec<i32>),
+    /// Resolved instances must be parents of these child IDs.
+    Parents(Vec<i32>),
+}
+
 /// Build a base CurrentQuery (symbols ⋈ instances ⋈ projects ⋈ objects).
 fn build_current_query() -> CurrentQuery<'static> {
     use crate::schema_diesel::*;
@@ -66,12 +74,45 @@ fn build_current_query() -> CurrentQuery<'static> {
 /// Resolve a CompositeFilter to instance IDs by running a CurrentQuery.
 async fn resolve_filter_to_ids(
     filter: &CompositeFilter,
+    role: Option<&ScopeRole>,
     conn: &mut Connection,
 ) -> Result<Vec<i32>> {
+    use diesel::sql_types::Bool;
+
     let mut query = build_current_query();
     if let Some(expr) = filter.compose_current() {
         query = query.filter(expr);
     }
+
+    // Add reference-based constraint when resolving scoped filters.
+    match role {
+        Some(ScopeRole::Children(parent_ids)) if !parent_ids.is_empty() => {
+            let ids_csv = parent_ids.iter()
+                .map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+            query = query.filter(OwnedSql::<Bool>::new(format!(
+                "symbol_instances.id IN (\
+                    SELECT si.id FROM index.symbol_refs sr \
+                    JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
+                    JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
+                      AND pd.offset_range @> sr.from_offset_range \
+                    WHERE pd.id IN ({ids_csv}))"
+            )));
+        }
+        Some(ScopeRole::Parents(child_ids)) if !child_ids.is_empty() => {
+            let ids_csv = child_ids.iter()
+                .map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+            query = query.filter(OwnedSql::<Bool>::new(format!(
+                "symbol_instances.id IN (\
+                    SELECT pd.id FROM index.symbol_refs sr \
+                    JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
+                      AND pd.offset_range @> sr.from_offset_range \
+                    JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
+                    WHERE si.id IN ({ids_csv}))"
+            )));
+        }
+        _ => {}
+    }
+
     let results = query
         .load::<(Symbol, SymbolInstance, Object, Project)>(conn)
         .await
@@ -86,11 +127,12 @@ async fn resolve_filter_to_ids(
 async fn resolve_scope_ids(
     ids: &[i32],
     filter: &Option<CompositeFilter>,
+    role: Option<&ScopeRole>,
     conn: &mut Connection,
 ) -> Result<Vec<i32>> {
     let mut all_ids = ids.to_vec();
     if let Some(ref f) = filter {
-        all_ids.extend(resolve_filter_to_ids(f, conn).await?);
+        all_ids.extend(resolve_filter_to_ids(f, role, conn).await?);
         all_ids.sort_unstable();
         all_ids.dedup();
     }
@@ -559,7 +601,8 @@ impl Index {
                 let _parents_span: tracing::span::EnteredSpan =
                     tracing::info_span!("select_parents").entered();
 
-                let scope_ids = resolve_scope_ids(ids, scope_filter, connection).await?;
+                let role = ScopeRole::Parents(current_instance_ids.clone());
+                let scope_ids = resolve_scope_ids(ids, scope_filter, Some(&role), connection).await?;
 
                 let mut parents_query = build_parents_query(current_instance_ids.clone());
                 if let Some(expr) = filter.compose_parents() {
@@ -598,7 +641,8 @@ impl Index {
                 let _select_children: tracing::span::EnteredSpan =
                     tracing::info_span!("select_children").entered();
 
-                let scope_ids = resolve_scope_ids(ids, scope_filter, connection).await?;
+                let role = ScopeRole::Children(current_instance_ids.clone());
+                let scope_ids = resolve_scope_ids(ids, scope_filter, Some(&role), connection).await?;
 
                 let mut children_query = build_children_query(current_instance_ids.clone());
                 if let Some(expr) = filter.compose_children() {
