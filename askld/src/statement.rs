@@ -13,7 +13,7 @@ use crate::span::Span;
 use crate::verb::{build_verb, DefaultTypeFilter, NotificationContext, VerbTag};
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::Selection;
+use index::db_diesel::{ScopeContext, Selection};
 use index::symbols::{SymbolInstanceId, FileId, Occurrence, SymbolId};
 use std::collections::HashMap;
 use pest::error::Error;
@@ -260,10 +260,21 @@ impl Statement {
                         selection = Some(sel.clone());
                     }
                 } else {
+                    // Selector has no selection (not yet resolved, filter-only, etc.).
+                    // Reset accumulation — a later selector with Some can still overwrite.
+                    // This ensures that e.g. [NameSel=Some, UserVerb=None] → None
+                    // (statement not ready until UserVerb resolves), while
+                    // [TypeSel(filter_only)=None, NameSel=Some] → Some (filter-only
+                    // is overwritten by the real selector that follows).
                     selection = None;
                 }
             });
         selection
+    }
+
+    /// Check if this statement's selectors have been computed (added to registry).
+    fn is_computed(&self, ctx: &ExecutionContext) -> bool {
+        self.command().selectors().all(|s| ctx.registry.contains(&s.id()))
     }
 
     fn is_selection_some(&self, ctx: &ExecutionContext) -> bool {
@@ -291,7 +302,9 @@ impl Statement {
 
         for statement in statements.iter() {
             ctx.current_statement_span = Some(statement.command().span().clone());
-            let warnings = statement.command().compute_selected(ctx, cfg).await?;
+            let parent_scope = build_parent_scope(statement, ctx);
+            let children_scope = build_children_scope(statement, ctx);
+            let warnings = statement.command().compute_selected(ctx, cfg, parent_scope, children_scope).await?;
 
             statement.get_state_mut().warnings.extend(warnings);
             if !statement.command().has_selectors() {
@@ -464,18 +477,75 @@ impl Statement {
         filtered_warnings
     }
 
-    fn collect_ref_edges(
+    /// Collect reference edges between all selected symbols.
+    ///
+    /// Three sources of edges:
+    /// 1. **Forced edges**: synthetic edges from ForcedVerb / UserVerb(forced=true),
+    ///    identified by symbol_ref.id == 0. Not in DB, must be preserved.
+    /// 2. **Explicit edges**: from scoped parents/children in Selection.
+    /// 3. **Implicit edges**: discovered via DB query between all selected instances.
+    ///
+    /// Deduplication key: (from_instance_id, to_instance_id, symbol_ref_id).
+    async fn collect_ref_edges(
         statements: &[Rc<Statement>],
         ctx: &ExecutionContext,
         all_nodes: &HashSet<SymbolInstanceId>,
+        index: &index::db_diesel::Index,
     ) -> EdgeList {
         let mut all_references = EdgeList::new();
-        // Track seen edges to deduplicate before returning.
-        // Key: (from_symbol_id, to_symbol_id, occurrence)
-        // This prevents duplicate edges when target symbol has multiple instances
-        // (e.g., module with 15 files creates 15 identical-looking edges for one import)
-        let mut seen_edges: HashSet<(SymbolId, SymbolId, Option<Occurrence>)> = HashSet::new();
+        // Dedup key: (from_instance_id, to_symbol_id, occurrence)
+        // Instance-level on from side prevents suppressing edges between different
+        // source instances of the same symbol. Symbol-level on to side deduplicates
+        // when the target symbol has multiple selected instances (e.g., definition
+        // + declaration of f), since a single reference should produce one edge.
+        let mut seen_edges: HashSet<(SymbolInstanceId, SymbolId, Option<Occurrence>)> = HashSet::new();
 
+        // 1. Collect forced edges (symbol_ref.id == 0) from Selection.parents
+        for statement in statements {
+            let current = if let Some(current) = statement.get_selection(ctx) {
+                current
+            } else {
+                continue;
+            };
+            for parent in &current.parents {
+                if parent.symbol_ref.id != 0 {
+                    continue; // Not a forced edge
+                }
+                if !all_nodes.contains(&SymbolInstanceId::new(parent.from_instance.id))
+                    || !all_nodes.contains(&SymbolInstanceId::new(parent.to_instance.id))
+                {
+                    continue;
+                }
+
+                let occurrence = Occurrence {
+                    file: parent.from_instance.object_id.into(),
+                    offset_range: range_bounds_to_offsets(&parent.symbol_ref.from_offset_range)
+                        .unwrap(),
+                };
+
+                let from_inst = SymbolInstanceId::new(parent.from_instance.id);
+                let to_inst = SymbolInstanceId::new(parent.to_instance.id);
+                let to_sym = SymbolId::new(parent.to_symbol.id);
+                let edge_key = (from_inst, to_sym.clone(), Some(occurrence.clone()));
+                if !seen_edges.insert(edge_key) {
+                    continue;
+                }
+
+                all_references.add_reference(
+                    SymbolNodeId {
+                        symbol_id: SymbolId::new(parent.from_instance.symbol),
+                        instance_id: from_inst,
+                    },
+                    SymbolNodeId {
+                        symbol_id: to_sym,
+                        instance_id: to_inst,
+                    },
+                    Some(occurrence),
+                );
+            }
+        }
+
+        // 2. Collect explicit edges from Selection.parents/children (non-forced)
         for statement in statements {
             let current = if let Some(current) = statement.get_selection(ctx) {
                 current
@@ -495,27 +565,31 @@ impl Statement {
                         .unwrap(),
                 };
 
-                let from_symbol = SymbolId::new(child.parent_symbol.id);
-                let to_symbol = SymbolId::new(child.symbol_ref.to_symbol);
-                let edge_key = (from_symbol.clone(), to_symbol.clone(), Some(occurrence.clone()));
+                let from_inst = SymbolInstanceId::new(child.from_instance.id);
+                let to_inst = SymbolInstanceId::new(child.symbol_instance.id);
+                let to_sym = SymbolId::new(child.symbol_ref.to_symbol);
+                let edge_key = (from_inst, to_sym.clone(), Some(occurrence.clone()));
                 if !seen_edges.insert(edge_key) {
                     continue;
                 }
 
                 all_references.add_reference(
                     SymbolNodeId {
-                        symbol_id: from_symbol,
-                        instance_id: SymbolInstanceId::new(child.from_instance.id),
+                        symbol_id: SymbolId::new(child.parent_symbol.id),
+                        instance_id: from_inst,
                     },
                     SymbolNodeId {
-                        symbol_id: to_symbol,
-                        instance_id: SymbolInstanceId::new(child.symbol_instance.id),
+                        symbol_id: to_sym,
+                        instance_id: to_inst,
                     },
                     Some(occurrence),
                 );
             }
 
             for parent in &current.parents {
+                if parent.symbol_ref.id == 0 {
+                    continue; // Already handled as forced edge
+                }
                 if !all_nodes.contains(&SymbolInstanceId::new(parent.from_instance.id))
                     || !all_nodes.contains(&SymbolInstanceId::new(parent.to_instance.id))
                 {
@@ -528,24 +602,75 @@ impl Statement {
                         .unwrap(),
                 };
 
-                let from_symbol = SymbolId::new(parent.from_instance.symbol);
-                let to_symbol = SymbolId::new(parent.to_symbol.id);
-                let edge_key = (from_symbol.clone(), to_symbol.clone(), Some(occurrence.clone()));
+                let from_inst = SymbolInstanceId::new(parent.from_instance.id);
+                let to_inst = SymbolInstanceId::new(parent.to_instance.id);
+                let to_sym = SymbolId::new(parent.to_symbol.id);
+                let edge_key = (from_inst, to_sym.clone(), Some(occurrence.clone()));
                 if !seen_edges.insert(edge_key) {
                     continue;
                 }
 
                 all_references.add_reference(
                     SymbolNodeId {
-                        symbol_id: from_symbol,
-                        instance_id: SymbolInstanceId::new(parent.from_instance.id),
+                        symbol_id: SymbolId::new(parent.from_instance.symbol),
+                        instance_id: from_inst,
                     },
                     SymbolNodeId {
-                        symbol_id: to_symbol,
-                        instance_id: SymbolInstanceId::new(parent.to_instance.id),
+                        symbol_id: to_sym,
+                        instance_id: to_inst,
                     },
                     Some(occurrence),
                 );
+            }
+        }
+
+        // 3. Discover implicit edges via DB query
+        // Build instance→(symbol_id, instance_id) lookup for mapping DB results to nodes.
+        let mut instance_to_node: HashMap<i32, (SymbolId, SymbolInstanceId)> = HashMap::new();
+        for statement in statements {
+            if let Some(sel) = statement.get_selection(ctx) {
+                for node in &sel.nodes {
+                    let inst_id = SymbolInstanceId::new(node.symbol_instance.id);
+                    if all_nodes.contains(&inst_id) {
+                        instance_to_node.insert(
+                            node.symbol_instance.id,
+                            (SymbolId::new(node.symbol.id), inst_id),
+                        );
+                    }
+                }
+            }
+        }
+
+        let all_ids: Vec<i32> = all_nodes.iter().map(|id| Into::<i32>::into(*id)).collect();
+        if let Ok(implicit_edges) = index.find_edges_between(&all_ids).await {
+            for edge in implicit_edges {
+                let from_node = instance_to_node.get(&edge.from_instance_id);
+                let to_node = instance_to_node.get(&edge.to_instance_id);
+                if let (Some((from_sym, from_inst)), Some((_to_sym, to_inst))) = (from_node, to_node) {
+                    let occurrence = Occurrence {
+                        file: FileId::new(edge.from_object),
+                        offset_range: range_bounds_to_offsets(&edge.from_offset_range)
+                            .unwrap(),
+                    };
+
+                    let to_symbol = SymbolId::new(edge.to_symbol);
+                    let edge_key = (*from_inst, to_symbol.clone(), Some(occurrence.clone()));
+                    if !seen_edges.insert(edge_key) {
+                        continue; // Already seen from explicit/forced
+                    }
+
+                    all_references.add_reference(
+                        SymbolNodeId {
+                            symbol_id: from_sym.clone(),
+                            instance_id: *from_inst,
+                        },
+                        SymbolNodeId {
+                            symbol_id: to_symbol,
+                            instance_id: *to_inst,
+                        },
+                        Some(occurrence),
+                    );
+                }
             }
         }
 
@@ -644,7 +769,7 @@ impl Statement {
                 .map(|node| SymbolInstanceId::new(node.symbol_instance.id)),
         );
 
-        let ref_edges = Self::collect_ref_edges(&statements, ctx, &all_nodes);
+        let ref_edges = Self::collect_ref_edges(&statements, ctx, &all_nodes, &cfg.index).await;
         let has_edges = Self::collect_has_edges(&statements, ctx, &all_nodes);
 
         Ok(ExecutionResult::new(
@@ -706,6 +831,11 @@ impl Statement {
             let rel_type = self.get_relationship_type();
 
             let unnest = dependent.statement.is_unnest();
+            let parent_scope = build_parent_scope(&dependent.statement, ctx);
+            let children_scope = ScopeContext::Scope {
+                ids: merged.get_instance_ids(),
+                mixins: vec![],
+            };
             let res = dependent
                 .statement
                 .command()
@@ -716,6 +846,8 @@ impl Statement {
                     DependencyRole::Parent,
                     rel_type,
                     unnest,
+                    parent_scope,
+                    children_scope,
                 )
                 .await?;
 
@@ -742,10 +874,12 @@ impl Statement {
             rel_type,
             unnest: dependent.statement.is_unnest(),
         };
+        let parent_scope = build_parent_scope(&dependent.statement, ctx);
+        let children_scope = build_children_scope(&dependent.statement, ctx);
         let res = dependent
             .statement
             .command()
-            .accept_notification(ctx, &cfg.index, self, notif_ctx)
+            .accept_notification(ctx, &cfg.index, self, notif_ctx, parent_scope, children_scope)
             .await?;
 
         if res.changed {
@@ -803,6 +937,80 @@ fn should_skip_in_parent_merge(child: &Statement) -> bool {
 fn all_descendants_weak(stmt: &Statement) -> bool {
     stmt.children()
         .all(|child| child.get_state().weak && all_descendants_weak(&child))
+}
+
+/// Build scope context for the parent side of a statement's parent query.
+/// If the parent already has a selection, use its instance IDs.
+/// If no parent exists, return Skip.
+/// If the parent hasn't been selected yet, fall back to mixin-based scoping.
+fn build_parent_scope(statement: &Statement, ctx: &ExecutionContext) -> ScopeContext {
+    match statement.parent().and_then(|p| p.upgrade()) {
+        Some(parent) => {
+            if parent.is_computed(ctx) {
+                match parent.get_selection(ctx) {
+                    Some(sel) => ScopeContext::Scope { ids: sel.get_instance_ids(), mixins: vec![] },
+                    // None = parent has no opinion (filter-only, unit, or no selectors).
+                    // Run unscoped — the parent is transparent.
+                    None => ScopeContext::Unscoped,
+                }
+            } else {
+                // Parent not yet computed — fall back to mixin-based scoping
+                let mixin_sets: Vec<Vec<_>> = parent.command().get_selector_mixin_sets()
+                    .into_iter()
+                    .filter(|ms| !ms.is_empty())
+                    .collect();
+                if mixin_sets.is_empty() {
+                    ScopeContext::Unscoped // No filter info available
+                } else {
+                    ScopeContext::Scope { ids: vec![], mixins: mixin_sets }
+                }
+            }
+        },
+        None => ScopeContext::Unscoped, // Root-level: run parents unscoped
+    }
+}
+
+/// Build scope context for the children side of a statement's children query.
+/// Collects instance IDs from already-selected children + mixin sets from unselected children.
+/// If no children exist, return Skip.
+fn build_children_scope(statement: &Statement, ctx: &ExecutionContext) -> ScopeContext {
+    // Single pass over children to collect all needed state.
+    let mut has_children = false;
+    let mut any_uncomputed = false;
+    let mut any_transparent = false; // computed child with None selection (filter-only, unit, etc.)
+    let mut selected_ids: Vec<i32> = Vec::new();
+    let mut unselected_mixins: Vec<Vec<Box<dyn index::db_diesel::SymbolSearchMixin>>> = Vec::new();
+
+    for child in statement.children() {
+        has_children = true;
+        if child.is_computed(ctx) {
+            match child.get_selection(ctx) {
+                Some(sel) => selected_ids.extend(sel.get_instance_ids()),
+                None => any_transparent = true,
+            }
+        } else {
+            any_uncomputed = true;
+            // Gather mixins from uncomputed children for mixin-based scoping.
+            for ms in child.command().get_selector_mixin_sets() {
+                if !ms.is_empty() {
+                    unselected_mixins.push(ms);
+                }
+            }
+        }
+    }
+
+    if !has_children {
+        return ScopeContext::Skip;
+    }
+    if selected_ids.is_empty() && unselected_mixins.is_empty() {
+        if any_uncomputed || any_transparent {
+            ScopeContext::Unscoped
+        } else {
+            ScopeContext::Skip // All children genuinely found nothing
+        }
+    } else {
+        ScopeContext::Scope { ids: selected_ids, mixins: unselected_mixins }
+    }
 }
 
 pub fn init_dependencies(

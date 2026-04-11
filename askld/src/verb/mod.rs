@@ -10,7 +10,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
     DirectOnlyMixin, InnermostOnlyMixin, OuterParentFilterMixin,
-    SymbolInstanceIdMixin, Index, Selection, SymbolSearchMixin,
+    ScopeContext, SymbolInstanceIdMixin, Index, Selection, SymbolSearchMixin,
 };
 use index::symbols::SymbolInstanceId;
 use log::debug;
@@ -367,6 +367,15 @@ pub trait Selector: std::fmt::Debug + Verb {
         None
     }
 
+    /// Build search mixins that represent this selector's filter criteria.
+    /// Used by scope builders to construct ScopeContext for parent/children scoping.
+    /// Default: returns command-wide filter mixins (caller provides them).
+    /// Override per selector type to add selector-specific filters (name, type, etc.).
+    fn build_search_mixins(&self, _command: &crate::command::Command) -> Vec<Box<dyn SymbolSearchMixin>> {
+        // Default: empty. Overridden by selector types that have meaningful filters.
+        vec![]
+    }
+
     fn score(&self, state: &SelectorState) -> Option<usize> {
         state.selection.as_ref().map(|sel| sel.nodes.len())
     }
@@ -392,11 +401,13 @@ pub trait Selector: std::fmt::Debug + Verb {
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         let select_from_all_name = format!("{:?}", self);
         let _select_from_all =
             tracing::info_span!("select_from_all", name = %select_from_all_name).entered();
-        self.select_from_all_impl(_ctx, cfg, search_mixins).await
+        self.select_from_all_impl(_ctx, cfg, search_mixins, parent_scope, children_scope).await
     }
 
     async fn select_from_all_impl(
@@ -404,9 +415,11 @@ pub trait Selector: std::fmt::Debug + Verb {
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         let mut search_mixins = search_mixins;
-        let selection = cfg.index.find_symbol(&mut search_mixins).await?;
+        let selection = cfg.index.find_symbol(&mut search_mixins, parent_scope, children_scope).await?;
         Ok(Some(selection))
     }
 
@@ -421,6 +434,8 @@ pub trait Selector: std::fmt::Debug + Verb {
         selector_filters: &[&dyn Filter],
         notifier: &Statement,
         notif_ctx: NotificationContext,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         if !notifier.command().has_selectors() {
             return Ok(NotificationResult::new(false, vec![]));
@@ -478,7 +493,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         }
 
         let mut selection = self
-            .derive_selection(ctx, index, selector_filters, notifier, notif_ctx)
+            .derive_selection(ctx, index, selector_filters, notifier, notif_ctx, parent_scope, children_scope)
             .await
             .map_err(|e| {
                 Error::new_from_span(
@@ -512,6 +527,8 @@ pub trait Selector: std::fmt::Debug + Verb {
         role: DependencyRole,
         rel_type: RelationshipType,
         unnest: bool,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         let mut changed = false;
         let (constrained, warnings) = selector_state_with(&mut ctx.registry, self, |state| {
@@ -562,7 +579,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         })?;
 
         let mut selection = self
-            .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
+            .find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope)
             .await
             .map_err(|e| {
                 Error::new_from_span(
@@ -590,14 +607,16 @@ pub trait Selector: std::fmt::Debug + Verb {
         selector_filters: &[&dyn Filter],
         notifier: &Statement,
         notif_ctx: NotificationContext,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         let selection = match notif_ctx.role {
             DependencyRole::Child => {
-                self.derive_from_parent(ctx, index, selector_filters, notifier, notif_ctx)
+                self.derive_from_parent(ctx, index, selector_filters, notifier, notif_ctx, parent_scope, children_scope)
                     .await?
             }
             DependencyRole::Parent => {
-                self.derive_from_child(ctx, index, selector_filters, notifier, notif_ctx)
+                self.derive_from_child(ctx, index, selector_filters, notifier, notif_ctx, parent_scope, children_scope)
                     .await?
             }
             DependencyRole::User => {
@@ -619,6 +638,8 @@ pub trait Selector: std::fmt::Debug + Verb {
         selector_filters: &[&dyn Filter],
         parent: &Statement,
         notif_ctx: NotificationContext,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         let parent_sel = match parent.get_selection(&ctx) {
             Some(selection) => selection,
@@ -638,7 +659,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         ).await.map_err(|e| anyhow::anyhow!("Failed to find child instance IDs: {}", e))?;
 
         let selection = self
-            .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
+            .find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope)
             .await?;
 
         Ok(Some(selection))
@@ -654,6 +675,8 @@ pub trait Selector: std::fmt::Debug + Verb {
         selector_filters: &[&dyn Filter],
         child: &Statement,
         notif_ctx: NotificationContext,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         let child_sel = match child.get_selection(&ctx) {
             Some(selection) => selection,
@@ -672,7 +695,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
 
         let selection = self
-            .find_symbol_by_instance_id(index, selector_filters, &decl_ids)
+            .find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope)
             .await?;
 
         Ok(Some(selection))
@@ -697,6 +720,8 @@ pub trait Selector: std::fmt::Debug + Verb {
         index: &Index,
         selector_filters: &[&dyn Filter],
         instances: &Vec<SymbolInstanceId>,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<Selection> {
         let mixin = SymbolInstanceIdMixin::new(instances);
         let mut mixins: Vec<Box<dyn SymbolSearchMixin>> = selector_filters
@@ -704,7 +729,7 @@ pub trait Selector: std::fmt::Debug + Verb {
             .flat_map(|f| f.get_filter_mixins())
             .collect();
         mixins.push(Box::new(mixin));
-        index.find_symbol(&mut mixins).await
+        index.find_symbol(&mut mixins, parent_scope, children_scope).await
     }
 }
 
