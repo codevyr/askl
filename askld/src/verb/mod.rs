@@ -9,8 +9,8 @@ use crate::statement::Statement;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    DirectOnlyMixin, InnermostOnlyMixin, OuterParentFilterMixin,
-    ScopeContext, SymbolInstanceIdMixin, Index, Selection, SymbolSearchMixin,
+    CompositeFilter, DirectOnlyMixin, InnermostOnlyMixin, OuterParentFilterMixin,
+    ScopeContext, SymbolInstanceIdMixin, Index, Selection,
 };
 use index::symbols::SymbolInstanceId;
 use log::debug;
@@ -172,8 +172,6 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
     }
 
     /// Create a new instance of this verb for derivation into child scopes.
-    /// Returns None to use the same Arc (default). Override to return
-    /// a fresh instance when shared registry state would cause issues.
     fn derive_new_instance(&self) -> Option<Arc<dyn Verb>> {
         None
     }
@@ -197,7 +195,6 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
         Ok(false)
     }
 
-    // Used to identify verb types for replacement
     fn get_tag(&self) -> Option<VerbTag> {
         None
     }
@@ -206,10 +203,6 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
         false
     }
 
-    /// Whether this selector provides no meaningful constraint on results.
-    /// True for UnitVerb (via is_unit) and bare type selectors like `func`
-    /// (filter mode, no name pattern). Used by mark_non_constraining to detect
-    /// statements whose selection is entirely child-derived.
     fn is_non_constraining_selector(&self) -> bool {
         self.is_unit()
     }
@@ -230,29 +223,32 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
         bail!("Not a marker verb")
     }
 
-    /// Whether this verb suppresses the automatic DefaultTypeFilter.
-    /// When true, build_statement will not add a DefaultTypeFilter for this statement.
     fn suppresses_default_type_filter(&self) -> bool {
         false
     }
 
-    /// Whether this selector requires a name constraint from some verb on the command.
     fn requires_name_constraint(&self) -> bool {
         false
     }
 
-    /// Whether this verb has (or provides) a name constraint.
-    /// Filters override to indicate they constrain by name.
-    /// Selectors override to check their own filter set.
     fn has_name_constraint(&self) -> bool {
         false
     }
 
 }
 
+/// Filter trait for verbs that constrain symbol selection.
+///
+/// Two filtering stages:
+/// - `get_composite_filter()` — returns a `CompositeFilter` tree compiled into
+///   SQL WHERE clauses. This is the primary filtering mechanism.
+/// - `filter_impl()` — optional in-memory post-filter on the returned `Selection`.
+///   Use only when SQL cannot express the constraint (e.g., application-level logic).
+///   When both are implemented, the SQL filter should be at least as broad as the
+///   in-memory filter (it pre-filters, the in-memory path refines).
 pub trait Filter: std::fmt::Debug + Display + Verb {
-    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
-        vec![]
+    fn get_composite_filter(&self) -> Option<CompositeFilter> {
+        None
     }
 
     fn filter(&self, selection: &mut Selection) {
@@ -304,8 +300,6 @@ impl SelectorState {
         len_before != len_after
     }
 
-    /// Constrain by parent relationship (I am a child, parent connects to me).
-    /// Checks each flag in rel_type and OR-s the conditions for union semantics.
     fn constrain_by_parent(&mut self, parent: &Selection, rel_type: RelationshipType) {
         let parent_node_ids: std::collections::HashSet<_> =
             parent.nodes.iter().map(|n| n.symbol_instance.id).collect();
@@ -324,8 +318,6 @@ impl SelectorState {
         });
     }
 
-    /// Constrain by child relationship (I am a parent, child connects to me).
-    /// Checks each flag in rel_type and OR-s the conditions for union semantics.
     fn constrain_by_child(&mut self, child: &Selection, rel_type: RelationshipType) {
         let child_node_ids: std::collections::HashSet<_> =
             child.nodes.iter().map(|n| n.symbol_instance.id).collect();
@@ -368,13 +360,12 @@ pub trait Selector: std::fmt::Debug + Verb {
         None
     }
 
-    /// Build search mixins that represent this selector's filter criteria.
+    /// Build a composite filter representing this selector's filter criteria.
     /// Used by scope builders to construct ScopeContext for parent/children scoping.
-    /// Default: returns command-wide filter mixins (caller provides them).
-    /// Override per selector type to add selector-specific filters (name, type, etc.).
-    fn build_search_mixins(&self, _command: &crate::command::Command) -> Vec<Box<dyn SymbolSearchMixin>> {
-        // Default: empty. Overridden by selector types that have meaningful filters.
-        vec![]
+    /// Default: `None` (no scope filter — scope is unscoped). Override in selectors
+    /// that should contribute to scope narrowing.
+    fn build_composite_filter(&self, _command: &crate::command::Command) -> Option<CompositeFilter> {
+        None
     }
 
     fn score(&self, state: &SelectorState) -> Option<usize> {
@@ -385,8 +376,6 @@ pub trait Selector: std::fmt::Debug + Verb {
         true
     }
 
-    // Normally selectors do not update their state automatically.
-    // They rely on notifications from statements they depend on.
     fn update_state(&self, _state: &mut SelectorState) {}
 
     fn get_selection_mut<'a>(&'a self, state: &'a mut SelectorState) -> Option<&'a mut Selection> {
@@ -401,33 +390,28 @@ pub trait Selector: std::fmt::Debug + Verb {
         &self,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         let select_from_all_name = format!("{:?}", self);
         let _select_from_all =
             tracing::info_span!("select_from_all", name = %select_from_all_name).entered();
-        self.select_from_all_impl(_ctx, cfg, search_mixins, parent_scope, children_scope).await
+        self.select_from_all_impl(_ctx, cfg, filter, parent_scope, children_scope).await
     }
 
     async fn select_from_all_impl(
         &self,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
-        let mut search_mixins = search_mixins;
-        let selection = cfg.index.find_symbol(&mut search_mixins, parent_scope, children_scope).await?;
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope).await?;
         Ok(Some(selection))
     }
 
-    /// Accept a notification from a statement that this selector should update its selection
-    /// based on the statement's selection.
-    ///
-    /// Returns Ok(true) if the selection was updated, Ok(false) if not.
     async fn accept_notification(
         &self,
         ctx: &mut ExecutionContext,
@@ -517,8 +501,6 @@ pub trait Selector: std::fmt::Debug + Verb {
         Ok(NotificationResult::new(true, vec![]))
     }
 
-    /// Like accept_notification but takes a pre-built Selection instead of a Statement.
-    /// Used when constraining/deriving a parent from the merged union of all children.
     async fn accept_notification_from_selection(
         &self,
         ctx: &mut ExecutionContext,
@@ -561,15 +543,16 @@ pub trait Selector: std::fmt::Debug + Verb {
             return Ok(NotificationResult::new(false, vec![]));
         }
         let child_ids = dependency.get_instance_ids();
-        let mut find_mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![];
+        let mut find_parts: Vec<CompositeFilter> = vec![];
         if !unnest {
-            find_mixins.push(Box::new(InnermostOnlyMixin));
+            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin));
         }
+        let find_filter = CompositeFilter::and(find_parts);
         let decl_ids = index.find_parent_instance_ids(
             &child_ids,
             rel_type.contains(RelationshipType::REFS),
             rel_type.contains(RelationshipType::HAS),
-            &mut find_mixins,
+            &find_filter,
         ).await.map_err(|e| {
             Error::new_from_span(
                 CustomError {
@@ -629,9 +612,6 @@ pub trait Selector: std::fmt::Debug + Verb {
         Ok(selection)
     }
 
-    /// Derive from parent (I am a child, collect IDs from parent's children/has_children).
-    /// Handles combined relationship types with union semantics.
-    /// When unnest is false, filters to direct children only.
     async fn derive_from_parent(
         &self,
         ctx: &mut ExecutionContext,
@@ -647,16 +627,17 @@ pub trait Selector: std::fmt::Debug + Verb {
             None => return Ok(None),
         };
         let parent_ids = parent_sel.get_instance_ids();
-        let mut find_mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![];
+        let mut find_parts: Vec<CompositeFilter> = vec![];
         if !notif_ctx.unnest {
-            find_mixins.push(Box::new(DirectOnlyMixin));
-            find_mixins.push(Box::new(OuterParentFilterMixin::new(&parent_ids)));
+            find_parts.push(CompositeFilter::leaf(DirectOnlyMixin));
+            find_parts.push(CompositeFilter::leaf(OuterParentFilterMixin::new(&parent_ids)));
         }
+        let find_filter = CompositeFilter::and(find_parts);
         let decl_ids = index.find_child_instance_ids(
             &parent_ids,
             notif_ctx.rel_type.contains(RelationshipType::REFS),
             notif_ctx.rel_type.contains(RelationshipType::HAS),
-            &mut find_mixins,
+            &find_filter,
         ).await.map_err(|e| anyhow::anyhow!("Failed to find child instance IDs: {}", e))?;
 
         let selection = self
@@ -666,9 +647,6 @@ pub trait Selector: std::fmt::Debug + Verb {
         Ok(Some(selection))
     }
 
-    /// Derive from child (I am a parent, collect IDs from child's parents/has_parents).
-    /// Handles combined relationship types with union semantics.
-    /// When unnest is false, only innermost has_parents are included.
     async fn derive_from_child(
         &self,
         ctx: &mut ExecutionContext,
@@ -684,15 +662,16 @@ pub trait Selector: std::fmt::Debug + Verb {
             None => return Ok(None),
         };
         let child_ids = child_sel.get_instance_ids();
-        let mut find_mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![];
+        let mut find_parts: Vec<CompositeFilter> = vec![];
         if !notif_ctx.unnest {
-            find_mixins.push(Box::new(InnermostOnlyMixin));
+            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin));
         }
+        let find_filter = CompositeFilter::and(find_parts);
         let decl_ids = index.find_parent_instance_ids(
             &child_ids,
             notif_ctx.rel_type.contains(RelationshipType::REFS),
             notif_ctx.rel_type.contains(RelationshipType::HAS),
-            &mut find_mixins,
+            &find_filter,
         ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
 
         let selection = self
@@ -724,13 +703,13 @@ pub trait Selector: std::fmt::Debug + Verb {
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<Selection> {
-        let mixin = SymbolInstanceIdMixin::new(instances);
-        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> = selector_filters
+        let mut parts: Vec<CompositeFilter> = selector_filters
             .iter()
-            .flat_map(|f| f.get_filter_mixins())
+            .filter_map(|f| f.get_composite_filter())
             .collect();
-        mixins.push(Box::new(mixin));
-        index.find_symbol(&mut mixins, parent_scope, children_scope).await
+        parts.push(CompositeFilter::leaf(SymbolInstanceIdMixin::new(instances)));
+        let filter = CompositeFilter::and(parts);
+        index.find_symbol(&filter, parent_scope, children_scope).await
     }
 }
 

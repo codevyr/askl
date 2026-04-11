@@ -11,12 +11,11 @@ use crate::statement::Statement;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    CompoundNameMixin, ExactNameMixin, LeafNameMixin, IgnoreFilterMixin, Index, ParentReference,
-    ProjectFilterMixin, ScopeContext, Selection, SymbolSearchMixin,
+    CompositeFilter, CompoundNameMixin, DefaultSymbolTypeMixin,
+    ExactNameMixin, LeafNameMixin, Index, PackageDescendantLeaf, ParentReference,
+    ProjectFilterMixin, ScopeContext, Selection, SymbolTypeMixin,
 };
 use index::models_diesel::SymbolRef;
-use index::symbols::{self, package_match};
-use index::symbols::{clean_and_split_string, partial_name_match, SymbolId};
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
 use std::collections::HashMap;
@@ -114,14 +113,14 @@ pub(crate) fn build_generic_verb(
     }
 }
 
-/// Returns a name mixin for the type-agnostic case (bare selectors).
+/// Returns a name filter for the type-agnostic case (bare selectors).
 /// Treats '.' as a separator (code symbol convention).
-fn name_search_mixin(name: &str) -> Box<dyn SymbolSearchMixin> {
+fn name_filter(name: &str) -> CompositeFilter {
     let is_compound = name.contains('.') || name.contains('/') || name.contains(':');
     if is_compound {
-        Box::new(CompoundNameMixin::new(name))
+        CompositeFilter::leaf(CompoundNameMixin::new(name))
     } else {
-        Box::new(LeafNameMixin::new(name, true))
+        CompositeFilter::leaf(LeafNameMixin::new(name, true))
     }
 }
 
@@ -166,27 +165,23 @@ impl Verb for NameSelector {
 
 #[async_trait(?Send)]
 impl Selector for NameSelector {
-    fn build_search_mixins(&self, command: &crate::command::Command) -> Vec<Box<dyn SymbolSearchMixin>> {
-        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> =
-            command.filters().flat_map(|f| f.get_filter_mixins()).collect();
-        mixins.push(name_search_mixin(&self.name));
-        mixins
+    fn build_composite_filter(&self, command: &crate::command::Command) -> Option<CompositeFilter> {
+        let mut parts: Vec<CompositeFilter> =
+            command.filters().filter_map(|f| f.get_composite_filter()).collect();
+        parts.push(name_filter(&self.name));
+        Some(CompositeFilter::and(parts))
     }
 
     async fn select_from_all_impl(
         &self,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
-        let mut search_mixins = search_mixins;
-        search_mixins.push(name_search_mixin(&self.name));
-        // Type filtering is handled by DefaultTypeFilter added in statement.rs.
-        // NameSelector does not add its own type filter to avoid conflicting
-        // with inherited default types from parent scopes.
-        let selection = cfg.index.find_symbol(&mut search_mixins, parent_scope, children_scope).await?;
+        let combined = CompositeFilter::and(vec![filter, name_filter(&self.name)]);
+        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope).await?;
         Ok(Some(selection))
     }
 }
@@ -230,19 +225,15 @@ impl Verb for ForcedVerb {
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
         Ok(self)
     }
-
-    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
-        Ok(self)
-    }
 }
 
 #[async_trait(?Send)]
 impl Selector for ForcedVerb {
-    fn build_search_mixins(&self, command: &crate::command::Command) -> Vec<Box<dyn SymbolSearchMixin>> {
-        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> =
-            command.filters().flat_map(|f| f.get_filter_mixins()).collect();
-        mixins.push(name_search_mixin(&self.name));
-        mixins
+    fn build_composite_filter(&self, command: &crate::command::Command) -> Option<CompositeFilter> {
+        let mut parts: Vec<CompositeFilter> =
+            command.filters().filter_map(|f| f.get_composite_filter()).collect();
+        parts.push(name_filter(&self.name));
+        Some(CompositeFilter::and(parts))
     }
 
     fn dependency_ready(&self, dependency_role: DependencyRole) -> bool {
@@ -257,14 +248,12 @@ impl Selector for ForcedVerb {
         &self,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
-        let mut search_mixins = search_mixins;
-        search_mixins.push(name_search_mixin(&self.name));
-        // Type filtering is handled by DefaultTypeFilter added in statement.rs.
-        let selection = cfg.index.find_symbol(&mut search_mixins, parent_scope, children_scope).await?;
+        let combined = CompositeFilter::and(vec![filter, name_filter(&self.name)]);
+        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope).await?;
 
         // Cache the forced selection so derivations can fabricate the
         // correct parent ↔ child relationship later on.
@@ -325,10 +314,6 @@ impl Selector for ForcedVerb {
     }
 }
 
-impl Filter for ForcedVerb {
-    fn filter_impl(&self, _selection: &mut Selection) {}
-}
-
 impl Display for ForcedVerb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ForcedVerb(name={})", self.name)
@@ -374,7 +359,7 @@ impl Selector for UnitVerb {
         &self,
         _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
-        _search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        _filter: CompositeFilter,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
@@ -447,40 +432,22 @@ impl Verb for IgnoreVerb {
 }
 
 impl Filter for IgnoreVerb {
-    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
-        vec![Box::new(IgnoreFilterMixin::new(
-            self.name.as_deref(),
-            self.package.as_deref(),
-        ))]
-    }
-
-    fn filter_impl(&self, selection: &mut Selection) {
-        selection.nodes.retain(|s| {
-            let index_symbol: symbols::Symbol = symbols::Symbol {
-                id: SymbolId(s.symbol.id.clone()),
-                name: s.symbol.name.clone(),
-                name_split: clean_and_split_string(&s.symbol.name),
-                ..Default::default()
-            };
-
-            let id = &index_symbol.id;
-            if let Some(ref name) = self.name {
-                let matcher = partial_name_match(name);
-                let matched_symbol = matcher((id, &index_symbol));
-                if matched_symbol.is_none() {
-                    return true;
-                }
+    fn get_composite_filter(&self) -> Option<CompositeFilter> {
+        let mut parts = vec![];
+        if let Some(ref name) = self.name {
+            // Same CompoundNameMixin the positive name filter uses — replaces
+            // the old in-memory partial_name_match with an equivalent SQL lquery.
+            parts.push(CompositeFilter::leaf(CompoundNameMixin::new(name)));
+        }
+        if let Some(ref package) = self.package {
+            if let Some(leaf) = PackageDescendantLeaf::new(package) {
+                parts.push(CompositeFilter::leaf(leaf));
             }
-
-            if let Some(ref package) = self.package {
-                let matcher = package_match(package);
-                let matched_symbol = matcher((id, &index_symbol));
-                if matched_symbol.is_none() {
-                    return true;
-                }
-            }
-            false
-        });
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        Some(CompositeFilter::not(CompositeFilter::and(parts)))
     }
 }
 
@@ -546,8 +513,8 @@ impl Verb for ProjectFilter {
 }
 
 impl Filter for ProjectFilter {
-    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
-        vec![Box::new(ProjectFilterMixin::new(&self.project))]
+    fn get_composite_filter(&self) -> Option<CompositeFilter> {
+        Some(CompositeFilter::leaf(ProjectFilterMixin::new(&self.project)))
     }
 }
 
@@ -618,7 +585,7 @@ impl Selector for IsolatedScope {
         &self,
         _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
-        _search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        _filter: CompositeFilter,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
@@ -931,8 +898,8 @@ impl Verb for DirectOnlyFilter {
 }
 
 impl Filter for DirectOnlyFilter {
-    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
-        vec![Box::new(index::db_diesel::DirectOnlyMixin)]
+    fn get_composite_filter(&self) -> Option<CompositeFilter> {
+        Some(CompositeFilter::leaf(index::db_diesel::DirectOnlyMixin))
     }
 }
 
@@ -1040,58 +1007,51 @@ impl TypeSelector {
         }))
     }
 
-    /// Returns the appropriate name mixin for the given name and symbol type.
-    /// Simple names (no separators) use LeafNameMixin for B-tree lookups (~0.1ms).
-    /// Compound names use CompoundNameMixin with lquery (leaf-anchored gets B-tree pre-filter).
-    /// Directory/file types with absolute paths use ExactNameMixin.
-    fn name_mixin(
+    /// Returns the appropriate name filter for the given name and symbol type.
+    fn name_filter_leaf(
         name: &str,
         symbol_type_id: i32,
         leaf_anchored: bool,
-    ) -> Box<dyn SymbolSearchMixin> {
+    ) -> CompositeFilter {
         match symbol_type_id {
-            // Files/directories with absolute path -> exact match
             SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE if name.starts_with('/') => {
-                Box::new(ExactNameMixin::new(name))
+                CompositeFilter::leaf(ExactNameMixin::new(name))
             }
-            // Files/directories: '.' is NOT a separator, only '/' and ':' are
             SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE => {
                 let is_compound = name.contains('/') || name.contains(':');
                 if is_compound {
-                    Box::new(CompoundNameMixin::with_options(name, leaf_anchored, false))
+                    CompositeFilter::leaf(CompoundNameMixin::with_options(name, leaf_anchored, false))
                 } else {
-                    Box::new(LeafNameMixin::new(name, false))
+                    CompositeFilter::leaf(LeafNameMixin::new(name, false))
                 }
             }
-            // Code symbols: '.', '/', ':' are all separators
             _ => {
                 let is_compound = name.contains('.') || name.contains('/') || name.contains(':');
                 if is_compound {
                     if leaf_anchored {
-                        Box::new(CompoundNameMixin::new_leaf_anchored(name))
+                        CompositeFilter::leaf(CompoundNameMixin::new_leaf_anchored(name))
                     } else {
-                        Box::new(CompoundNameMixin::new(name))
+                        CompositeFilter::leaf(CompoundNameMixin::new(name))
                     }
                 } else {
-                    Box::new(LeafNameMixin::new(name, true))
+                    CompositeFilter::leaf(LeafNameMixin::new(name, true))
                 }
             }
         }
     }
 
-    /// Build search mixins for this type selector.
-    /// Used by both `get_filter_mixins` and `select_from_all_impl` to avoid duplication.
-    fn build_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
-        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> =
-            vec![Box::new(SymbolTypeMixin::new(self.symbol_type_id))];
+    /// Build composite filter parts for this type selector.
+    fn build_filter_parts(&self) -> Vec<CompositeFilter> {
+        let mut parts: Vec<CompositeFilter> =
+            vec![CompositeFilter::leaf(SymbolTypeMixin::new(self.symbol_type_id))];
         if let Some(ref name) = self.name_pattern {
-            mixins.push(Self::name_mixin(
+            parts.push(Self::name_filter_leaf(
                 name,
                 self.symbol_type_id,
                 self.leaf_anchored,
             ));
         }
-        mixins
+        parts
     }
 }
 
@@ -1199,52 +1159,47 @@ impl Verb for TypeSelector {
 }
 
 impl Filter for TypeSelector {
-    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
+    fn get_composite_filter(&self) -> Option<CompositeFilter> {
         if self.filter_only && self.name_pattern.is_some() {
             // When used as a namespace filter (e.g., mod("test", filter="true")),
-            // only constrain by name pattern, not by type. This allows
-            // mod("test", filter="true") "a" to find functions named "test.a"
-            // rather than restricting to MODULE-type symbols.
-            // Always use CompoundNameMixin here — the name acts as a path component
-            // filter (*.test.*), not a leaf name match.
+            // only constrain by name pattern, not by type.
             let name = self.name_pattern.as_ref().unwrap();
             let dot_is_separator = !matches!(
                 self.symbol_type_id,
                 SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE
             );
-            vec![Box::new(CompoundNameMixin::with_options(name, false, dot_is_separator))]
+            Some(CompositeFilter::leaf(CompoundNameMixin::with_options(name, false, dot_is_separator)))
         } else {
-            self.build_mixins()
+            Some(CompositeFilter::and(self.build_filter_parts()))
         }
     }
 }
 
 #[async_trait(?Send)]
 impl Selector for TypeSelector {
-    fn build_search_mixins(&self, command: &crate::command::Command) -> Vec<Box<dyn SymbolSearchMixin>> {
-        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> =
-            command.filters().flat_map(|f| f.get_filter_mixins()).collect();
-        mixins.extend(self.build_mixins());
-        mixins
+    fn build_composite_filter(&self, command: &crate::command::Command) -> Option<CompositeFilter> {
+        // TypeSelector implements as_filter(), so its get_composite_filter()
+        // is already included via command.filters().
+        let parts: Vec<CompositeFilter> =
+            command.filters().filter_map(|f| f.get_composite_filter()).collect();
+        if parts.is_empty() { None } else { Some(CompositeFilter::and(parts)) }
     }
 
     async fn select_from_all_impl(
         &self,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
-        // In filter mode, don't query all symbols - wait for derivation from parent.
-        // This is much more efficient for queries like `file has { func }`.
         if self.filter_only {
             return Ok(None);
         }
 
-        let mut search_mixins = search_mixins;
-        search_mixins.extend(self.build_mixins());
-        let selection = cfg.index.find_symbol(&mut search_mixins, parent_scope, children_scope).await?;
+        // `filter` already contains this TypeSelector's get_composite_filter()
+        // (collected at compute_selected). Just use it directly.
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope).await?;
         Ok(Some(selection))
     }
 }
@@ -1262,33 +1217,6 @@ impl Display for TypeSelector {
             SYMBOL_TYPE_FIELD => write!(f, "TypeSelector(field)"),
             _ => write!(f, "TypeSelector({})", self.symbol_type_id),
         }
-    }
-}
-
-/// SymbolTypeMixin - filters symbols by type ID.
-/// Only filter_current is needed; follow-up queries are constrained
-/// by current_instance_ids which already reflects the type filter.
-#[derive(Debug, Clone)]
-pub struct SymbolTypeMixin {
-    pub symbol_type_id: i32,
-}
-
-impl SymbolTypeMixin {
-    pub fn new(symbol_type_id: i32) -> Self {
-        Self { symbol_type_id }
-    }
-}
-
-impl SymbolSearchMixin for SymbolTypeMixin {
-    fn filter_current<'a>(
-        &self,
-        _connection: &mut index::db_diesel::Connection,
-        query: index::db_diesel::CurrentQuery<'a>,
-    ) -> anyhow::Result<index::db_diesel::CurrentQuery<'a>> {
-        use diesel::prelude::*;
-        use index::schema_diesel::symbols;
-
-        Ok(query.filter(symbols::dsl::symbol_type.eq(self.symbol_type_id)))
     }
 }
 
@@ -1329,13 +1257,13 @@ impl Verb for DefaultTypeFilter {
 }
 
 impl Filter for DefaultTypeFilter {
-    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
+    fn get_composite_filter(&self) -> Option<CompositeFilter> {
         if self.symbol_type_ids.is_empty() {
-            return vec![];
+            return None;
         }
-        vec![Box::new(DefaultSymbolTypeMixin::new(
+        Some(CompositeFilter::leaf(DefaultSymbolTypeMixin::new(
             self.symbol_type_ids.clone(),
-        ))]
+        )))
     }
 }
 
@@ -1394,20 +1322,21 @@ impl Verb for GenericSelector {
 
 #[async_trait(?Send)]
 impl Selector for GenericSelector {
-    fn build_search_mixins(&self, command: &crate::command::Command) -> Vec<Box<dyn SymbolSearchMixin>> {
-        command.filters().flat_map(|f| f.get_filter_mixins()).collect()
+    fn build_composite_filter(&self, command: &crate::command::Command) -> Option<CompositeFilter> {
+        let parts: Vec<CompositeFilter> =
+            command.filters().filter_map(|f| f.get_composite_filter()).collect();
+        if parts.is_empty() { None } else { Some(CompositeFilter::and(parts)) }
     }
 
     async fn select_from_all_impl(
         &self,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
-        let mut search_mixins = search_mixins;
-        let selection = cfg.index.find_symbol(&mut search_mixins, parent_scope, children_scope).await?;
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope).await?;
         Ok(Some(selection))
     }
 }
@@ -1486,22 +1415,22 @@ impl FilterKind {
         matches!(self, FilterKind::Type { .. })
     }
 
-    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
+    fn get_composite_filter(&self) -> Option<CompositeFilter> {
         match self {
             FilterKind::Type { symbol_type_ids } => {
                 if symbol_type_ids.len() == 1 {
-                    vec![Box::new(SymbolTypeMixin::new(symbol_type_ids[0]))]
+                    Some(CompositeFilter::leaf(SymbolTypeMixin::new(symbol_type_ids[0])))
                 } else {
-                    vec![Box::new(DefaultSymbolTypeMixin::new(
+                    Some(CompositeFilter::leaf(DefaultSymbolTypeMixin::new(
                         symbol_type_ids.clone(),
-                    ))]
+                    )))
                 }
             }
             FilterKind::ExactName { value } => {
-                vec![Box::new(ExactNameMixin::new(value))]
+                Some(CompositeFilter::leaf(ExactNameMixin::new(value)))
             }
             FilterKind::CompoundName { value } => {
-                vec![Box::new(CompoundNameMixin::new(value))]
+                Some(CompositeFilter::leaf(CompoundNameMixin::new(value)))
             }
         }
     }
@@ -1623,8 +1552,8 @@ impl Verb for GenericFilter {
 }
 
 impl Filter for GenericFilter {
-    fn get_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
-        self.kind.get_filter_mixins()
+    fn get_composite_filter(&self) -> Option<CompositeFilter> {
+        self.kind.get_composite_filter()
     }
 }
 
@@ -1634,56 +1563,3 @@ impl Display for GenericFilter {
     }
 }
 
-/// DefaultSymbolTypeMixin - filters symbols by multiple type IDs (OR condition).
-///
-/// - `filter_current`: constrains which symbols this command matches
-/// - `filter_parents`: constrains the *caller* side (parent_symbols) to this command's
-///   types. This is intentional — by default, only functions appear as callers.
-///   To see module-level refs, use `mod { "foo" }` which sets the inherited
-///   default types to [MODULE, FUNCTION].
-///
-/// No filter_children/filter_has_*: those would only re-filter the current symbol,
-/// which is already constrained by current_instance_ids after the current query.
-#[derive(Debug, Clone)]
-pub struct DefaultSymbolTypeMixin {
-    pub symbol_type_ids: Vec<i32>,
-}
-
-impl DefaultSymbolTypeMixin {
-    pub fn new(symbol_type_ids: Vec<i32>) -> Self {
-        Self { symbol_type_ids }
-    }
-}
-
-impl SymbolSearchMixin for DefaultSymbolTypeMixin {
-    fn filter_current<'a>(
-        &self,
-        _connection: &mut index::db_diesel::Connection,
-        query: index::db_diesel::CurrentQuery<'a>,
-    ) -> anyhow::Result<index::db_diesel::CurrentQuery<'a>> {
-        use diesel::prelude::*;
-        use index::schema_diesel::symbols;
-
-        let types = self.symbol_type_ids.clone();
-        Ok(query.filter(symbols::dsl::symbol_type.eq_any(types)))
-    }
-
-    /// Filter parent_symbols in the parents query (who calls me) to this command's types.
-    /// This ensures only instances of matching types can "own" refs.
-    fn filter_parents<'a>(
-        &self,
-        _connection: &mut index::db_diesel::Connection,
-        query: index::db_diesel::mixins::ParentsQuery<'a>,
-    ) -> anyhow::Result<index::db_diesel::mixins::ParentsQuery<'a>> {
-        use diesel::prelude::*;
-        use index::db_diesel::mixins::PARENT_SYMBOLS_ALIAS;
-        use index::schema_diesel::symbols;
-
-        let types = self.symbol_type_ids.clone();
-        Ok(query.filter(
-            PARENT_SYMBOLS_ALIAS
-                .field(symbols::dsl::symbol_type)
-                .eq_any(types),
-        ))
-    }
-}

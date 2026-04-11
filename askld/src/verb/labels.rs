@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::{
-    db_diesel::{InnermostOnlyMixin, Index, ParentReference, ScopeContext, Selection, SymbolSearchMixin},
+    db_diesel::{CompositeFilter, InnermostOnlyMixin, Index, ParentReference, ScopeContext, Selection},
     models_diesel::SymbolRef,
 };
 use pest::error::ErrorVariant::CustomError;
@@ -194,7 +194,7 @@ impl Selector for UserVerb {
         &self,
         _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
-        _search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        _filter: CompositeFilter,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
@@ -302,15 +302,16 @@ impl Selector for UserVerb {
 
         // Use DB query instead of stale child.parents vector
         let child_ids = child.get_instance_ids();
-        let mut find_mixins: Vec<Box<dyn SymbolSearchMixin>> = vec![];
+        let mut find_parts: Vec<CompositeFilter> = vec![];
         if !notif_ctx.unnest {
-            find_mixins.push(Box::new(InnermostOnlyMixin));
+            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin));
         }
+        let find_filter = CompositeFilter::and(find_parts);
         let parent_ids = index.find_parent_instance_ids(
             &child_ids,
             notif_ctx.rel_type.contains(RelationshipType::REFS),
             notif_ctx.rel_type.contains(RelationshipType::HAS),
-            &mut find_mixins,
+            &find_filter,
         ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
         let parent_id_set: std::collections::HashSet<i32> =
             parent_ids.into_iter().map(Into::<i32>::into).collect();
