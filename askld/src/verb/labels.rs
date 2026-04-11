@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::{
-    db_diesel::{InnermostOnlyMixin, Index, ParentReference, Selection, SymbolSearchMixin},
+    db_diesel::{InnermostOnlyMixin, Index, ParentReference, ScopeContext, Selection, SymbolSearchMixin},
     models_diesel::SymbolRef,
 };
 use pest::error::ErrorVariant::CustomError;
@@ -195,6 +195,8 @@ impl Selector for UserVerb {
         _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
         _search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        _parent_scope: ScopeContext,
+        _children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         Ok(None)
     }
@@ -229,6 +231,8 @@ impl Selector for UserVerb {
         _selector_filters: &[&dyn Filter],
         parent: &Statement,
         _notif_ctx: NotificationContext,
+        _parent_scope: ScopeContext,
+        _children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         if !self.forced {
             bail!("Cannot derive from parent when not forced");
@@ -282,6 +286,8 @@ impl Selector for UserVerb {
         _selector_filters: &[&dyn Filter],
         child: &Statement,
         notif_ctx: NotificationContext,
+        _parent_scope: ScopeContext,
+        _children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         let child = match child.get_selection(&ctx) {
             Some(selection) => selection,
@@ -323,6 +329,8 @@ impl Selector for UserVerb {
         selector_filters: &[&dyn Filter],
         notifier: &Statement,
         notif_ctx: NotificationContext,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         if !notifier.command().has_selectors() {
             return Ok(NotificationResult::new(false, vec![]));
@@ -374,7 +382,7 @@ impl Selector for UserVerb {
         }
 
         let mut selection = self
-            .derive_selection(ctx, index, selector_filters, notifier, notif_ctx)
+            .derive_selection(ctx, index, selector_filters, notifier, notif_ctx, parent_scope, children_scope)
             .await
             .map_err(|e| {
                 pest::error::Error::new_from_span(

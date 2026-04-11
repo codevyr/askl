@@ -287,7 +287,25 @@ fn ltree_filter_sql(column: &str, lquery: &str) -> String {
 /// only add filters that constrain the *relationship* side — e.g. the caller's type in
 /// `filter_parents`. Do NOT re-filter the current symbol in follow-up methods;
 /// `current_instance_ids` already handles that.
-pub trait SymbolSearchMixin: std::fmt::Debug {
+/// Helper trait enabling `Clone` for `Box<dyn SymbolSearchMixin>`.
+/// Blanket-implemented for all `SymbolSearchMixin + Clone + 'static` types.
+pub trait SymbolSearchMixinClone {
+    fn clone_box(&self) -> Box<dyn SymbolSearchMixin>;
+}
+
+impl<T: 'static + SymbolSearchMixin + Clone> SymbolSearchMixinClone for T {
+    fn clone_box(&self) -> Box<dyn SymbolSearchMixin> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn SymbolSearchMixin> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+pub trait SymbolSearchMixin: std::fmt::Debug + SymbolSearchMixinClone {
     fn enter(&self, _connection: &mut Connection) -> Result<()> {
         Ok(())
     }

@@ -7,7 +7,7 @@ mod index_impl;
 pub mod mixins;
 mod selection;
 
-pub use index_impl::Index;
+pub use index_impl::{ImplicitEdge, Index, ScopeContext};
 pub use mixins::{
     CompoundNameMixin, CurrentQuery, DirectOnlyMixin, InnermostOnlyMixin, OuterParentFilterMixin,
     SymbolInstanceIdMixin, ExactNameMixin, LeafNameMixin,

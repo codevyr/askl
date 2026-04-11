@@ -16,6 +16,10 @@ impl SelectorRegistry {
         self.0.insert(selector.id(), SelectorState { selection });
     }
 
+    pub fn contains(&self, id: &SelectorId) -> bool {
+        self.0.contains_key(id)
+    }
+
     pub fn for_each_selector_mut<'a, S, F>(&mut self, selectors: S, mut f: F)
     where
         S: 'a + Iterator<Item = &'a dyn Selector>,

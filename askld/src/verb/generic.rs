@@ -12,7 +12,7 @@ use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
     CompoundNameMixin, ExactNameMixin, LeafNameMixin, IgnoreFilterMixin, Index, ParentReference,
-    ProjectFilterMixin, Selection, SymbolSearchMixin,
+    ProjectFilterMixin, ScopeContext, Selection, SymbolSearchMixin,
 };
 use index::models_diesel::SymbolRef;
 use index::symbols::{self, package_match};
@@ -166,18 +166,27 @@ impl Verb for NameSelector {
 
 #[async_trait(?Send)]
 impl Selector for NameSelector {
+    fn build_search_mixins(&self, command: &crate::command::Command) -> Vec<Box<dyn SymbolSearchMixin>> {
+        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> =
+            command.filters().flat_map(|f| f.get_filter_mixins()).collect();
+        mixins.push(name_search_mixin(&self.name));
+        mixins
+    }
+
     async fn select_from_all_impl(
         &self,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         let mut search_mixins = search_mixins;
         search_mixins.push(name_search_mixin(&self.name));
         // Type filtering is handled by DefaultTypeFilter added in statement.rs.
         // NameSelector does not add its own type filter to avoid conflicting
         // with inherited default types from parent scopes.
-        let selection = cfg.index.find_symbol(&mut search_mixins).await?;
+        let selection = cfg.index.find_symbol(&mut search_mixins, parent_scope, children_scope).await?;
         Ok(Some(selection))
     }
 }
@@ -229,6 +238,13 @@ impl Verb for ForcedVerb {
 
 #[async_trait(?Send)]
 impl Selector for ForcedVerb {
+    fn build_search_mixins(&self, command: &crate::command::Command) -> Vec<Box<dyn SymbolSearchMixin>> {
+        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> =
+            command.filters().flat_map(|f| f.get_filter_mixins()).collect();
+        mixins.push(name_search_mixin(&self.name));
+        mixins
+    }
+
     fn dependency_ready(&self, dependency_role: DependencyRole) -> bool {
         if dependency_role == DependencyRole::Parent {
             false
@@ -242,11 +258,13 @@ impl Selector for ForcedVerb {
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         let mut search_mixins = search_mixins;
         search_mixins.push(name_search_mixin(&self.name));
         // Type filtering is handled by DefaultTypeFilter added in statement.rs.
-        let selection = cfg.index.find_symbol(&mut search_mixins).await?;
+        let selection = cfg.index.find_symbol(&mut search_mixins, parent_scope, children_scope).await?;
 
         // Cache the forced selection so derivations can fabricate the
         // correct parent ↔ child relationship later on.
@@ -266,6 +284,8 @@ impl Selector for ForcedVerb {
         _selector_filters: &[&dyn Filter],
         parent: &Statement,
         _notif_ctx: super::NotificationContext,
+        _parent_scope: ScopeContext,
+        _children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         let parent_selection = match parent.get_selection(ctx) {
             Some(selection) => selection,
@@ -355,6 +375,8 @@ impl Selector for UnitVerb {
         _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
         _search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        _parent_scope: ScopeContext,
+        _children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         Ok(None)
     }
@@ -597,6 +619,8 @@ impl Selector for IsolatedScope {
         _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
         _search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        _parent_scope: ScopeContext,
+        _children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         Ok(Some(Selection::new()))
     }
@@ -1197,11 +1221,20 @@ impl Filter for TypeSelector {
 
 #[async_trait(?Send)]
 impl Selector for TypeSelector {
+    fn build_search_mixins(&self, command: &crate::command::Command) -> Vec<Box<dyn SymbolSearchMixin>> {
+        let mut mixins: Vec<Box<dyn SymbolSearchMixin>> =
+            command.filters().flat_map(|f| f.get_filter_mixins()).collect();
+        mixins.extend(self.build_mixins());
+        mixins
+    }
+
     async fn select_from_all_impl(
         &self,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         // In filter mode, don't query all symbols - wait for derivation from parent.
         // This is much more efficient for queries like `file has { func }`.
@@ -1211,7 +1244,7 @@ impl Selector for TypeSelector {
 
         let mut search_mixins = search_mixins;
         search_mixins.extend(self.build_mixins());
-        let selection = cfg.index.find_symbol(&mut search_mixins).await?;
+        let selection = cfg.index.find_symbol(&mut search_mixins, parent_scope, children_scope).await?;
         Ok(Some(selection))
     }
 }
@@ -1370,25 +1403,37 @@ impl Verb for GenericSelector {
     }
 }
 
+impl GenericSelector {
+    /// Collect search mixins from captured filter verbs only (ignores command-wide filters).
+    fn captured_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
+        let Some(captured) = self.captured_filters.get() else {
+            return Vec::new();
+        };
+        captured.iter()
+            .filter_map(|v| v.as_filter().ok())
+            .flat_map(|f| f.get_filter_mixins())
+            .collect()
+    }
+}
+
 #[async_trait(?Send)]
 impl Selector for GenericSelector {
+    fn build_search_mixins(&self, _command: &crate::command::Command) -> Vec<Box<dyn SymbolSearchMixin>> {
+        self.captured_filter_mixins()
+    }
+
     async fn select_from_all_impl(
         &self,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         _search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         // Ignore incoming search_mixins (command-wide filters including DefaultTypeFilter).
         // Instead, use only the captured filter verbs' mixins.
-        let mut search_mixins: Vec<Box<dyn SymbolSearchMixin>> = Vec::new();
-        if let Some(captured) = self.captured_filters.get() {
-            for verb in captured {
-                if let Ok(filter) = verb.as_filter() {
-                    search_mixins.extend(filter.get_filter_mixins());
-                }
-            }
-        }
-        let selection = cfg.index.find_symbol(&mut search_mixins).await?;
+        let mut search_mixins = self.captured_filter_mixins();
+        let selection = cfg.index.find_symbol(&mut search_mixins, parent_scope, children_scope).await?;
         Ok(Some(selection))
     }
 }

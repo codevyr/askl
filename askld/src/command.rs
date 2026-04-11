@@ -7,7 +7,7 @@ use crate::statement::Statement;
 use crate::verb::{add_verb, DeriveMethod, Filter, Labeler, NotificationContext, Selector, Verb, VerbTag};
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{Index, Selection, SymbolSearchMixin};
+use index::db_diesel::{Index, ScopeContext, Selection, SymbolSearchMixin};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -66,7 +66,7 @@ impl Command {
         self.verbs = add_verb(verbs, other);
     }
 
-    fn filters<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Filter> + 'a> {
+    pub(crate) fn filters<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Filter> + 'a> {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_filter().ok()))
     }
 
@@ -115,6 +115,15 @@ impl Command {
         self.labels().flat_map(|m| m.get_label()).collect()
     }
 
+    /// Build mixin sets for all selectors. Each inner Vec represents one selector's
+    /// filter criteria (ANDed). Outer Vec is ORed across selectors.
+    /// Used by scope builders to construct ScopeContext.
+    pub fn get_selector_mixin_sets(&self) -> Vec<Vec<Box<dyn SymbolSearchMixin>>> {
+        self.selectors()
+            .map(|sel| sel.build_search_mixins(self))
+            .collect()
+    }
+
     pub fn filter(&self, selection: &mut Selection) {
         let _command_filter: tracing::span::EnteredSpan =
             tracing::info_span!("command_filter").entered();
@@ -133,6 +142,8 @@ impl Command {
         role: DependencyRole,
         rel_type: RelationshipType,
         unnest: bool,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         let mut changed = false;
         let mut warnings = vec![];
@@ -147,6 +158,8 @@ impl Command {
                     role,
                     rel_type,
                     unnest,
+                    parent_scope.clone(),
+                    children_scope.clone(),
                 )
                 .await?;
             changed |= res.changed;
@@ -161,6 +174,8 @@ impl Command {
         index: &Index,
         notifier: &Statement,
         notif_ctx: NotificationContext,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         // Collect filters so we can iterate over them multiple times while notifying selectors.
         let mut changed = false;
@@ -168,7 +183,7 @@ impl Command {
         let selector_filters: Vec<&dyn Filter> = self.filters().collect();
         for selector in self.selectors() {
             let res = selector
-                .accept_notification(ctx, index, &selector_filters, notifier, notif_ctx)
+                .accept_notification(ctx, index, &selector_filters, notifier, notif_ctx, parent_scope.clone(), children_scope.clone())
                 .await?;
             changed |= res.changed;
             warnings.extend(res.warnings);
@@ -180,10 +195,15 @@ impl Command {
     /// command. This method returns an `Option<SymbolInstanceRefs>`, which will be
     /// `None` if no symbols are selected. It returns
     /// `Some(SymbolInstanceRefs::new())` if no symbols match the selectors.
+    /// Scope-building data for parent/children scoping. Since ScopeContext
+    /// contains non-clonable Box<dyn>, we store the raw data and rebuild
+    /// ScopeContext for each selector.
     pub async fn compute_selected(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
     ) -> Result<Vec<pest::error::Error<Rule>>, pest::error::Error<Rule>> {
         let selectors: Vec<&dyn Selector> = self.selectors().collect();
 
@@ -216,7 +236,7 @@ impl Command {
                 self.filters().flat_map(|f| f.get_filter_mixins()).collect();
 
             let mut current_selection = selector
-                .select_from_all(ctx, cfg, search_mixins)
+                .select_from_all(ctx, cfg, search_mixins, parent_scope.clone(), children_scope.clone())
                 .await
                 .map_err(|e| {
                     pest::error::Error::new_from_span(
@@ -259,7 +279,7 @@ impl LabeledStatements {
         for mark in marks {
             self.0
                 .entry(mark)
-                .or_insert(vec![statement.clone()])
+                .or_insert_with(Vec::new)
                 .push(statement.clone());
         }
 
