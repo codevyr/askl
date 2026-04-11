@@ -1352,7 +1352,6 @@ impl Display for DefaultTypeFilter {
 #[derive(Debug)]
 pub struct GenericSelector {
     span: Span,
-    captured_filters: OnceLock<Vec<Arc<dyn Verb>>>,
 }
 
 impl GenericSelector {
@@ -1363,10 +1362,7 @@ impl GenericSelector {
         _positional: &Vec<String>,
         _named: &HashMap<String, String>,
     ) -> Result<Arc<dyn Verb>> {
-        Ok(Arc::new(Self {
-            span,
-            captured_filters: OnceLock::new(),
-        }))
+        Ok(Arc::new(Self { span }))
     }
 }
 
@@ -1387,52 +1383,30 @@ impl Verb for GenericSelector {
         true
     }
 
-    fn has_name_constraint(&self) -> bool {
-        self.captured_filters
-            .get()
-            .map(|filters| filters.iter().any(|v| v.has_name_constraint()))
-            .unwrap_or(false)
+    fn get_tag(&self) -> Option<VerbTag> {
+        Some(VerbTag::GenericSelector)
     }
 
-    fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        // Capture filter verbs from the command at this point (before we're added).
-        // This gives each select its own positional filter set.
-        let filters = ctx.get_filter_verbs();
-        let _ = self.captured_filters.set(filters);
-        Ok(false)
-    }
-}
-
-impl GenericSelector {
-    /// Collect search mixins from captured filter verbs only (ignores command-wide filters).
-    fn captured_filter_mixins(&self) -> Vec<Box<dyn SymbolSearchMixin>> {
-        let Some(captured) = self.captured_filters.get() else {
-            return Vec::new();
-        };
-        captured.iter()
-            .filter_map(|v| v.as_filter().ok())
-            .flat_map(|f| f.get_filter_mixins())
-            .collect()
+    fn add_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
+        self.replace_verb(existing_verbs)
     }
 }
 
 #[async_trait(?Send)]
 impl Selector for GenericSelector {
-    fn build_search_mixins(&self, _command: &crate::command::Command) -> Vec<Box<dyn SymbolSearchMixin>> {
-        self.captured_filter_mixins()
+    fn build_search_mixins(&self, command: &crate::command::Command) -> Vec<Box<dyn SymbolSearchMixin>> {
+        command.filters().flat_map(|f| f.get_filter_mixins()).collect()
     }
 
     async fn select_from_all_impl(
         &self,
         _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        _search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
+        search_mixins: Vec<Box<dyn SymbolSearchMixin>>,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
-        // Ignore incoming search_mixins (command-wide filters including DefaultTypeFilter).
-        // Instead, use only the captured filter verbs' mixins.
-        let mut search_mixins = self.captured_filter_mixins();
+        let mut search_mixins = search_mixins;
         let selection = cfg.index.find_symbol(&mut search_mixins, parent_scope, children_scope).await?;
         Ok(Some(selection))
     }
