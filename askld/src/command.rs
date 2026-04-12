@@ -4,7 +4,7 @@ use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::Rule;
 use crate::span::Span;
 use crate::statement::Statement;
-use crate::verb::{add_verb, ConstraintAction, DeriveMethod, Filter, Labeler, NotificationContext, Selector, Verb, VerbTag, find_symbol_by_instance_id};
+use crate::verb::{add_verb, ConstraintAction, DeriveMethod, Filter, Labeler, NotificationContext, Selector, SelectorId, Verb, VerbTag, find_symbol_by_instance_id};
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::{CompositeFilter, InnermostOnlyMixin, Index, ScopeContext, Selection};
@@ -302,19 +302,22 @@ impl Command {
     /// ScopeContext for each selector.
     pub async fn compute_selected(
         &self,
-        ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
-    ) -> Result<Vec<pest::error::Error<Rule>>, pest::error::Error<Rule>> {
+    ) -> Result<
+        (Vec<(SelectorId, Option<Selection>)>, Vec<pest::error::Error<Rule>>),
+        pest::error::Error<Rule>,
+    > {
         let selectors: Vec<&dyn Selector> = self.selectors().collect();
 
         // Nothing to do
-        if selectors.len() == 0 {
-            return Ok(Vec::new());
+        if selectors.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
         }
 
         let mut warnings = vec![];
+        let mut results = vec![];
 
         // Validate: each selector that requires a name constraint must have one
         // command-wide (any filter verb on the command counts).
@@ -343,7 +346,7 @@ impl Command {
             let _select_from_all =
                 tracing::info_span!("select_from_all", name = %select_from_all_name).entered();
             let mut current_selection = selector
-                .select_from_all_impl(ctx, cfg, filter, parent_scope.clone(), children_scope.clone())
+                .select_from_all_impl(cfg, filter, parent_scope.clone(), children_scope.clone())
                 .await
                 .map_err(|e| {
                     pest::error::Error::new_from_span(
@@ -367,9 +370,9 @@ impl Command {
                     ));
                 }
             }
-            ctx.registry.add(selector, current_selection);
+            results.push((selector.id(), current_selection));
         }
-        Ok(warnings)
+        Ok((results, warnings))
     }
 }
 

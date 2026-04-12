@@ -300,12 +300,31 @@ impl Statement {
         let _select_nodes: tracing::span::EnteredSpan =
             tracing::info_span!("select_nodes").entered();
 
-        for statement in statements.iter() {
-            ctx.current_statement_span = Some(statement.command().span().clone());
-            let parent_scope = build_parent_scope(statement, ctx);
-            let children_scope = build_children_scope(statement, ctx);
-            let warnings = statement.command().compute_selected(ctx, cfg, parent_scope, children_scope).await?;
+        // Build scopes (reads registry) and create futures
+        let futures: Vec<_> = statements
+            .iter()
+            .map(|statement| {
+                let stmt = statement.clone();
+                let parent_scope = build_parent_scope(&stmt, ctx);
+                let children_scope = build_children_scope(&stmt, ctx);
+                async move {
+                    stmt.command()
+                        .compute_selected(cfg, parent_scope, children_scope)
+                        .await
+                }
+            })
+            .collect();
 
+        // Run all DB queries concurrently
+        let results = futures::future::join_all(futures).await;
+
+        // Write results to registry sequentially
+        for (statement, result) in statements.iter().zip(results) {
+            ctx.current_statement_span = Some(statement.command().span().clone());
+            let (selector_results, warnings) = result?;
+            for (id, selection) in selector_results {
+                ctx.registry.add_by_id(id, selection);
+            }
             statement.get_state_mut().warnings.extend(warnings);
             if !statement.command().has_selectors() {
                 statement.get_state_mut().completed = true;

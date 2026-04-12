@@ -1,7 +1,7 @@
 use index::symbols::SymbolInstanceId;
 
 use crate::{
-    cfg::ControlFlowGraph, execution_context::ExecutionContext, span::Span,
+    cfg::ControlFlowGraph, span::Span,
     test_util::{get_shared_index, run_query, VERB_TEST},
     verb::*,
 };
@@ -23,8 +23,6 @@ async fn test_select_matching_name() {
         ("FOO", vec![]),
     ];
 
-    let mut ctx = ExecutionContext::new(); // Assuming there's a default constructor
-
     for (name, expected_ids) in test_cases {
         let fake_span = Span::synthetic(name);
         let named_args = HashMap::from([("name".to_string(), name.to_string())]);
@@ -33,7 +31,7 @@ async fn test_select_matching_name() {
         let result = selector
             .as_selector()
             .unwrap()
-            .select_from_all_impl(&mut ctx, &cfg, index::db_diesel::CompositeFilter::And(vec![]), index::db_diesel::ScopeContext::Skip, index::db_diesel::ScopeContext::Skip)
+            .select_from_all_impl(&cfg, index::db_diesel::CompositeFilter::And(vec![]), index::db_diesel::ScopeContext::Skip, index::db_diesel::ScopeContext::Skip)
             .await
             .unwrap();
 

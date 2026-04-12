@@ -13,7 +13,11 @@ impl SelectorRegistry {
     }
 
     pub fn add(&mut self, selector: &dyn Selector, selection: Option<Selection>) {
-        self.0.insert(selector.id(), SelectorState { selection });
+        self.add_by_id(selector.id(), selection);
+    }
+
+    pub fn add_by_id(&mut self, id: SelectorId, selection: Option<Selection>) {
+        self.0.insert(id, SelectorState { selection });
     }
 
     pub fn contains(&self, id: &SelectorId) -> bool {

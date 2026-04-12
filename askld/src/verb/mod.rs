@@ -459,7 +459,6 @@ pub trait Selector: std::fmt::Debug + Verb {
 
     async fn select_from_all_impl(
         &self,
-        _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         filter: CompositeFilter,
         parent_scope: ScopeContext,
