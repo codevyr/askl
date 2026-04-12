@@ -8,7 +8,7 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use tokio::time::timeout;
 
-use super::types::{AsklData, Edge, ErrorResponse, Graph, GraphObjectEntry, HasEdge, Node, NodeSymbolInstance};
+use super::types::{AsklData, Edge, ErrorResponse, Graph, GraphObjectEntry, HasEdge, Node, NodeSymbolInstance, QueryStatement};
 
 const MAX_RESPONSE_BYTES: usize = 1_024 * 1_024; // 1 MB
 
@@ -112,32 +112,40 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
     }
 
     for symbol in all_symbols {
-        let symbol_instances: Vec<NodeSymbolInstance> = res
-            .nodes
-            .0
-            .iter()
-            .filter(|n| n.symbol_instance.symbol == symbol.id)
-            .map(|n| {
-                let (start_offset, end_offset) =
-                    range_bounds_to_offsets(&n.symbol_instance.offset_range).unwrap();
-                NodeSymbolInstance {
-                    id: SymbolInstanceId::new(n.symbol_instance.id).to_string(),
-                    symbol: SymbolId(n.symbol_instance.symbol).to_string(),
-                    object_id: FileId::new(n.object.id).to_string(),
-                    project_id: n.object.project_id.to_string(),
-                    symbol_type: SymbolType::from(symbol.symbol_type),
-                    instance_type: InstanceType::from(n.symbol_instance.instance_type),
-                    start_offset,
-                    end_offset,
+        let mut seen_stmts = HashSet::new();
+        let mut query_stmts = Vec::new();
+        let mut symbol_instances = Vec::new();
+
+        for n in res.nodes.0.iter().filter(|n| n.symbol_instance.symbol == symbol.id) {
+            for stmt in &n.query_statements {
+                if seen_stmts.insert((stmt.start, stmt.end)) {
+                    query_stmts.push(QueryStatement {
+                        start: stmt.start,
+                        end: stmt.end,
+                        text: stmt.text.clone(),
+                    });
                 }
-            })
-            .collect();
+            }
+            let (start_offset, end_offset) =
+                range_bounds_to_offsets(&n.symbol_instance.offset_range).unwrap();
+            symbol_instances.push(NodeSymbolInstance {
+                id: SymbolInstanceId::new(n.symbol_instance.id).to_string(),
+                symbol: SymbolId(n.symbol_instance.symbol).to_string(),
+                object_id: FileId::new(n.object.id).to_string(),
+                project_id: n.object.project_id.to_string(),
+                symbol_type: SymbolType::from(symbol.symbol_type),
+                instance_type: InstanceType::from(n.symbol_instance.instance_type),
+                start_offset,
+                end_offset,
+            });
+        }
 
         println!("Symbol instances for symbol {}: {:?}", symbol.id, symbol_instances);
         result_graph.add_node(Node::new(
             SymbolId(symbol.id),
             symbol.name.clone(),
             symbol_instances,
+            query_stmts,
         ));
     }
 

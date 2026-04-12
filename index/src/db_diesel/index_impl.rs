@@ -702,6 +702,7 @@ impl Index {
                     symbol_instance: instance,
                     object,
                     project,
+                    query_statements: vec![],
                 })
                 .collect();
 

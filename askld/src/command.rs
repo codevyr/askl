@@ -27,6 +27,7 @@ impl NotificationResult {
 pub struct Command {
     verbs: Vec<Arc<dyn Verb>>,
     span: Option<Span>,
+    verb_span: Option<Span>,
 }
 
 impl Command {
@@ -34,6 +35,7 @@ impl Command {
         Self {
             verbs: vec![],
             span: Some(span),
+            verb_span: None,
         }
     }
 
@@ -54,11 +56,22 @@ impl Command {
         Self {
             verbs: verbs,
             span: Some(span),
+            verb_span: None,
         }
     }
 
     pub fn span(&self) -> &Span {
         self.span.as_ref().unwrap()
+    }
+
+    pub fn set_verb_span(&mut self, span: Span) {
+        self.verb_span = Some(span);
+    }
+
+    /// Returns the verb-only span if available (for statements with non-empty scopes),
+    /// otherwise falls back to the full statement span.
+    pub fn query_statement_span(&self) -> &Span {
+        self.verb_span.as_ref().unwrap_or_else(|| self.span.as_ref().unwrap())
     }
 
     pub fn extend(&mut self, other: Arc<dyn Verb>) {

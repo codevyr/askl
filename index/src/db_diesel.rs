@@ -19,7 +19,8 @@ pub use mixins::{
 };
 pub use selection::{
     ChildReference, HasChildReference, HasParentReference, ObjectFullDiesel, ParentReference,
-    ReferenceFullDiesel, ReferenceResult, Selection, SelectionNode, SymbolInstanceFullDiesel,
+    QueryStatementRange, ReferenceFullDiesel, ReferenceResult, Selection, SelectionNode,
+    SymbolInstanceFullDiesel,
 };
 
 pub type Connection = AsyncPgConnection;
