@@ -36,12 +36,28 @@ impl Span {
         }
     }
 
+    pub fn start(&self) -> usize {
+        self.start
+    }
+
+    pub fn end(&self) -> usize {
+        self.end
+    }
+
     pub fn as_pest_span(&self) -> pest::Span<'_> {
         pest::Span::new(&self.input, self.start, self.end).expect("valid span")
     }
 
     pub fn input(&self) -> Arc<String> {
         self.input.clone()
+    }
+
+    pub fn sub_span(&self, start: usize, end: usize) -> Self {
+        Self {
+            input: self.input.clone(),
+            start,
+            end,
+        }
     }
 }
 

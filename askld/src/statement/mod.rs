@@ -679,28 +679,38 @@ impl Statement {
 
         let warnings = self.gather_warnings(&statements);
 
-        let mut complete_selection = Vec::new();
+        let mut node_map: HashMap<i32, index::db_diesel::SelectionNode> = HashMap::new();
         for statement in &statements {
-            complete_selection.extend(
-                statement
-                    .get_selection(ctx)
-                    .iter()
-                    .map(|s| s.nodes.clone())
-                    .flatten(),
-            );
+            if let Some(selection) = statement.get_selection(ctx) {
+                let span = statement.command.query_statement_span();
+                let stmt_info = index::db_diesel::QueryStatementRange {
+                    start: span.start(),
+                    end: span.end(),
+                    text: span.as_pest_span().as_str().to_string(),
+                };
+                for mut node in selection.nodes {
+                    node.query_statements.push(stmt_info.clone());
+                    node_map
+                        .entry(node.symbol_instance.id)
+                        .and_modify(|existing| {
+                            existing
+                                .query_statements
+                                .extend(node.query_statements.iter().cloned());
+                        })
+                        .or_insert(node);
+                }
+            }
         }
 
         let all_nodes = HashSet::<SymbolInstanceId>::from_iter(
-            complete_selection
-                .iter()
-                .map(|node| SymbolInstanceId::new(node.symbol_instance.id)),
+            node_map.keys().map(|id| SymbolInstanceId::new(*id)),
         );
 
         let ref_edges = Self::collect_ref_edges(&statements, ctx, &all_nodes, &cfg.index).await;
         let has_edges = Self::collect_has_edges(&statements, ctx, &all_nodes);
 
         Ok(ExecutionResult::new(
-            NodeList(complete_selection.into_iter().collect()),
+            NodeList(node_map.into_values().collect()),
             ref_edges,
             has_edges,
             warnings,

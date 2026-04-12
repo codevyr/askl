@@ -2,6 +2,7 @@ use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::symbols::{
     SymbolInstanceId, FileId, Occurrence, SymbolId, SymbolScope, SymbolType,
 };
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ObjectFullDiesel {
@@ -33,13 +34,45 @@ pub struct SymbolInstanceFullDiesel {
     pub parents: Vec<ReferenceFullDiesel>,
 }
 
-#[derive(Debug, Clone, PartialEq, Hash, Eq)]
+/// Provenance info: which query statement produced this node.
+#[derive(Debug, Clone)]
+pub struct QueryStatementRange {
+    pub start: usize,
+    pub end: usize,
+    pub text: String,
+}
+
+/// A node selected by a query. `query_statements` is metadata excluded from
+/// identity (Hash/Eq) so duplicate nodes can be merged while accumulating
+/// which statements contributed them.
+#[derive(Debug, Clone)]
 pub struct SelectionNode {
     pub symbol: Symbol,
     pub symbol_instance: SymbolInstance,
     pub object: Object,
     pub project: Project,
+    pub query_statements: Vec<QueryStatementRange>,
 }
+
+impl Hash for SelectionNode {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.symbol.hash(state);
+        self.symbol_instance.hash(state);
+        self.object.hash(state);
+        self.project.hash(state);
+    }
+}
+
+impl PartialEq for SelectionNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.symbol == other.symbol
+            && self.symbol_instance == other.symbol_instance
+            && self.object == other.object
+            && self.project == other.project
+    }
+}
+
+impl Eq for SelectionNode {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReferenceResult {

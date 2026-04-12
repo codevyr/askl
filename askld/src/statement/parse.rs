@@ -24,12 +24,18 @@ pub fn build_statement<'a>(
     // Track inherited default symbol types
     let inherited_default_types = sub_ctx.get_default_symbol_types();
 
+    let mut last_verb_end: Option<usize> = None;
+    let mut scope_has_real_children = false;
+
     for pair in iter.by_ref() {
         match pair.as_rule() {
             Rule::verb => {
+                last_verb_end = Some(pair.as_span().end());
                 build_verb(sub_ctx.clone(), pair)?;
             }
             Rule::scope => {
+                scope_has_real_children = pair.clone().into_inner().next().is_some();
+
                 if !sub_ctx.has_relationship_modifier() {
                     // No explicit has/refs — default to both so parent-child
                     // works regardless of whether the edge is containment or reference.
@@ -77,7 +83,12 @@ pub fn build_statement<'a>(
         }
     }
 
-    let command = sub_ctx.command(statement_span);
+    let mut command = sub_ctx.command(statement_span.clone());
+    if scope_has_real_children {
+        if let Some(end) = last_verb_end {
+            command.set_verb_span(statement_span.sub_span(statement_span.start(), end));
+        }
+    }
     let relationship_type = sub_ctx.get_relationship_type();
     let unnest = command.has_verb_tag(&VerbTag::Unnest);
     let statement = Statement::new_full(command, scope.clone(), relationship_type, unnest);

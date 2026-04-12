@@ -28,19 +28,33 @@ pub struct NodeSymbolInstance {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct QueryStatement {
+    pub start: usize,
+    pub end: usize,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Node {
     #[serde(serialize_with = "symbolid_as_string")]
     id: SymbolId,
     label: String,
     symbol_instances: Vec<NodeSymbolInstance>,
+    query_statements: Vec<QueryStatement>,
 }
 
 impl Node {
-    pub fn new(id: SymbolId, label: String, symbol_instances: Vec<NodeSymbolInstance>) -> Self {
+    pub fn new(
+        id: SymbolId,
+        label: String,
+        symbol_instances: Vec<NodeSymbolInstance>,
+        query_statements: Vec<QueryStatement>,
+    ) -> Self {
         Self {
             id,
             label,
             symbol_instances,
+            query_statements,
         }
     }
 }
