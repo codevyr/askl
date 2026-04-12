@@ -2,18 +2,16 @@ use crate::cfg::{ControlFlowGraph, EdgeList, HasEdge, HasEdgeList, NodeList, Sym
 use crate::command::{Command, LabeledStatements};
 use crate::execution_context::ExecutionContext;
 use crate::execution_state::{
-    DependencyRole, ExecutionState, RelationshipType, StatementDependency, StatementDependent,
+    DependencyRole, ExecutionState, RelationshipType, StatementDependent,
 };
 use crate::hierarchy::Hierarchy;
 use crate::offset_range::range_bounds_to_offsets;
 use crate::parser::Rule;
-use crate::parser_context::ParserContext;
-use crate::scope::{build_scope, EmptyScope, Scope, StatementIter};
-use crate::span::Span;
-use crate::verb::{build_verb, DefaultTypeFilter, NotificationContext, VerbTag};
+use crate::scope::{Scope, StatementIter};
+use crate::verb::NotificationContext;
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{CompositeFilter, ScopeContext, Selection};
+use index::db_diesel::{ScopeContext, Selection};
 use index::symbols::{SymbolInstanceId, FileId, Occurrence, SymbolId};
 use std::collections::HashMap;
 use pest::error::Error;
@@ -21,102 +19,12 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashSet;
 use std::rc::{Rc, Weak};
 
-pub fn build_statement<'a>(
-    ctx: Rc<ParserContext>,
-    pair: pest::iterators::Pair<Rule>,
-) -> Result<Rc<Statement>, Error<Rule>> {
-    let statement_span = Span::from_pest(pair.as_span(), ctx.source());
-    let mut iter = pair.into_inner();
-    let sub_ctx = ParserContext::derive(ctx, statement_span.clone());
-    let mut scope: Rc<dyn Scope> = Rc::new(EmptyScope::new());
-    // Track relationship type BEFORE any verbs run
-    let inherited_rel_type = sub_ctx.get_relationship_type();
-    // Track inherited default symbol types
-    let inherited_default_types = sub_ctx.get_default_symbol_types();
+mod parse;
+mod scope_helpers;
 
-    for pair in iter.by_ref() {
-        match pair.as_rule() {
-            Rule::verb => {
-                build_verb(sub_ctx.clone(), pair)?;
-            }
-            Rule::scope => {
-                if !sub_ctx.has_relationship_modifier() {
-                    // No explicit has/refs — default to both so parent-child
-                    // works regardless of whether the edge is containment or reference.
-                    sub_ctx.set_relationship_type_default(RelationshipType::REFS | RelationshipType::HAS);
-                }
+pub use self::parse::{build_empty_statement, build_statement, init_dependencies};
 
-                // Allow all symbol types for children — empty vec means no type filtering.
-                sub_ctx.set_default_symbol_types(vec![]);
-
-                scope = build_scope(sub_ctx.clone(), pair)?;
-                break;
-            }
-            _ => Err(Error::new_from_span(
-                pest::error::ErrorVariant::ParsingError {
-                    positives: vec![Rule::verb, Rule::scope],
-                    negatives: vec![pair.as_rule()],
-                },
-                pair.as_span(),
-            ))?,
-        }
-    }
-
-    // Restore this statement's own relationship_type (how it relates to its parent).
-    // This is the INHERITED value, not the value after verbs (like has/func) modified it.
-    // The verb modifications only affect children (via the scope built above).
-    sub_ctx.set_relationship_type_default(inherited_rel_type);
-
-    if let Some(pair) = iter.next() {
-        return Err(Error::new_from_span(
-            pest::error::ErrorVariant::CustomError {
-                message: format!("Unexpected token after scope: {}", pair),
-            },
-            pair.as_span(),
-        ));
-    }
-
-    // If no explicit type selector was used, add a DefaultTypeFilter.
-    // None → no inherited default, all types (no filtering needed, skip verb).
-    // Some(vec![]) → explicitly set to "all types" (no filtering needed, skip verb).
-    // Some(types) → filter by those types.
-    if !sub_ctx.has_type_selector() {
-        let default_types = inherited_default_types.unwrap_or_default();
-        if !default_types.is_empty() {
-            sub_ctx.extend_verb(DefaultTypeFilter::new(statement_span.clone(), default_types));
-        }
-    }
-
-    let command = sub_ctx.command(statement_span);
-    let relationship_type = sub_ctx.get_relationship_type();
-    let unnest = command.has_verb_tag(&VerbTag::Unnest);
-    let statement = Statement::new_full(command, scope.clone(), relationship_type, unnest);
-    scope.set_parent(Rc::downgrade(&statement));
-
-    Ok(statement)
-}
-
-pub fn build_empty_statement(ctx: Rc<ParserContext>, span: Span) -> Rc<Statement> {
-    let scope: Rc<dyn Scope> = Rc::new(EmptyScope::new());
-    let sub_ctx = ParserContext::derive(ctx.clone(), span.clone());
-    // Keep the inherited relationship type (Has or Refs).
-    // For has {}, we want to use Has relationship (containment).
-    // For {} without has, the parent context already reset to Refs.
-    // The relationship type is correctly set by build_statement before calling build_scope.
-
-    // Empty statements have no explicit type selector — add DefaultTypeFilter if needed.
-    // None → all types (no filtering needed, skip verb). Some(vec![]) → same, skip.
-    let default_types = sub_ctx.get_default_symbol_types().unwrap_or_default();
-    if !default_types.is_empty() {
-        sub_ctx.extend_verb(DefaultTypeFilter::new(span.clone(), default_types));
-    }
-
-    let command = sub_ctx.command(span);
-    let relationship_type = sub_ctx.get_relationship_type();
-    let statement = Statement::new_with_relationship(command, scope.clone(), relationship_type);
-    scope.set_parent(Rc::downgrade(&statement));
-    return statement;
-}
+use self::scope_helpers::{build_children_scope, build_parent_scope, should_skip_in_parent_merge};
 
 pub struct ExecutionResult {
     pub nodes: NodeList,
@@ -925,182 +833,4 @@ impl Hierarchy for Statement {
     fn children(&self) -> StatementIter {
         self.scope().statements()
     }
-}
-
-/// Whether a child should be excluded from the bottom-up parent merge.
-///
-/// A bare `{}` (weak UnitVerb) can acquire a selection in two ways:
-///
-/// 1. **Top-down echo** — a strong ancestor above derived data downward
-///    through weak intermediaries.  Including this in the parent merge would
-///    feed the parent's own data back to it, diluting constraints.
-///
-/// 2. **Bottom-up signal** — a non-weak descendant (e.g. a NameSelector)
-///    originated data that propagated upward through weak intermediaries.
-///    This is real constraining data that the parent needs.
-///
-/// We distinguish the two structurally: if every descendant of the child is
-/// weak, no node below could have originated data, so any selection is
-/// necessarily a top-down echo (case 1) — skip it.  If a non-weak descendant
-/// exists, real data could have flowed up (case 2) — include it.
-///
-/// A direct-children check (`child.children().all(weak)`) is insufficient
-/// because `mark_weak_statements` propagates weakness downward via the
-/// `parent_weak` rule: a statement can be weak (from its parent) while having
-/// a non-weak child of its own.  So a weak grandchild may still carry data
-/// from a non-weak great-grandchild.  We therefore recurse the full subtree.
-fn should_skip_in_parent_merge(child: &Statement) -> bool {
-    child.get_state().weak && child.command().is_unit() && all_descendants_weak(child)
-}
-
-fn all_descendants_weak(stmt: &Statement) -> bool {
-    stmt.children()
-        .all(|child| child.get_state().weak && all_descendants_weak(&child))
-}
-
-/// Build scope context for the parent side of a statement's parent query.
-/// If the parent already has a selection, use its instance IDs.
-/// If no parent exists, return Skip.
-/// If the parent hasn't been selected yet, fall back to mixin-based scoping.
-fn build_parent_scope(statement: &Statement, ctx: &ExecutionContext) -> ScopeContext {
-    match statement.parent().and_then(|p| p.upgrade()) {
-        Some(parent) => {
-            if parent.is_computed(ctx) {
-                match parent.get_selection(ctx) {
-                    Some(sel) => ScopeContext::Scope { ids: sel.get_instance_ids(), filter: None },
-                    // None = parent has no opinion (filter-only, unit, or no selectors).
-                    // Run unscoped — the parent is transparent.
-                    None => ScopeContext::Unscoped,
-                }
-            } else {
-                // Parent not yet computed — fall back to filter-based scoping
-                match parent.command().get_selector_composite_filter() {
-                    Some(f) => ScopeContext::Scope { ids: vec![], filter: Some(f) },
-                    None => ScopeContext::Unscoped,
-                }
-            }
-        },
-        None => ScopeContext::Unscoped, // Root-level: run parents unscoped
-    }
-}
-
-/// Build scope context for the children side of a statement's children query.
-/// Collects instance IDs from already-selected children + filters from unselected children.
-/// If no children exist, return Skip.
-fn build_children_scope(statement: &Statement, ctx: &ExecutionContext) -> ScopeContext {
-    let mut has_children = false;
-    let mut any_uncomputed = false;
-    let mut any_transparent = false;
-    let mut selected_ids: Vec<i32> = Vec::new();
-    let mut unselected_filters: Vec<CompositeFilter> = Vec::new();
-
-    for child in statement.children() {
-        has_children = true;
-        if child.is_computed(ctx) {
-            match child.get_selection(ctx) {
-                Some(sel) => selected_ids.extend(sel.get_instance_ids()),
-                None => any_transparent = true,
-            }
-        } else {
-            any_uncomputed = true;
-            if let Some(f) = child.command().get_selector_composite_filter() {
-                unselected_filters.push(f);
-            }
-        }
-    }
-
-    if !has_children {
-        return ScopeContext::Skip;
-    }
-
-    let combined_filter = if unselected_filters.is_empty() {
-        None
-    } else {
-        Some(CompositeFilter::or(unselected_filters))
-    };
-
-    if selected_ids.is_empty() && combined_filter.is_none() {
-        if any_uncomputed || any_transparent {
-            ScopeContext::Unscoped
-        } else {
-            ScopeContext::Skip
-        }
-    } else {
-        ScopeContext::Scope { ids: selected_ids, filter: combined_filter }
-    }
-}
-
-pub fn init_dependencies(
-    statement: Rc<Statement>,
-    labeled_statements_map: &LabeledStatements,
-) -> Result<(), pest::error::Error<Rule>> {
-    let mut state = statement.get_state_mut();
-    if let Some(parent) = statement.parent().and_then(|p| p.upgrade()) {
-        // Add a parent as a dependent
-        state.dependents.push(StatementDependent::new(
-            parent.clone(),
-            DependencyRole::Parent,
-        ));
-
-        // Add ourself as a dependency to the parent
-        parent
-            .get_state_mut()
-            .dependencies
-            .push(StatementDependency::new(
-                statement.clone(),
-                DependencyRole::Parent,
-            ));
-    }
-
-    for child in statement.children() {
-        state.dependents.push(StatementDependent::new(
-            child.clone(),
-            DependencyRole::Child,
-        ));
-
-        // Add ourself as a dependency to the child
-        child
-            .get_state_mut()
-            .dependencies
-            .push(StatementDependency::new(
-                statement.clone(),
-                DependencyRole::Child,
-            ));
-    }
-
-    // For every user verb, add current statement as dependent to the labeled statements
-    for user in statement.command().selectors() {
-        let Some(label) = user.get_label() else {
-            continue;
-        };
-        let labeled_statements =
-            if let Some(labeled_statements) = labeled_statements_map.get_statements(&label) {
-                labeled_statements
-            } else {
-                return Err(Error::new_from_span(
-                    pest::error::ErrorVariant::CustomError {
-                        message: format!("Label '{}' not found for user selector", label),
-                    },
-                    user.span(),
-                ));
-            };
-
-        for labeled_statement in labeled_statements {
-            labeled_statement
-                .get_state_mut()
-                .dependents
-                .push(StatementDependent::new_user(
-                    statement.clone(),
-                    label.as_str(),
-                ));
-
-            // Add ourself as a dependency to the labeled statement
-            state.dependencies.push(StatementDependency::new(
-                labeled_statement.clone(),
-                DependencyRole::User,
-            ));
-        }
-    }
-
-    Ok(())
 }
