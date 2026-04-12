@@ -192,7 +192,6 @@ impl Selector for UserVerb {
 
     async fn select_from_all_impl(
         &self,
-        _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
         _filter: CompositeFilter,
         _parent_scope: ScopeContext,

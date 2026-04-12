@@ -174,7 +174,6 @@ impl Selector for NameSelector {
 
     async fn select_from_all_impl(
         &self,
-        _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         filter: CompositeFilter,
         parent_scope: ScopeContext,
@@ -246,7 +245,6 @@ impl Selector for ForcedVerb {
 
     async fn select_from_all_impl(
         &self,
-        _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         filter: CompositeFilter,
         parent_scope: ScopeContext,
@@ -357,7 +355,6 @@ impl Verb for UnitVerb {
 impl Selector for UnitVerb {
     async fn select_from_all_impl(
         &self,
-        _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
         _filter: CompositeFilter,
         _parent_scope: ScopeContext,
@@ -583,7 +580,6 @@ impl Verb for IsolatedScope {
 impl Selector for IsolatedScope {
     async fn select_from_all_impl(
         &self,
-        _ctx: &mut ExecutionContext,
         _cfg: &ControlFlowGraph,
         _filter: CompositeFilter,
         _parent_scope: ScopeContext,
@@ -1187,7 +1183,6 @@ impl Selector for TypeSelector {
 
     async fn select_from_all_impl(
         &self,
-        _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         filter: CompositeFilter,
         parent_scope: ScopeContext,
@@ -1330,7 +1325,6 @@ impl Selector for GenericSelector {
 
     async fn select_from_all_impl(
         &self,
-        _ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         filter: CompositeFilter,
         parent_scope: ScopeContext,
