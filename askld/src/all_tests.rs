@@ -2777,3 +2777,32 @@ fn label_forced_with_scoped_derivation() {
     assert!(nodes.contains(&SymbolInstanceId::new(200)), "M inside e");
     assert!(nodes.contains(&SymbolInstanceId::new(210)), "x (child of M in e)");
 }
+
+// ============================================================================
+// Multi-instance symbol constraint tests — verify that REFS constraints use
+// symbol-level matching so that a symbol with declaration + definition
+// instances retains both when constrained by children/parents.
+//
+// Symbol f (id=6) has two instances: 86 (bar.c) and 96 (main.c).
+// Only instance 86 (bar.c) references h.  With instance-level matching
+// the child constraint would remove instance 96; symbol-level matching
+// keeps both.
+// ============================================================================
+
+#[test]
+fn multi_instance_nested_retains_both() {
+    // d -> {e, f} and f(bar.c) -> h.
+    // "d" { "f" { "h" } } must retain both f instances (86 and 96).
+    const QUERY: &str = r#""d" { "f" { "h" } }"#;
+    let res = run_query(TEST_INPUT_B, QUERY);
+
+    println!("{:#?}", res.nodes);
+    println!("{:#?}", res.edges);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(94)), "d should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(86)), "f (bar.c) should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(96)), "f (main.c) should be retained by symbol-level matching");
+    assert!(nodes.contains(&SymbolInstanceId::new(88)), "h should be in results");
+    assert!(res.warnings.is_empty(), "no warnings expected");
+}

@@ -300,37 +300,49 @@ impl SelectorState {
     }
 
     fn constrain_by_parent(&mut self, parent: &Selection, rel_type: RelationshipType) {
-        let parent_node_ids: std::collections::HashSet<_> =
-            parent.nodes.iter().map(|n| n.symbol_instance.id).collect();
+        let check_refs = rel_type.contains(RelationshipType::REFS);
+        let check_has = rel_type.contains(RelationshipType::HAS);
+        let parent_symbol_ids: std::collections::HashSet<_> = if check_refs {
+            parent.nodes.iter().map(|n| n.symbol.id).collect()
+        } else { Default::default() };
+        let parent_instance_ids: std::collections::HashSet<_> = if check_has {
+            parent.nodes.iter().map(|n| n.symbol_instance.id).collect()
+        } else { Default::default() };
         let selection = self.selection.as_mut().unwrap();
         selection.nodes.retain(|s| {
-            (rel_type.contains(RelationshipType::REFS)
+            (check_refs
                 && parent.children.iter().any(|r| {
-                    r.symbol_instance.id == s.symbol_instance.id
-                        && parent_node_ids.contains(&r.from_instance.id)
+                    r.symbol.id == s.symbol.id
+                        && parent_symbol_ids.contains(&r.parent_symbol.id)
                 }))
-                || (rel_type.contains(RelationshipType::HAS)
+                || (check_has
                     && parent.has_children.iter().any(|r| {
                         r.child_instance.id == s.symbol_instance.id
-                            && parent_node_ids.contains(&r.parent_instance.id)
+                            && parent_instance_ids.contains(&r.parent_instance.id)
                     }))
         });
     }
 
     fn constrain_by_child(&mut self, child: &Selection, rel_type: RelationshipType) {
-        let child_node_ids: std::collections::HashSet<_> =
-            child.nodes.iter().map(|n| n.symbol_instance.id).collect();
+        let check_refs = rel_type.contains(RelationshipType::REFS);
+        let check_has = rel_type.contains(RelationshipType::HAS);
+        let child_symbol_ids: std::collections::HashSet<_> = if check_refs {
+            child.nodes.iter().map(|n| n.symbol.id).collect()
+        } else { Default::default() };
+        let child_instance_ids: std::collections::HashSet<_> = if check_has {
+            child.nodes.iter().map(|n| n.symbol_instance.id).collect()
+        } else { Default::default() };
         let selection = self.selection.as_mut().unwrap();
         selection.nodes.retain(|s| {
-            (rel_type.contains(RelationshipType::REFS)
+            (check_refs
                 && child.parents.iter().any(|r| {
-                    r.from_instance.id == s.symbol_instance.id
-                        && child_node_ids.contains(&r.to_instance.id)
+                    r.from_instance.symbol == s.symbol.id
+                        && child_symbol_ids.contains(&r.to_symbol.id)
                 }))
-                || (rel_type.contains(RelationshipType::HAS)
+                || (check_has
                     && child.has_parents.iter().any(|r| {
                         r.parent_instance.id == s.symbol_instance.id
-                            && child_node_ids.contains(&r.child_instance.id)
+                            && child_instance_ids.contains(&r.child_instance.id)
                     }))
         });
     }

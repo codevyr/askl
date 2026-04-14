@@ -102,3 +102,17 @@ INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type
 INSERT INTO symbol_refs (to_symbol, from_object, from_offset_range) VALUES
     (201, 1, int4range(954, 956)),   -- ref to x inside M-in-e
     (202, 1, int4range(974, 976));   -- ref to y inside M-in-g
+
+-- === Multi-instance constraint test data ===
+-- Symbol f (id=6) already has two instances: 86 (bar.c) and 96 (main.c).
+-- Add symbol h that only f's bar.c definition (instance 86) references.
+-- Query "d" { "f" { "h" } } must retain BOTH f instances (symbol-level REFS matching).
+
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope) VALUES
+    (8, 'h', 1, 1, 1);   -- function
+
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (88, 8, 2, int4range(880, 889), 1);   -- h definition in bar.c
+
+INSERT INTO symbol_refs (to_symbol, from_object, from_offset_range) VALUES
+    (8, 2, int4range(861, 863));   -- f(bar.c) -> h  (inside f's bar.c range [860,869))
