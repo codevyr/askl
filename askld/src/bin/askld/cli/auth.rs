@@ -24,6 +24,8 @@ fn print_key(key: &ApiKeyInfo) {
 }
 
 pub async fn run_auth_command(port: u16, command: AuthCommand) -> Result<()> {
+    let client = reqwest::Client::new();
+
     match command {
         AuthCommand::CreateApiKey {
             email,
@@ -31,21 +33,21 @@ pub async fn run_auth_command(port: u16, command: AuthCommand) -> Result<()> {
             json,
             expires_at,
         } => {
-            let client = awc::Client::default();
             let url = format!("http://127.0.0.1:{}/auth/local/create-api-key", port);
-            let mut response = client
+            let response = client
                 .post(url)
-                .send_json(&CreateApiKeyRequest {
+                .json(&CreateApiKeyRequest {
                     email,
                     name,
                     expires_at,
                 })
+                .send()
                 .await
                 .map_err(|e| anyhow!("Request failed: {}", e))?;
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body_bytes = response.body().await.map_err(|e| anyhow!("{}", e))?;
+                let body_bytes = response.bytes().await.map_err(|e| anyhow!("{}", e))?;
                 let body = String::from_utf8_lossy(&body_bytes);
                 return Err(anyhow!("Request failed ({}): {}", status, body));
             }
@@ -64,17 +66,17 @@ pub async fn run_auth_command(port: u16, command: AuthCommand) -> Result<()> {
             }
         }
         AuthCommand::RevokeApiKey { token_id, json } => {
-            let client = awc::Client::default();
             let url = format!("http://127.0.0.1:{}/auth/local/revoke-api-key", port);
-            let mut response = client
+            let response = client
                 .post(url)
-                .send_json(&RevokeApiKeyRequest { token_id })
+                .json(&RevokeApiKeyRequest { token_id })
+                .send()
                 .await
                 .map_err(|e| anyhow!("Request failed: {}", e))?;
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body_bytes = response.body().await.map_err(|e| anyhow!("{}", e))?;
+                let body_bytes = response.bytes().await.map_err(|e| anyhow!("{}", e))?;
                 let body = String::from_utf8_lossy(&body_bytes);
                 return Err(anyhow!("Request failed ({}): {}", status, body));
             }
@@ -91,17 +93,17 @@ pub async fn run_auth_command(port: u16, command: AuthCommand) -> Result<()> {
             }
         }
         AuthCommand::ListApiKeys { email, json } => {
-            let client = awc::Client::default();
             let url = format!("http://127.0.0.1:{}/auth/local/list-api-keys", port);
-            let mut response = client
+            let response = client
                 .post(url)
-                .send_json(&ListApiKeysRequest { email })
+                .json(&ListApiKeysRequest { email })
+                .send()
                 .await
                 .map_err(|e| anyhow!("Request failed: {}", e))?;
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body_bytes = response.body().await.map_err(|e| anyhow!("{}", e))?;
+                let body_bytes = response.bytes().await.map_err(|e| anyhow!("{}", e))?;
                 let body = String::from_utf8_lossy(&body_bytes);
                 return Err(anyhow!("Request failed ({}): {}", status, body));
             }

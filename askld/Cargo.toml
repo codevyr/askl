@@ -39,7 +39,7 @@ chrono = "0.4.41"
 tracing-actix-web = "0.7.19"
 argon2 = "0.5"
 base64 = "0.22"
-awc = "3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 uuid = { version = "1.10", features = ["v4"] }
 diesel = { workspace = true, features = ["postgres", "r2d2", "chrono", "uuid"] }
 diesel-async = { workspace = true }

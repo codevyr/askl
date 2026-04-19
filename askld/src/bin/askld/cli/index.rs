@@ -1,12 +1,12 @@
 use crate::args::IndexCommand;
-use actix_web::http::header::CONTENT_LENGTH;
-use actix_web::http::StatusCode;
 use anyhow::{anyhow, Result};
 use askld::proto::askl::index::Project;
 use bytes::Bytes;
 use futures::TryStreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use prost::Message;
+use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use tokio::time::Duration;
 use tokio_util::codec::{BytesCodec, FramedRead};
@@ -60,14 +60,12 @@ fn normalize_base_url(url: &str) -> String {
     base_url.trim_end_matches('/').to_string()
 }
 
-fn build_client(timeout: u64) -> awc::Client {
-    let mut builder = awc::Client::builder();
+fn build_client(timeout: u64) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder();
     if timeout > 0 {
         builder = builder.timeout(Duration::from_secs(timeout));
-    } else {
-        builder = builder.disable_timeout();
     }
-    builder.finish()
+    builder.build().expect("failed to build HTTP client")
 }
 
 fn build_progress_bar(total: u64, enabled: bool) -> Option<ProgressBar> {
@@ -103,12 +101,12 @@ fn resolve_project_selector(id: Option<i32>, name: Option<String>) -> Result<Pro
 }
 
 async fn fetch_projects(
-    client: &awc::Client,
+    client: &reqwest::Client,
     base_url: &str,
     token: &str,
 ) -> Result<Vec<ProjectInfo>> {
     let endpoint = format!("{}/v1/index/projects", base_url);
-    let mut response = client
+    let response = client
         .get(endpoint)
         .bearer_auth(token)
         .send()
@@ -117,7 +115,7 @@ async fn fetch_projects(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body_bytes = response.body().await.map_err(|e| anyhow!("{}", e))?;
+        let body_bytes = response.bytes().await.map_err(|e| anyhow!("{}", e))?;
         let body = String::from_utf8_lossy(&body_bytes);
         return Err(anyhow!("Request failed ({}): {}", status, body));
     }
@@ -129,7 +127,7 @@ async fn fetch_projects(
 }
 
 async fn resolve_project_id(
-    client: &awc::Client,
+    client: &reqwest::Client,
     base_url: &str,
     token: &str,
     selector: ProjectSelector,
@@ -163,7 +161,7 @@ fn human_size(bytes: u64) -> String {
 }
 
 async fn stream_file_to_endpoint(
-    client: &awc::Client,
+    client: &reqwest::Client,
     endpoint: &str,
     token: &str,
     file_path: &str,
@@ -192,12 +190,13 @@ async fn stream_file_to_endpoint(
         bytes.freeze()
     });
 
-    let mut response = client
+    let response = client
         .post(endpoint)
-        .content_type("application/x-protobuf")
+        .header(CONTENT_TYPE, "application/x-protobuf")
         .bearer_auth(token)
-        .insert_header((CONTENT_LENGTH, total))
-        .send_stream(stream)
+        .header(CONTENT_LENGTH, total.to_string())
+        .body(reqwest::Body::wrap_stream(stream))
+        .send()
         .await
         .map_err(|e| anyhow!("Request failed: {}", e))?;
 
@@ -209,7 +208,7 @@ async fn stream_file_to_endpoint(
     }
 
     let status = response.status();
-    let body = response.body().await.map_err(|e| anyhow!("{}", e))?.to_vec();
+    let body = response.bytes().await.map_err(|e| anyhow!("{}", e))?.to_vec();
     Ok((status, body))
 }
 
@@ -242,7 +241,7 @@ fn print_upload_result(body: &[u8], json: bool) -> Result<()> {
 }
 
 async fn upload_project_pb(
-    client: &awc::Client,
+    client: &reqwest::Client,
     endpoint: &str,
     token: &str,
     file_path: &str,
@@ -280,12 +279,13 @@ async fn upload_project_pb(
             Ok::<Bytes, std::io::Error>(chunk)
         }));
 
-        let mut response = client
+        let response = client
             .post(endpoint)
-            .content_type("application/x-protobuf")
+            .header(CONTENT_TYPE, "application/x-protobuf")
             .bearer_auth(token)
-            .insert_header((CONTENT_LENGTH, total))
-            .send_stream(stream)
+            .header(CONTENT_LENGTH, total.to_string())
+            .body(reqwest::Body::wrap_stream(stream))
+            .send()
             .await
             .map_err(|e| anyhow!("Request failed: {}", e))?;
         if let Some(pb) = progress {
@@ -296,7 +296,7 @@ async fn upload_project_pb(
         }
 
         let status = response.status();
-        let body = response.body().await.map_err(|e| anyhow!("{}", e))?.to_vec();
+        let body = response.bytes().await.map_err(|e| anyhow!("{}", e))?.to_vec();
         Ok((status, body))
     } else {
         stream_file_to_endpoint(client, endpoint, token, file_path, "Uploading project", show_progress).await
@@ -304,7 +304,7 @@ async fn upload_project_pb(
 }
 
 async fn upload_single_file(
-    client: &awc::Client,
+    client: &reqwest::Client,
     base_url: &str,
     token: &str,
     file_path: &str,
@@ -318,7 +318,7 @@ async fn upload_single_file(
 }
 
 async fn upload_directory(
-    client: &awc::Client,
+    client: &reqwest::Client,
     base_url: &str,
     token: &str,
     dir_path: &str,
@@ -451,7 +451,7 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
             let (project_id, _) = resolve_project_id(&client, &base_url, &token, selector).await?;
             let endpoint = format!("{}/v1/index/projects/{}", base_url, project_id);
 
-            let mut response = client
+            let response = client
                 .get(endpoint)
                 .bearer_auth(&token)
                 .send()
@@ -460,7 +460,7 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body_bytes = response.body().await.map_err(|e| anyhow!("{}", e))?;
+                let body_bytes = response.bytes().await.map_err(|e| anyhow!("{}", e))?;
                 let body = String::from_utf8_lossy(&body_bytes);
                 return Err(anyhow!("Request failed ({}): {}", status, body));
             }
@@ -502,7 +502,7 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
                 resolve_project_id(&client, &base_url, &token, selector).await?;
             let endpoint = format!("{}/v1/index/projects/{}", base_url, project_id);
 
-            let mut response = client
+            let response = client
                 .delete(endpoint)
                 .bearer_auth(&token)
                 .send()
@@ -511,7 +511,7 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
 
             if !response.status().is_success() {
                 let status = response.status();
-                let body_bytes = response.body().await.map_err(|e| anyhow!("{}", e))?;
+                let body_bytes = response.bytes().await.map_err(|e| anyhow!("{}", e))?;
                 let body = String::from_utf8_lossy(&body_bytes);
                 return Err(anyhow!("Request failed ({}): {}", status, body));
             }
