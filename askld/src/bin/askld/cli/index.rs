@@ -1,6 +1,6 @@
 use crate::args::IndexCommand;
 use anyhow::{anyhow, Result};
-use askld::proto::askl::index::Project;
+use askld::proto::askl::index::{ContentBatch, Project};
 use bytes::Bytes;
 use futures::TryStreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -51,6 +51,7 @@ enum ProjectSelector {
 }
 
 const UPLOAD_CHUNK_SIZE: usize = 64 * 1024;
+const CONTENTS_UPLOAD_MAX_BYTES: usize = 128 * 1024 * 1024;
 
 fn normalize_base_url(url: &str) -> String {
     let mut base_url = url.trim().to_string();
@@ -165,24 +166,18 @@ async fn stream_file_to_endpoint(
     endpoint: &str,
     token: &str,
     file_path: &str,
-    msg: &str,
-    show_progress: bool,
+    progress: &Option<ProgressBar>,
 ) -> Result<(StatusCode, Vec<u8>)> {
     let file = tokio::fs::File::open(file_path)
         .await
         .map_err(|err| anyhow!("Failed to open {}: {}", file_path, err))?;
-    let metadata = file
+    let total = file
         .metadata()
         .await
-        .map_err(|err| anyhow!("Failed to read {} metadata: {}", file_path, err))?;
-    let total = metadata.len();
+        .map_err(|err| anyhow!("Failed to read {} metadata: {}", file_path, err))?
+        .len();
 
-    let progress = build_progress_bar(total, show_progress);
     let progress_handle = progress.clone();
-    if let Some(ref pb) = progress {
-        pb.set_message(msg.to_string());
-    }
-
     let stream = FramedRead::new(file, BytesCodec::new()).map_ok(move |bytes| {
         if let Some(ref pb) = progress_handle {
             pb.inc(bytes.len() as u64);
@@ -199,13 +194,6 @@ async fn stream_file_to_endpoint(
         .send()
         .await
         .map_err(|e| anyhow!("Request failed: {}", e))?;
-
-    if let Some(pb) = progress {
-        pb.finish_and_clear();
-    }
-    if show_progress {
-        eprintln!("{}... {} done", msg, human_size(total));
-    }
 
     let status = response.status();
     let body = response.bytes().await.map_err(|e| anyhow!("{}", e))?.to_vec();
@@ -246,10 +234,10 @@ async fn upload_project_pb(
     token: &str,
     file_path: &str,
     project_name: Option<String>,
-    show_progress: bool,
+    progress: &Option<ProgressBar>,
 ) -> Result<(StatusCode, Vec<u8>)> {
     if let Some(project_name) = project_name {
-        // Decode, override name, re-encode, stream with progress
+        // Decode, override name, re-encode, stream in chunks
         let payload = tokio::fs::read(file_path)
             .await
             .map_err(|err| anyhow!("Failed to read {}: {}", file_path, err))?;
@@ -261,45 +249,9 @@ async fn upload_project_pb(
         upload.project_name = project_name;
         let mut buffer = Vec::with_capacity(upload.encoded_len());
         upload.encode(&mut buffer)?;
-
-        let total = buffer.len() as u64;
-        let progress = build_progress_bar(total, show_progress);
-        let progress_handle = progress.clone();
-        if let Some(ref pb) = progress {
-            pb.set_message("Uploading project".to_string());
-        }
-        let chunks: Vec<Bytes> = buffer
-            .chunks(UPLOAD_CHUNK_SIZE)
-            .map(Bytes::copy_from_slice)
-            .collect();
-        let stream = futures::stream::iter(chunks.into_iter().map(move |chunk| {
-            if let Some(ref pb) = progress_handle {
-                pb.inc(chunk.len() as u64);
-            }
-            Ok::<Bytes, std::io::Error>(chunk)
-        }));
-
-        let response = client
-            .post(endpoint)
-            .header(CONTENT_TYPE, "application/x-protobuf")
-            .bearer_auth(token)
-            .header(CONTENT_LENGTH, total.to_string())
-            .body(reqwest::Body::wrap_stream(stream))
-            .send()
-            .await
-            .map_err(|e| anyhow!("Request failed: {}", e))?;
-        if let Some(pb) = progress {
-            pb.finish_and_clear();
-        }
-        if show_progress {
-            eprintln!("Uploading project... {} done", human_size(total));
-        }
-
-        let status = response.status();
-        let body = response.bytes().await.map_err(|e| anyhow!("{}", e))?.to_vec();
-        Ok((status, body))
+        stream_bytes(client, endpoint, token, buffer, progress).await
     } else {
-        stream_file_to_endpoint(client, endpoint, token, file_path, "Uploading project", show_progress).await
+        stream_file_to_endpoint(client, endpoint, token, file_path, progress).await
     }
 }
 
@@ -311,10 +263,105 @@ async fn upload_single_file(
     project: Option<String>,
     json: bool,
 ) -> Result<()> {
+    let show_progress = !json;
+    let total = tokio::fs::metadata(file_path)
+        .await
+        .map_err(|e| anyhow!("Failed to stat {}: {}", file_path, e))?
+        .len();
+    let progress = build_progress_bar(total, show_progress);
+    if let Some(ref pb) = progress {
+        pb.set_message("Uploading project".to_string());
+    }
     let endpoint = format!("{}/v1/index/projects", base_url);
-    let (status, body) = upload_project_pb(client, &endpoint, token, file_path, project, !json).await?;
+    let (status, body) = upload_project_pb(client, &endpoint, token, file_path, project, &progress).await?;
+    if let Some(pb) = progress {
+        pb.finish_and_clear();
+    }
+    if show_progress {
+        eprintln!("Uploading project... {} done", human_size(total));
+    }
     check_upload_response(status, &body)?;
     print_upload_result(&body, json)
+}
+
+/// Stream a pre-encoded buffer in UPLOAD_CHUNK_SIZE chunks, updating a shared progress bar.
+async fn stream_bytes(
+    client: &reqwest::Client,
+    endpoint: &str,
+    token: &str,
+    buf: Vec<u8>,
+    progress: &Option<ProgressBar>,
+) -> Result<(StatusCode, Vec<u8>)> {
+    let buf_len = buf.len() as u64;
+    let progress_handle = progress.clone();
+    let chunks: Vec<Bytes> = buf
+        .chunks(UPLOAD_CHUNK_SIZE)
+        .map(Bytes::copy_from_slice)
+        .collect();
+    let stream = futures::stream::iter(chunks.into_iter().map(move |chunk| {
+        if let Some(ref pb) = progress_handle {
+            pb.inc(chunk.len() as u64);
+        }
+        Ok::<Bytes, std::io::Error>(chunk)
+    }));
+
+    let response = client
+        .post(endpoint)
+        .header(CONTENT_TYPE, "application/x-protobuf")
+        .bearer_auth(token)
+        .header(CONTENT_LENGTH, buf_len.to_string())
+        .body(reqwest::Body::wrap_stream(stream))
+        .send()
+        .await
+        .map_err(|e| anyhow!("Request failed: {}", e))?;
+
+    let status = response.status();
+    let body = response.bytes().await.map_err(|e| anyhow!("{}", e))?.to_vec();
+    Ok((status, body))
+}
+
+async fn upload_content_file(
+    client: &reqwest::Client,
+    endpoint: &str,
+    token: &str,
+    file_path: &str,
+    progress: &Option<ProgressBar>,
+) -> Result<()> {
+    let data = tokio::fs::read(file_path)
+        .await
+        .map_err(|e| anyhow!("Failed to read {}: {}", file_path, e))?;
+    let batch = ContentBatch::decode(data.as_slice())
+        .map_err(|e| anyhow!("Failed to decode {}: {}", file_path, e))?;
+
+    // Partition into sub-batches by raw content size
+    let mut sub_batches: Vec<ContentBatch> = Vec::new();
+    let mut current = ContentBatch::default();
+    let mut current_size: usize = 0;
+
+    for entry in batch.contents {
+        let entry_size = entry.content.len();
+        if current_size + entry_size > CONTENTS_UPLOAD_MAX_BYTES && !current.contents.is_empty() {
+            sub_batches.push(std::mem::take(&mut current));
+            current_size = 0;
+        }
+        current_size += entry_size;
+        current.contents.push(entry);
+    }
+    if !current.contents.is_empty() {
+        sub_batches.push(current);
+    }
+
+    for sub_batch in sub_batches {
+        let mut buf = Vec::with_capacity(sub_batch.encoded_len());
+        sub_batch.encode(&mut buf)?;
+        let (status, body) = stream_bytes(client, endpoint, token, buf, progress).await?;
+        if !status.is_success() {
+            let body_str = String::from_utf8_lossy(&body);
+            return Err(anyhow!("Content upload failed ({}): {}", status, body_str));
+        }
+    }
+
+    Ok(())
 }
 
 async fn upload_directory(
@@ -357,34 +404,44 @@ async fn upload_directory(
     let contents_endpoint = format!("{}/v1/index/contents", base_url);
     let show_progress = !json;
 
+    // Compute total bytes across all files for the unified progress bar
+    let mut total_bytes: u64 = tokio::fs::metadata(&project_pb)
+        .await
+        .map_err(|e| anyhow!("Failed to stat {}: {}", project_pb, e))?
+        .len();
+    for name in &content_files {
+        total_bytes += tokio::fs::metadata(format!("{}/{}", dir_path, name))
+            .await
+            .map_err(|e| anyhow!("Failed to stat {}: {}", name, e))?
+            .len();
+    }
+
+    let progress = build_progress_bar(total_bytes, show_progress);
+
     // Upload content parts sequentially
     let total_parts = content_files.len();
     for (i, name) in content_files.iter().enumerate() {
         let file_path = format!("{}/{}", dir_path, name);
-        let msg = format!("Uploading contents ({}/{})", i + 1, total_parts);
-        let (status, body) = stream_file_to_endpoint(
-            client,
-            &contents_endpoint,
-            token,
-            &file_path,
-            &msg,
-            show_progress,
-        )
-        .await?;
-
-        if !status.is_success() {
-            let body_str = String::from_utf8_lossy(&body);
-            return Err(anyhow!(
-                "Content upload failed ({}): {}",
-                status,
-                body_str
-            ));
+        if let Some(ref pb) = progress {
+            pb.set_message(format!("Uploading contents ({}/{})", i + 1, total_parts));
         }
+        upload_content_file(client, &contents_endpoint, token, &file_path, &progress).await?;
     }
 
     // Upload project
+    if let Some(ref pb) = progress {
+        pb.set_message("Uploading project".to_string());
+    }
     let projects_endpoint = format!("{}/v1/index/projects", base_url);
-    let (status, body) = upload_project_pb(client, &projects_endpoint, token, &project_pb, project, show_progress).await?;
+    let (status, body) = upload_project_pb(client, &projects_endpoint, token, &project_pb, project, &progress).await?;
+
+    if let Some(pb) = progress {
+        pb.finish_and_clear();
+    }
+    if show_progress {
+        eprintln!("Uploaded {} total", human_size(total_bytes));
+    }
+
     check_upload_response(status, &body)?;
     print_upload_result(&body, json)
 }
