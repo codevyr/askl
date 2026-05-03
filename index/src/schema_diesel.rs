@@ -21,7 +21,7 @@ diesel::table! {
 
     index.symbol_instances (id) {
         id -> Integer,
-        symbol -> Integer,
+        symbol -> BigInt,
         object_id -> Integer,
         offset_range -> Int4range,
         instance_type -> Integer,
@@ -67,6 +67,7 @@ diesel::table! {
         id -> Integer,
         project_name -> Text,
         root_path -> Text,
+        upload_status -> Text,
     }
 }
 
@@ -75,7 +76,7 @@ diesel::table! {
 
     index.symbol_refs (id) {
         id -> Integer,
-        to_symbol -> Integer,
+        to_symbol -> BigInt,
         from_object -> Integer,
         from_offset_range -> Int4range,
     }
@@ -86,7 +87,7 @@ diesel::table! {
     use crate::ltree::Ltree;
 
     index.symbols (id) {
-        id -> Integer,
+        id -> BigInt,
         name -> Text,
         symbol_path -> Ltree,
         project_id -> Integer,
@@ -106,7 +107,6 @@ diesel::joinable!(objects -> projects (project_id));
 diesel::joinable!(symbol_refs -> symbols (to_symbol));
 diesel::joinable!(symbols -> projects (project_id));
 diesel::joinable!(symbols -> symbol_types (symbol_type));
-
 diesel::allow_tables_to_appear_in_same_query!(
     instance_types,
     symbol_instances,

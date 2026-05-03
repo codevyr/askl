@@ -188,10 +188,10 @@ pub trait Symbols {
 #[derive(
     Debug, Default, Serialize, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord,
 )]
-pub struct SymbolId(pub i32);
+pub struct SymbolId(pub i64);
 
 impl SymbolId {
-    pub fn new(id: i32) -> Self {
+    pub fn new(id: i64) -> Self {
         Self(id)
     }
 }
@@ -202,7 +202,7 @@ impl From<clang_ast::Id> for SymbolId {
             .strip_prefix("0x")
             .and_then(|hex| u64::from_str_radix(hex, 16).ok())
             .unwrap();
-        Self(value as i32)
+        Self(value as i64)
     }
 }
 
@@ -214,25 +214,25 @@ impl fmt::Display for SymbolId {
 
 impl From<Option<i32>> for SymbolId {
     fn from(value: Option<i32>) -> Self {
-        Self(value.unwrap())
+        Self(value.unwrap() as i64)
     }
 }
 
 impl From<Option<i64>> for SymbolId {
     fn from(value: Option<i64>) -> Self {
-        Self(value.unwrap() as i32)
+        Self(value.unwrap())
     }
 }
 
 impl From<i32> for SymbolId {
     fn from(value: i32) -> Self {
-        Self(value)
+        Self(value as i64)
     }
 }
 
 impl From<i64> for SymbolId {
     fn from(value: i64) -> Self {
-        Self(value as i32)
+        Self(value)
     }
 }
 
@@ -595,6 +595,43 @@ pub fn normalize_symbol_tokens(input: &str) -> Vec<String> {
         .collect()
 }
 
+/// Pre-compute `(symbol_path, leaf_name)` for a symbol before INSERT, replicating
+/// the `set_symbol_path` DB trigger.  Calling this in Rust eliminates ~50µs of
+/// per-row SQL work (subquery + regexp) per symbol.
+///
+/// Mirrors `symbol_name_to_ltree(name, dot_is_separator)` + leaf extraction:
+/// - Files (type 2) and directories (type 4): dots are part of the name → replaced with `_`
+/// - All other types: dots are label separators
+///
+/// # IMPORTANT — keep in sync with the DB trigger
+///
+/// The migration at `2026-04-24-000001_upload_workflow_and_indexes/up.sql` configures
+/// `symbols_set_path` to fire on INSERT only when `symbol_path IS NULL`, skipping the
+/// trigger when the caller pre-fills it.  Pre-filled values are **not validated** by the
+/// trigger, so any divergence between this function and the DB trigger function
+/// `index.set_symbol_path` → `index.symbol_name_to_ltree` is silent.
+///
+/// Key rules that must remain identical on both sides:
+/// - Characters stripped before splitting: `* [ ] { } , @ - (space) ( )`
+/// - Split delimiters: `.`, `/`, `:`
+/// - Per-label allowlist after split: ASCII alphanumeric + `_` only
+/// - dot-is-separator logic: false for symbol types FILE (2) and DIRECTORY (4), true otherwise
+/// - Empty token list → `"unknown"`
+///
+/// The DB trigger regex for stripping is `E'[\\*\\[\\]\\{\\},@\\- \\(\\)]'` — verify that
+/// any future changes to `chars_to_remove` in [`clean_and_split_string`] are reflected there.
+pub fn symbol_path_and_leaf(name: &str, symbol_type: i32) -> (String, String) {
+    let dot_is_sep = symbol_type != SymbolType::File as i32
+        && symbol_type != SymbolType::Directory as i32;
+    let path = if dot_is_sep {
+        symbol_name_to_path(name)
+    } else {
+        symbol_name_to_path(&name.replace('.', "_"))
+    };
+    let leaf = path.rsplit('.').next().unwrap_or(&path).to_string();
+    (path, leaf)
+}
+
 pub fn symbol_name_to_path(input: &str) -> String {
     let tokens = normalize_symbol_tokens(input);
     if tokens.is_empty() {
@@ -813,5 +850,53 @@ mod tests {
             build_lquery("log.h", true, false),
             Some("*.log_h".to_string())
         );
+    }
+
+    // symbol_path_and_leaf
+
+    #[test]
+    fn path_and_leaf_function_dots_are_separators() {
+        // For functions dots split into ltree labels, so "foo.bar" → path "foo.bar", leaf "bar"
+        let (path, leaf) = symbol_path_and_leaf("foo.bar", SymbolType::Function as i32);
+        assert!(path.ends_with(".bar") || path == "bar", "path={}", path);
+        assert_eq!(leaf, path.rsplit('.').next().unwrap());
+    }
+
+    #[test]
+    fn path_and_leaf_file_dots_become_underscores() {
+        // For files dots must NOT split labels — "stdio.h" should produce "stdio_h" not "stdio.h"
+        let (path, leaf) = symbol_path_and_leaf("/usr/include/stdio.h", SymbolType::File as i32);
+        assert!(path.contains("stdio_h"), "expected stdio_h in path, got {}", path);
+        assert!(!path.contains("stdio.h"), "dot must not remain in path for file type");
+        assert_eq!(leaf, path.rsplit('.').next().unwrap());
+    }
+
+    #[test]
+    fn path_and_leaf_directory_dots_become_underscores() {
+        let (path, leaf) = symbol_path_and_leaf("/home/user/my.dir", SymbolType::Directory as i32);
+        assert!(path.contains("my_dir"), "expected my_dir in path, got {}", path);
+        assert_eq!(leaf, path.rsplit('.').next().unwrap());
+    }
+
+    #[test]
+    fn path_and_leaf_leaf_is_last_label() {
+        // leaf must always equal the last dot-separated component of path
+        for (name, st) in &[
+            ("std::vec::Vec", SymbolType::Type as i32),
+            ("/kernel/sched.c", SymbolType::File as i32),
+            ("linux/kernel", SymbolType::Module as i32),
+        ] {
+            let (path, leaf) = symbol_path_and_leaf(name, *st);
+            let expected = path.rsplit('.').next().unwrap().to_string();
+            assert_eq!(leaf, expected, "name={} type={}", name, st);
+        }
+    }
+
+    #[test]
+    fn path_and_leaf_no_dots_in_name() {
+        // A plain name with no dots or separators should still produce a valid non-empty path
+        let (path, leaf) = symbol_path_and_leaf("myfunc", SymbolType::Function as i32);
+        assert!(!path.is_empty());
+        assert!(!leaf.is_empty());
     }
 }

@@ -26,6 +26,15 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .app_data(web::PayloadConfig::new(index::max_upload_bytes()))
                 .route(web::post().to(index::upload_contents)),
         )
+        .service(
+            web::resource("/v1/index/projects/{project_id}/objects")
+                .app_data(web::PayloadConfig::new(index::max_upload_bytes()))
+                .route(web::post().to(index::append_project_objects)),
+        )
+        .service(
+            web::resource("/v1/index/projects/{project_id}/finalize")
+                .route(web::post().to(index::finalize_project)),
+        )
         .service(index::get_index_project)
         .service(index::delete_index_project)
         .service(index::get_project_tree)

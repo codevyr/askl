@@ -47,7 +47,7 @@ pub async fn create_api_key(
         .create_api_key(payload.email.trim(), payload.name.as_deref(), expires_at)
         .await
     {
-        Ok(token) => HttpResponse::Ok().json(CreateApiKeyResponse {
+        Ok(token) => HttpResponse::Created().json(CreateApiKeyResponse {
             token,
             expires_at: expires_at_response,
         }),

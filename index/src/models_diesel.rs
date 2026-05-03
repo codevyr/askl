@@ -18,7 +18,7 @@ pub struct SymbolType {
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct SymbolInstance {
     pub id: i32,
-    pub symbol: i32,
+    pub symbol: i64,
     pub object_id: i32,
     pub offset_range: (Bound<i32>, Bound<i32>),
     pub instance_type: i32,
@@ -45,6 +45,7 @@ pub struct Project {
     pub id: i32,
     pub project_name: String,
     pub root_path: String,
+    pub upload_status: String,
 }
 
 #[derive(
@@ -63,7 +64,7 @@ pub struct Project {
 #[diesel(belongs_to(Project, foreign_key = project_id))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Symbol {
-    pub id: i32,
+    pub id: i64,
     pub name: String,
     pub symbol_path: String,
     pub project_id: i32,
@@ -83,7 +84,7 @@ pub struct ContentRow {
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct SymbolRef {
     pub id: i32,
-    pub to_symbol: i32,
+    pub to_symbol: i64,
     pub from_object: i32,
     pub from_offset_range: (Bound<i32>, Bound<i32>),
 }

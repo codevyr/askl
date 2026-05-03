@@ -12,7 +12,7 @@ use crate::models_diesel::{ContentRow, Object, Project, Symbol, SymbolInstance, 
 use crate::symbols::FileId;
 
 use super::mixins::{
-    CompositeFilter, CurrentQuery, OwnedSql,
+    CompositeFilter, CurrentQuery, OwnedSqlBound,
     PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
     CONTAINER_INSTANCE_ALIAS, CONTAINER_SYMBOL_ALIAS, CONTAINER_TYPE_ALIAS,
     CONTAINED_INSTANCE_ALIAS, CONTAINED_SYMBOL_ALIAS, CONTAINED_TYPE_ALIAS,
@@ -87,28 +87,28 @@ async fn resolve_filter_to_ids(
     // Add reference-based constraint when resolving scoped filters.
     match role {
         Some(ScopeRole::Children(parent_ids)) if !parent_ids.is_empty() => {
-            let ids_csv = parent_ids.iter()
-                .map(|id| id.to_string()).collect::<Vec<_>>().join(",");
-            query = query.filter(OwnedSql::<Bool>::new(format!(
+            query = query.filter(OwnedSqlBound::<Bool>::new(
                 "symbol_instances.id IN (\
                     SELECT si.id FROM index.symbol_refs sr \
                     JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
                     JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
                       AND pd.offset_range @> sr.from_offset_range \
-                    WHERE pd.id IN ({ids_csv}))"
-            )));
+                    WHERE pd.id = ANY(".into(),
+                parent_ids.clone(),
+                "))".into(),
+            ));
         }
         Some(ScopeRole::Parents(child_ids)) if !child_ids.is_empty() => {
-            let ids_csv = child_ids.iter()
-                .map(|id| id.to_string()).collect::<Vec<_>>().join(",");
-            query = query.filter(OwnedSql::<Bool>::new(format!(
+            query = query.filter(OwnedSqlBound::<Bool>::new(
                 "symbol_instances.id IN (\
                     SELECT pd.id FROM index.symbol_refs sr \
                     JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
                       AND pd.offset_range @> sr.from_offset_range \
                     JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
-                    WHERE si.id IN ({ids_csv}))"
-            )));
+                    WHERE si.id = ANY(".into(),
+                child_ids.clone(),
+                "))".into(),
+            ));
         }
         _ => {}
     }
@@ -915,8 +915,8 @@ impl Index {
 pub struct ImplicitEdge {
     #[diesel(sql_type = diesel::sql_types::Integer)]
     pub ref_id: i32,
-    #[diesel(sql_type = diesel::sql_types::Integer)]
-    pub to_symbol: i32,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    pub to_symbol: i64,
     #[diesel(sql_type = diesel::sql_types::Integer)]
     pub from_object: i32,
     #[diesel(sql_type = diesel::sql_types::Int4range)]

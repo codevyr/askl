@@ -8,7 +8,7 @@ use diesel::pg::Pg;
 use diesel::prelude::*;
 use diesel::query_builder::{AstPass, QueryFragment, QueryId};
 use diesel::query_source::{Alias, AliasedField};
-use diesel::sql_types::{Bool, Int4range, Integer, Text};
+use diesel::sql_types::{BigInt, Bool, Int4range, Integer, Nullable, Text};
 
 use crate::ltree::Ltree;
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
@@ -67,9 +67,9 @@ pub type CurrentQuery<'a> = BoxedSelectStatement<
     Pg,
 >;
 
-type SymbolInstanceColumnsSqlType = (Integer, Integer, Integer, Int4range, Integer);
+type SymbolInstanceColumnsSqlType = (Integer, BigInt, Integer, Int4range, Integer);
 
-type SymbolColumnsSqlType = (Integer, Text, Ltree, Integer, Integer, diesel::sql_types::Nullable<Integer>, Text);  // (id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name)
+type SymbolColumnsSqlType = (BigInt, Text, Ltree, Integer, Integer, Nullable<Integer>, Text);  // (id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name)
 
 type ParentSelectionTuple = (
     AsSelect<SymbolRef, Pg>,
@@ -316,6 +316,71 @@ impl<ST> QueryId for OwnedSql<ST> {
 }
 
 impl<ST: 'static + Send + diesel::sql_types::SingleValue, GB> ValidGrouping<GB> for OwnedSql<ST> {
+    type IsAggregate = is_aggregate::No;
+}
+
+// ============================================================================
+// OwnedSqlBound — like OwnedSql but binds a Vec<i32> via ANY($N)
+// ============================================================================
+
+/// Like [`OwnedSql`] but holds a `Vec<i32>` that is sent as a bound `int[]`
+/// parameter via PostgreSQL `ANY($N)`.
+///
+/// Use this instead of `format!("... IN ({ids_csv})")` to keep integer ID
+/// lists as proper bind parameters rather than inline SQL text.
+///
+/// Example:
+/// ```rust
+/// OwnedSqlBound::<Bool>::new(
+///     "col IN (SELECT id FROM t WHERE other_id = ANY(".into(),
+///     ids,
+///     "))".into(),
+/// )
+/// ```
+#[derive(Debug, Clone)]
+pub(crate) struct OwnedSqlBound<ST> {
+    before: String,
+    ids: Vec<i32>,
+    after: String,
+    _marker: PhantomData<ST>,
+}
+
+impl<ST> OwnedSqlBound<ST> {
+    pub(crate) fn new(before: String, ids: Vec<i32>, after: String) -> Self {
+        Self { before, ids, after, _marker: PhantomData }
+    }
+}
+
+impl<ST: 'static + Send + diesel::sql_types::SingleValue> Expression for OwnedSqlBound<ST> {
+    type SqlType = ST;
+}
+
+impl<ST: 'static + Send> QueryFragment<Pg> for OwnedSqlBound<ST> {
+    fn walk_ast<'b>(&'b self, mut pass: AstPass<'_, 'b, Pg>) -> diesel::QueryResult<()> {
+        pass.push_sql(&self.before);
+        pass.push_bind_param::<diesel::sql_types::Array<Integer>, _>(&self.ids)?;
+        pass.push_sql(&self.after);
+        Ok(())
+    }
+}
+
+impl<ST: 'static + Send + diesel::sql_types::SingleValue, QS> SelectableExpression<QS>
+    for OwnedSqlBound<ST>
+{
+}
+impl<ST: 'static + Send + diesel::sql_types::SingleValue, QS> AppearsOnTable<QS>
+    for OwnedSqlBound<ST>
+{
+}
+
+impl<ST> QueryId for OwnedSqlBound<ST> {
+    type QueryId = ();
+    const HAS_STATIC_QUERY_ID: bool = false;
+}
+
+impl<ST: 'static + Send + diesel::sql_types::SingleValue, GB> ValidGrouping<GB>
+    for OwnedSqlBound<ST>
+{
     type IsAggregate = is_aggregate::No;
 }
 
@@ -705,20 +770,18 @@ impl FilterLeaf for OuterParentFilterMixin {
         if self.parent_ids.is_empty() {
             return None;
         }
-        let ids_csv = self.parent_ids.iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        Some(Box::new(OwnedSql::<Bool>::new(format!(
+        Some(Box::new(OwnedSqlBound::<Bool>::new(
             "NOT EXISTS (\
                 SELECT 1 FROM index.symbol_instances op \
-                WHERE op.id IN ({ids_csv}) \
+                WHERE op.id = ANY(".into(),
+            self.parent_ids.clone(),
+            ") \
                   AND op.id != parent_decls.id \
                   AND op.object_id = parent_decls.object_id \
                   AND op.offset_range @> parent_decls.offset_range \
                   AND op.offset_range != parent_decls.offset_range\
-            )"
-        ))))
+            )".into(),
+        )))
     }
 }
 
