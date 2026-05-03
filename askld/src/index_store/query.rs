@@ -8,28 +8,30 @@ use index::symbols::FileId;
 
 use super::{
     ChildCountsRow, DirectoryChildRow, ExistsRow, FileChildRow, IndexStore, NameRow,
-    ProjectDetails, ProjectInfo, ProjectTreeNode, ProjectTreeResult, StoreError,
+    ProjectDetails, ProjectInfo, ProjectTreeNode, ProjectTreeResult, StoreError, UploadStatus,
     normalize_full_path, path_basename,
 };
 
 impl IndexStore {
     pub async fn list_projects(&self) -> Result<Vec<ProjectInfo>, StoreError> {
         let mut conn = self.get_conn().await?;
-        let rows: Vec<(i32, String, String)> = index_schema::projects::table
+        let rows: Vec<(i32, String, String, UploadStatus)> = index_schema::projects::table
             .select((
                 index_schema::projects::id,
                 index_schema::projects::project_name,
                 index_schema::projects::root_path,
+                index_schema::projects::upload_status,
             ))
             .order(index_schema::projects::id)
             .load(&mut conn)
             .await?;
         Ok(rows
             .into_iter()
-            .map(|(id, project_name, root_path)| ProjectInfo {
+            .map(|(id, project_name, root_path, upload_status)| ProjectInfo {
                 id,
                 project_name,
                 root_path,
+                upload_status,
             })
             .collect())
     }
@@ -40,18 +42,19 @@ impl IndexStore {
     ) -> Result<Option<ProjectDetails>, StoreError> {
         let mut conn = self.get_conn().await?;
 
-        let project_row: Option<(i32, String, String)> = index_schema::projects::table
+        let project_row: Option<(i32, String, String, UploadStatus)> = index_schema::projects::table
             .filter(index_schema::projects::id.eq(project_id))
             .select((
                 index_schema::projects::id,
                 index_schema::projects::project_name,
                 index_schema::projects::root_path,
+                index_schema::projects::upload_status,
             ))
             .first(&mut conn)
             .await
             .optional()?;
 
-        let (id, project_name, root_path) = match project_row {
+        let (id, project_name, root_path, upload_status) = match project_row {
             Some(row) => row,
             None => return Ok(None),
         };
@@ -72,19 +75,85 @@ impl IndexStore {
             id,
             project_name,
             root_path,
+            upload_status,
             file_count,
             symbol_count,
         }))
     }
 
+    /// Delete a project and all its data.
+    ///
+    /// Proceeds in dependency order to avoid per-row ON DELETE CASCADE overhead:
+    ///
+    /// 1. Mark `Deleting` — reserves the name; a crash at any later step leaves a zombie
+    ///    that the next re-upload of the same name will clean up automatically.
+    /// 2. Delete `symbol_refs` and `symbol_instances` using a range scan on the global
+    ///    symbol ID: every symbol for project P has `id = P << 32 | local_id`, so all of
+    ///    a project's symbols occupy `[P << 32, (P+1) << 32)` in the B-tree index.
+    ///    This avoids a subquery join through `symbols` entirely.
+    /// 3. Delete `symbols` — CASCADE to the now-empty instances/refs is a no-op.
+    /// 4. Delete `objects` — CASCADE handles `object_contents` via its PK (fast 1:1).
+    /// 5. Delete the `projects` row.
     pub async fn delete_project(&self, project_id: i32) -> Result<bool, StoreError> {
         let mut conn = self.get_conn().await?;
-        let deleted = diesel::delete(
+
+        // Mark as deleting first so the name is immediately reserved and any crash
+        // leaves a zombie that the next re-upload of the same name will clean up.
+        let marked = diesel::update(
+            index_schema::projects::table.filter(index_schema::projects::id.eq(project_id)),
+        )
+        .set(index_schema::projects::upload_status.eq(UploadStatus::Deleting))
+        .execute(&mut conn)
+        .await?;
+        if marked == 0 {
+            return Ok(false);
+        }
+        tracing::info!(project_id, "delete_project: marked Deleting");
+
+        // Global symbol IDs encode the project: symbol = project_id << 32 | local_id.
+        // All symbols for a project form a contiguous range in the B-tree — one range
+        // scan on symbol_refs_to_symbol_idx/symbol_instances_symbol_idx, no subquery.
+        let n = diesel::sql_query(
+            "DELETE FROM index.symbol_refs \
+             WHERE to_symbol >= $1::bigint << 32 AND to_symbol < ($1::bigint + 1) << 32",
+        )
+        .bind::<diesel::sql_types::Integer, _>(project_id)
+        .execute(&mut conn)
+        .await?;
+        tracing::info!(project_id, rows = n, "delete_project: symbol_refs done");
+
+        let n = diesel::sql_query(
+            "DELETE FROM index.symbol_instances \
+             WHERE symbol >= $1::bigint << 32 AND symbol < ($1::bigint + 1) << 32",
+        )
+        .bind::<diesel::sql_types::Integer, _>(project_id)
+        .execute(&mut conn)
+        .await?;
+        tracing::info!(project_id, rows = n, "delete_project: symbol_instances done");
+
+        let n = diesel::delete(
+            index_schema::symbols::table.filter(index_schema::symbols::project_id.eq(project_id)),
+        )
+        .execute(&mut conn)
+        .await?;
+        tracing::info!(project_id, rows = n, "delete_project: symbols done");
+
+        let n = diesel::delete(
+            index_schema::objects::table.filter(index_schema::objects::project_id.eq(project_id)),
+        )
+        .execute(&mut conn)
+        .await?;
+        tracing::info!(project_id, rows = n, "delete_project: objects done");
+
+        // Deleting the project row cascades any remaining ON DELETE CASCADE children.
+        diesel::delete(
             index_schema::projects::table.filter(index_schema::projects::id.eq(project_id)),
         )
         .execute(&mut conn)
         .await?;
-        Ok(deleted > 0)
+        tracing::info!(project_id, "delete_project: complete");
+
+        Ok(true)
     }
 
     pub async fn list_project_tree(
@@ -95,14 +164,16 @@ impl IndexStore {
     ) -> Result<ProjectTreeResult, StoreError> {
         let mut conn = self.get_conn().await?;
 
-        let exists = index_schema::projects::table
+        let project_status: Option<UploadStatus> = index_schema::projects::table
             .filter(index_schema::projects::id.eq(project_id))
-            .select(index_schema::projects::id)
-            .first::<i32>(&mut conn)
+            .select(index_schema::projects::upload_status)
+            .first::<UploadStatus>(&mut conn)
             .await
             .optional()?;
-        if exists.is_none() {
-            return Ok(ProjectTreeResult::ProjectNotFound);
+        match project_status {
+            None => return Ok(ProjectTreeResult::ProjectNotFound),
+            Some(s) if s != UploadStatus::Complete => return Ok(ProjectTreeResult::NotReady),
+            Some(_) => {}
         }
 
         let normalized = normalize_full_path(path);
@@ -112,7 +183,7 @@ impl IndexStore {
             .filter(index_schema::symbols::symbol_type.eq(4)) // DIRECTORY
             .filter(index_schema::symbols::name.eq(&normalized))
             .select(index_schema::symbols::id)
-            .first::<i32>(&mut conn)
+            .first::<i64>(&mut conn)
             .await
             .optional()?;
 
@@ -212,7 +283,7 @@ async fn load_tree_children(
         FROM index.symbols s
         WHERE s.project_id = $1
           AND s.symbol_type = 4
-          AND s.name LIKE $2 || '%'
+          AND starts_with(s.name, $2)
           AND s.name != $2
           AND position('/' IN substring(s.name FROM length($2) + 1)) = 0
         ORDER BY s.name
@@ -261,12 +332,12 @@ async fn query_child_counts(
         SELECT
             (SELECT COUNT(*) FROM index.symbols s
              WHERE s.project_id = $1 AND s.symbol_type = 4
-               AND s.name LIKE $2 || '%'
+               AND starts_with(s.name, $2)
                AND position('/' IN substring(s.name FROM length($2) + 1)) = 0
             ) AS dir_count,
             (SELECT COUNT(*) FROM index.symbols s
              WHERE s.project_id = $1 AND s.symbol_type = 2
-               AND s.name LIKE $2 || '%'
+               AND starts_with(s.name, $2)
                AND position('/' IN substring(s.name FROM length($2) + 1)) = 0
             ) AS file_count
         "#,
@@ -294,7 +365,7 @@ async fn compute_compact_path(
             FROM index.symbols s
             WHERE s.project_id = $1
               AND s.symbol_type = 4
-              AND s.name LIKE $2 || '%'
+              AND starts_with(s.name, $2)
               AND position('/' IN substring(s.name FROM length($2) + 1)) = 0
             LIMIT 2
             "#,
@@ -314,7 +385,7 @@ async fn compute_compact_path(
                 SELECT 1 FROM index.symbols s
                 WHERE s.project_id = $1
                   AND s.symbol_type = 2
-                  AND s.name LIKE $2 || '%'
+                  AND starts_with(s.name, $2)
                   AND position('/' IN substring(s.name FROM length($2) + 1)) = 0
             ) AS exists
             "#,
@@ -350,7 +421,7 @@ async fn load_file_children(
         JOIN index.symbols fs ON fs.name = o.filesystem_path
         WHERE fs.project_id = $1
           AND fs.symbol_type = 2
-          AND fs.name LIKE $2 || '%'
+          AND starts_with(fs.name, $2)
           AND position('/' IN substring(fs.name FROM length($2) + 1)) = 0
         ORDER BY o.filesystem_path
         "#,

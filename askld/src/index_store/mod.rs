@@ -1,9 +1,18 @@
+use std::fmt;
+use std::io::Write;
+
 use diesel::prelude::*;
+use diesel::{
+    deserialize::{self, FromSql},
+    pg::Pg,
+    serialize::{self, IsNull, Output, ToSql},
+};
 use diesel_async::pooled_connection::{bb8, bb8::Pool};
 use diesel_async::AsyncPgConnection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use index::ltree::LtreeValue;
 use index::schema_diesel as index_schema;
 use index::symbols::FileId;
 
@@ -13,14 +22,59 @@ mod upload;
 #[cfg(test)]
 mod tests;
 
-const MAX_INSERT_ROWS: usize = 1000;
+const MAX_INSERT_ROWS: usize = 10_000;
+// NewSymbol has 7 fields; PostgreSQL limits bind parameters to 65_535 (u16::MAX).
+// 65_535 / 7 = 9_362; use 9_000 to leave a safe margin.
+const MAX_SYMBOL_INSERT_ROWS: usize = 9_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[derive(diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
+#[diesel(sql_type = diesel::sql_types::Text)]
+pub enum UploadStatus {
+    Uploading,
+    Complete,
+    Failed,
+    Deleting,
+}
+
+impl fmt::Display for UploadStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            UploadStatus::Uploading => f.write_str("uploading"),
+            UploadStatus::Complete => f.write_str("complete"),
+            UploadStatus::Failed => f.write_str("failed"),
+            UploadStatus::Deleting => f.write_str("deleting"),
+        }
+    }
+}
+
+impl ToSql<diesel::sql_types::Text, Pg> for UploadStatus {
+    fn to_sql<'b>(&'b self, out: &mut Output<'b, '_, Pg>) -> serialize::Result {
+        out.write_all(self.to_string().as_bytes())?;
+        Ok(IsNull::No)
+    }
+}
+
+impl FromSql<diesel::sql_types::Text, Pg> for UploadStatus {
+    fn from_sql(bytes: <Pg as diesel::backend::Backend>::RawValue<'_>) -> deserialize::Result<Self> {
+        let s = <String as FromSql<diesel::sql_types::Text, Pg>>::from_sql(bytes)?;
+        match s.as_str() {
+            "uploading" => Ok(UploadStatus::Uploading),
+            "complete" => Ok(UploadStatus::Complete),
+            "failed" => Ok(UploadStatus::Failed),
+            "deleting" => Ok(UploadStatus::Deleting),
+            _ => Err(format!("unknown upload_status value: {}", s).into()),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct IndexStore {
     pool: Pool<AsyncPgConnection>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum UploadError {
     Conflict,
     Invalid(String),
@@ -37,6 +91,7 @@ pub struct ProjectInfo {
     pub id: i32,
     pub project_name: String,
     pub root_path: String,
+    pub upload_status: UploadStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -44,6 +99,7 @@ pub struct ProjectDetails {
     pub id: i32,
     pub project_name: String,
     pub root_path: String,
+    pub upload_status: UploadStatus,
     pub file_count: i64,
     pub symbol_count: i64,
 }
@@ -65,6 +121,7 @@ pub struct ProjectTreeNode {
 #[derive(Debug)]
 pub enum ProjectTreeResult {
     ProjectNotFound,
+    NotReady,
     NotDirectory,
     Nodes(Vec<ProjectTreeNode>),
 }
@@ -74,24 +131,19 @@ pub enum ProjectTreeResult {
 struct NewProject {
     project_name: String,
     root_path: String,
+    upload_status: UploadStatus,
 }
 
 #[derive(Insertable, Clone)]
 #[diesel(table_name = index_schema::objects)]
 struct NewObject {
-    project_id: i32,
-    module_path: String,
-    filesystem_path: String,
-    filetype: String,
-    content_hash: String,
+    project_id: i32,      // 1
+    module_path: String,  // 2
+    filesystem_path: String, // 3
+    filetype: String,     // 4
+    content_hash: String, // 5
 }
 
-#[derive(Insertable, Clone)]
-#[diesel(table_name = index_schema::object_contents)]
-struct NewObjectContent {
-    object_id: i32,
-    content: Vec<u8>,
-}
 
 #[derive(Insertable, Clone)]
 #[diesel(table_name = index_schema::content_store)]
@@ -103,16 +155,23 @@ struct NewContentStoreRow {
 #[derive(Insertable, Clone)]
 #[diesel(table_name = index_schema::symbols)]
 struct NewSymbol {
+    id: i64,
     name: String,
+    // Pre-computed in Rust; trigger only fires on UPDATE OF name now.
+    // serialize_as wraps the String in LtreeValue (which implements AsExpression<Ltree>)
+    // since String cannot directly implement AsExpression<Ltree> due to orphan rules.
+    #[diesel(serialize_as = LtreeValue)]
+    symbol_path: String,
     project_id: i32,
     symbol_type: i32,
     symbol_scope: Option<i32>,
+    leaf_name: String,  // pre-computed in Rust; trigger only fires on UPDATE OF name
 }
 
 #[derive(Insertable, Clone)]
 #[diesel(table_name = index_schema::symbol_instances)]
 struct NewSymbolInstance {
-    symbol: i32,
+    symbol: i64,
     object_id: i32,
     offset_range: std::ops::Range<i32>,
     instance_type: i32,
@@ -121,7 +180,7 @@ struct NewSymbolInstance {
 #[derive(Insertable, Clone)]
 #[diesel(table_name = index_schema::symbol_refs)]
 struct NewSymbolRef {
-    to_symbol: i32,
+    to_symbol: i64,
     from_object: i32,
     from_offset_range: std::ops::Range<i32>,
 }

@@ -83,6 +83,56 @@ pub async fn upload_index(
     }
 }
 
+pub async fn finalize_project(
+    _identity: AuthIdentity,
+    store: web::Data<IndexStore>,
+    project_id: web::Path<i32>,
+) -> impl Responder {
+    match store.finalize_project(*project_id).await {
+        Ok(true) => HttpResponse::Ok().finish(),
+        Ok(false) => HttpResponse::NotFound().body("Project not found"),
+        Err(UploadError::Conflict) => {
+            HttpResponse::Conflict().body("Project is not in uploading state")
+        }
+        Err(UploadError::Storage(msg)) => {
+            error!("Failed to finalize project {}: {}", project_id, msg);
+            HttpResponse::InternalServerError().body("Failed to finalize project")
+        }
+        Err(e) => {
+            error!("Unexpected error finalizing project {}: {:?}", project_id, e);
+            HttpResponse::InternalServerError().body("Unexpected error")
+        }
+    }
+}
+
+pub async fn append_project_objects(
+    _identity: AuthIdentity,
+    store: web::Data<IndexStore>,
+    project_id: web::Path<i32>,
+    req: HttpRequest,
+    body: web::Bytes,
+) -> impl Responder {
+    if let Err(resp) = require_protobuf(&req) {
+        return resp;
+    }
+    let upload = match Project::decode(body.as_ref()) {
+        Ok(u) => u,
+        Err(err) => {
+            return HttpResponse::BadRequest()
+                .body(format!("Failed to decode protobuf payload: {}", err));
+        }
+    };
+    match store.upload_objects(*project_id, upload).await {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(UploadError::Invalid(msg)) => HttpResponse::BadRequest().body(msg),
+        Err(UploadError::Storage(msg)) => {
+            error!("Object upload failed: {}", msg);
+            HttpResponse::InternalServerError().body("Failed to upload objects")
+        }
+        Err(UploadError::Conflict) => HttpResponse::Conflict().finish(),
+    }
+}
+
 pub async fn upload_contents(
     _identity: AuthIdentity,
     store: web::Data<IndexStore>,
@@ -215,6 +265,9 @@ pub async fn get_project_tree(
         Ok(ProjectTreeResult::ProjectNotFound) => {
             return HttpResponse::NotFound().body("Project not found");
         }
+        Ok(ProjectTreeResult::NotReady) => {
+            return HttpResponse::Conflict().body("Project upload is not complete");
+        }
         Ok(ProjectTreeResult::NotDirectory) => {
             return HttpResponse::BadRequest().body("path is not a directory");
         }
@@ -251,6 +304,9 @@ pub async fn get_project_tree(
             Ok(ProjectTreeResult::Nodes(nodes)) => nodes,
             Ok(ProjectTreeResult::ProjectNotFound) => {
                 return HttpResponse::NotFound().body("Project not found");
+            }
+            Ok(ProjectTreeResult::NotReady) => {
+                return HttpResponse::Conflict().body("Project upload is not complete");
             }
             Ok(ProjectTreeResult::NotDirectory) => {
                 return HttpResponse::BadRequest()

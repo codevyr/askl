@@ -410,7 +410,7 @@ impl FromRequest for AuthIdentity {
                 Err(AuthError::InvalidToken | AuthError::RevokedToken | AuthError::ExpiredToken) => {
                     Err(ErrorUnauthorized("Unauthorized"))
                 }
-                Err(AuthError::Storage(message)) => Err(ErrorInternalServerError(message)),
+                Err(AuthError::Storage(_)) => Err(ErrorInternalServerError("Internal error")),
             }
         })
     }

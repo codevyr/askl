@@ -1,27 +1,23 @@
+use std::borrow::Cow;
+
 use crate::args::IndexCommand;
 use anyhow::{anyhow, Result};
+use askld::index_store::UploadStatus;
 use askld::proto::askl::index::{ContentBatch, Project};
 use bytes::Bytes;
-use futures::TryStreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use prost::Message;
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use tokio::time::Duration;
-use tokio_util::codec::{BytesCodec, FramedRead};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ProjectInfo {
     id: i32,
     project_name: String,
     root_path: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ProjectModule {
-    id: i32,
-    module_name: String,
+    upload_status: UploadStatus,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -29,7 +25,7 @@ struct ProjectDetails {
     id: i32,
     project_name: String,
     root_path: String,
-    modules: Vec<ProjectModule>,
+    upload_status: UploadStatus,
     file_count: i64,
     symbol_count: i64,
 }
@@ -52,6 +48,56 @@ enum ProjectSelector {
 
 const UPLOAD_CHUNK_SIZE: usize = 64 * 1024;
 const CONTENTS_UPLOAD_MAX_BYTES: usize = 128 * 1024 * 1024;
+const OBJECTS_UPLOAD_MAX_BYTES: usize = 200 * 1024 * 1024;
+
+/// Typed API endpoint builder — eliminates repeated raw-string URL construction.
+struct Endpoints<'a> {
+    base_url: &'a str,
+}
+
+impl<'a> Endpoints<'a> {
+    fn new(base_url: &'a str) -> Self {
+        Self { base_url }
+    }
+    fn projects(&self) -> String {
+        format!("{}/v1/index/projects", self.base_url)
+    }
+    fn project(&self, id: i32) -> String {
+        format!("{}/v1/index/projects/{}", self.base_url, id)
+    }
+    fn project_objects(&self, id: i32) -> String {
+        format!("{}/v1/index/projects/{}/objects", self.base_url, id)
+    }
+    fn project_finalize(&self, id: i32) -> String {
+        format!("{}/v1/index/projects/{}/finalize", self.base_url, id)
+    }
+    fn contents(&self) -> String {
+        format!("{}/v1/index/contents", self.base_url)
+    }
+}
+
+fn set_progress_msg(progress: &Option<ProgressBar>, msg: impl Into<Cow<'static, str>>) {
+    if let Some(pb) = progress {
+        pb.set_message(msg);
+    }
+}
+
+/// Best-effort DELETE on upload failure.
+///
+/// Returns `Ok(())` if the server accepted the delete, or `Err(msg)` with a
+/// human-readable description so callers can distinguish "cleaned up" from
+/// "project orphaned and needs manual removal".
+async fn try_delete_project(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> Result<(), String> {
+    match client.delete(url).bearer_auth(token).send().await {
+        Ok(r) if r.status().is_success() => Ok(()),
+        Ok(r) => Err(format!("delete failed ({})", r.status())),
+        Err(e) => Err(format!("delete failed: {}", e)),
+    }
+}
 
 fn normalize_base_url(url: &str) -> String {
     let mut base_url = url.trim().to_string();
@@ -106,7 +152,7 @@ async fn fetch_projects(
     base_url: &str,
     token: &str,
 ) -> Result<Vec<ProjectInfo>> {
-    let endpoint = format!("{}/v1/index/projects", base_url);
+    let endpoint = Endpoints::new(base_url).projects();
     let response = client
         .get(endpoint)
         .bearer_auth(token)
@@ -141,9 +187,16 @@ async fn resolve_project_id(
                 .into_iter()
                 .filter(|project| project.project_name == name)
                 .collect::<Vec<_>>();
-            match matches.pop() {
-                Some(project) => Ok((project.id, Some(project.project_name))),
-                None => Err(anyhow!("Project not found: {}", name)),
+            match matches.len() {
+                0 => Err(anyhow!("Project not found: {}", name)),
+                1 => {
+                    let p = matches.remove(0);
+                    Ok((p.id, Some(p.project_name)))
+                }
+                n => Err(anyhow!(
+                    "{} projects named {:?} — use --id to disambiguate",
+                    n, name
+                )),
             }
         }
     }
@@ -159,45 +212,6 @@ fn human_size(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
-}
-
-async fn stream_file_to_endpoint(
-    client: &reqwest::Client,
-    endpoint: &str,
-    token: &str,
-    file_path: &str,
-    progress: &Option<ProgressBar>,
-) -> Result<(StatusCode, Vec<u8>)> {
-    let file = tokio::fs::File::open(file_path)
-        .await
-        .map_err(|err| anyhow!("Failed to open {}: {}", file_path, err))?;
-    let total = file
-        .metadata()
-        .await
-        .map_err(|err| anyhow!("Failed to read {} metadata: {}", file_path, err))?
-        .len();
-
-    let progress_handle = progress.clone();
-    let stream = FramedRead::new(file, BytesCodec::new()).map_ok(move |bytes| {
-        if let Some(ref pb) = progress_handle {
-            pb.inc(bytes.len() as u64);
-        }
-        bytes.freeze()
-    });
-
-    let response = client
-        .post(endpoint)
-        .header(CONTENT_TYPE, "application/x-protobuf")
-        .bearer_auth(token)
-        .header(CONTENT_LENGTH, total.to_string())
-        .body(reqwest::Body::wrap_stream(stream))
-        .send()
-        .await
-        .map_err(|e| anyhow!("Request failed: {}", e))?;
-
-    let status = response.status();
-    let body = response.bytes().await.map_err(|e| anyhow!("{}", e))?.to_vec();
-    Ok((status, body))
 }
 
 fn check_upload_response(status: StatusCode, body: &[u8]) -> Result<()> {
@@ -216,45 +230,6 @@ fn check_upload_response(status: StatusCode, body: &[u8]) -> Result<()> {
     Err(anyhow!("Request failed ({}): {}", status, body_str))
 }
 
-fn print_upload_result(body: &[u8], json: bool) -> Result<()> {
-    let result: IndexUploadResponse = serde_json::from_slice(body)
-        .map_err(|e| anyhow!("Failed to parse response: {}", e))?;
-    if json {
-        let output = serde_json::to_string_pretty(&result)?;
-        println!("{}", output);
-    } else {
-        println!("Uploaded index; project id: {}", result.project_id);
-    }
-    Ok(())
-}
-
-async fn upload_project_pb(
-    client: &reqwest::Client,
-    endpoint: &str,
-    token: &str,
-    file_path: &str,
-    project_name: Option<String>,
-    progress: &Option<ProgressBar>,
-) -> Result<(StatusCode, Vec<u8>)> {
-    if let Some(project_name) = project_name {
-        // Decode, override name, re-encode, stream in chunks
-        let payload = tokio::fs::read(file_path)
-            .await
-            .map_err(|err| anyhow!("Failed to read {}: {}", file_path, err))?;
-        if payload.is_empty() {
-            return Err(anyhow!("Payload file is empty: {}", file_path));
-        }
-        let mut upload = Project::decode(payload.as_slice())
-            .map_err(|err| anyhow!("Failed to decode protobuf payload: {}", err))?;
-        upload.project_name = project_name;
-        let mut buffer = Vec::with_capacity(upload.encoded_len());
-        upload.encode(&mut buffer)?;
-        stream_bytes(client, endpoint, token, buffer, progress).await
-    } else {
-        stream_file_to_endpoint(client, endpoint, token, file_path, progress).await
-    }
-}
-
 async fn upload_single_file(
     client: &reqwest::Client,
     base_url: &str,
@@ -269,19 +244,19 @@ async fn upload_single_file(
         .map_err(|e| anyhow!("Failed to stat {}: {}", file_path, e))?
         .len();
     let progress = build_progress_bar(total, show_progress);
-    if let Some(ref pb) = progress {
-        pb.set_message("Uploading project".to_string());
-    }
-    let endpoint = format!("{}/v1/index/projects", base_url);
-    let (status, body) = upload_project_pb(client, &endpoint, token, file_path, project, &progress).await?;
+    let result = upload_batched_project(client, base_url, token, file_path, project, &progress).await?;
     if let Some(pb) = progress {
         pb.finish_and_clear();
     }
     if show_progress {
         eprintln!("Uploading project... {} done", human_size(total));
     }
-    check_upload_response(status, &body)?;
-    print_upload_result(&body, json)
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("Uploaded index; project id: {}", result.project_id);
+    }
+    Ok(())
 }
 
 /// Stream a pre-encoded buffer in UPLOAD_CHUNK_SIZE chunks, updating a shared progress bar.
@@ -364,6 +339,115 @@ async fn upload_content_file(
     Ok(())
 }
 
+async fn upload_batched_project(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    file_path: &str,
+    project_name_override: Option<String>,
+    progress: &Option<ProgressBar>,
+) -> Result<IndexUploadResponse> {
+    let data = tokio::fs::read(file_path)
+        .await
+        .map_err(|e| anyhow!("Failed to read {}: {}", file_path, e))?;
+    let mut upload = Project::decode(data.as_slice())
+        .map_err(|e| anyhow!("Failed to decode protobuf: {}", e))?;
+    drop(data);
+
+    if let Some(name) = project_name_override {
+        upload.project_name = name;
+    }
+    let all_objects = std::mem::take(&mut upload.objects);
+    let total_objects = all_objects.len();
+
+    // Build batches by accumulating objects until the encoded size limit is reached,
+    // using each object's actual encoded length rather than guessing from the file size.
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    let mut current_size: usize = 0;
+    for object in all_objects {
+        let object_size = object.encoded_len();
+        if current_size + object_size > OBJECTS_UPLOAD_MAX_BYTES && !current.is_empty() {
+            batches.push(std::mem::take(&mut current));
+            current_size = 0;
+        }
+        current_size += object_size;
+        current.push(object);
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    let total_batches = batches.len();
+
+    let ep = Endpoints::new(base_url);
+
+    // Phase 1: POST header (symbols only, no objects)
+    set_progress_msg(progress, "Uploading project header");
+    let mut header_buf = Vec::with_capacity(upload.encoded_len());
+    upload.encode(&mut header_buf)?;
+    let (status, body) = stream_bytes(client, &ep.projects(), token, header_buf, progress).await?;
+    check_upload_response(status, &body)?;
+    let response: IndexUploadResponse = serde_json::from_slice(&body)
+        .map_err(|e| anyhow!("Failed to parse response: {}", e))?;
+    let project_id = response.project_id;
+    let project_url = ep.project(project_id);
+
+    // Phase 2: POST object batches
+    let mut uploaded_objects: usize = 0;
+    for (i, batch) in batches.into_iter().enumerate() {
+        let batch_len = batch.len();
+        set_progress_msg(
+            progress,
+            format!("Uploading objects ({}/{})", uploaded_objects, total_objects),
+        );
+        let batch_msg = Project { objects: batch, ..Default::default() };
+        let mut buf = Vec::with_capacity(batch_msg.encoded_len());
+        batch_msg.encode(&mut buf)?;
+        let (status, body) =
+            stream_bytes(client, &ep.project_objects(project_id), token, buf, progress).await?;
+        if !status.is_success() {
+            let cleanup = try_delete_project(client, &project_url, token).await;
+            let cleanup_note = match cleanup {
+                Ok(()) => "project deleted".to_string(),
+                Err(msg) => format!("WARNING: {msg} — project may be orphaned at {project_url}"),
+            };
+            return Err(anyhow!(
+                "Object batch {}/{} failed ({}): {} — {}",
+                i + 1, total_batches, status,
+                String::from_utf8_lossy(&body),
+                cleanup_note
+            ));
+        }
+        uploaded_objects += batch_len;
+    }
+
+    // Phase 3: finalize so the project becomes visible
+    set_progress_msg(progress, "Finalizing");
+    let fin_response = client
+        .post(&ep.project_finalize(project_id))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| anyhow!("Failed to finalize project {}: {}", project_id, e))?;
+    if !fin_response.status().is_success() {
+        let fin_status = fin_response.status();
+        let fin_body = fin_response.bytes().await.map_err(|e| anyhow!("{}", e))?;
+        let cleanup = try_delete_project(client, &project_url, token).await;
+        let cleanup_note = match cleanup {
+            Ok(()) => "project deleted".to_string(),
+            Err(msg) => format!("WARNING: {msg} — project may be orphaned at {project_url}"),
+        };
+        return Err(anyhow!(
+            "Finalize failed ({}): {} — {}",
+            fin_status,
+            String::from_utf8_lossy(&fin_body),
+            cleanup_note
+        ));
+    }
+
+    Ok(response)
+}
+
 async fn upload_directory(
     client: &reqwest::Client,
     base_url: &str,
@@ -401,7 +485,7 @@ async fn upload_directory(
     }
     content_files.sort();
 
-    let contents_endpoint = format!("{}/v1/index/contents", base_url);
+    let ep = Endpoints::new(base_url);
     let show_progress = !json;
 
     // Compute total bytes across all files for the unified progress bar
@@ -422,18 +506,23 @@ async fn upload_directory(
     let total_parts = content_files.len();
     for (i, name) in content_files.iter().enumerate() {
         let file_path = format!("{}/{}", dir_path, name);
-        if let Some(ref pb) = progress {
-            pb.set_message(format!("Uploading contents ({}/{})", i + 1, total_parts));
-        }
-        upload_content_file(client, &contents_endpoint, token, &file_path, &progress).await?;
+        set_progress_msg(&progress, format!("Uploading contents ({}/{})", i + 1, total_parts));
+        upload_content_file(client, &ep.contents(), token, &file_path, &progress).await?;
     }
 
-    // Upload project
-    if let Some(ref pb) = progress {
-        pb.set_message("Uploading project".to_string());
-    }
-    let projects_endpoint = format!("{}/v1/index/projects", base_url);
-    let (status, body) = upload_project_pb(client, &projects_endpoint, token, &project_pb, project, &progress).await?;
+    // Upload project (always batched: header POST then object batch POSTs)
+    let result = upload_batched_project(client, base_url, token, &project_pb, project, &progress)
+        .await
+        .map_err(|e| {
+            if !content_files.is_empty() {
+                anyhow!(
+                    "{}\nNote: content blobs were already uploaded and remain on the server.",
+                    e
+                )
+            } else {
+                e
+            }
+        })?;
 
     if let Some(pb) = progress {
         pb.finish_and_clear();
@@ -442,8 +531,121 @@ async fn upload_directory(
         eprintln!("Uploaded {} total", human_size(total_bytes));
     }
 
-    check_upload_response(status, &body)?;
-    print_upload_result(&body, json)
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("Uploaded index; project id: {}", result.project_id);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- normalize_base_url ---
+
+    #[test]
+    fn normalize_base_url_adds_http_scheme() {
+        assert_eq!(normalize_base_url("example.com"), "http://example.com");
+    }
+
+    #[test]
+    fn normalize_base_url_preserves_https() {
+        assert_eq!(normalize_base_url("https://example.com"), "https://example.com");
+    }
+
+    #[test]
+    fn normalize_base_url_preserves_http() {
+        assert_eq!(normalize_base_url("http://example.com"), "http://example.com");
+    }
+
+    #[test]
+    fn normalize_base_url_strips_trailing_slash() {
+        assert_eq!(normalize_base_url("http://example.com/"), "http://example.com");
+    }
+
+    #[test]
+    fn normalize_base_url_strips_multiple_trailing_slashes() {
+        assert_eq!(normalize_base_url("https://example.com///"), "https://example.com");
+    }
+
+    // --- human_size ---
+
+    #[test]
+    fn human_size_sub_kilobyte() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn human_size_kilobytes() {
+        assert_eq!(human_size(1024), "1 KB");
+        assert_eq!(human_size(3 * 1024), "3 KB");
+    }
+
+    #[test]
+    fn human_size_megabytes() {
+        assert_eq!(human_size(1024 * 1024), "1 MB");
+        assert_eq!(human_size(5 * 1024 * 1024), "5 MB");
+    }
+
+    #[test]
+    fn human_size_gigabytes() {
+        assert_eq!(human_size(1024 * 1024 * 1024), "1 GB");
+        assert_eq!(human_size(2 * 1024 * 1024 * 1024), "2 GB");
+    }
+
+    // --- Endpoints ---
+
+    #[test]
+    fn endpoints_projects() {
+        assert_eq!(
+            Endpoints::new("http://api.example.com").projects(),
+            "http://api.example.com/v1/index/projects"
+        );
+    }
+
+    #[test]
+    fn endpoints_project() {
+        assert_eq!(
+            Endpoints::new("http://api.example.com").project(42),
+            "http://api.example.com/v1/index/projects/42"
+        );
+    }
+
+    #[test]
+    fn endpoints_project_objects() {
+        assert_eq!(
+            Endpoints::new("http://api.example.com").project_objects(7),
+            "http://api.example.com/v1/index/projects/7/objects"
+        );
+    }
+
+    #[test]
+    fn endpoints_project_finalize() {
+        assert_eq!(
+            Endpoints::new("http://api.example.com").project_finalize(3),
+            "http://api.example.com/v1/index/projects/3/finalize"
+        );
+    }
+
+    #[test]
+    fn endpoints_contents() {
+        assert_eq!(
+            Endpoints::new("http://api.example.com").contents(),
+            "http://api.example.com/v1/index/contents"
+        );
+    }
+
+    #[test]
+    fn endpoints_no_double_slash_when_base_has_no_trailing_slash() {
+        // normalize_base_url strips the trailing slash, so Endpoints should never
+        // produce double slashes in practice — verify the raw struct holds the contract too
+        let ep = Endpoints::new("http://example.com");
+        assert!(!ep.projects().contains("//v1"));
+        assert!(!ep.project(1).contains("//v1"));
+    }
 }
 
 pub async fn run_index_command(command: IndexCommand) -> Result<()> {
@@ -488,7 +690,11 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
                 println!("No projects found.");
             } else {
                 for project in projects {
-                    println!("{} {}", project.id, project.project_name);
+                    if project.upload_status == UploadStatus::Complete {
+                        println!("{} {}", project.id, project.project_name);
+                    } else {
+                        println!("{} {} [{}]", project.id, project.project_name, project.upload_status);
+                    }
                 }
             }
         }
@@ -506,7 +712,7 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
             let client = build_client(timeout);
 
             let (project_id, _) = resolve_project_id(&client, &base_url, &token, selector).await?;
-            let endpoint = format!("{}/v1/index/projects/{}", base_url, project_id);
+            let endpoint = Endpoints::new(&base_url).project(project_id);
 
             let response = client
                 .get(endpoint)
@@ -530,16 +736,9 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
             } else {
                 println!("ID: {}", details.id);
                 println!("Name: {}", details.project_name);
+                println!("Status: {}", details.upload_status);
                 println!("Files: {}", details.file_count);
                 println!("Symbols: {}", details.symbol_count);
-                if details.modules.is_empty() {
-                    println!("Modules: none");
-                } else {
-                    println!("Modules:");
-                    for module in details.modules {
-                        println!("{} {}", module.id, module.module_name);
-                    }
-                }
             }
         }
         IndexCommand::DeleteProject {
@@ -557,7 +756,7 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
 
             let (project_id, project_name) =
                 resolve_project_id(&client, &base_url, &token, selector).await?;
-            let endpoint = format!("{}/v1/index/projects/{}", base_url, project_id);
+            let endpoint = Endpoints::new(&base_url).project(project_id);
 
             let response = client
                 .delete(endpoint)
