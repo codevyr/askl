@@ -101,6 +101,9 @@ pub enum IndexCommand {
         /// Print JSON response only
         #[clap(long, action)]
         json: bool,
+        /// Skip uploading content blobs (useful when they were already uploaded in a prior attempt)
+        #[clap(long, action)]
+        skip_content_upload: bool,
     },
     ListProjects {
         /// askld base URL

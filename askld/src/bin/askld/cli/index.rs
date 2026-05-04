@@ -455,6 +455,7 @@ async fn upload_directory(
     dir_path: &str,
     project: Option<String>,
     json: bool,
+    skip_content_upload: bool,
 ) -> Result<()> {
     // Discover files
     let project_pb = format!("{}/project.pb", dir_path);
@@ -493,21 +494,25 @@ async fn upload_directory(
         .await
         .map_err(|e| anyhow!("Failed to stat {}: {}", project_pb, e))?
         .len();
-    for name in &content_files {
-        total_bytes += tokio::fs::metadata(format!("{}/{}", dir_path, name))
-            .await
-            .map_err(|e| anyhow!("Failed to stat {}: {}", name, e))?
-            .len();
+    if !skip_content_upload {
+        for name in &content_files {
+            total_bytes += tokio::fs::metadata(format!("{}/{}", dir_path, name))
+                .await
+                .map_err(|e| anyhow!("Failed to stat {}: {}", name, e))?
+                .len();
+        }
     }
 
     let progress = build_progress_bar(total_bytes, show_progress);
 
     // Upload content parts sequentially
-    let total_parts = content_files.len();
-    for (i, name) in content_files.iter().enumerate() {
-        let file_path = format!("{}/{}", dir_path, name);
-        set_progress_msg(&progress, format!("Uploading contents ({}/{})", i + 1, total_parts));
-        upload_content_file(client, &ep.contents(), token, &file_path, &progress).await?;
+    if !skip_content_upload {
+        let total_parts = content_files.len();
+        for (i, name) in content_files.iter().enumerate() {
+            let file_path = format!("{}/{}", dir_path, name);
+            set_progress_msg(&progress, format!("Uploading contents ({}/{})", i + 1, total_parts));
+            upload_content_file(client, &ep.contents(), token, &file_path, &progress).await?;
+        }
     }
 
     // Upload project (always batched: header POST then object batch POSTs)
@@ -657,6 +662,7 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
             project,
             timeout,
             json,
+            skip_content_upload,
         } => {
             let token = resolve_token(token)?;
             let base_url = normalize_base_url(&url);
@@ -664,7 +670,7 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
 
             let path = std::path::Path::new(&index);
             if path.is_dir() {
-                upload_directory(&client, &base_url, &token, &index, project, json).await?;
+                upload_directory(&client, &base_url, &token, &index, project, json, skip_content_upload).await?;
             } else if path.is_file() {
                 upload_single_file(&client, &base_url, &token, &index, project, json).await?;
             } else {
