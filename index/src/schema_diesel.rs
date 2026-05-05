@@ -68,6 +68,22 @@ diesel::table! {
         project_name -> Text,
         root_path -> Text,
         upload_status -> Text,
+        symbol_chunks_total -> Nullable<Integer>,
+        object_chunks_total -> Nullable<Integer>,
+    }
+}
+
+diesel::table! {
+    index.project_symbol_chunks (project_id, seq) {
+        project_id -> Integer,
+        seq -> Integer,
+    }
+}
+
+diesel::table! {
+    index.project_object_chunks (project_id, seq) {
+        project_id -> Integer,
+        seq -> Integer,
     }
 }
 
@@ -116,6 +132,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     object_contents,
     objects,
     projects,
+    project_symbol_chunks,
+    project_object_chunks,
     symbol_refs,
     symbols,
 );
