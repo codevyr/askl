@@ -50,9 +50,31 @@ fn require_protobuf(req: &HttpRequest) -> Result<(), HttpResponse> {
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UploadIndexQuery {
+    pub symbol_chunks: Option<i32>,
+    pub object_chunks: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChunkSeqQuery {
+    pub seq: i32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CheckHashesRequest {
+    pub hashes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CheckHashesResponse {
+    pub present: Vec<String>,
+}
+
 pub async fn upload_index(
     _identity: AuthIdentity,
     store: web::Data<IndexStore>,
+    query: web::Query<UploadIndexQuery>,
     req: HttpRequest,
     body: web::Bytes,
 ) -> impl Responder {
@@ -70,16 +92,65 @@ pub async fn upload_index(
         }
     };
 
-    match store.upload_index(upload).await {
-        Ok(project_id) => HttpResponse::Created()
-            .append_header((header::LOCATION, format!("/v1/index/projects/{}", project_id)))
-            .json(IndexUploadResponse { project_id }),
+    match store
+        .upload_index(upload, query.symbol_chunks, query.object_chunks)
+        .await
+    {
+        Ok((project_id, resumed)) => {
+            let body = IndexUploadResponse { project_id, resumed };
+            if resumed {
+                HttpResponse::Ok()
+                    .append_header((header::LOCATION, format!("/v1/index/projects/{}", project_id)))
+                    .json(body)
+            } else {
+                HttpResponse::Created()
+                    .append_header((header::LOCATION, format!("/v1/index/projects/{}", project_id)))
+                    .json(body)
+            }
+        }
         Err(UploadError::Conflict) => HttpResponse::Conflict().body("Project already exists"),
         Err(UploadError::Invalid(message)) => HttpResponse::BadRequest().body(message),
         Err(UploadError::Storage(message)) => {
             error!("Index upload failed: {}", message);
             HttpResponse::InternalServerError().body("Failed to upload index")
         }
+    }
+}
+
+pub async fn upload_symbol_chunk(
+    _identity: AuthIdentity,
+    store: web::Data<IndexStore>,
+    project_id: web::Path<i32>,
+    query: web::Query<ChunkSeqQuery>,
+    req: HttpRequest,
+    body: web::Bytes,
+) -> impl Responder {
+    if let Err(resp) = require_protobuf(&req) {
+        return resp;
+    }
+    let upload = match Project::decode(body.as_ref()) {
+        Ok(u) => u,
+        Err(err) => {
+            return HttpResponse::BadRequest()
+                .body(format!("Failed to decode protobuf payload: {}", err));
+        }
+    };
+    if !upload.objects.is_empty() {
+        return HttpResponse::BadRequest()
+            .body("objects must be uploaded via POST /v1/index/projects/{id}/objects");
+    }
+    let seq = query.seq;
+    match store
+        .upload_symbol_chunk(*project_id, seq, upload.symbols)
+        .await
+    {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "seq": seq })),
+        Err(UploadError::Invalid(msg)) => HttpResponse::BadRequest().body(msg),
+        Err(UploadError::Storage(msg)) => {
+            error!("Symbol chunk upload failed (project={} seq={}): {}", project_id, seq, msg);
+            HttpResponse::InternalServerError().body("Failed to upload symbol chunk")
+        }
+        Err(UploadError::Conflict) => HttpResponse::Conflict().finish(),
     }
 }
 
@@ -109,6 +180,7 @@ pub async fn append_project_objects(
     _identity: AuthIdentity,
     store: web::Data<IndexStore>,
     project_id: web::Path<i32>,
+    query: web::Query<ChunkSeqQuery>,
     req: HttpRequest,
     body: web::Bytes,
 ) -> impl Responder {
@@ -122,11 +194,12 @@ pub async fn append_project_objects(
                 .body(format!("Failed to decode protobuf payload: {}", err));
         }
     };
-    match store.upload_objects(*project_id, upload).await {
-        Ok(()) => HttpResponse::Ok().finish(),
+    let seq = query.seq;
+    match store.upload_object_chunk(*project_id, seq, upload).await {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "seq": seq })),
         Err(UploadError::Invalid(msg)) => HttpResponse::BadRequest().body(msg),
         Err(UploadError::Storage(msg)) => {
-            error!("Object upload failed: {}", msg);
+            error!("Object chunk upload failed (project={} seq={}): {}", project_id, seq, msg);
             HttpResponse::InternalServerError().body("Failed to upload objects")
         }
         Err(UploadError::Conflict) => HttpResponse::Conflict().finish(),
@@ -160,6 +233,20 @@ pub async fn upload_contents(
         }
         Err(UploadError::Conflict) => {
             HttpResponse::InternalServerError().body("Unexpected conflict")
+        }
+    }
+}
+
+pub async fn check_contents(
+    _identity: AuthIdentity,
+    store: web::Data<IndexStore>,
+    body: web::Json<CheckHashesRequest>,
+) -> impl Responder {
+    match store.check_content_hashes(body.into_inner().hashes).await {
+        Ok(present) => HttpResponse::Ok().json(CheckHashesResponse { present }),
+        Err(StoreError::Storage(message)) => {
+            error!("Content hash check failed: {}", message);
+            HttpResponse::InternalServerError().body("Failed to check content hashes")
         }
     }
 }

@@ -27,6 +27,15 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route(web::post().to(index::upload_contents)),
         )
         .service(
+            web::resource("/v1/index/contents/check")
+                .route(web::post().to(index::check_contents)),
+        )
+        .service(
+            web::resource("/v1/index/projects/{project_id}/symbols")
+                .app_data(web::PayloadConfig::new(index::max_upload_bytes()))
+                .route(web::post().to(index::upload_symbol_chunk)),
+        )
+        .service(
             web::resource("/v1/index/projects/{project_id}/objects")
                 .app_data(web::PayloadConfig::new(index::max_upload_bytes()))
                 .route(web::post().to(index::append_project_objects)),

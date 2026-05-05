@@ -22,10 +22,10 @@ mod upload;
 #[cfg(test)]
 mod tests;
 
-const MAX_INSERT_ROWS: usize = 10_000;
+const MAX_INSERT_ROWS: usize = 1000;
 // NewSymbol has 7 fields; PostgreSQL limits bind parameters to 65_535 (u16::MAX).
-// 65_535 / 7 = 9_362; use 9_000 to leave a safe margin.
-const MAX_SYMBOL_INSERT_ROWS: usize = 9_000;
+// 65_535 / 7 = 9_362; use 1_000 to leave a safe margin.
+const MAX_SYMBOL_INSERT_ROWS: usize = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,7 +57,9 @@ impl ToSql<diesel::sql_types::Text, Pg> for UploadStatus {
 }
 
 impl FromSql<diesel::sql_types::Text, Pg> for UploadStatus {
-    fn from_sql(bytes: <Pg as diesel::backend::Backend>::RawValue<'_>) -> deserialize::Result<Self> {
+    fn from_sql(
+        bytes: <Pg as diesel::backend::Backend>::RawValue<'_>,
+    ) -> deserialize::Result<Self> {
         let s = <String as FromSql<diesel::sql_types::Text, Pg>>::from_sql(bytes)?;
         match s.as_str() {
             "uploading" => Ok(UploadStatus::Uploading),
@@ -102,6 +104,10 @@ pub struct ProjectDetails {
     pub upload_status: UploadStatus,
     pub file_count: i64,
     pub symbol_count: i64,
+    pub symbol_chunks_total: Option<i32>,
+    pub object_chunks_total: Option<i32>,
+    pub committed_symbol_chunks: Vec<i32>,
+    pub committed_object_chunks: Vec<i32>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -132,18 +138,33 @@ struct NewProject {
     project_name: String,
     root_path: String,
     upload_status: UploadStatus,
+    symbol_chunks_total: Option<i32>,
+    object_chunks_total: Option<i32>,
+}
+
+#[derive(Insertable, Clone)]
+#[diesel(table_name = index_schema::project_symbol_chunks)]
+pub(super) struct NewProjectSymbolChunk {
+    pub project_id: i32,
+    pub seq: i32,
+}
+
+#[derive(Insertable, Clone)]
+#[diesel(table_name = index_schema::project_object_chunks)]
+pub(super) struct NewProjectObjectChunk {
+    pub project_id: i32,
+    pub seq: i32,
 }
 
 #[derive(Insertable, Clone)]
 #[diesel(table_name = index_schema::objects)]
 struct NewObject {
-    project_id: i32,      // 1
-    module_path: String,  // 2
+    project_id: i32,         // 1
+    module_path: String,     // 2
     filesystem_path: String, // 3
-    filetype: String,     // 4
-    content_hash: String, // 5
+    filetype: String,        // 4
+    content_hash: String,    // 5
 }
-
 
 #[derive(Insertable, Clone)]
 #[diesel(table_name = index_schema::content_store)]
@@ -165,7 +186,7 @@ struct NewSymbol {
     project_id: i32,
     symbol_type: i32,
     symbol_scope: Option<i32>,
-    leaf_name: String,  // pre-computed in Rust; trigger only fires on UPDATE OF name
+    leaf_name: String, // pre-computed in Rust; trigger only fires on UPDATE OF name
 }
 
 #[derive(Insertable, Clone)]
@@ -245,9 +266,7 @@ impl IndexStore {
         Self { pool }
     }
 
-    async fn get_conn(
-        &self,
-    ) -> Result<bb8::PooledConnection<'_, AsyncPgConnection>, StoreError> {
+    async fn get_conn(&self) -> Result<bb8::PooledConnection<'_, AsyncPgConnection>, StoreError> {
         self.pool
             .get()
             .await
@@ -275,7 +294,9 @@ fn normalize_full_path(path: &str) -> String {
     for part in normalized.split('/') {
         match part {
             "" | "." => continue,
-            ".." => { stack.pop(); }
+            ".." => {
+                stack.pop();
+            }
             _ => stack.push(part),
         }
     }

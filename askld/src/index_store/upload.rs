@@ -13,8 +13,8 @@ use index::schema_diesel as index_schema;
 
 use super::{
     hash_bytes, normalize_full_path, IndexStore, NewContentStoreRow, NewObject,
-    NewProject, NewSymbol, NewSymbolInstance, NewSymbolRef, UploadError,
-    UploadStatus, MAX_INSERT_ROWS, MAX_SYMBOL_INSERT_ROWS,
+    NewProject, NewProjectObjectChunk, NewProjectSymbolChunk, NewSymbol, NewSymbolInstance,
+    NewSymbolRef, UploadError, UploadStatus, MAX_INSERT_ROWS, MAX_SYMBOL_INSERT_ROWS,
 };
 
 struct ObjectInsert {
@@ -24,7 +24,29 @@ struct ObjectInsert {
 }
 
 impl IndexStore {
-    pub async fn upload_index(&self, upload: UploadProject) -> Result<i32, UploadError> {
+    /// Create a project skeleton (name + root_path only, no symbols).
+    ///
+    /// Returns `(project_id, resumed)`:
+    /// - `resumed = false`: fresh project created
+    /// - `resumed = true`: an existing `Uploading` project was found with matching
+    ///   chunk totals; the caller should resume from where it left off
+    ///
+    /// Conflict rules:
+    /// - `Uploading` + matching totals → resume (return existing id)
+    /// - `Uploading` + mismatched totals → error (user should `--force`)
+    /// - `Failed` / `Deleting` → delete zombie, create fresh
+    /// - `Complete` → conflict error
+    pub async fn upload_index(
+        &self,
+        upload: UploadProject,
+        symbol_chunks_total: Option<i32>,
+        object_chunks_total: Option<i32>,
+    ) -> Result<(i32, bool), UploadError> {
+        if !upload.symbols.is_empty() {
+            return Err(UploadError::Invalid(
+                "symbols must be uploaded via POST /v1/index/projects/{id}/symbols".to_string(),
+            ));
+        }
         let project_name = upload.project_name.trim().to_string();
         if project_name.is_empty() {
             return Err(UploadError::Invalid("project_name is required".to_string()));
@@ -39,94 +61,63 @@ impl IndexStore {
             ));
         }
 
-        // Transaction 1: create project row, cleaning up any zombie from a prior failed upload
-        let project_id = {
-            let mut conn = self.get_upload_conn().await?;
-            conn.transaction::<_, UploadError, _>(move |conn| {
-                create_project(conn, project_name, root_path).scope_boxed()
-            })
-            .await?
-        };
-
-        // IDs are computed as project_id << 32 | local_id — no DB roundtrip needed.
-        let symbol_rows = build_symbols(project_id, &upload.symbols)?;
-        let total_batches = (symbol_rows.len() + MAX_SYMBOL_INSERT_ROWS - 1).max(1) / MAX_SYMBOL_INSERT_ROWS.max(1);
-        tracing::info!(
-            count = symbol_rows.len(),
-            batches = total_batches,
-            "upload_index: inserting symbols"
-        );
-
         let mut conn = self.get_upload_conn().await?;
-        for (batch_idx, chunk) in symbol_rows.chunks(MAX_SYMBOL_INSERT_ROWS).enumerate() {
-            let rows: Vec<NewSymbol> = chunk.to_vec();
-            let result = diesel::insert_into(index_schema::symbols::table)
-                .values(rows)
-                .execute(&mut conn)
-                .await;
-
-            if let Err(e) = result {
-                // Use a fresh connection — the current one may be broken after the insert error.
-                if let Ok(mut fallback) = self.get_upload_conn().await {
-                    let _ = diesel::update(
-                        index_schema::projects::table
-                            .filter(index_schema::projects::id.eq(project_id)),
-                    )
-                    .set(index_schema::projects::upload_status.eq(UploadStatus::Failed))
-                    .execute(&mut fallback)
-                    .await;
-                }
-                return Err(UploadError::Storage(e.to_string()));
-            }
-
-            tracing::info!(
-                batch = batch_idx + 1,
-                total = total_batches,
-                "upload_index: symbol batch committed"
-            );
-        }
-
-        tracing::info!(project_id, "upload_index: symbols done");
-        Ok(project_id)
+        conn.transaction::<_, UploadError, _>(move |conn| {
+            create_project(conn, project_name, root_path, symbol_chunks_total, object_chunks_total)
+                .scope_boxed()
+        })
+        .await
     }
 
-    pub async fn finalize_project(&self, project_id: i32) -> Result<bool, UploadError> {
+    /// Upload a single symbol chunk (seq N).
+    ///
+    /// Idempotent: if the chunk record already exists the symbols are not
+    /// re-inserted and `Ok(())` is returned immediately.
+    pub async fn upload_symbol_chunk(
+        &self,
+        project_id: i32,
+        seq: i32,
+        symbols: Vec<UploadSymbol>,
+    ) -> Result<(), UploadError> {
         let mut conn = self.get_upload_conn().await?;
         conn.transaction::<_, UploadError, _>(|conn| {
             async move {
-                // SELECT FOR UPDATE so the status check and update are atomic: no concurrent
-                // delete can sneak in between the read and the write.
-                let status: Option<UploadStatus> = index_schema::projects::table
-                    .filter(index_schema::projects::id.eq(project_id))
-                    .select(index_schema::projects::upload_status)
-                    .for_update()
-                    .first(conn)
-                    .await
-                    .optional()?;
-                match status {
-                    None => Ok(false),
-                    Some(UploadStatus::Uploading) => {
-                        diesel::update(
-                            index_schema::projects::table
-                                .filter(index_schema::projects::id.eq(project_id)),
-                        )
-                        .set(index_schema::projects::upload_status.eq(UploadStatus::Complete))
-                        .execute(conn)
-                        .await?;
-                        Ok(true)
-                    }
-                    Some(UploadStatus::Complete) => Ok(true),  // idempotent: already finalized
-                    Some(_) => Err(UploadError::Conflict),
+                // Claim this chunk slot.
+                let inserted = diesel::insert_into(index_schema::project_symbol_chunks::table)
+                    .values(NewProjectSymbolChunk { project_id, seq })
+                    .on_conflict_do_nothing()
+                    .execute(conn)
+                    .await?;
+
+                if inserted == 0 {
+                    // Already committed — idempotent success.
+                    return Ok(());
                 }
+
+                let symbol_rows = build_symbols(project_id, &symbols)?;
+                for chunk in symbol_rows.chunks(MAX_SYMBOL_INSERT_ROWS) {
+                    let chunk_vec: Vec<NewSymbol> = chunk.to_vec();
+                    diesel::insert_into(index_schema::symbols::table)
+                        .values(chunk_vec)
+                        .execute(conn)
+                        .await
+                        .map_err(|e| UploadError::Storage(e.to_string()))?;
+                }
+                Ok(())
             }
             .scope_boxed()
         })
         .await
     }
 
-    pub async fn upload_objects(
+    /// Upload a single object chunk (seq M).
+    ///
+    /// Idempotent: if the chunk record already exists the objects are not
+    /// re-inserted and `Ok(())` is returned immediately.
+    pub async fn upload_object_chunk(
         &self,
         project_id: i32,
+        seq: i32,
         upload: UploadProject,
     ) -> Result<(), UploadError> {
         if !upload.symbols.is_empty() {
@@ -136,16 +127,95 @@ impl IndexStore {
         }
 
         let mut conn = self.get_upload_conn().await?;
-        let upload_span = tracing::info_span!("index_upload_objects");
-        do_upload_objects(&mut conn, project_id, upload)
-            .instrument(upload_span)
-            .await
+        let upload_span = tracing::info_span!("index_upload_object_chunk", seq);
+        conn.transaction::<_, UploadError, _>(|conn| {
+            async move {
+                let inserted = diesel::insert_into(index_schema::project_object_chunks::table)
+                    .values(NewProjectObjectChunk { project_id, seq })
+                    .on_conflict_do_nothing()
+                    .execute(conn)
+                    .await?;
+
+                if inserted == 0 {
+                    return Ok(());
+                }
+
+                do_upload_objects(conn, project_id, upload).await
+            }
+            .scope_boxed()
+        })
+        .instrument(upload_span)
+        .await
+    }
+
+    pub async fn finalize_project(&self, project_id: i32) -> Result<bool, UploadError> {
+        let mut conn = self.get_upload_conn().await?;
+        conn.transaction::<_, UploadError, _>(|conn| {
+            async move {
+                let row: Option<(UploadStatus, Option<i32>, Option<i32>)> =
+                    index_schema::projects::table
+                        .filter(index_schema::projects::id.eq(project_id))
+                        .select((
+                            index_schema::projects::upload_status,
+                            index_schema::projects::symbol_chunks_total,
+                            index_schema::projects::object_chunks_total,
+                        ))
+                        .for_update()
+                        .first(conn)
+                        .await
+                        .optional()?;
+
+                match row {
+                    None => Ok(false),
+                    Some((UploadStatus::Complete, _, _)) => Ok(true), // idempotent
+                    Some((UploadStatus::Uploading, sym_total, obj_total)) => {
+                        // Null-safe: only validate if totals were recorded (new protocol).
+                        if let Some(total) = sym_total {
+                            let committed: i64 = index_schema::project_symbol_chunks::table
+                                .filter(index_schema::project_symbol_chunks::project_id.eq(project_id))
+                                .count()
+                                .get_result(conn)
+                                .await?;
+                            if committed != total as i64 {
+                                return Err(UploadError::Invalid(format!(
+                                    "{}/{} symbol chunks committed — upload incomplete",
+                                    committed, total
+                                )));
+                            }
+                        }
+                        if let Some(total) = obj_total {
+                            let committed: i64 = index_schema::project_object_chunks::table
+                                .filter(index_schema::project_object_chunks::project_id.eq(project_id))
+                                .count()
+                                .get_result(conn)
+                                .await?;
+                            if committed != total as i64 {
+                                return Err(UploadError::Invalid(format!(
+                                    "{}/{} object chunks committed — upload incomplete",
+                                    committed, total
+                                )));
+                            }
+                        }
+                        diesel::update(
+                            index_schema::projects::table
+                                .filter(index_schema::projects::id.eq(project_id)),
+                        )
+                        .set(index_schema::projects::upload_status.eq(UploadStatus::Complete))
+                        .execute(conn)
+                        .await?;
+                        Ok(true)
+                    }
+                    Some((_, _, _)) => Err(UploadError::Conflict),
+                }
+            }
+            .scope_boxed()
+        })
+        .await
     }
 
     pub async fn upload_contents(&self, batch: ContentBatch) -> Result<usize, UploadError> {
         let mut conn = self.get_upload_conn().await?;
 
-        // Validate all hashes and build rows, consuming the batch to avoid a double-allocation.
         let rows: Vec<NewContentStoreRow> = batch
             .contents
             .into_iter()
@@ -185,51 +255,77 @@ impl IndexStore {
     }
 }
 
-/// Transaction body for project creation in phase 1.
+/// Create or resume a project in a transaction.
 ///
-/// Zombie cleanup: `Failed`, `Deleting`, or `Uploading` projects (from a previous aborted upload
-/// or a crashed client) are deleted and replaced. `Complete` projects return `Conflict`.
-/// The `FOR UPDATE` lock serializes concurrent zombie cleanups on the same name; the unique
-/// constraint on `project_name` catches any remaining races at INSERT time.
+/// Returns `(project_id, resumed)`.
 async fn create_project(
     conn: &mut AsyncPgConnection,
     project_name: String,
     root_path: String,
-) -> Result<i32, UploadError> {
-    let existing: Option<(i32, UploadStatus)> = index_schema::projects::table
+    symbol_chunks_total: Option<i32>,
+    object_chunks_total: Option<i32>,
+) -> Result<(i32, bool), UploadError> {
+    let existing: Option<(i32, UploadStatus, Option<i32>)> = index_schema::projects::table
         .filter(index_schema::projects::project_name.eq(&project_name))
-        .select((index_schema::projects::id, index_schema::projects::upload_status))
+        .select((
+            index_schema::projects::id,
+            index_schema::projects::upload_status,
+            index_schema::projects::symbol_chunks_total,
+        ))
         .for_update()
         .first(conn)
         .await
         .optional()?;
 
-    if let Some((existing_id, existing_status)) = existing {
-        if matches!(existing_status, UploadStatus::Failed | UploadStatus::Deleting | UploadStatus::Uploading) {
-            tracing::info!(project_id = existing_id, status = %existing_status, "upload_index: deleting zombie project");
-            diesel::delete(
-                index_schema::projects::table.filter(index_schema::projects::id.eq(existing_id)),
-            )
-            .execute(conn)
-            .await?;
-        } else {
-            // Complete — project already exists.
-            return Err(UploadError::Conflict);
+    if let Some((existing_id, existing_status, stored_sym_total)) = existing {
+        match existing_status {
+            UploadStatus::Uploading => {
+                // Validate chunk totals match so we don't silently resume a stale upload.
+                if stored_sym_total != symbol_chunks_total {
+                    return Err(UploadError::Invalid(format!(
+                        "Project '{}' already exists with different chunk counts \
+                         (stored symbol_chunks_total={:?} vs requested {:?}). \
+                         Re-run with --force to replace it.",
+                        project_name, stored_sym_total, symbol_chunks_total
+                    )));
+                }
+                tracing::info!(project_id = existing_id, "upload_index: resuming uploading project");
+                return Ok((existing_id, true));
+            }
+            UploadStatus::Failed | UploadStatus::Deleting => {
+                tracing::info!(
+                    project_id = existing_id,
+                    status = %existing_status,
+                    "upload_index: deleting zombie project"
+                );
+                diesel::delete(
+                    index_schema::projects::table
+                        .filter(index_schema::projects::id.eq(existing_id)),
+                )
+                .execute(conn)
+                .await?;
+            }
+            UploadStatus::Complete => {
+                return Err(UploadError::Conflict);
+            }
         }
     }
 
-    let insert_result: Result<i32, DieselError> = diesel::insert_into(index_schema::projects::table)
-        .values(NewProject {
-            project_name,
-            root_path,
-            upload_status: UploadStatus::Uploading,
-        })
-        .returning(index_schema::projects::id)
-        .get_result(conn)
-        .await;
+    let insert_result: Result<i32, DieselError> =
+        diesel::insert_into(index_schema::projects::table)
+            .values(NewProject {
+                project_name,
+                root_path,
+                upload_status: UploadStatus::Uploading,
+                symbol_chunks_total,
+                object_chunks_total,
+            })
+            .returning(index_schema::projects::id)
+            .get_result(conn)
+            .await;
 
     match insert_result {
-        Ok(id) => Ok(id),
+        Ok(id) => Ok((id, false)),
         Err(DieselError::DatabaseError(DatabaseErrorKind::UniqueViolation, _)) => {
             Err(UploadError::Conflict)
         }
@@ -237,9 +333,7 @@ async fn create_project(
     }
 }
 
-/// Transaction body for phase 2 object upload.
-///
-/// Symbol IDs are computed directly from `project_id << 32 | local_id` — no DB lookup needed.
+/// Process all objects in one chunk: insert objects, instances, refs.
 async fn do_upload_objects(
     conn: &mut AsyncPgConnection,
     project_id: i32,
@@ -389,10 +483,8 @@ fn build_objects(
         let filesystem_path = normalize_full_path(filesystem_path_raw);
 
         let (content, content_hash) = if !object.content_hash.is_empty() && object.content.is_empty() {
-            // Hash-only object: content lives in content_store
             (None, object.content_hash.clone())
         } else {
-            // Inline content: compute hash from content; reject if client-supplied hash disagrees
             let computed = hash_bytes(&object.content);
             if !object.content_hash.is_empty() && object.content_hash != computed {
                 return Err(UploadError::Invalid(format!(
@@ -451,13 +543,11 @@ async fn insert_objects(
         for (entry, id) in chunk.iter_mut().zip(ids.iter()) {
             object_map.insert(entry.local_id, *id);
             if let Some(content) = entry.content.take() {
-                // Inline content: store in content_store only (object_contents is legacy)
                 content_store_rows.push(NewContentStoreRow {
                     content_hash: entry.row.content_hash.clone(),
                     content,
                 });
             }
-            // Hash-only objects: content already in content_store, nothing to insert
         }
 
         if !content_store_rows.is_empty() {
@@ -672,7 +762,6 @@ mod tests {
 
     #[test]
     fn compute_symbol_id_basic() {
-        // project 1, local_id 10 → 1 << 32 | 10
         assert_eq!(compute_symbol_id(1, 10), Ok((1i64 << 32) | 10));
     }
 
@@ -761,7 +850,6 @@ mod tests {
 
     #[test]
     fn build_objects_client_hash_must_match_computed() {
-        // Providing both content and a wrong hash is an error
         assert!(build_objects(1, &[obj(1, "/a.c", b"real", "wrong")]).is_err());
     }
 
@@ -886,4 +974,3 @@ mod tests {
         assert!(build_symbol_refs(1, &[object], &obj_map).is_err());
     }
 }
-

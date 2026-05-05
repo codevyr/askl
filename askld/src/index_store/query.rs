@@ -42,22 +42,26 @@ impl IndexStore {
     ) -> Result<Option<ProjectDetails>, StoreError> {
         let mut conn = self.get_conn().await?;
 
-        let project_row: Option<(i32, String, String, UploadStatus)> = index_schema::projects::table
-            .filter(index_schema::projects::id.eq(project_id))
-            .select((
-                index_schema::projects::id,
-                index_schema::projects::project_name,
-                index_schema::projects::root_path,
-                index_schema::projects::upload_status,
-            ))
-            .first(&mut conn)
-            .await
-            .optional()?;
+        let project_row: Option<(i32, String, String, UploadStatus, Option<i32>, Option<i32>)> =
+            index_schema::projects::table
+                .filter(index_schema::projects::id.eq(project_id))
+                .select((
+                    index_schema::projects::id,
+                    index_schema::projects::project_name,
+                    index_schema::projects::root_path,
+                    index_schema::projects::upload_status,
+                    index_schema::projects::symbol_chunks_total,
+                    index_schema::projects::object_chunks_total,
+                ))
+                .first(&mut conn)
+                .await
+                .optional()?;
 
-        let (id, project_name, root_path, upload_status) = match project_row {
-            Some(row) => row,
-            None => return Ok(None),
-        };
+        let (id, project_name, root_path, upload_status, symbol_chunks_total, object_chunks_total) =
+            match project_row {
+                Some(row) => row,
+                None => return Ok(None),
+            };
 
         let file_count: i64 = index_schema::objects::table
             .filter(index_schema::objects::project_id.eq(project_id))
@@ -71,6 +75,20 @@ impl IndexStore {
             .get_result(&mut conn)
             .await?;
 
+        let committed_symbol_chunks: Vec<i32> = index_schema::project_symbol_chunks::table
+            .filter(index_schema::project_symbol_chunks::project_id.eq(project_id))
+            .select(index_schema::project_symbol_chunks::seq)
+            .order(index_schema::project_symbol_chunks::seq)
+            .load(&mut conn)
+            .await?;
+
+        let committed_object_chunks: Vec<i32> = index_schema::project_object_chunks::table
+            .filter(index_schema::project_object_chunks::project_id.eq(project_id))
+            .select(index_schema::project_object_chunks::seq)
+            .order(index_schema::project_object_chunks::seq)
+            .load(&mut conn)
+            .await?;
+
         Ok(Some(ProjectDetails {
             id,
             project_name,
@@ -78,6 +96,10 @@ impl IndexStore {
             upload_status,
             file_count,
             symbol_count,
+            symbol_chunks_total,
+            object_chunks_total,
+            committed_symbol_chunks,
+            committed_object_chunks,
         }))
     }
 
@@ -261,6 +283,24 @@ impl IndexStore {
         .map(|row| row.content);
 
         Ok(content)
+    }
+
+    /// Return which of the given content hashes already exist in the content store.
+    /// Used by clients to skip uploading content that is already present.
+    pub async fn check_content_hashes(
+        &self,
+        hashes: Vec<String>,
+    ) -> Result<Vec<String>, StoreError> {
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut conn = self.get_conn().await?;
+        let present: Vec<String> = index_schema::content_store::table
+            .filter(index_schema::content_store::content_hash.eq_any(&hashes))
+            .select(index_schema::content_store::content_hash)
+            .load(&mut conn)
+            .await?;
+        Ok(present)
     }
 }
 

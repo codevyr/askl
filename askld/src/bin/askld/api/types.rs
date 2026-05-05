@@ -226,6 +226,7 @@ impl ErrorResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IndexUploadResponse {
     pub project_id: i32,
+    pub resumed: bool,
 }
 
 #[derive(Debug, Serialize)]

@@ -101,9 +101,12 @@ pub enum IndexCommand {
         /// Print JSON response only
         #[clap(long, action)]
         json: bool,
-        /// Skip uploading content blobs (useful when they were already uploaded in a prior attempt)
+        /// Max concurrent in-flight chunk uploads (1 = sequential)
+        #[clap(long, default_value = "1")]
+        window: usize,
+        /// Delete any existing project with the same name and start fresh
         #[clap(long, action)]
-        skip_content_upload: bool,
+        force: bool,
     },
     ListProjects {
         /// askld base URL
