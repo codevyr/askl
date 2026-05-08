@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::io::Write;
 
@@ -110,11 +111,18 @@ pub struct ProjectDetails {
     pub committed_object_chunks: Vec<i32>,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeType {
+    Dir,
+    File,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct ProjectTreeNode {
     pub name: String,
     pub path: String,
-    pub node_type: String,
+    pub node_type: NodeType,
     pub has_children: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_id: Option<FileId>,
@@ -125,11 +133,11 @@ pub struct ProjectTreeNode {
 }
 
 #[derive(Debug)]
-pub enum ProjectTreeResult {
+pub enum MultiTreeResult {
     ProjectNotFound,
     NotReady,
-    NotDirectory,
-    Nodes(Vec<ProjectTreeNode>),
+    NotDirectory(String),
+    Nodes(HashMap<String, Vec<ProjectTreeNode>>),
 }
 
 #[derive(Insertable, Clone)]
@@ -207,46 +215,41 @@ struct NewSymbolRef {
 }
 
 #[derive(Debug, QueryableByName)]
-struct DirectoryChildRow {
+pub(super) struct NameRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    pub(super) name: String,
+}
+
+#[derive(Debug, QueryableByName)]
+struct CompactableRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    parent_name: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    child_name: String,
+}
+
+#[derive(Debug, QueryableByName)]
+struct BatchedDirRow {
     #[diesel(sql_type = diesel::sql_types::Text)]
     path: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    parent_prefix: String,
     #[diesel(sql_type = diesel::sql_types::Bool)]
     has_children: bool,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     compact_path: Option<String>,
 }
 
-/// Single name column from a query.
 #[derive(Debug, QueryableByName)]
-struct NameRow {
-    #[diesel(sql_type = diesel::sql_types::Text)]
-    name: String,
-}
-
-/// Generic boolean result from an EXISTS query.
-#[derive(Debug, QueryableByName)]
-struct ExistsRow {
-    #[diesel(sql_type = diesel::sql_types::Bool)]
-    exists: bool,
-}
-
-/// Per-directory child counts for determining has_children and compact eligibility.
-#[derive(Debug, QueryableByName)]
-struct ChildCountsRow {
-    #[diesel(sql_type = diesel::sql_types::BigInt)]
-    dir_count: i64,
-    #[diesel(sql_type = diesel::sql_types::BigInt)]
-    file_count: i64,
-}
-
-#[derive(Debug, QueryableByName)]
-struct FileChildRow {
+struct BatchedFileRow {
     #[diesel(sql_type = diesel::sql_types::Integer)]
     id: i32,
     #[diesel(sql_type = diesel::sql_types::Text)]
     path: String,
     #[diesel(sql_type = diesel::sql_types::Text)]
     filetype: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    parent_prefix: String,
 }
 
 impl From<diesel::result::Error> for UploadError {
@@ -287,7 +290,7 @@ fn normalize_posix(path: &str) -> String {
     path.replace('\\', "/")
 }
 
-fn normalize_full_path(path: &str) -> String {
+pub fn normalize_full_path(path: &str) -> String {
     let normalized = normalize_posix(path);
     let has_leading = normalized.starts_with('/');
     let mut stack: Vec<&str> = Vec::new();

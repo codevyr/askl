@@ -330,7 +330,7 @@ impl<ST: 'static + Send + diesel::sql_types::SingleValue, GB> ValidGrouping<GB> 
 /// lists as proper bind parameters rather than inline SQL text.
 ///
 /// Example:
-/// ```rust
+/// ```rust,ignore
 /// OwnedSqlBound::<Bool>::new(
 ///     "col IN (SELECT id FROM t WHERE other_id = ANY(".into(),
 ///     ids,

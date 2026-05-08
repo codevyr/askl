@@ -1,8 +1,8 @@
 use actix_web::{delete, get, http::header, web, HttpRequest, HttpResponse, Responder};
+use tracing::Instrument;
 use askld::auth::AuthIdentity;
-use askld::index_store::{IndexStore, ProjectTreeResult, StoreError, UploadError};
+use askld::index_store::{normalize_full_path, IndexStore, MultiTreeResult, StoreError, UploadError};
 use askld::proto::askl::index::{ContentBatch, Project};
-use futures::future::join_all;
 use log::{error, warn};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -328,11 +328,8 @@ pub async fn get_project_tree(
         }
     };
 
-    let mut path = query.path.clone().unwrap_or_else(|| "/".to_string());
-    if path.is_empty() {
-        path = "/".to_string();
-    }
-    if !path.starts_with('/') {
+    let raw_path = query.path.clone().unwrap_or_else(|| "/".to_string());
+    if raw_path.is_empty() || !raw_path.starts_with('/') {
         return HttpResponse::BadRequest().body("path must be an absolute path");
     }
     let compact = match query.compact {
@@ -347,68 +344,53 @@ pub async fn get_project_tree(
         }
     }
 
-    let base_nodes = match store.list_project_tree(*project_id, &path, compact).await {
-        Ok(ProjectTreeResult::Nodes(nodes)) => nodes,
-        Ok(ProjectTreeResult::ProjectNotFound) => {
+    // Normalize all paths so that HashMap keys match what the store returns.
+    let path = normalize_full_path(&raw_path);
+    let expand_normalized: Vec<String> = query.expand.iter().map(|p| normalize_full_path(p)).collect();
+
+    let mut all_paths = vec![path.clone()];
+    all_paths.extend(expand_normalized.iter().cloned());
+
+    let span = tracing::info_span!(
+        "project_tree",
+        project_id = *project_id,
+        path = %path,
+        compact,
+        expand_count = query.expand.len(),
+    );
+
+    let mut all_nodes = match store
+        .list_project_tree_multi(*project_id, &all_paths, compact)
+        .instrument(span)
+        .await
+    {
+        Ok(MultiTreeResult::Nodes(map)) => map,
+        Ok(MultiTreeResult::ProjectNotFound) => {
             return HttpResponse::NotFound().body("Project not found");
         }
-        Ok(ProjectTreeResult::NotReady) => {
+        Ok(MultiTreeResult::NotReady) => {
             return HttpResponse::Conflict().body("Project upload is not complete");
         }
-        Ok(ProjectTreeResult::NotDirectory) => {
+        Ok(MultiTreeResult::NotDirectory(p)) if p == path => {
             return HttpResponse::BadRequest().body("path is not a directory");
         }
+        Ok(MultiTreeResult::NotDirectory(p)) => {
+            return HttpResponse::BadRequest()
+                .body(format!("expand path is not a directory: {}", p));
+        }
         Err(StoreError::Storage(message)) => {
-            error!(
-                "Failed to load project tree {}: {}",
-                project_id, message
-            );
+            error!("Failed to load project tree {}: {}", project_id, message);
             return HttpResponse::InternalServerError().body("Failed to load project tree");
         }
     };
 
-    // Process all expand paths concurrently
-    let expand_futures: Vec<_> = query
-        .expand
+    let base_nodes = all_nodes.remove(&path).unwrap_or_default();
+    let expanded: std::collections::HashMap<String, _> = expand_normalized
         .iter()
-        .map(|expand_path| {
-            let store = store.clone();
-            let expand_path = expand_path.clone();
-            let project_id = *project_id;
-            async move {
-                let result = store
-                    .list_project_tree(project_id, &expand_path, compact)
-                    .await;
-                (expand_path, result)
-            }
-        })
+        .filter_map(|p| all_nodes.remove(p).map(|nodes| (p.clone(), nodes)))
         .collect();
-    let expand_results = join_all(expand_futures).await;
 
-    let mut expanded = std::collections::HashMap::new();
-    for (expand_path, result) in expand_results {
-        let nodes = match result {
-            Ok(ProjectTreeResult::Nodes(nodes)) => nodes,
-            Ok(ProjectTreeResult::ProjectNotFound) => {
-                return HttpResponse::NotFound().body("Project not found");
-            }
-            Ok(ProjectTreeResult::NotReady) => {
-                return HttpResponse::Conflict().body("Project upload is not complete");
-            }
-            Ok(ProjectTreeResult::NotDirectory) => {
-                return HttpResponse::BadRequest()
-                    .body(format!("expand path is not a directory: {}", expand_path));
-            }
-            Err(StoreError::Storage(message)) => {
-                error!(
-                    "Failed to load project tree {}: {}",
-                    project_id, message
-                );
-                return HttpResponse::InternalServerError().body("Failed to load project tree");
-            }
-        };
-        expanded.insert(expand_path, nodes);
-    }
+    tracing::debug!(nodes = base_nodes.len(), expanded = expanded.len(), "project_tree complete");
 
     let response = TreeResponse {
         base_path: path,
