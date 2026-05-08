@@ -50,6 +50,7 @@ fn build_cors() -> Cors {
 pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
     let _guard = if let Some(trace_dir) = &serve_args.trace {
         use chrono::prelude::*;
+        std::fs::create_dir_all(trace_dir).expect("Failed to create trace directory");
         let trace_file = format!("trace-{}.json", Local::now().format("%Y%m%d-%H%M%S"),);
         let trace_path = std::path::Path::new(trace_dir).join(trace_file);
         if trace_path.exists() {

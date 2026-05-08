@@ -2,14 +2,16 @@ use diesel::prelude::*;
 use diesel::OptionalExtension;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 
+use std::collections::HashMap;
+
 use index::models_diesel::ContentRow;
 use index::schema_diesel as index_schema;
-use index::symbols::FileId;
+use index::symbols::{FileId, SymbolType};
 
 use super::{
-    ChildCountsRow, DirectoryChildRow, ExistsRow, FileChildRow, IndexStore, NameRow,
-    ProjectDetails, ProjectInfo, ProjectTreeNode, ProjectTreeResult, StoreError, UploadStatus,
-    normalize_full_path, path_basename,
+    normalize_full_path, path_basename, BatchedDirRow, BatchedFileRow, CompactableRow, IndexStore,
+    MultiTreeResult, NodeType, ProjectDetails, ProjectInfo, ProjectTreeNode, StoreError,
+    UploadStatus,
 };
 
 impl IndexStore {
@@ -151,7 +153,11 @@ impl IndexStore {
         .bind::<diesel::sql_types::Integer, _>(project_id)
         .execute(&mut conn)
         .await?;
-        tracing::info!(project_id, rows = n, "delete_project: symbol_instances done");
+        tracing::info!(
+            project_id,
+            rows = n,
+            "delete_project: symbol_instances done"
+        );
 
         let n = diesel::delete(
             index_schema::symbols::table.filter(index_schema::symbols::project_id.eq(project_id)),
@@ -178,12 +184,17 @@ impl IndexStore {
         Ok(true)
     }
 
-    pub async fn list_project_tree(
+    #[tracing::instrument(skip(self), fields(path_count = paths.len()))]
+    pub async fn list_project_tree_multi(
         &self,
         project_id: i32,
-        path: &str,
+        paths: &[String],
         compact: bool,
-    ) -> Result<ProjectTreeResult, StoreError> {
+    ) -> Result<MultiTreeResult, StoreError> {
+        if paths.is_empty() {
+            return Ok(MultiTreeResult::Nodes(HashMap::new()));
+        }
+
         let mut conn = self.get_conn().await?;
 
         let project_status: Option<UploadStatus> = index_schema::projects::table
@@ -193,41 +204,71 @@ impl IndexStore {
             .await
             .optional()?;
         match project_status {
-            None => return Ok(ProjectTreeResult::ProjectNotFound),
-            Some(s) if s != UploadStatus::Complete => return Ok(ProjectTreeResult::NotReady),
+            None => return Ok(MultiTreeResult::ProjectNotFound),
+            Some(s) if s != UploadStatus::Complete => return Ok(MultiTreeResult::NotReady),
             Some(_) => {}
         }
 
-        let normalized = normalize_full_path(path);
+        let normalized: Vec<String> = paths.iter().map(|p| normalize_full_path(p)).collect();
 
-        let dir_symbol = index_schema::symbols::table
-            .filter(index_schema::symbols::project_id.eq(project_id))
-            .filter(index_schema::symbols::symbol_type.eq(4)) // DIRECTORY
-            .filter(index_schema::symbols::name.eq(&normalized))
-            .select(index_schema::symbols::id)
-            .first::<i64>(&mut conn)
-            .await
-            .optional()?;
+        // Validate all non-root paths are directories.
+        let non_root: Vec<String> = normalized
+            .iter()
+            .filter(|p| p.as_str() != "/")
+            .cloned()
+            .collect();
+        if !non_root.is_empty() {
+            let found: std::collections::HashSet<String> = diesel::sql_query(
+                r#"
+                SELECT name FROM index.symbols
+                WHERE project_id = $1
+                  AND symbol_type = $2
+                  AND name = ANY($3)
+                "#,
+            )
+            .bind::<diesel::sql_types::Integer, _>(project_id)
+            .bind::<diesel::sql_types::Integer, _>(SymbolType::Directory as i32)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(&non_root)
+            .load::<super::NameRow>(&mut conn)
+            .await?
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
 
-        if dir_symbol.is_none() && normalized != "/" {
-            return Ok(ProjectTreeResult::NotDirectory);
+            if let Some(invalid) = non_root.into_iter().find(|p| !found.contains(p)) {
+                return Ok(MultiTreeResult::NotDirectory(invalid));
+            }
         }
 
-        let (directories, files) = load_tree_children(
-            &mut conn,
-            project_id,
-            &normalized,
-            compact,
-        )
-        .await?;
+        let (dir_rows, file_rows) =
+            load_tree_children_multi(&mut conn, project_id, &normalized, compact).await?;
 
-        let mut nodes = Vec::with_capacity(directories.len() + files.len());
-        for row in directories {
+        // Group results by original normalized path using the prefix→path mapping.
+        let prefix_to_path: HashMap<String, String> = normalized
+            .iter()
+            .map(|p| {
+                let prefix = if p == "/" {
+                    "/".to_string()
+                } else {
+                    format!("{}/", p)
+                };
+                (prefix, p.clone())
+            })
+            .collect();
+
+        let mut result: HashMap<String, Vec<ProjectTreeNode>> =
+            normalized.iter().map(|p| (p.clone(), Vec::new())).collect();
+
+        for row in dir_rows {
+            let parent = match prefix_to_path.get(&row.parent_prefix) {
+                Some(p) => p.clone(),
+                None => continue,
+            };
             let name = path_basename(&row.path);
-            nodes.push(ProjectTreeNode {
+            result.entry(parent).or_default().push(ProjectTreeNode {
                 name,
                 path: row.path,
-                node_type: "dir".to_string(),
+                node_type: NodeType::Dir,
                 has_children: row.has_children,
                 file_id: None,
                 filetype: None,
@@ -235,12 +276,16 @@ impl IndexStore {
             });
         }
 
-        for row in files {
+        for row in file_rows {
+            let parent = match prefix_to_path.get(&row.parent_prefix) {
+                Some(p) => p.clone(),
+                None => continue,
+            };
             let name = path_basename(&row.path);
-            nodes.push(ProjectTreeNode {
+            result.entry(parent).or_default().push(ProjectTreeNode {
                 name,
                 path: row.path,
-                node_type: "file".to_string(),
+                node_type: NodeType::File,
                 has_children: false,
                 file_id: Some(FileId::new(row.id)),
                 filetype: Some(row.filetype),
@@ -248,12 +293,15 @@ impl IndexStore {
             });
         }
 
-        nodes.sort_by(|a, b| {
-            let a_is_dir = a.node_type == "dir";
-            let b_is_dir = b.node_type == "dir";
-            b_is_dir.cmp(&a_is_dir).then_with(|| a.path.cmp(&b.path))
-        });
-        Ok(ProjectTreeResult::Nodes(nodes))
+        for nodes in result.values_mut() {
+            nodes.sort_by(|a, b| {
+                let a_is_dir = a.node_type == NodeType::Dir;
+                let b_is_dir = b.node_type == NodeType::Dir;
+                b_is_dir.cmp(&a_is_dir).then_with(|| a.path.cmp(&b.path))
+            });
+        }
+
+        Ok(MultiTreeResult::Nodes(result))
     }
 
     pub async fn get_project_file_contents_by_path(
@@ -304,171 +352,199 @@ impl IndexStore {
     }
 }
 
-/// Load direct child directories and files for a given parent path.
-async fn load_tree_children(
+/// Fetch all single-child-no-files directories for the project in one query.
+/// Returns a map of parent_path → child_path used to walk compact chains in Rust.
+///
+/// Identifies compactable directories purely by path-string arithmetic:
+/// for each file/dir symbol (excluding root), compute its parent by stripping
+/// the last path component, then group by parent. A parent is compactable iff
+/// it has exactly one direct child and that child is a directory.
+#[tracing::instrument(skip(conn))]
+async fn query_compactable_dirs(
     conn: &mut AsyncPgConnection,
     project_id: i32,
-    parent_path: &str,
-    compact: bool,
-) -> Result<(Vec<DirectoryChildRow>, Vec<FileChildRow>), StoreError> {
-    let prefix = if parent_path == "/" {
-        "/".to_string()
-    } else {
-        format!("{}/", parent_path)
-    };
-
-    let child_dir_names: Vec<String> = diesel::sql_query(
-        r#"
-        SELECT s.name
-        FROM index.symbols s
-        WHERE s.project_id = $1
-          AND s.symbol_type = 4
-          AND starts_with(s.name, $2)
-          AND s.name != $2
-          AND position('/' IN substring(s.name FROM length($2) + 1)) = 0
-        ORDER BY s.name
-        "#,
-    )
-    .bind::<diesel::sql_types::Integer, _>(project_id)
-    .bind::<diesel::sql_types::Text, _>(&prefix)
-    .load::<NameRow>(conn)
-    .await?
-    .into_iter()
-    .map(|r| r.name)
-    .collect();
-
-    let mut dir_children = Vec::with_capacity(child_dir_names.len());
-    for dir_name in &child_dir_names {
-        let child_prefix = format!("{}/", dir_name);
-        let counts = query_child_counts(conn, project_id, &child_prefix).await?;
-        let has_children = counts.dir_count > 0 || counts.file_count > 0;
-
-        let compact_path = if compact && counts.dir_count == 1 && counts.file_count == 0 {
-            compute_compact_path(conn, project_id, dir_name).await?
-        } else {
-            None
-        };
-
-        dir_children.push(DirectoryChildRow {
-            path: dir_name.clone(),
-            has_children,
-            compact_path,
-        });
-    }
-
-    let files = load_file_children(conn, project_id, &prefix).await?;
-
-    Ok((dir_children, files))
-}
-
-/// Query direct child dir count and file count under a prefix.
-async fn query_child_counts(
-    conn: &mut AsyncPgConnection,
-    project_id: i32,
-    child_prefix: &str,
-) -> Result<ChildCountsRow, StoreError> {
-    let row = diesel::sql_query(
+) -> Result<HashMap<String, String>, StoreError> {
+    let rows: Vec<CompactableRow> = diesel::sql_query(
         r#"
         SELECT
-            (SELECT COUNT(*) FROM index.symbols s
-             WHERE s.project_id = $1 AND s.symbol_type = 4
-               AND starts_with(s.name, $2)
-               AND position('/' IN substring(s.name FROM length($2) + 1)) = 0
-            ) AS dir_count,
-            (SELECT COUNT(*) FROM index.symbols s
-             WHERE s.project_id = $1 AND s.symbol_type = 2
-               AND starts_with(s.name, $2)
-               AND position('/' IN substring(s.name FROM length($2) + 1)) = 0
-            ) AS file_count
-        "#,
-    )
-    .bind::<diesel::sql_types::Integer, _>(project_id)
-    .bind::<diesel::sql_types::Text, _>(child_prefix)
-    .get_result::<ChildCountsRow>(conn)
-    .await?;
-    Ok(row)
-}
-
-/// Walk down a chain of single-child-no-files directories for compact display.
-async fn compute_compact_path(
-    conn: &mut AsyncPgConnection,
-    project_id: i32,
-    dir_path: &str,
-) -> Result<Option<String>, StoreError> {
-    let mut current = dir_path.to_string();
-    for _ in 0..20 {
-        let child_prefix = format!("{}/", current);
-
-        let child_dirs: Vec<NameRow> = diesel::sql_query(
-            r#"
-            SELECT s.name
+            parent_name,
+            MIN(child_name) FILTER (WHERE symbol_type = $2) AS child_name
+        FROM (
+            SELECT
+                s.name AS child_name,
+                s.symbol_type,
+                CASE WHEN position('/' IN ltrim(s.name, '/')) = 0 THEN '/'
+                     ELSE left(s.name, length(s.name) - position('/' IN reverse(s.name)))
+                END AS parent_name
             FROM index.symbols s
             WHERE s.project_id = $1
-              AND s.symbol_type = 4
-              AND starts_with(s.name, $2)
-              AND position('/' IN substring(s.name FROM length($2) + 1)) = 0
-            LIMIT 2
-            "#,
-        )
-        .bind::<diesel::sql_types::Integer, _>(project_id)
-        .bind::<diesel::sql_types::Text, _>(&child_prefix)
-        .load(conn)
-        .await?;
-
-        if child_dirs.len() != 1 {
-            break;
-        }
-
-        let has_files = diesel::sql_query(
-            r#"
-            SELECT EXISTS(
-                SELECT 1 FROM index.symbols s
-                WHERE s.project_id = $1
-                  AND s.symbol_type = 2
-                  AND starts_with(s.name, $2)
-                  AND position('/' IN substring(s.name FROM length($2) + 1)) = 0
-            ) AS exists
-            "#,
-        )
-        .bind::<diesel::sql_types::Integer, _>(project_id)
-        .bind::<diesel::sql_types::Text, _>(&child_prefix)
-        .get_result::<ExistsRow>(conn)
-        .await?;
-
-        current = child_dirs.into_iter().next().unwrap().name;
-        if has_files.exists {
-            break;
-        }
-    }
-
-    if current != dir_path {
-        Ok(Some(current))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Load direct child files under a parent prefix.
-async fn load_file_children(
-    conn: &mut AsyncPgConnection,
-    project_id: i32,
-    parent_prefix: &str,
-) -> Result<Vec<FileChildRow>, StoreError> {
-    let rows = diesel::sql_query(
-        r#"
-        SELECT DISTINCT o.id, o.filesystem_path AS path, o.filetype
-        FROM index.objects o
-        JOIN index.symbols fs ON fs.name = o.filesystem_path
-        WHERE fs.project_id = $1
-          AND fs.symbol_type = 2
-          AND starts_with(fs.name, $2)
-          AND position('/' IN substring(fs.name FROM length($2) + 1)) = 0
-        ORDER BY o.filesystem_path
+              AND (s.symbol_type = $2 OR s.symbol_type = $3)
+              AND s.name != '/'
+        ) children
+        GROUP BY parent_name
+        HAVING count(*) = 1
+           AND count(*) FILTER (WHERE symbol_type = $2) = 1
         "#,
     )
     .bind::<diesel::sql_types::Integer, _>(project_id)
-    .bind::<diesel::sql_types::Text, _>(parent_prefix)
-    .load::<FileChildRow>(conn)
+    .bind::<diesel::sql_types::Integer, _>(SymbolType::Directory as i32)
+    .bind::<diesel::sql_types::Integer, _>(SymbolType::File as i32)
+    .load(conn)
     .await?;
-    Ok(rows)
+
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.parent_name, r.child_name))
+        .collect())
+}
+
+/// Walk the compactable map to find the terminal path of a compact chain.
+///
+/// The chain terminates when a path has no single-child compactable successor.
+/// As a cycle-safety bound we stop once the accumulated path length exceeds
+/// the POSIX PATH_MAX of 4096 bytes; a legitimate filesystem path cannot be
+/// longer than that.
+fn walk_compact_chain(start: &str, map: &HashMap<String, String>) -> Option<String> {
+    let mut current = start;
+    while current.len() <= 4096 {
+        match map.get(current) {
+            Some(next) => current = next.as_str(),
+            None => break,
+        }
+    }
+    if current != start {
+        Some(current.to_string())
+    } else {
+        None
+    }
+}
+
+/// Load children for multiple parent paths in two batch queries (dirs + files).
+#[tracing::instrument(skip(conn), fields(path_count = paths.len()))]
+async fn load_tree_children_multi(
+    conn: &mut AsyncPgConnection,
+    project_id: i32,
+    paths: &[String],
+    compact: bool,
+) -> Result<(Vec<BatchedDirRow>, Vec<BatchedFileRow>), StoreError> {
+    // Deduplicate: repeated prefixes (e.g. "/" appearing for both base path and an
+    // expand path) would make unnest emit duplicate parent_prefix values, causing
+    // each child node to appear twice in the results.
+    let mut seen_prefixes = std::collections::HashSet::new();
+    let prefixes: Vec<String> = paths
+        .iter()
+        .map(|p| {
+            if p == "/" {
+                "/".to_string()
+            } else {
+                format!("{}/", p)
+            }
+        })
+        .filter(|p| seen_prefixes.insert(p.clone()))
+        .collect();
+
+    // The main join uses nlevel(symbol_path) = children_nlevel to restrict the
+    // index scan to exactly the right depth layer.  children_nlevel is the number
+    // of '/' characters in the prefix string.
+    //
+    // has_children is computed in bulk via two extra CTEs (one for directory
+    // grandchildren, one for file grandchildren), each scanning once per prefix
+    // rather than once per returned directory.  This replaces ~N×2 correlated
+    // EXISTS subqueries with 2×|prefixes| range scans.
+    let mut dir_rows: Vec<BatchedDirRow> = diesel::sql_query(
+        r#"
+        WITH prefixes AS (
+            SELECT
+                t.prefix,
+                length(t.prefix) - length(replace(t.prefix, '/', '')) AS children_nlevel
+            FROM unnest($2::text[]) AS t(prefix)
+        ),
+        direct_dirs AS (
+            SELECT s.name AS path, p.prefix AS parent_prefix
+            FROM prefixes p
+            JOIN index.symbols s ON s.project_id = $1
+              AND s.symbol_type = $3
+              AND nlevel(s.symbol_path) = p.children_nlevel
+              AND starts_with(s.name, p.prefix)
+              AND s.name != p.prefix
+        ),
+        dirs_with_dir_children AS (
+            SELECT DISTINCT
+                left(c.name, length(c.name) - position('/' IN reverse(c.name))) AS parent_name
+            FROM prefixes p
+            JOIN index.symbols c ON c.project_id = $1
+              AND c.symbol_type = $3
+              AND nlevel(c.symbol_path) = p.children_nlevel + 1
+              AND starts_with(c.name, p.prefix)
+        ),
+        dirs_with_file_children AS (
+            SELECT DISTINCT
+                left(c.name, length(c.name) - position('/' IN reverse(c.name))) AS parent_name
+            FROM prefixes p
+            JOIN index.symbols c ON c.project_id = $1
+              AND c.symbol_type = $4
+              AND nlevel(c.symbol_path) = p.children_nlevel + 1
+              AND starts_with(c.name, p.prefix)
+        )
+        SELECT
+            d.path,
+            d.parent_prefix,
+            (ddc.parent_name IS NOT NULL OR dfc.parent_name IS NOT NULL) AS has_children,
+            NULL::text AS compact_path
+        FROM direct_dirs d
+        LEFT JOIN dirs_with_dir_children ddc ON ddc.parent_name = d.path
+        LEFT JOIN dirs_with_file_children dfc ON dfc.parent_name = d.path
+        ORDER BY d.parent_prefix, d.path
+        "#,
+    )
+    .bind::<diesel::sql_types::Integer, _>(project_id)
+    .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(&prefixes)
+    .bind::<diesel::sql_types::Integer, _>(SymbolType::Directory as i32)
+    .bind::<diesel::sql_types::Integer, _>(SymbolType::File as i32)
+    .load(conn)
+    .await?;
+
+    if compact {
+        let compactable = query_compactable_dirs(conn, project_id).await?;
+        for row in &mut dir_rows {
+            row.compact_path = walk_compact_chain(&row.path, &compactable);
+        }
+    }
+
+    // file_nlevel = slash count in prefix = nlevel of direct children.
+    // nlevel(symbol_path) = file_nlevel restricts the index scan to exactly the
+    // right depth layer, using symbols_project_type_nlevel_name_idx.
+    //
+    // The join to objects goes via symbol_instances on IDs rather than matching
+    // on filesystem_path strings.  File symbols (symbol_type=2) only ever have
+    // file-content instances (source/header/build/file); containment and sentinel
+    // instance types are used exclusively by Directory symbols, so no instance_type
+    // filter is needed here.  DISTINCT guards against any future edge cases where
+    // a file symbol might accumulate multiple instances.
+    let file_rows: Vec<BatchedFileRow> = diesel::sql_query(
+        r#"
+        WITH prefixes AS (
+            SELECT
+                t.prefix,
+                length(t.prefix) - length(replace(t.prefix, '/', '')) AS file_nlevel
+            FROM unnest($2::text[]) AS t(prefix)
+        )
+        SELECT DISTINCT o.id, fs.name AS path, o.filetype, p.prefix AS parent_prefix
+        FROM prefixes p
+        JOIN index.symbols fs ON fs.project_id = $1
+          AND fs.symbol_type = $3
+          AND nlevel(fs.symbol_path) = p.file_nlevel
+          AND starts_with(fs.name, p.prefix)
+        JOIN index.symbol_instances si ON si.symbol = fs.id
+        JOIN index.objects o ON o.id = si.object_id
+        ORDER BY p.prefix, fs.name
+        "#,
+    )
+    .bind::<diesel::sql_types::Integer, _>(project_id)
+    .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(&prefixes)
+    .bind::<diesel::sql_types::Integer, _>(SymbolType::File as i32)
+    .load(conn)
+    .await?;
+
+    Ok((dir_rows, file_rows))
 }
