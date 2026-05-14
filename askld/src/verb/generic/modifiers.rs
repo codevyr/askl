@@ -4,7 +4,7 @@ use crate::parser_context::ParserContext;
 use crate::span::Span;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
-use index::db_diesel::{CompositeFilter, ScopeContext, Selection};
+use index::db_diesel::{CompositeFilter, EphemeralOverlay, ScopeContext, Selection};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
@@ -74,8 +74,8 @@ impl Selector for IsolatedScope {
         _filter: CompositeFilter,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
-    ) -> Result<Option<Selection>> {
-        Ok(Some(Selection::new()))
+    ) -> Result<(Option<Selection>, EphemeralOverlay)> {
+        Ok((Some(Selection::new()), EphemeralOverlay::empty()))
     }
 }
 

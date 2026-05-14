@@ -75,10 +75,11 @@ impl Selector for NameSelector {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
-    ) -> Result<Option<Selection>> {
+    ) -> Result<(Option<Selection>, EphemeralOverlay)> {
+        let overlay = EphemeralOverlay::empty();
         let combined = CompositeFilter::and(vec![filter, name_filter(&self.name)]);
-        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope, &EphemeralOverlay::empty()).await?;
-        Ok(Some(selection))
+        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope, &overlay).await?;
+        Ok((Some(selection), overlay))
     }
 }
 
@@ -146,9 +147,10 @@ impl Selector for ForcedVerb {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
-    ) -> Result<Option<Selection>> {
+    ) -> Result<(Option<Selection>, EphemeralOverlay)> {
+        let overlay = EphemeralOverlay::empty();
         let combined = CompositeFilter::and(vec![filter, name_filter(&self.name)]);
-        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope, &EphemeralOverlay::empty()).await?;
+        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope, &overlay).await?;
 
         // Cache the forced selection so derivations can fabricate the
         // correct parent <-> child relationship later on.
@@ -158,7 +160,7 @@ impl Selector for ForcedVerb {
         // materialised when another statement (e.g. a parent) references
         // them. Returning an empty selection keeps the execution state unset
         // so derivations can populate it when needed.
-        Ok(None)
+        Ok((None, overlay))
     }
 
     async fn derive_from_parent(
@@ -256,8 +258,8 @@ impl Selector for UnitVerb {
         _filter: CompositeFilter,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
-    ) -> Result<Option<Selection>> {
-        Ok(None)
+    ) -> Result<(Option<Selection>, EphemeralOverlay)> {
+        Ok((None, EphemeralOverlay::empty()))
     }
 }
 
@@ -549,15 +551,16 @@ impl Selector for TypeSelector {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
-    ) -> Result<Option<Selection>> {
+    ) -> Result<(Option<Selection>, EphemeralOverlay)> {
         if self.filter_only {
-            return Ok(None);
+            return Ok((None, EphemeralOverlay::empty()));
         }
 
         // `filter` already contains this TypeSelector's get_composite_filter()
         // (collected at compute_selected). Just use it directly.
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, &EphemeralOverlay::empty()).await?;
-        Ok(Some(selection))
+        let overlay = EphemeralOverlay::empty();
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, &overlay).await?;
+        Ok((Some(selection), overlay))
     }
 }
 
@@ -638,9 +641,10 @@ impl Selector for GenericSelector {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
-    ) -> Result<Option<Selection>> {
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, &EphemeralOverlay::empty()).await?;
-        Ok(Some(selection))
+    ) -> Result<(Option<Selection>, EphemeralOverlay)> {
+        let overlay = EphemeralOverlay::empty();
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, &overlay).await?;
+        Ok((Some(selection), overlay))
     }
 }
 

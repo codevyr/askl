@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, AtomicI64};
 
-use index::db_diesel::Selection;
+use index::db_diesel::{EphemeralOverlay, Selection};
 
 use crate::span::Span;
 use crate::verb::{Selector, SelectorId, SelectorState};
@@ -71,6 +73,14 @@ where
 pub struct ExecutionContext {
     pub registry: SelectorRegistry,
     pub current_statement_span: Option<Span>,
+    /// Ephemeral overlay rows accumulated across execution rounds.
+    /// Populated by `initialize_roots` from selector return values;
+    /// used by derive paths to make ephemeral data visible.
+    pub overlay: EphemeralOverlay,
+    /// Shared counters for ephemeral ID allocation (decrement from MAX).
+    pub symbol_id_counter: Arc<AtomicI64>,
+    pub instance_id_counter: Arc<AtomicI32>,
+    pub ref_id_counter: Arc<AtomicI32>,
 }
 
 impl ExecutionContext {
@@ -78,6 +88,10 @@ impl ExecutionContext {
         Self {
             registry: SelectorRegistry::new(),
             current_statement_span: None,
+            overlay: EphemeralOverlay::empty(),
+            symbol_id_counter: Arc::new(AtomicI64::new(i64::MAX)),
+            instance_id_counter: Arc::new(AtomicI32::new(i32::MAX)),
+            ref_id_counter: Arc::new(AtomicI32::new(i32::MAX)),
         }
     }
 }

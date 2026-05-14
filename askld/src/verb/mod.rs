@@ -474,9 +474,10 @@ pub trait Selector: std::fmt::Debug + Verb {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
-    ) -> Result<Option<Selection>> {
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, &EphemeralOverlay::empty()).await?;
-        Ok(Some(selection))
+    ) -> Result<(Option<Selection>, EphemeralOverlay)> {
+        let overlay = EphemeralOverlay::empty();
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, &overlay).await?;
+        Ok((Some(selection), overlay))
     }
 
     async fn derive_from_parent(
@@ -505,10 +506,10 @@ pub trait Selector: std::fmt::Debug + Verb {
             notif_ctx.rel_type.contains(RelationshipType::REFS),
             notif_ctx.rel_type.contains(RelationshipType::HAS),
             &find_filter,
-            &EphemeralOverlay::empty(),
+            &ctx.overlay,
         ).await.map_err(|e| anyhow::anyhow!("Failed to find child instance IDs: {}", e))?;
 
-        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope, &EphemeralOverlay::empty())
+        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope, &ctx.overlay)
             .await?;
 
         Ok(Some(selection))
@@ -539,10 +540,10 @@ pub trait Selector: std::fmt::Debug + Verb {
             notif_ctx.rel_type.contains(RelationshipType::REFS),
             notif_ctx.rel_type.contains(RelationshipType::HAS),
             &find_filter,
-            &EphemeralOverlay::empty(),
+            &ctx.overlay,
         ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
 
-        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope, &EphemeralOverlay::empty())
+        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope, &ctx.overlay)
             .await?;
 
         Ok(Some(selection))

@@ -36,7 +36,7 @@ async fn test_select_matching_name() {
             .unwrap();
 
         let mut got_symbol_instances: Vec<SymbolInstanceId> = result
-            .unwrap()
+            .0.unwrap()
             .nodes
             .into_iter()
             .map(|s| SymbolInstanceId::new(s.symbol_instance.id))

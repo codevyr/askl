@@ -11,7 +11,7 @@ use crate::scope::{Scope, StatementIter};
 use crate::verb::NotificationContext;
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{EphemeralOverlay, ScopeContext, Selection};
+use index::db_diesel::{ScopeContext, Selection};
 use index::symbols::{SymbolInstanceId, FileId, Occurrence, SymbolId};
 use std::collections::HashMap;
 use pest::error::Error;
@@ -201,10 +201,11 @@ impl Statement {
         // Run all DB queries concurrently
         let results = futures::future::join_all(futures).await;
 
-        // Write results to registry sequentially
+        // Write results to registry sequentially; merge overlay contributions.
         for (statement, result) in statements.iter().zip(results) {
             ctx.current_statement_span = Some(statement.command().span().clone());
-            let (selector_results, warnings) = result?;
+            let (selector_results, warnings, overlay) = result?;
+            ctx.overlay.merge(overlay);
             for (id, selection) in selector_results {
                 ctx.registry.add_by_id(id, selection);
             }
@@ -551,7 +552,7 @@ impl Statement {
         }
 
         let all_ids: Vec<i32> = all_nodes.iter().map(|id| Into::<i32>::into(*id)).collect();
-        if let Ok(implicit_edges) = index.find_edges_between(&all_ids, &EphemeralOverlay::empty()).await {
+        if let Ok(implicit_edges) = index.find_edges_between(&all_ids, &ctx.overlay).await {
             for edge in implicit_edges {
                 let from_node = instance_to_node.get(&edge.from_instance_id);
                 let to_node = instance_to_node.get(&edge.to_instance_id);

@@ -184,8 +184,8 @@ impl Selector for UserVerb {
         _filter: CompositeFilter,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
-    ) -> Result<Option<Selection>> {
-        Ok(None)
+    ) -> Result<(Option<Selection>, EphemeralOverlay)> {
+        Ok((None, EphemeralOverlay::empty()))
     }
 
     async fn derive_from_provider(
@@ -299,7 +299,7 @@ impl Selector for UserVerb {
             notif_ctx.rel_type.contains(RelationshipType::REFS),
             notif_ctx.rel_type.contains(RelationshipType::HAS),
             &find_filter,
-            &EphemeralOverlay::empty(),
+            &ctx.overlay,
         ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
         let parent_id_set: std::collections::HashSet<i32> =
             parent_ids.into_iter().map(Into::<i32>::into).collect();

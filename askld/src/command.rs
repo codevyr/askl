@@ -186,7 +186,7 @@ impl Command {
                     rel_type.contains(RelationshipType::REFS),
                     rel_type.contains(RelationshipType::HAS),
                     &find_filter,
-                    &EphemeralOverlay::empty(),
+                    &ctx.overlay,
                 ).await.map_err(|e| {
                     pest::error::Error::new_from_span(
                         pest::error::ErrorVariant::CustomError {
@@ -198,7 +198,7 @@ impl Command {
             }
             let decl_ids = derivation_ids.as_ref().unwrap();
 
-            let mut selection = find_symbol_by_instance_id(index, &selector_filters, decl_ids, parent_scope.clone(), children_scope.clone(), &EphemeralOverlay::empty())
+            let mut selection = find_symbol_by_instance_id(index, &selector_filters, decl_ids, parent_scope.clone(), children_scope.clone(), &ctx.overlay)
                 .await
                 .map_err(|e| {
                     pest::error::Error::new_from_span(
@@ -320,18 +320,19 @@ impl Command {
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<
-        (Vec<(SelectorId, Option<Selection>)>, Vec<pest::error::Error<Rule>>),
+        (Vec<(SelectorId, Option<Selection>)>, Vec<pest::error::Error<Rule>>, EphemeralOverlay),
         pest::error::Error<Rule>,
     > {
         let selectors: Vec<&dyn Selector> = self.selectors().collect();
 
         // Nothing to do
         if selectors.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok((Vec::new(), Vec::new(), EphemeralOverlay::empty()));
         }
 
         let mut warnings = vec![];
         let mut results = vec![];
+        let mut merged_overlay = EphemeralOverlay::empty();
 
         // Validate: each selector that requires a name constraint must have one
         // command-wide (any filter verb on the command counts).
@@ -359,7 +360,7 @@ impl Command {
             let select_from_all_name = format!("{:?}", selector);
             let _select_from_all =
                 tracing::info_span!("select_from_all", name = %select_from_all_name).entered();
-            let mut current_selection = selector
+            let (mut current_selection, sel_overlay) = selector
                 .select_from_all_impl(cfg, filter, parent_scope.clone(), children_scope.clone())
                 .await
                 .map_err(|e| {
@@ -370,6 +371,7 @@ impl Command {
                         self.span().as_pest_span(),
                     )
                 })?;
+            merged_overlay.merge(sel_overlay);
             if let Some(selection) = &mut current_selection {
                 self.filter(selection);
                 if selection.is_empty() {
@@ -386,7 +388,7 @@ impl Command {
             }
             results.push((selector.id(), current_selection));
         }
-        Ok((results, warnings))
+        Ok((results, warnings, merged_overlay))
     }
 }
 
