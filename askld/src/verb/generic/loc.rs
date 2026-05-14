@@ -130,22 +130,13 @@ impl Selector for LocSelector {
             let project_id_i32: i32 = project_id.into();
             let file_id_i32: i32 = file_id.into();
 
-            // Symbol entry
-            overlay.symbol_ids.push(sym_id);
-            overlay.symbol_names.push(String::new());
-            overlay.symbol_paths.push(format!("eph_loc_{}", inst_id));
-            overlay.symbol_project_ids.push(project_id_i32);
-            overlay.symbol_types.push(SYMBOL_TYPE_FUNCTION);
-            overlay.symbol_scopes.push(None);
-            overlay.symbol_leaf_names.push(String::new());
-
-            // Instance entry
-            overlay.instance_ids.push(inst_id);
-            overlay.instance_symbols.push(sym_id);
-            overlay.instance_object_ids.push(file_id_i32);
-            overlay.instance_offset_starts.push(start);
-            overlay.instance_offset_ends.push(end);
-            overlay.instance_types.push(INSTANCE_TYPE_DEFINITION);
+            overlay.symbols.push(
+                sym_id, String::new(), format!("eph_loc_{}", inst_id),
+                project_id_i32, SYMBOL_TYPE_FUNCTION, None, String::new(),
+            );
+            overlay.instances.push(
+                inst_id, sym_id, file_id_i32, start, end, INSTANCE_TYPE_DEFINITION,
+            );
 
             instance_ids.push(SymbolInstanceId::new(inst_id));
         }

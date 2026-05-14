@@ -114,13 +114,15 @@ impl Selector for EphemeralSymbolVerb {
         _children_scope: ScopeContext,
     ) -> Result<(Option<Selection>, EphemeralOverlay)> {
         let mut overlay = EphemeralOverlay::empty();
-        overlay.symbol_ids.push(self.symbol_id);
-        overlay.symbol_names.push(self.name.clone());
-        overlay.symbol_paths.push(self.path.clone());
-        overlay.symbol_project_ids.push(self.project_id);
-        overlay.symbol_types.push(self.symbol_type);
-        overlay.symbol_scopes.push(self.scope);
-        overlay.symbol_leaf_names.push(self.leaf_name.clone());
+        overlay.symbols.push(
+            self.symbol_id,
+            self.name.clone(),
+            self.path.clone(),
+            self.project_id,
+            self.symbol_type,
+            self.scope,
+            self.leaf_name.clone(),
+        );
         // No instance — selection is empty; symbol contributes to overlay only.
         Ok((None, overlay))
     }
@@ -235,13 +237,10 @@ impl Selector for EphemeralInstanceVerb {
         children_scope: ScopeContext,
     ) -> Result<(Option<Selection>, EphemeralOverlay)> {
         let mut overlay = EphemeralOverlay::empty();
-
-        overlay.instance_ids.push(self.instance_id);
-        overlay.instance_symbols.push(self.symbol_id);
-        overlay.instance_object_ids.push(self.object_id);
-        overlay.instance_offset_starts.push(self.start);
-        overlay.instance_offset_ends.push(self.end);
-        overlay.instance_types.push(self.instance_type);
+        overlay.instances.push(
+            self.instance_id, self.symbol_id, self.object_id,
+            self.start, self.end, self.instance_type,
+        );
 
         // Query via find_symbol to get the full SelectionNode with object/project data.
         // symbol_id must refer to a symbol already visible in the overlay (if ephemeral)
@@ -358,12 +357,9 @@ impl Selector for EphemeralRefVerb {
         _children_scope: ScopeContext,
     ) -> Result<(Option<Selection>, EphemeralOverlay)> {
         let mut overlay = EphemeralOverlay::empty();
-
-        overlay.ref_ids.push(self.ref_id);
-        overlay.ref_to_symbols.push(self.to_symbol);
-        overlay.ref_from_objects.push(self.from_object);
-        overlay.ref_from_offset_starts.push(self.start);
-        overlay.ref_from_offset_ends.push(self.end);
+        overlay.refs.push(
+            self.ref_id, self.to_symbol, self.from_object, self.start, self.end,
+        );
 
         // Validate FK: to_symbol must exist in the persistent index or current overlay.
         if !cfg.index.symbol_exists(self.to_symbol, &overlay).await? {

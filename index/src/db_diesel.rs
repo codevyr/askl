@@ -19,7 +19,7 @@ pub use mixins::{
     INSTANCE_TYPE_DEFINITION, INSTANCE_TYPE_DECLARATION, INSTANCE_TYPE_EXPANSION, INSTANCE_TYPE_SENTINEL, INSTANCE_TYPE_CONTAINMENT, INSTANCE_TYPE_SOURCE, INSTANCE_TYPE_HEADER, INSTANCE_TYPE_BUILD, INSTANCE_TYPE_FILE, INSTANCE_TYPE_DOCUMENTATION,
 };
 pub use overlay::{
-    EphemeralOverlay,
+    EphemeralOverlay, OverlaySymbols, OverlayInstances, OverlayRefs,
     EPHEMERAL_SYMBOL_ID_MIN, EPHEMERAL_INSTANCE_ID_MIN, EPHEMERAL_REF_ID_MIN,
     alloc_ephemeral_symbol_id, alloc_ephemeral_instance_id, alloc_ephemeral_ref_id,
     is_ephemeral_symbol_id, is_ephemeral_instance_id, is_ephemeral_ref_id,

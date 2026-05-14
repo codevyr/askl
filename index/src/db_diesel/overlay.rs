@@ -5,6 +5,154 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
 // ============================================================================
+// Per-table overlay row sets
+// ============================================================================
+
+/// Ephemeral rows for `index.symbols`.
+#[derive(Debug, Clone, Default)]
+pub struct OverlaySymbols {
+    pub ids: Vec<i64>,
+    pub names: Vec<String>,
+    /// Stored as text; cast to `ltree` inside the CTE.
+    pub paths: Vec<String>,
+    pub project_ids: Vec<i32>,
+    pub types: Vec<i32>,
+    /// `None` → NULL in the DB column.
+    pub scopes: Vec<Option<i32>>,
+    pub leaf_names: Vec<String>,
+}
+
+impl OverlaySymbols {
+    /// Append one symbol row.
+    pub fn push(
+        &mut self,
+        id: i64,
+        name: String,
+        path: String,
+        project_id: i32,
+        symbol_type: i32,
+        scope: Option<i32>,
+        leaf_name: String,
+    ) {
+        self.ids.push(id);
+        self.names.push(name);
+        self.paths.push(path);
+        self.project_ids.push(project_id);
+        self.types.push(symbol_type);
+        self.scopes.push(scope);
+        self.leaf_names.push(leaf_name);
+    }
+
+    /// Merge another set into this one.
+    ///
+    /// Duplicate symbol rows are harmless in JOINs, so no deduplication is
+    /// performed here.
+    pub fn merge(&mut self, other: OverlaySymbols) {
+        self.ids.extend(other.ids);
+        self.names.extend(other.names);
+        self.paths.extend(other.paths);
+        self.project_ids.extend(other.project_ids);
+        self.types.extend(other.types);
+        self.scopes.extend(other.scopes);
+        self.leaf_names.extend(other.leaf_names);
+    }
+}
+
+/// Ephemeral rows for `index.symbol_instances`.
+#[derive(Debug, Clone, Default)]
+pub struct OverlayInstances {
+    pub ids: Vec<i32>,
+    pub symbols: Vec<i64>,
+    pub object_ids: Vec<i32>,
+    /// Parallel with `offset_ends`; together they form `int4range([start, end))`.
+    pub offset_starts: Vec<i32>,
+    pub offset_ends: Vec<i32>,
+    pub types: Vec<i32>,
+}
+
+impl OverlayInstances {
+    /// Append one instance row.
+    pub fn push(
+        &mut self,
+        id: i32,
+        symbol: i64,
+        object_id: i32,
+        offset_start: i32,
+        offset_end: i32,
+        instance_type: i32,
+    ) {
+        self.ids.push(id);
+        self.symbols.push(symbol);
+        self.object_ids.push(object_id);
+        self.offset_starts.push(offset_start);
+        self.offset_ends.push(offset_end);
+        self.types.push(instance_type);
+    }
+
+    /// Merge another set into this one, deduplicating by instance ID.
+    pub fn merge(&mut self, other: OverlayInstances) {
+        let seen: HashSet<i32> = self.ids.iter().cloned().collect();
+        for (i, &id) in other.ids.iter().enumerate() {
+            if !seen.contains(&id) {
+                self.push(
+                    id,
+                    other.symbols[i],
+                    other.object_ids[i],
+                    other.offset_starts[i],
+                    other.offset_ends[i],
+                    other.types[i],
+                );
+            }
+        }
+    }
+}
+
+/// Ephemeral rows for `index.symbol_refs`.
+#[derive(Debug, Clone, Default)]
+pub struct OverlayRefs {
+    pub ids: Vec<i32>,
+    pub to_symbols: Vec<i64>,
+    pub from_objects: Vec<i32>,
+    /// Parallel with `from_offset_ends`.
+    pub from_offset_starts: Vec<i32>,
+    pub from_offset_ends: Vec<i32>,
+}
+
+impl OverlayRefs {
+    /// Append one ref row.
+    pub fn push(
+        &mut self,
+        id: i32,
+        to_symbol: i64,
+        from_object: i32,
+        from_offset_start: i32,
+        from_offset_end: i32,
+    ) {
+        self.ids.push(id);
+        self.to_symbols.push(to_symbol);
+        self.from_objects.push(from_object);
+        self.from_offset_starts.push(from_offset_start);
+        self.from_offset_ends.push(from_offset_end);
+    }
+
+    /// Merge another set into this one, deduplicating by ref ID.
+    pub fn merge(&mut self, other: OverlayRefs) {
+        let seen: HashSet<i32> = self.ids.iter().cloned().collect();
+        for (i, &id) in other.ids.iter().enumerate() {
+            if !seen.contains(&id) {
+                self.push(
+                    id,
+                    other.to_symbols[i],
+                    other.from_objects[i],
+                    other.from_offset_starts[i],
+                    other.from_offset_ends[i],
+                );
+            }
+        }
+    }
+}
+
+// ============================================================================
 // EphemeralOverlay — per-query in-memory rows injected via CTE
 // ============================================================================
 
@@ -14,38 +162,11 @@ use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 /// - `symbols.id`:          `i64::MAX - 1_000_000_000 ..= i64::MAX`
 /// - `symbol_instances.id`: `i32::MAX - 1_000_000     ..= i32::MAX`
 /// - `symbol_refs.id`:      `i32::MAX - 1_000_000     ..= i32::MAX`
-///
-/// For thread-safe ID allocation across concurrent selectors, callers must
-/// hold `Arc<AtomicI64>` / `Arc<AtomicI32>` counters (added in PR 2).
 #[derive(Debug, Clone, Default)]
 pub struct EphemeralOverlay {
-    // ---- symbols ----
-    pub symbol_ids: Vec<i64>,
-    pub symbol_names: Vec<String>,
-    /// Stored as text; cast to `ltree` inside the CTE.
-    pub symbol_paths: Vec<String>,
-    pub symbol_project_ids: Vec<i32>,
-    pub symbol_types: Vec<i32>,
-    /// `None` → NULL in the DB column.
-    pub symbol_scopes: Vec<Option<i32>>,
-    pub symbol_leaf_names: Vec<String>,
-
-    // ---- symbol_instances ----
-    pub instance_ids: Vec<i32>,
-    pub instance_symbols: Vec<i64>,
-    pub instance_object_ids: Vec<i32>,
-    /// Parallel to `instance_offset_ends`; together they form `int4range([start, end))`.
-    pub instance_offset_starts: Vec<i32>,
-    pub instance_offset_ends: Vec<i32>,
-    pub instance_types: Vec<i32>,
-
-    // ---- symbol_refs ----
-    pub ref_ids: Vec<i32>,
-    pub ref_to_symbols: Vec<i64>,
-    pub ref_from_objects: Vec<i32>,
-    /// Parallel to `ref_from_offset_ends`.
-    pub ref_from_offset_starts: Vec<i32>,
-    pub ref_from_offset_ends: Vec<i32>,
+    pub symbols: OverlaySymbols,
+    pub instances: OverlayInstances,
+    pub refs: OverlayRefs,
 }
 
 impl EphemeralOverlay {
@@ -61,67 +182,36 @@ impl EphemeralOverlay {
     /// Symbol rows are not deduplicated because they only participate in JOINs
     /// and duplicate symbol rows are harmless.
     pub fn merge(&mut self, other: EphemeralOverlay) {
-        self.symbol_ids.extend(other.symbol_ids);
-        self.symbol_names.extend(other.symbol_names);
-        self.symbol_paths.extend(other.symbol_paths);
-        self.symbol_project_ids.extend(other.symbol_project_ids);
-        self.symbol_types.extend(other.symbol_types);
-        self.symbol_scopes.extend(other.symbol_scopes);
-        self.symbol_leaf_names.extend(other.symbol_leaf_names);
-
-        let existing_inst: HashSet<i32> = self.instance_ids.iter().cloned().collect();
-        for (i, &id) in other.instance_ids.iter().enumerate() {
-            if existing_inst.contains(&id) {
-                continue;
-            }
-            self.instance_ids.push(id);
-            self.instance_symbols.push(other.instance_symbols[i]);
-            self.instance_object_ids.push(other.instance_object_ids[i]);
-            self.instance_offset_starts.push(other.instance_offset_starts[i]);
-            self.instance_offset_ends.push(other.instance_offset_ends[i]);
-            self.instance_types.push(other.instance_types[i]);
-        }
-
-        let existing_ref: HashSet<i32> = self.ref_ids.iter().cloned().collect();
-        for (i, &id) in other.ref_ids.iter().enumerate() {
-            if existing_ref.contains(&id) {
-                continue;
-            }
-            self.ref_ids.push(id);
-            self.ref_to_symbols.push(other.ref_to_symbols[i]);
-            self.ref_from_objects.push(other.ref_from_objects[i]);
-            self.ref_from_offset_starts.push(other.ref_from_offset_starts[i]);
-            self.ref_from_offset_ends.push(other.ref_from_offset_ends[i]);
-        }
+        self.symbols.merge(other.symbols);
+        self.instances.merge(other.instances);
+        self.refs.merge(other.refs);
     }
 
-    /// Returns a SQL `WITH` prefix for use in raw `diesel::sql_query` calls
-    /// when the overlay is **non-empty**.
+    /// Returns a SQL `WITH` prefix for use in raw `diesel::sql_query` calls.
     ///
-    /// The prelude uses positional placeholders `$1`–`$18` for the 18 overlay
-    /// array parameters (symbols $1–$7, instances $8–$13, refs $14–$18).
-    /// The caller is responsible for binding these parameters in order, then
-    /// binding any query-specific parameters starting at `$19`.
+    /// Uses positional placeholders `$1`–`$18` for the 18 overlay array
+    /// parameters (symbols $1–$7, instances $8–$13, refs $14–$18).
+    /// Bind these in order, then bind any query-specific parameters at `$19+`.
     ///
     /// Parameter order:
-    /// - $1  `symbol_ids`             `int8[]`
-    /// - $2  `symbol_names`           `text[]`
-    /// - $3  `symbol_paths`           `text[]`
-    /// - $4  `symbol_project_ids`     `int4[]`
-    /// - $5  `symbol_types`           `int4[]`
-    /// - $6  `symbol_scopes`          `int4[]`
-    /// - $7  `symbol_leaf_names`      `text[]`
-    /// - $8  `instance_ids`           `int4[]`
-    /// - $9  `instance_symbols`       `int8[]`
-    /// - $10 `instance_object_ids`    `int4[]`
-    /// - $11 `instance_offset_starts` `int4[]`
-    /// - $12 `instance_offset_ends`   `int4[]`
-    /// - $13 `instance_types`         `int4[]`
-    /// - $14 `ref_ids`                `int4[]`
-    /// - $15 `ref_to_symbols`         `int8[]`
-    /// - $16 `ref_from_objects`       `int4[]`
-    /// - $17 `ref_from_offset_starts` `int4[]`
-    /// - $18 `ref_from_offset_ends`   `int4[]`
+    /// - $1  `symbols.ids`              `int8[]`
+    /// - $2  `symbols.names`            `text[]`
+    /// - $3  `symbols.paths`            `text[]`
+    /// - $4  `symbols.project_ids`      `int4[]`
+    /// - $5  `symbols.types`            `int4[]`
+    /// - $6  `symbols.scopes`           `int4[]`
+    /// - $7  `symbols.leaf_names`       `text[]`
+    /// - $8  `instances.ids`            `int4[]`
+    /// - $9  `instances.symbols`        `int8[]`
+    /// - $10 `instances.object_ids`     `int4[]`
+    /// - $11 `instances.offset_starts`  `int4[]`
+    /// - $12 `instances.offset_ends`    `int4[]`
+    /// - $13 `instances.types`          `int4[]`
+    /// - $14 `refs.ids`                 `int4[]`
+    /// - $15 `refs.to_symbols`          `int8[]`
+    /// - $16 `refs.from_objects`        `int4[]`
+    /// - $17 `refs.from_offset_starts`  `int4[]`
+    /// - $18 `refs.from_offset_ends`    `int4[]`
     pub fn parameterized_cte_prefix() -> &'static str {
         "\
 WITH eph_symbols(id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name) AS (\
@@ -213,24 +303,28 @@ impl<Q: QueryFragment<Pg> + Send> QueryFragment<Pg> for WithOverlay<Q> {
         // equivalent to the persistent tables when the overlay is empty.
         // Parameter order: symbols (7) → instances (6) → refs (5) = 18 total.
         // Inner query parameters start at $19.
+        let sym = &self.overlay.symbols;
+        let inst = &self.overlay.instances;
+        let refs = &self.overlay.refs;
+
         pass.push_sql(
             "WITH eph_symbols(id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name) AS (\
                 SELECT id, name, symbol_path::ltree, project_id, symbol_type, symbol_scope, leaf_name \
                 FROM unnest(",
         );
-        pass.push_bind_param::<Array<BigInt>, _>(&self.overlay.symbol_ids)?;
+        pass.push_bind_param::<Array<BigInt>, _>(&sym.ids)?;
         pass.push_sql("::int8[],");
-        pass.push_bind_param::<Array<Text>, _>(&self.overlay.symbol_names)?;
+        pass.push_bind_param::<Array<Text>, _>(&sym.names)?;
         pass.push_sql("::text[],");
-        pass.push_bind_param::<Array<Text>, _>(&self.overlay.symbol_paths)?;
+        pass.push_bind_param::<Array<Text>, _>(&sym.paths)?;
         pass.push_sql("::text[],");
-        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.symbol_project_ids)?;
+        pass.push_bind_param::<Array<Integer>, _>(&sym.project_ids)?;
         pass.push_sql("::int4[],");
-        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.symbol_types)?;
+        pass.push_bind_param::<Array<Integer>, _>(&sym.types)?;
         pass.push_sql("::int4[],");
-        pass.push_bind_param::<Array<Nullable<Integer>>, _>(&self.overlay.symbol_scopes)?;
+        pass.push_bind_param::<Array<Nullable<Integer>>, _>(&sym.scopes)?;
         pass.push_sql("::int4[],");
-        pass.push_bind_param::<Array<Text>, _>(&self.overlay.symbol_leaf_names)?;
+        pass.push_bind_param::<Array<Text>, _>(&sym.leaf_names)?;
         pass.push_sql(
             "::text[]) AS t(id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name)\
             ), \
@@ -245,17 +339,17 @@ impl<Q: QueryFragment<Pg> + Send> QueryFragment<Pg> for WithOverlay<Q> {
                 SELECT id, symbol, object_id, int4range(offset_range_start, offset_range_end, '[)'), instance_type \
                 FROM unnest(",
         );
-        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.instance_ids)?;
+        pass.push_bind_param::<Array<Integer>, _>(&inst.ids)?;
         pass.push_sql("::int4[],");
-        pass.push_bind_param::<Array<BigInt>, _>(&self.overlay.instance_symbols)?;
+        pass.push_bind_param::<Array<BigInt>, _>(&inst.symbols)?;
         pass.push_sql("::int8[],");
-        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.instance_object_ids)?;
+        pass.push_bind_param::<Array<Integer>, _>(&inst.object_ids)?;
         pass.push_sql("::int4[],");
-        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.instance_offset_starts)?;
+        pass.push_bind_param::<Array<Integer>, _>(&inst.offset_starts)?;
         pass.push_sql("::int4[],");
-        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.instance_offset_ends)?;
+        pass.push_bind_param::<Array<Integer>, _>(&inst.offset_ends)?;
         pass.push_sql("::int4[],");
-        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.instance_types)?;
+        pass.push_bind_param::<Array<Integer>, _>(&inst.types)?;
         pass.push_sql(
             "::int4[]) AS t(id, symbol, object_id, offset_range_start, offset_range_end, instance_type)\
             ), \
@@ -270,15 +364,15 @@ impl<Q: QueryFragment<Pg> + Send> QueryFragment<Pg> for WithOverlay<Q> {
                 SELECT id, to_symbol, from_object, int4range(from_offset_range_start, from_offset_range_end, '[)') \
                 FROM unnest(",
         );
-        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.ref_ids)?;
+        pass.push_bind_param::<Array<Integer>, _>(&refs.ids)?;
         pass.push_sql("::int4[],");
-        pass.push_bind_param::<Array<BigInt>, _>(&self.overlay.ref_to_symbols)?;
+        pass.push_bind_param::<Array<BigInt>, _>(&refs.to_symbols)?;
         pass.push_sql("::int8[],");
-        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.ref_from_objects)?;
+        pass.push_bind_param::<Array<Integer>, _>(&refs.from_objects)?;
         pass.push_sql("::int4[],");
-        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.ref_from_offset_starts)?;
+        pass.push_bind_param::<Array<Integer>, _>(&refs.from_offset_starts)?;
         pass.push_sql("::int4[],");
-        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.ref_from_offset_ends)?;
+        pass.push_bind_param::<Array<Integer>, _>(&refs.from_offset_ends)?;
         pass.push_sql(
             "::int4[]) AS t(id, to_symbol, from_object, from_offset_range_start, from_offset_range_end)\
             ), \
