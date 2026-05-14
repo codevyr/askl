@@ -10,6 +10,16 @@ pub enum DependencyRole {
     User,
 }
 
+/// Whether a dependency must be satisfied before any output can be produced,
+/// or whether any one satisfied dep in the set is enough to enable initial output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyKind {
+    /// Statement cannot produce any output until this dep has a selection.
+    Necessary,
+    /// Any one satisfied sufficient dep enables initial output; others constrain further.
+    Sufficient,
+}
+
 /// The type of relationship to traverse when deriving selections.
 /// Bitflag newtype: composable via `|`, testable via `contains()`.
 /// - REFS: Reference-based traversal (calls/uses) via symbol_refs table
@@ -44,6 +54,7 @@ impl std::ops::BitOr for RelationshipType {
 pub struct StatementDependency {
     pub dependency: Rc<Statement>,
     pub dependency_role: DependencyRole,
+    pub kind: DependencyKind,
 }
 
 impl StatementDependency {
@@ -51,6 +62,19 @@ impl StatementDependency {
         Self {
             dependency: statement,
             dependency_role,
+            kind: DependencyKind::Sufficient,
+        }
+    }
+
+    pub fn new_with_kind(
+        statement: Rc<Statement>,
+        dependency_role: DependencyRole,
+        kind: DependencyKind,
+    ) -> Self {
+        Self {
+            dependency: statement,
+            dependency_role,
+            kind,
         }
     }
 }
@@ -86,7 +110,6 @@ impl StatementDependent {
 
 #[derive(Debug)]
 pub struct ExecutionState {
-    pub completed: bool,
     /// Statements that this state still depends on. We use this to determine
     /// when this state has its dependencies satisfied.
     pub dependencies: Vec<StatementDependency>,
@@ -102,7 +125,6 @@ pub struct ExecutionState {
 impl ExecutionState {
     pub fn new() -> Self {
         Self {
-            completed: false,
             dependencies: vec![],
             dependents: vec![],
             weak: false,

@@ -2,7 +2,7 @@ use crate::cfg::{ControlFlowGraph, EdgeList, HasEdge, HasEdgeList, NodeList, Sym
 use crate::command::{Command, LabeledStatements};
 use crate::execution_context::ExecutionContext;
 use crate::execution_state::{
-    DependencyRole, ExecutionState, RelationshipType, StatementDependent,
+    DependencyKind, DependencyRole, ExecutionState, RelationshipType, StatementDependent,
 };
 use crate::hierarchy::Hierarchy;
 use crate::offset_range::range_bounds_to_offsets;
@@ -22,7 +22,7 @@ use std::rc::{Rc, Weak};
 mod parse;
 mod scope_helpers;
 
-pub use self::parse::{build_empty_statement, build_statement, init_dependencies};
+pub use self::parse::{build_dependency_graph, build_empty_statement, build_statement};
 
 use self::scope_helpers::{build_children_scope, build_parent_scope, should_skip_in_parent_merge};
 
@@ -47,6 +47,10 @@ impl ExecutionResult {
             warnings,
         }
     }
+}
+
+pub struct PropagationResult {
+    pub changed: bool,
 }
 
 #[derive(Debug)]
@@ -119,44 +123,6 @@ impl Statement {
         self.execution_state.borrow()
     }
 
-    pub fn dependency_ready(&self, dependency_role: DependencyRole) -> bool {
-        self.command()
-            .selectors()
-            .all(|selector| selector.dependency_ready(dependency_role))
-    }
-
-    // A lower score means higher priority for execution
-    fn statement_score(&self, ctx: &ExecutionContext) -> usize {
-        let mandatory_completed = self
-            .get_state()
-            .dependencies
-            .iter()
-            .all(|dep| dep.dependency.dependency_ready(dep.dependency_role));
-        if !mandatory_completed {
-            return usize::MAX;
-        }
-
-        let mut total_score: Option<usize> = None;
-        ctx.registry
-            .for_each_selector(self.command().selectors(), |selector, state| {
-                match (total_score, selector.score(state)) {
-                    (None, Some(score)) => {
-                        total_score = Some(score);
-                    }
-                    (Some(current_score), Some(selection)) => {
-                        total_score = Some(current_score.saturating_add(selection));
-                    }
-                    (Some(_), None) => {
-                        total_score = Some(usize::MAX);
-                    }
-                    (None, None) => {
-                        total_score = Some(usize::MAX);
-                    }
-                }
-            });
-        total_score.or(Some(usize::MAX)).unwrap()
-    }
-
     pub fn get_selection(&self, ctx: &ExecutionContext) -> Option<Selection> {
         let mut selection: Option<Selection> = None;
         ctx.registry
@@ -180,6 +146,15 @@ impl Statement {
         selection
     }
 
+    pub fn has_selection(&self, ctx: &ExecutionContext) -> bool {
+        self.get_selection(ctx).is_some()
+    }
+
+    pub fn propagation_priority(&self, ctx: &ExecutionContext) -> usize {
+        self.get_selection(ctx)
+            .map_or(usize::MAX, |sel| sel.nodes.len())
+    }
+
     /// Check if this statement's selectors have been computed (added to registry).
     fn is_computed(&self, ctx: &ExecutionContext) -> bool {
         self.command().selectors().all(|s| ctx.registry.contains(&s.id()))
@@ -199,7 +174,7 @@ impl Statement {
     }
 
     // Statements that have dependencies resolved and are ready to execute
-    async fn compute_selectors(
+    async fn initialize_roots(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
@@ -234,14 +209,11 @@ impl Statement {
                 ctx.registry.add_by_id(id, selection);
             }
             statement.get_state_mut().warnings.extend(warnings);
-            if !statement.command().has_selectors() {
-                statement.get_state_mut().completed = true;
-            }
         }
         Ok(())
     }
 
-    fn init_dependencies(
+    fn build_dependency_graph(
         &self,
         labeled_statements_map: &LabeledStatements,
     ) -> Result<(), pest::error::Error<Rule>> {
@@ -249,7 +221,7 @@ impl Statement {
             bool,
             pest::error::Error<Rule>,
         > {
-            init_dependencies(statement, &labeled_statements_map)?;
+            build_dependency_graph(statement, &labeled_statements_map)?;
             Ok(true)
         })?;
         Ok(())
@@ -300,6 +272,58 @@ impl Statement {
         }
     }
 
+    async fn run_worklist(
+        &self,
+        ctx: &mut ExecutionContext,
+        cfg: &ControlFlowGraph,
+        statements: &[Rc<Statement>],
+    ) -> Result<(), pest::error::Error<Rule>> {
+        let mut worklist = Worklist::new();
+
+        // Seed: every statement that already has a selection after root initialization.
+        for stmt in statements {
+            if stmt.has_selection(ctx) {
+                worklist.schedule(stmt.clone());
+            }
+        }
+
+        while let Some(current_statement) = worklist.pop_next(ctx) {
+            // Yield to the runtime so tokio::time::timeout can fire if the
+            // query has exceeded its deadline.
+            tokio::task::yield_now().await;
+
+            let _statement_iteration: tracing::span::EnteredSpan =
+                tracing::info_span!("statement_iteration").entered();
+
+            // Apply update_state + filter to narrow the selection.
+            ctx.registry.for_each_selector_mut(
+                current_statement.command().selectors(),
+                |selector, state| {
+                    selector.update_state(state);
+                    if let Some(selection) = selector.get_selection_mut(state) {
+                        current_statement.command().filter(selection);
+                    }
+                },
+            );
+
+            // No selection → nothing to propagate.
+            if !current_statement.has_selection(ctx) {
+                continue;
+            }
+
+            // Notify dependents; reschedule those whose selection changed.
+            let dependents = current_statement.get_state().dependents.clone();
+            for dependent in dependents {
+                let result = current_statement.notify(ctx, cfg, &dependent).await?;
+                if result.changed {
+                    worklist.schedule(dependent.statement.clone());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn compute_nodes(
         &self,
         ctx: &mut ExecutionContext,
@@ -313,56 +337,14 @@ impl Statement {
             Ok(true)
         })?;
 
-        // First, execute all selectors
-        self.compute_selectors(ctx, cfg, &statements).await?;
+        // First, run all root selectors to seed initial selections
+        self.initialize_roots(ctx, cfg, &statements).await?;
 
-        self.init_dependencies(&labeled_statements)?;
+        self.build_dependency_graph(&labeled_statements)?;
 
         self.mark_weak_statements(&statements);
 
-        while !statements.iter().all(|s| s.get_state().completed) {
-            // Yield to the runtime so tokio::time::timeout can fire if the
-            // query has exceeded its deadline.
-            tokio::task::yield_now().await;
-
-            let _statement_iteration: tracing::span::EnteredSpan =
-                tracing::info_span!("statement_iteration").entered();
-
-            // Find an uncompleted statement with the least number of nodes. If
-            // there are no such statements, pick any uncompleted statement.
-            statements.sort_by_key(|s| s.statement_score(ctx));
-            let current_statement = statements
-                .iter_mut()
-                .filter(|s| !s.get_state().completed)
-                .next()
-                .expect("No uncompleted statements found, this should not happen");
-
-            ctx.registry.for_each_selector_mut(
-                current_statement.command().selectors(),
-                |selector, state| {
-                    selector.update_state(state);
-
-                    if let Some(selection) = selector.get_selection_mut(state) {
-                        current_statement.command().filter(selection);
-                    }
-                },
-            );
-
-            current_statement.get_state_mut().completed = true;
-            // TODO: The default case for statement not to have selection is
-            // something like a standalone unit verb. But if the query cannot be
-            // resolved, it also results in no selection. We should distinguish
-            // these two cases when implementing error reporting.
-            if !current_statement.is_selection_some(ctx) {
-                continue;
-            };
-
-            // Notify dependents
-            let dependents = current_statement.get_state().dependents.clone();
-            for dependent in dependents {
-                current_statement.notify(ctx, cfg, &dependent).await?;
-            }
-        }
+        self.run_worklist(ctx, cfg, &statements).await?;
 
         Ok(statements)
     }
@@ -730,7 +712,7 @@ impl Statement {
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         dependent: &StatementDependent,
-    ) -> Result<(), pest::error::Error<Rule>> {
+    ) -> Result<PropagationResult, pest::error::Error<Rule>> {
         let _update_dependency: tracing::span::EnteredSpan =
             tracing::info_span!("notify").entered();
 
@@ -741,7 +723,7 @@ impl Statement {
                 .children()
                 .all(|child| child.is_selection_some(ctx));
             if !all_children_resolved {
-                return Ok(());
+                return Ok(PropagationResult { changed: false });
             }
 
             // Merge all children's selections into one (union).
@@ -761,7 +743,7 @@ impl Statement {
             }
 
             if !any_has_selection {
-                return Ok(());
+                return Ok(PropagationResult { changed: false });
             }
 
             // Use the notifying child's relationship type (all siblings share it).
@@ -788,15 +770,9 @@ impl Statement {
                 )
                 .await?;
 
-            if res.changed {
-                dependent.statement.get_state_mut().completed = false;
-            }
-            dependent
-                .statement
-                .get_state_mut()
-                .warnings
-                .extend(res.warnings);
-            return Ok(());
+            let changed = res.changed;
+            dependent.statement.get_state_mut().warnings.extend(res.warnings);
+            return Ok(PropagationResult { changed });
         }
 
         // Original flow for Child and User roles.
@@ -819,15 +795,37 @@ impl Statement {
             .accept_notification(ctx, &cfg.index, self, notif_ctx, parent_scope, children_scope)
             .await?;
 
-        if res.changed {
-            dependent.statement.get_state_mut().completed = false;
+        let changed = res.changed;
+        dependent.statement.get_state_mut().warnings.extend(res.warnings);
+        Ok(PropagationResult { changed })
+    }
+}
+
+struct Worklist(Vec<Rc<Statement>>);
+
+impl Worklist {
+    fn new() -> Self {
+        Worklist(Vec::new())
+    }
+
+    /// Add a statement to the worklist if not already present.
+    fn schedule(&mut self, stmt: Rc<Statement>) {
+        if !self.0.iter().any(|s| Rc::ptr_eq(s, &stmt)) {
+            self.0.push(stmt);
         }
-        dependent
-            .statement
-            .get_state_mut()
-            .warnings
-            .extend(res.warnings);
-        Ok(())
+    }
+
+    /// Remove and return the statement with the lowest propagation_priority.
+    fn pop_next(&mut self, ctx: &ExecutionContext) -> Option<Rc<Statement>> {
+        if self.0.is_empty() {
+            return None;
+        }
+        let idx = self.0
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, s)| s.propagation_priority(ctx))
+            .map(|(i, _)| i)?;
+        Some(self.0.swap_remove(idx))
     }
 }
 
