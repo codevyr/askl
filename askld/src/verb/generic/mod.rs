@@ -16,6 +16,7 @@ use super::labels::{LabelVerb, UserVerb};
 use super::preamble::PreambleVerb;
 use super::Verb;
 
+mod ephemeral;
 mod filters;
 mod modifiers;
 mod selectors;
@@ -23,6 +24,7 @@ mod selectors;
 pub use self::filters::{DefaultTypeFilter, DirectOnlyFilter, GenericFilter};
 pub use self::selectors::{GenericSelector, NameSelector, UnitVerb};
 
+pub(super) use self::ephemeral::{EphemeralInstanceVerb, EphemeralRefVerb, EphemeralSymbolVerb};
 pub(super) use self::filters::{IgnoreVerb, ProjectFilter};
 pub(super) use self::modifiers::{
     AnyModifier, DeriveModifier, HasModifier, IsolatedScope, RefsModifier, UnnestModifier,
@@ -75,6 +77,9 @@ pub(crate) fn build_generic_verb(
         DeriveModifier::NAME => DeriveModifier::new(verb_span, &positional, &named),
         UnnestModifier::NAME => UnnestModifier::new(verb_span, &positional, &named),
         AnyModifier::NAME => AnyModifier::new(verb_span, &positional, &named),
+        EphemeralSymbolVerb::NAME => EphemeralSymbolVerb::new(verb_span, &positional, &named),
+        EphemeralInstanceVerb::NAME => EphemeralInstanceVerb::new(verb_span, &positional, &named),
+        EphemeralRefVerb::NAME => EphemeralRefVerb::new(verb_span, &positional, &named),
         TypeSelector::NAME_FUNCTION => {
             TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FUNCTION)
         }

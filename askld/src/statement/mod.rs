@@ -2,7 +2,7 @@ use crate::cfg::{ControlFlowGraph, EdgeList, HasEdge, HasEdgeList, NodeList, Sym
 use crate::command::{Command, LabeledStatements};
 use crate::execution_context::ExecutionContext;
 use crate::execution_state::{
-    DependencyKind, DependencyRole, ExecutionState, RelationshipType, StatementDependent,
+    DependencyRole, ExecutionState, RelationshipType, StatementDependent,
 };
 use crate::hierarchy::Hierarchy;
 use crate::offset_range::range_bounds_to_offsets;
