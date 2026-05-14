@@ -413,7 +413,15 @@ fn compute_symbol_id(project_id: i32, local_id: i64) -> Result<i64, UploadError>
             local_id
         )));
     }
-    Ok((project_id as i64) << 32 | local_id)
+    let id = (project_id as i64) << 32 | local_id;
+    if id >= index::db_diesel::EPHEMERAL_SYMBOL_ID_MIN {
+        return Err(UploadError::Invalid(format!(
+            "computed symbol id {} falls in the reserved ephemeral range (>= {}); \
+             project_id {} is too large (would require ~2 billion projects)",
+            id, index::db_diesel::EPHEMERAL_SYMBOL_ID_MIN, project_id
+        )));
+    }
+    Ok(id)
 }
 
 fn validate_type(value: i32, valid: &[i32], label: &str) -> Result<i32, UploadError> {

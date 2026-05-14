@@ -369,22 +369,41 @@ pub fn with_overlay<Q>(overlay: &EphemeralOverlay, inner: Q) -> WithOverlay<Q> {
 // ID-space helpers
 // ============================================================================
 
+/// Minimum ID value that belongs to the ephemeral symbol ID space.
+/// Persistent `symbols.id` values must be strictly below this threshold.
+/// Must stay in sync with the CHECK constraint in the
+/// `reserve_ephemeral_id_space` migration.
+pub const EPHEMERAL_SYMBOL_ID_MIN: i64 = i64::MAX - 1_000_000_000; // 9_223_372_035_854_775_807
+
+/// Minimum ID value that belongs to the ephemeral instance ID space.
+/// Persistent `symbol_instances.id` values must be strictly below this threshold.
+/// Must stay in sync with the CHECK constraint and sequence MAXVALUE in the
+/// `reserve_ephemeral_id_space` migration.
+pub const EPHEMERAL_INSTANCE_ID_MIN: i32 = i32::MAX - 1_000_000; // 2_146_483_647
+
+/// Minimum ID value that belongs to the ephemeral ref ID space.
+/// Persistent `symbol_refs.id` values must be strictly below this threshold.
+/// Must stay in sync with the CHECK constraint and sequence MAXVALUE in the
+/// `reserve_ephemeral_id_space` migration.
+pub const EPHEMERAL_REF_ID_MIN: i32 = i32::MAX - 1_000_000; // 2_146_483_647
+
 pub fn is_ephemeral_symbol_id(id: i64) -> bool {
-    id >= i64::MAX - 1_000_000_000
+    id >= EPHEMERAL_SYMBOL_ID_MIN
 }
 
 pub fn is_ephemeral_instance_id(id: i32) -> bool {
-    id >= i32::MAX - 1_000_000
+    id >= EPHEMERAL_INSTANCE_ID_MIN
 }
 
 pub fn is_ephemeral_ref_id(id: i32) -> bool {
-    id >= i32::MAX - 1_000_000
+    id >= EPHEMERAL_REF_ID_MIN
 }
 
 // ============================================================================
 // Global counters for auto-allocation (used by composite verbs like loc).
 // Decrement from MAX - 1; valid as long as within the ephemeral range.
 // Upper bound (MAX) is deliberately skipped to avoid any sentinel confusion.
+// Counter start values are EPHEMERAL_*_ID_MIN + range_size - 2, i.e. MAX - 1.
 // ============================================================================
 
 static GLOBAL_SYMBOL_ID: AtomicI64 = AtomicI64::new(i64::MAX - 1);
