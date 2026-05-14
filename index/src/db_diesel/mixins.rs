@@ -17,40 +17,40 @@ use crate::symbols::{symbol_name_to_path, build_lquery, normalize_symbol_tokens,
 
 diesel::alias! {
     pub const PARENT_SYMBOLS_ALIAS: Alias<ParentSymbolsAlias> =
-        index_schema::symbols as parent_symbols;
+        index_schema::all_symbols as parent_symbols;
     pub const PARENT_DECLS_ALIAS: Alias<ParentDeclsAlias> =
-        index_schema::symbol_instances as parent_decls;
+        index_schema::all_instances as parent_decls;
     // Aliases for containment queries
     pub const CONTAINER_INSTANCE_ALIAS: Alias<ContainerInstanceAlias> =
-        index_schema::symbol_instances as container_instances;
+        index_schema::all_instances as container_instances;
     pub const CONTAINER_SYMBOL_ALIAS: Alias<ContainerSymbolAlias> =
-        index_schema::symbols as container_symbols;
+        index_schema::all_symbols as container_symbols;
     pub const CONTAINER_TYPE_ALIAS: Alias<ContainerTypeAlias> =
         index_schema::symbol_types as container_types;
     pub const CONTAINED_INSTANCE_ALIAS: Alias<ContainedInstanceAlias> =
-        index_schema::symbol_instances as contained_instances;
+        index_schema::all_instances as contained_instances;
     pub const CONTAINED_SYMBOL_ALIAS: Alias<ContainedSymbolAlias> =
-        index_schema::symbols as contained_symbols;
+        index_schema::all_symbols as contained_symbols;
     pub const CONTAINED_TYPE_ALIAS: Alias<ContainedTypeAlias> =
         index_schema::symbol_types as contained_types;
 }
 
 type SymbolInstanceJoinSource = InnerJoinQuerySource<
-    index_schema::symbols::table,
-    index_schema::symbol_instances::table,
-    Eq<index_schema::symbols::columns::id, index_schema::symbol_instances::columns::symbol>,
+    index_schema::all_symbols::table,
+    index_schema::all_instances::table,
+    Eq<index_schema::all_symbols::columns::id, index_schema::all_instances::columns::symbol>,
 >;
 
 type SymbolInstanceProjectJoinSource = InnerJoinQuerySource<
     SymbolInstanceJoinSource,
     index_schema::projects::table,
-    Eq<index_schema::symbols::columns::project_id, index_schema::projects::columns::id>,
+    Eq<index_schema::all_symbols::columns::project_id, index_schema::projects::columns::id>,
 >;
 
 type SymbolInstanceProjectObjectJoin = InnerJoinQuerySource<
     SymbolInstanceProjectJoinSource,
     index_schema::objects::table,
-    Eq<index_schema::objects::columns::id, index_schema::symbol_instances::columns::object_id>,
+    Eq<index_schema::objects::columns::id, index_schema::all_instances::columns::object_id>,
 >;
 
 type SelectionTuple = (
@@ -79,20 +79,20 @@ type ParentSelectionTuple = (
 );
 
 type SymbolRefSymbolJoin = InnerJoinQuerySource<
-    index_schema::symbol_refs::table,
-    index_schema::symbols::table,
-    Eq<index_schema::symbol_refs::columns::to_symbol, index_schema::symbols::columns::id>,
+    index_schema::all_refs::table,
+    index_schema::all_symbols::table,
+    Eq<index_schema::all_refs::columns::to_symbol, index_schema::all_symbols::columns::id>,
 >;
 
 type SymbolRefSymbolInstanceJoin = InnerJoinQuerySource<
     SymbolRefSymbolJoin,
-    index_schema::symbol_instances::table,
-    Eq<index_schema::symbols::columns::id, index_schema::symbol_instances::columns::symbol>,
+    index_schema::all_instances::table,
+    Eq<index_schema::all_symbols::columns::id, index_schema::all_instances::columns::symbol>,
 >;
 
 type ParentDeclOn = Eq<
-    AliasedField<ParentDeclsAlias, index_schema::symbol_instances::columns::object_id>,
-    index_schema::symbol_refs::columns::from_object,
+    AliasedField<ParentDeclsAlias, index_schema::all_instances::columns::object_id>,
+    index_schema::all_refs::columns::from_object,
 >;
 
 pub type ParentsQuery<'a> = BoxedSelectStatement<
@@ -112,13 +112,13 @@ type ChildSelectionTuple = (
 );
 
 type ParentSymbolOn = Eq<
-    AliasedField<ParentSymbolsAlias, index_schema::symbols::columns::id>,
-    AliasedField<ParentDeclsAlias, index_schema::symbol_instances::columns::symbol>,
+    AliasedField<ParentSymbolsAlias, index_schema::all_symbols::columns::id>,
+    AliasedField<ParentDeclsAlias, index_schema::all_instances::columns::symbol>,
 >;
 
 type ParentObjectOn = Eq<
     index_schema::objects::columns::id,
-    AliasedField<ParentDeclsAlias, index_schema::symbol_instances::columns::object_id>,
+    AliasedField<ParentDeclsAlias, index_schema::all_instances::columns::object_id>,
 >;
 
 type SymbolRefSymbolInstanceParentInstanceJoin =
@@ -156,24 +156,24 @@ type HasParentsSelectionTuple = (
     SymbolInstanceColumnsSqlType,   // parent_instance (container)
 );
 
-// Join type for symbol_instances -> symbols
+// Join type for all_instances -> all_symbols
 type InstanceSymbolJoin = InnerJoinQuerySource<
-    index_schema::symbol_instances::table,
-    index_schema::symbols::table,
-    Eq<index_schema::symbol_instances::columns::symbol, index_schema::symbols::columns::id>,
+    index_schema::all_instances::table,
+    index_schema::all_symbols::table,
+    Eq<index_schema::all_instances::columns::symbol, index_schema::all_symbols::columns::id>,
 >;
 
-// Join type for symbol_instances -> symbols -> symbol_types
+// Join type for all_instances -> all_symbols -> symbol_types
 type InstanceSymbolTypeJoin = InnerJoinQuerySource<
     InstanceSymbolJoin,
     index_schema::symbol_types::table,
-    Eq<index_schema::symbols::columns::symbol_type, index_schema::symbol_types::columns::id>,
+    Eq<index_schema::all_symbols::columns::symbol_type, index_schema::symbol_types::columns::id>,
 >;
 
 // Join type for ... -> container_instances
 type ContainerInstanceOn = Eq<
-    AliasedField<ContainerInstanceAlias, index_schema::symbol_instances::columns::object_id>,
-    index_schema::symbol_instances::columns::object_id,
+    AliasedField<ContainerInstanceAlias, index_schema::all_instances::columns::object_id>,
+    index_schema::all_instances::columns::object_id,
 >;
 
 type InstanceSymbolTypeContainerInstanceJoin = InnerJoinQuerySource<
@@ -184,8 +184,8 @@ type InstanceSymbolTypeContainerInstanceJoin = InnerJoinQuerySource<
 
 // Join type for ... -> container_symbols
 type ContainerSymbolOn = Eq<
-    AliasedField<ContainerSymbolAlias, index_schema::symbols::columns::id>,
-    AliasedField<ContainerInstanceAlias, index_schema::symbol_instances::columns::symbol>,
+    AliasedField<ContainerSymbolAlias, index_schema::all_symbols::columns::id>,
+    AliasedField<ContainerInstanceAlias, index_schema::all_instances::columns::symbol>,
 >;
 
 type InstanceSymbolTypeContainerInstanceSymbolJoin = InnerJoinQuerySource<
@@ -197,7 +197,7 @@ type InstanceSymbolTypeContainerInstanceSymbolJoin = InnerJoinQuerySource<
 // Join type for ... -> container_types
 type ContainerTypeOn = Eq<
     AliasedField<ContainerTypeAlias, index_schema::symbol_types::columns::id>,
-    AliasedField<ContainerSymbolAlias, index_schema::symbols::columns::symbol_type>,
+    AliasedField<ContainerSymbolAlias, index_schema::all_symbols::columns::symbol_type>,
 >;
 
 type HasParentsJoinSource = InnerJoinQuerySource<
@@ -227,13 +227,13 @@ type HasChildrenSelectionTuple = (
 type InstanceSymbolTypeObjectJoin = InnerJoinQuerySource<
     InstanceSymbolTypeJoin,
     index_schema::objects::table,
-    Eq<index_schema::objects::columns::id, index_schema::symbol_instances::columns::object_id>,
+    Eq<index_schema::objects::columns::id, index_schema::all_instances::columns::object_id>,
 >;
 
 // Join type for ... -> contained_instances
 type ContainedInstanceOn = Eq<
-    AliasedField<ContainedInstanceAlias, index_schema::symbol_instances::columns::object_id>,
-    index_schema::symbol_instances::columns::object_id,
+    AliasedField<ContainedInstanceAlias, index_schema::all_instances::columns::object_id>,
+    index_schema::all_instances::columns::object_id,
 >;
 
 type InstanceSymbolTypeObjectContainedInstanceJoin = InnerJoinQuerySource<
@@ -244,8 +244,8 @@ type InstanceSymbolTypeObjectContainedInstanceJoin = InnerJoinQuerySource<
 
 // Join type for ... -> contained_symbols
 type ContainedSymbolOn = Eq<
-    AliasedField<ContainedSymbolAlias, index_schema::symbols::columns::id>,
-    AliasedField<ContainedInstanceAlias, index_schema::symbol_instances::columns::symbol>,
+    AliasedField<ContainedSymbolAlias, index_schema::all_symbols::columns::id>,
+    AliasedField<ContainedInstanceAlias, index_schema::all_instances::columns::symbol>,
 >;
 
 type InstanceSymbolTypeObjectContainedInstanceSymbolJoin = InnerJoinQuerySource<
@@ -257,7 +257,7 @@ type InstanceSymbolTypeObjectContainedInstanceSymbolJoin = InnerJoinQuerySource<
 // Join type for ... -> contained_types
 type ContainedTypeOn = Eq<
     AliasedField<ContainedTypeAlias, index_schema::symbol_types::columns::id>,
-    AliasedField<ContainedSymbolAlias, index_schema::symbols::columns::symbol_type>,
+    AliasedField<ContainedSymbolAlias, index_schema::all_symbols::columns::symbol_type>,
 >;
 
 type HasChildrenJoinSource = InnerJoinQuerySource<
@@ -597,11 +597,11 @@ impl FilterLeaf for CompoundNameMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
         let mut parts: Vec<CurrentBoolExpr> = vec![];
         if let Some(ref leaf) = self.leaf_token {
-            parts.push(Box::new(index_schema::symbols::dsl::leaf_name.eq(leaf.clone())));
+            parts.push(Box::new(index_schema::all_symbols::dsl::leaf_name.eq(leaf.clone())));
         }
         if let Some(ref lquery) = self.lquery {
             parts.push(Box::new(OwnedSql::<Bool>::new(
-                ltree_filter_sql("symbols.symbol_path", lquery)
+                ltree_filter_sql("all_symbols.symbol_path", lquery)
             )));
         }
         fold_and(parts)
@@ -622,7 +622,7 @@ impl LeafNameMixin {
 
 impl FilterLeaf for LeafNameMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
-        Some(Box::new(index_schema::symbols::dsl::leaf_name.eq(self.leaf_name.clone())))
+        Some(Box::new(index_schema::all_symbols::dsl::leaf_name.eq(self.leaf_name.clone())))
     }
 }
 
@@ -642,7 +642,7 @@ impl ExactNameMixin {
 
 impl FilterLeaf for ExactNameMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
-        Some(Box::new(index_schema::symbols::dsl::name.eq(self.name.clone())))
+        Some(Box::new(index_schema::all_symbols::dsl::name.eq(self.name.clone())))
     }
 }
 
@@ -662,7 +662,7 @@ impl SymbolInstanceIdMixin {
 impl FilterLeaf for SymbolInstanceIdMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
         Some(Box::new(
-            index_schema::symbol_instances::dsl::id.eq_any(self.instance_ids.clone())
+            index_schema::all_instances::dsl::id.eq_any(self.instance_ids.clone())
         ))
     }
 }
@@ -692,17 +692,20 @@ impl FilterLeaf for ProjectFilterMixin {
 #[derive(Debug, Clone)]
 pub struct DirectOnlyMixin;
 
+// NOTE: The subquery still references index.symbol_instances / index.symbols directly
+// (not the all_instances / all_symbols CTEs) — ephemeral instances are not visible
+// to these direct-only / innermost-only filters. Accepted PoC limitation.
 const DIRECT_ONLY_HAS_CHILDREN_SQL: &str = "\
     NOT EXISTS (\
         SELECT 1 FROM index.symbol_instances mid \
         JOIN index.symbols mid_sym ON mid.symbol = mid_sym.id \
         JOIN index.symbol_types mid_type ON mid_sym.symbol_type = mid_type.id \
-        WHERE mid.object_id = symbol_instances.object_id \
-          AND symbol_instances.offset_range @> mid.offset_range \
+        WHERE mid.object_id = all_instances.object_id \
+          AND all_instances.offset_range @> mid.offset_range \
           AND mid.offset_range @> contained_instances.offset_range \
-          AND mid.offset_range != symbol_instances.offset_range \
+          AND mid.offset_range != all_instances.offset_range \
           AND mid.offset_range != contained_instances.offset_range \
-          AND mid.id != symbol_instances.id \
+          AND mid.id != all_instances.id \
           AND mid.id != contained_instances.id \
           AND symbol_types.level >= mid_type.level\
     )";
@@ -715,7 +718,7 @@ const DIRECT_ONLY_CHILDREN_SQL: &str = "\
         JOIN index.symbol_types parent_type ON parent_type.id = parent_symbols.symbol_type \
         WHERE container.object_id = parent_decls.object_id \
           AND parent_decls.offset_range @> container.offset_range \
-          AND container.offset_range @> symbol_refs.from_offset_range \
+          AND container.offset_range @> all_refs.from_offset_range \
           AND container.offset_range != parent_decls.offset_range \
           AND container.id != parent_decls.id \
           AND cont_type.level <= parent_type.level\
@@ -740,11 +743,11 @@ const INNERMOST_ONLY_SQL: &str = "\
         SELECT 1 FROM index.symbol_instances mid \
         WHERE mid.object_id = container_instances.object_id \
           AND container_instances.offset_range @> mid.offset_range \
-          AND mid.offset_range @> symbol_instances.offset_range \
+          AND mid.offset_range @> all_instances.offset_range \
           AND mid.offset_range != container_instances.offset_range \
-          AND mid.offset_range != symbol_instances.offset_range \
+          AND mid.offset_range != all_instances.offset_range \
           AND mid.id != container_instances.id \
-          AND mid.id != symbol_instances.id\
+          AND mid.id != all_instances.id\
     )";
 
 impl FilterLeaf for InnermostOnlyMixin {
@@ -799,7 +802,7 @@ impl SymbolTypeMixin {
 
 impl FilterLeaf for SymbolTypeMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
-        Some(Box::new(index_schema::symbols::dsl::symbol_type.eq(self.symbol_type_id)))
+        Some(Box::new(index_schema::all_symbols::dsl::symbol_type.eq(self.symbol_type_id)))
     }
 }
 
@@ -817,7 +820,7 @@ impl DefaultSymbolTypeMixin {
 
 impl FilterLeaf for DefaultSymbolTypeMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
-        Some(Box::new(index_schema::symbols::dsl::symbol_type.eq_any(self.symbol_type_ids.clone())))
+        Some(Box::new(index_schema::all_symbols::dsl::symbol_type.eq_any(self.symbol_type_ids.clone())))
     }
 }
 
@@ -843,7 +846,7 @@ impl FilterLeaf for PackageDescendantLeaf {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
         // "descendants only, not exact match" — sanitized via symbol_name_to_path
         Some(Box::new(OwnedSql::<Bool>::new(format!(
-            "( '{}'::ltree @> symbols.symbol_path ) AND (symbols.symbol_path <> '{}')",
+            "( '{}'::ltree @> all_symbols.symbol_path ) AND (all_symbols.symbol_path <> '{}')",
             self.base_path, self.base_path
         ))))
     }

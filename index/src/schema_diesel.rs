@@ -19,7 +19,7 @@ diesel::table! {
 diesel::table! {
     use diesel::sql_types::*;
 
-    index.symbol_instances (id) {
+    all_instances (id) {
         id -> Integer,
         symbol -> BigInt,
         object_id -> Integer,
@@ -90,13 +90,34 @@ diesel::table! {
 diesel::table! {
     use diesel::sql_types::*;
 
-    index.symbol_refs (id) {
+    all_refs (id) {
         id -> Integer,
         to_symbol -> BigInt,
         from_object -> Integer,
         from_offset_range -> Int4range,
     }
 }
+
+diesel::table! {
+    use diesel::sql_types::*;
+    use crate::ltree::Ltree;
+
+    all_symbols (id) {
+        id -> BigInt,
+        name -> Text,
+        symbol_path -> Ltree,
+        project_id -> Integer,
+        symbol_type -> Integer,
+        symbol_scope -> Nullable<Integer>,
+        leaf_name -> Text,
+    }
+}
+
+// ============================================================================
+// Persistent table declarations (for INSERT / DELETE / simple SELECT only).
+// These reference the real index.* tables.  Query-execution code uses the
+// CTE-named `all_symbols` / `all_instances` / `all_refs` above.
+// ============================================================================
 
 diesel::table! {
     use diesel::sql_types::*;
@@ -113,19 +134,42 @@ diesel::table! {
     }
 }
 
-diesel::joinable!(symbol_instances -> instance_types (instance_type));
-diesel::joinable!(symbol_instances -> objects (object_id));
-diesel::joinable!(symbol_instances -> symbols (symbol));
+diesel::table! {
+    use diesel::sql_types::*;
+
+    index.symbol_instances (id) {
+        id -> Integer,
+        symbol -> BigInt,
+        object_id -> Integer,
+        offset_range -> Int4range,
+        instance_type -> Integer,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::*;
+
+    index.symbol_refs (id) {
+        id -> Integer,
+        to_symbol -> BigInt,
+        from_object -> Integer,
+        from_offset_range -> Int4range,
+    }
+}
+
+diesel::joinable!(all_instances -> instance_types (instance_type));
+diesel::joinable!(all_instances -> objects (object_id));
+diesel::joinable!(all_instances -> all_symbols (symbol));
 diesel::joinable!(object_contents -> objects (object_id));
 // joinable!(objects -> directories (directory_id)) removed - directories table dropped
 diesel::joinable!(objects -> projects (project_id));
 // joinable!(directories -> projects (project_id)) removed - directories table dropped
-diesel::joinable!(symbol_refs -> symbols (to_symbol));
-diesel::joinable!(symbols -> projects (project_id));
-diesel::joinable!(symbols -> symbol_types (symbol_type));
+diesel::joinable!(all_refs -> all_symbols (to_symbol));
+diesel::joinable!(all_symbols -> projects (project_id));
+diesel::joinable!(all_symbols -> symbol_types (symbol_type));
 diesel::allow_tables_to_appear_in_same_query!(
     instance_types,
-    symbol_instances,
+    all_instances,
     symbol_types,
     // directories removed
     content_store,
@@ -134,6 +178,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     projects,
     project_symbol_chunks,
     project_object_chunks,
-    symbol_refs,
-    symbols,
+    all_refs,
+    all_symbols,
 );

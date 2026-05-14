@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::{
-    db_diesel::{CompositeFilter, InnermostOnlyMixin, Index, ParentReference, ScopeContext, Selection},
+    db_diesel::{CompositeFilter, EphemeralOverlay, InnermostOnlyMixin, Index, ParentReference, ScopeContext, Selection},
     models_diesel::SymbolRef,
 };
 use pest::error::ErrorVariant::CustomError;
@@ -299,6 +299,7 @@ impl Selector for UserVerb {
             notif_ctx.rel_type.contains(RelationshipType::REFS),
             notif_ctx.rel_type.contains(RelationshipType::HAS),
             &find_filter,
+            &EphemeralOverlay::empty(),
         ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
         let parent_id_set: std::collections::HashSet<i32> =
             parent_ids.into_iter().map(Into::<i32>::into).collect();

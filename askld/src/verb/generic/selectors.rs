@@ -10,7 +10,7 @@ use crate::statement::Statement;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    CompoundNameMixin, CompositeFilter, ExactNameMixin, Index,
+    CompoundNameMixin, CompositeFilter, EphemeralOverlay, ExactNameMixin, Index,
     LeafNameMixin, ParentReference, ScopeContext, Selection, SymbolTypeMixin,
 };
 use index::models_diesel::SymbolRef;
@@ -77,7 +77,7 @@ impl Selector for NameSelector {
         children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         let combined = CompositeFilter::and(vec![filter, name_filter(&self.name)]);
-        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope).await?;
+        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope, &EphemeralOverlay::empty()).await?;
         Ok(Some(selection))
     }
 }
@@ -148,7 +148,7 @@ impl Selector for ForcedVerb {
         children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
         let combined = CompositeFilter::and(vec![filter, name_filter(&self.name)]);
-        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope).await?;
+        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope, &EphemeralOverlay::empty()).await?;
 
         // Cache the forced selection so derivations can fabricate the
         // correct parent <-> child relationship later on.
@@ -556,7 +556,7 @@ impl Selector for TypeSelector {
 
         // `filter` already contains this TypeSelector's get_composite_filter()
         // (collected at compute_selected). Just use it directly.
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope).await?;
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, &EphemeralOverlay::empty()).await?;
         Ok(Some(selection))
     }
 }
@@ -639,7 +639,7 @@ impl Selector for GenericSelector {
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope).await?;
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, &EphemeralOverlay::empty()).await?;
         Ok(Some(selection))
     }
 }

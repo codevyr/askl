@@ -11,7 +11,7 @@ use crate::scope::{Scope, StatementIter};
 use crate::verb::NotificationContext;
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{ScopeContext, Selection};
+use index::db_diesel::{EphemeralOverlay, ScopeContext, Selection};
 use index::symbols::{SymbolInstanceId, FileId, Occurrence, SymbolId};
 use std::collections::HashMap;
 use pest::error::Error;
@@ -551,7 +551,7 @@ impl Statement {
         }
 
         let all_ids: Vec<i32> = all_nodes.iter().map(|id| Into::<i32>::into(*id)).collect();
-        if let Ok(implicit_edges) = index.find_edges_between(&all_ids).await {
+        if let Ok(implicit_edges) = index.find_edges_between(&all_ids, &EphemeralOverlay::empty()).await {
             for edge in implicit_edges {
                 let from_node = instance_to_node.get(&edge.from_instance_id);
                 let to_node = instance_to_node.get(&edge.to_instance_id);

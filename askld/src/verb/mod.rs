@@ -8,7 +8,7 @@ use crate::statement::Statement;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    CompositeFilter, DirectOnlyMixin, InnermostOnlyMixin, OuterParentFilterMixin,
+    CompositeFilter, DirectOnlyMixin, EphemeralOverlay, InnermostOnlyMixin, OuterParentFilterMixin,
     ScopeContext, SymbolInstanceIdMixin, Index, Selection,
 };
 use index::symbols::SymbolInstanceId;
@@ -475,7 +475,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope).await?;
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, &EphemeralOverlay::empty()).await?;
         Ok(Some(selection))
     }
 
@@ -505,9 +505,10 @@ pub trait Selector: std::fmt::Debug + Verb {
             notif_ctx.rel_type.contains(RelationshipType::REFS),
             notif_ctx.rel_type.contains(RelationshipType::HAS),
             &find_filter,
+            &EphemeralOverlay::empty(),
         ).await.map_err(|e| anyhow::anyhow!("Failed to find child instance IDs: {}", e))?;
 
-        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope)
+        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope, &EphemeralOverlay::empty())
             .await?;
 
         Ok(Some(selection))
@@ -538,9 +539,10 @@ pub trait Selector: std::fmt::Debug + Verb {
             notif_ctx.rel_type.contains(RelationshipType::REFS),
             notif_ctx.rel_type.contains(RelationshipType::HAS),
             &find_filter,
+            &EphemeralOverlay::empty(),
         ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
 
-        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope)
+        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope, &EphemeralOverlay::empty())
             .await?;
 
         Ok(Some(selection))
@@ -568,6 +570,7 @@ pub(crate) async fn find_symbol_by_instance_id(
     instances: &Vec<SymbolInstanceId>,
     parent_scope: ScopeContext,
     children_scope: ScopeContext,
+    overlay: &EphemeralOverlay,
 ) -> Result<Selection> {
     let mut parts: Vec<CompositeFilter> = selector_filters
         .iter()
@@ -575,7 +578,7 @@ pub(crate) async fn find_symbol_by_instance_id(
         .collect();
     parts.push(CompositeFilter::leaf(SymbolInstanceIdMixin::new(instances)));
     let filter = CompositeFilter::and(parts);
-    index.find_symbol(&filter, parent_scope, children_scope).await
+    index.find_symbol(&filter, parent_scope, children_scope, overlay).await
 }
 
 pub trait Labeler: std::fmt::Debug {

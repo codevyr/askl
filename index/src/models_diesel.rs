@@ -13,7 +13,7 @@ pub struct SymbolType {
 }
 
 #[derive(Clone, Queryable, Selectable, Identifiable, Associations, Debug, PartialEq, Eq, Hash)]
-#[diesel(table_name = crate::schema_diesel::symbol_instances)]
+#[diesel(table_name = crate::schema_diesel::all_instances)]
 #[diesel(belongs_to(Symbol, foreign_key = symbol))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct SymbolInstance {
@@ -60,7 +60,7 @@ pub struct Project {
     Eq,
     Hash,
 )]
-#[diesel(table_name = crate::schema_diesel::symbols)]
+#[diesel(table_name = crate::schema_diesel::all_symbols)]
 #[diesel(belongs_to(Project, foreign_key = project_id))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Symbol {
@@ -80,7 +80,7 @@ pub struct ContentRow {
 }
 
 #[derive(Clone, Queryable, Selectable, Debug, PartialEq)]
-#[diesel(table_name = crate::schema_diesel::symbol_refs)]
+#[diesel(table_name = crate::schema_diesel::all_refs)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct SymbolRef {
     pub id: i32,

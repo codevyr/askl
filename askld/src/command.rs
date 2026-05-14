@@ -7,7 +7,7 @@ use crate::statement::Statement;
 use crate::verb::{add_verb, ConstraintAction, DeriveMethod, Filter, Labeler, NotificationContext, Selector, SelectorId, Verb, VerbTag, find_symbol_by_instance_id};
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{CompositeFilter, InnermostOnlyMixin, Index, ScopeContext, Selection};
+use index::db_diesel::{CompositeFilter, EphemeralOverlay, InnermostOnlyMixin, Index, ScopeContext, Selection};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -186,6 +186,7 @@ impl Command {
                     rel_type.contains(RelationshipType::REFS),
                     rel_type.contains(RelationshipType::HAS),
                     &find_filter,
+                    &EphemeralOverlay::empty(),
                 ).await.map_err(|e| {
                     pest::error::Error::new_from_span(
                         pest::error::ErrorVariant::CustomError {
@@ -197,7 +198,7 @@ impl Command {
             }
             let decl_ids = derivation_ids.as_ref().unwrap();
 
-            let mut selection = find_symbol_by_instance_id(index, &selector_filters, decl_ids, parent_scope.clone(), children_scope.clone())
+            let mut selection = find_symbol_by_instance_id(index, &selector_filters, decl_ids, parent_scope.clone(), children_scope.clone(), &EphemeralOverlay::empty())
                 .await
                 .map_err(|e| {
                     pest::error::Error::new_from_span(

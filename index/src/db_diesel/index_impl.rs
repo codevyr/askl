@@ -50,18 +50,18 @@ enum ScopeRole {
     Parents(Vec<i32>),
 }
 
-/// Build a base CurrentQuery (symbols ⋈ instances ⋈ projects ⋈ objects).
+/// Build a base CurrentQuery (all_symbols ⋈ all_instances ⋈ projects ⋈ objects).
 fn build_current_query() -> CurrentQuery<'static> {
     use crate::schema_diesel::*;
-    symbols::dsl::symbols
+    all_symbols::dsl::all_symbols
         .inner_join(
-            symbol_instances::dsl::symbol_instances
-                .on(symbols::dsl::id.eq(symbol_instances::dsl::symbol)),
+            all_instances::dsl::all_instances
+                .on(all_symbols::dsl::id.eq(all_instances::dsl::symbol)),
         )
         .inner_join(
-            projects::dsl::projects.on(symbols::dsl::project_id.eq(projects::dsl::id)),
+            projects::dsl::projects.on(all_symbols::dsl::project_id.eq(projects::dsl::id)),
         )
-        .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(symbol_instances::dsl::object_id)))
+        .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(all_instances::dsl::object_id)))
         .select((
             Symbol::as_select(),
             SymbolInstance::as_select(),
@@ -75,6 +75,7 @@ fn build_current_query() -> CurrentQuery<'static> {
 async fn resolve_filter_to_ids(
     filter: &CompositeFilter,
     role: Option<&ScopeRole>,
+    overlay: &super::overlay::EphemeralOverlay,
     conn: &mut Connection,
 ) -> Result<Vec<i32>> {
     use diesel::sql_types::Bool;
@@ -85,13 +86,14 @@ async fn resolve_filter_to_ids(
     }
 
     // Add reference-based constraint when resolving scoped filters.
+    // References all_refs and all_instances (CTE names after schema rename).
     match role {
         Some(ScopeRole::Children(parent_ids)) if !parent_ids.is_empty() => {
             query = query.filter(OwnedSqlBound::<Bool>::new(
-                "symbol_instances.id IN (\
-                    SELECT si.id FROM index.symbol_refs sr \
-                    JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
-                    JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
+                "all_instances.id IN (\
+                    SELECT si.id FROM all_refs sr \
+                    JOIN all_instances si ON si.symbol = sr.to_symbol \
+                    JOIN all_instances pd ON pd.object_id = sr.from_object \
                       AND pd.offset_range @> sr.from_offset_range \
                     WHERE pd.id = ANY(".into(),
                 parent_ids.clone(),
@@ -100,11 +102,11 @@ async fn resolve_filter_to_ids(
         }
         Some(ScopeRole::Parents(child_ids)) if !child_ids.is_empty() => {
             query = query.filter(OwnedSqlBound::<Bool>::new(
-                "symbol_instances.id IN (\
-                    SELECT pd.id FROM index.symbol_refs sr \
-                    JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
+                "all_instances.id IN (\
+                    SELECT pd.id FROM all_refs sr \
+                    JOIN all_instances pd ON pd.object_id = sr.from_object \
                       AND pd.offset_range @> sr.from_offset_range \
-                    JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
+                    JOIN all_instances si ON si.symbol = sr.to_symbol \
                     WHERE si.id = ANY(".into(),
                 child_ids.clone(),
                 "))".into(),
@@ -113,7 +115,7 @@ async fn resolve_filter_to_ids(
         _ => {}
     }
 
-    let results = query
+    let results = super::overlay::with_overlay(overlay, query)
         .load::<(Symbol, SymbolInstance, Object, Project)>(conn)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to resolve filter to IDs: {}", e))?;
@@ -128,11 +130,12 @@ async fn resolve_scope_ids(
     ids: &[i32],
     filter: &Option<CompositeFilter>,
     role: Option<&ScopeRole>,
+    overlay: &super::overlay::EphemeralOverlay,
     conn: &mut Connection,
 ) -> Result<Vec<i32>> {
     let mut all_ids = ids.to_vec();
     if let Some(ref f) = filter {
-        all_ids.extend(resolve_filter_to_ids(f, role, conn).await?);
+        all_ids.extend(resolve_filter_to_ids(f, role, overlay, conn).await?);
         all_ids.sort_unstable();
         all_ids.dedup();
     }
@@ -151,37 +154,37 @@ fn build_parents_query(
     let parent_decls = PARENT_DECLS_ALIAS;
     let parent_symbols = PARENT_SYMBOLS_ALIAS;
 
-    symbol_refs::dsl::symbol_refs
+    all_refs::dsl::all_refs
         .inner_join(
-            symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::dsl::id)),
+            all_symbols::dsl::all_symbols.on(all_refs::dsl::to_symbol.eq(all_symbols::dsl::id)),
         )
         .inner_join(
-            symbol_instances::dsl::symbol_instances
-                .on(symbols::dsl::id.eq(symbol_instances::dsl::symbol)),
+            all_instances::dsl::all_instances
+                .on(all_symbols::dsl::id.eq(all_instances::dsl::symbol)),
         )
         .inner_join(
             parent_decls.on(parent_decls
-                .field(symbol_instances::dsl::object_id)
-                .eq(symbol_refs::dsl::from_object)),
+                .field(all_instances::dsl::object_id)
+                .eq(all_refs::dsl::from_object)),
         )
         .inner_join(
             parent_symbols.on(parent_symbols
-                .field(symbols::dsl::id)
-                .eq(parent_decls.field(symbol_instances::dsl::symbol))),
+                .field(all_symbols::dsl::id)
+                .eq(parent_decls.field(all_instances::dsl::symbol))),
         )
         .filter(
             parent_decls
-                .field(symbol_instances::dsl::offset_range)
-                .contains_range(symbol_refs::dsl::from_offset_range),
+                .field(all_instances::dsl::offset_range)
+                .contains_range(all_refs::dsl::from_offset_range),
         )
         .filter(
-            symbol_instances::dsl::id.eq_any(source_ids),
+            all_instances::dsl::id.eq_any(source_ids),
         )
         .select((
             SymbolRef::as_select(),
             Symbol::as_select(),
             SymbolInstance::as_select(),
-            parent_decls.fields(crate::schema_diesel::symbol_instances::all_columns),
+            parent_decls.fields(crate::schema_diesel::all_instances::all_columns),
         ))
         .into_boxed::<Pg>()
 }
@@ -194,40 +197,40 @@ fn build_children_query(
     let parent_decls = PARENT_DECLS_ALIAS;
     let parent_symbols = PARENT_SYMBOLS_ALIAS;
 
-    symbol_refs::dsl::symbol_refs
-        .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::id)))
+    all_refs::dsl::all_refs
+        .inner_join(all_symbols::dsl::all_symbols.on(all_refs::dsl::to_symbol.eq(all_symbols::id)))
         .inner_join(
-            symbol_instances::dsl::symbol_instances.on(symbols::dsl::id.eq(symbol_instances::symbol)),
+            all_instances::dsl::all_instances.on(all_symbols::dsl::id.eq(all_instances::symbol)),
         )
         .inner_join(
             parent_decls.on(parent_decls
-                .field(symbol_instances::dsl::object_id)
-                .eq(symbol_refs::dsl::from_object)),
+                .field(all_instances::dsl::object_id)
+                .eq(all_refs::dsl::from_object)),
         )
         .filter(
             parent_decls
-                .field(symbol_instances::dsl::offset_range)
-                .contains_range(symbol_refs::dsl::from_offset_range),
+                .field(all_instances::dsl::offset_range)
+                .contains_range(all_refs::dsl::from_offset_range),
         )
         .filter(
             parent_decls
-                .field(symbol_instances::dsl::id)
+                .field(all_instances::dsl::id)
                 .eq_any(source_ids),
         )
         .inner_join(
             parent_symbols.on(parent_symbols
-                .field(symbols::dsl::id)
-                .eq(parent_decls.field(symbol_instances::dsl::symbol))),
+                .field(all_symbols::dsl::id)
+                .eq(parent_decls.field(all_instances::dsl::symbol))),
         )
         .inner_join(
             objects::dsl::objects
-                .on(objects::dsl::id.eq(parent_decls.field(symbol_instances::dsl::object_id))),
+                .on(objects::dsl::id.eq(parent_decls.field(all_instances::dsl::object_id))),
         )
         .select((
-            parent_symbols.fields(crate::schema_diesel::symbols::all_columns),
+            parent_symbols.fields(crate::schema_diesel::all_symbols::all_columns),
             Symbol::as_select(),
             SymbolInstance::as_select(),
-            parent_decls.fields(crate::schema_diesel::symbol_instances::all_columns),
+            parent_decls.fields(crate::schema_diesel::all_instances::all_columns),
             SymbolRef::as_select(),
             Object::as_select(),
         ))
@@ -243,31 +246,31 @@ fn build_has_parents_query(
     let container_symbol = CONTAINER_SYMBOL_ALIAS;
     let container_type = CONTAINER_TYPE_ALIAS;
 
-    symbol_instances::dsl::symbol_instances
-        .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
-        .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
-        .filter(symbol_instances::dsl::id.eq_any(source_ids))
+    all_instances::dsl::all_instances
+        .inner_join(all_symbols::dsl::all_symbols.on(all_instances::dsl::symbol.eq(all_symbols::dsl::id)))
+        .inner_join(symbol_types::dsl::symbol_types.on(all_symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
+        .filter(all_instances::dsl::id.eq_any(source_ids))
         .inner_join(
             container_instance.on(
-                container_instance.field(symbol_instances::dsl::object_id)
-                    .eq(symbol_instances::dsl::object_id)
+                container_instance.field(all_instances::dsl::object_id)
+                    .eq(all_instances::dsl::object_id)
             ),
         )
         .inner_join(
             container_symbol.on(
-                container_symbol.field(symbols::dsl::id)
-                    .eq(container_instance.field(symbol_instances::dsl::symbol))
+                container_symbol.field(all_symbols::dsl::id)
+                    .eq(container_instance.field(all_instances::dsl::symbol))
             ),
         )
         .inner_join(
             container_type.on(
                 container_type.field(symbol_types::dsl::id)
-                    .eq(container_symbol.field(symbols::dsl::symbol_type))
+                    .eq(container_symbol.field(all_symbols::dsl::symbol_type))
             ),
         )
         .filter(
             diesel::dsl::sql::<diesel::sql_types::Bool>(
-                "container_instances.offset_range @> symbol_instances.offset_range"
+                "container_instances.offset_range @> all_instances.offset_range"
             )
         )
         .filter(
@@ -275,14 +278,14 @@ fn build_has_parents_query(
                 .ge(symbol_types::dsl::level)
         )
         .filter(
-            container_instance.field(symbol_instances::dsl::id)
-                .ne(symbol_instances::dsl::id)
+            container_instance.field(all_instances::dsl::id)
+                .ne(all_instances::dsl::id)
         )
         .select((
             Symbol::as_select(),
             SymbolInstance::as_select(),
-            container_symbol.fields(crate::schema_diesel::symbols::all_columns),
-            container_instance.fields(crate::schema_diesel::symbol_instances::all_columns),
+            container_symbol.fields(crate::schema_diesel::all_symbols::all_columns),
+            container_instance.fields(crate::schema_diesel::all_instances::all_columns),
         ))
         .into_boxed::<Pg>()
 }
@@ -296,32 +299,32 @@ fn build_has_children_query(
     let contained_symbol = CONTAINED_SYMBOL_ALIAS;
     let contained_type = CONTAINED_TYPE_ALIAS;
 
-    symbol_instances::dsl::symbol_instances
-        .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
-        .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
-        .filter(symbol_instances::dsl::id.eq_any(source_ids))
-        .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(symbol_instances::dsl::object_id)))
+    all_instances::dsl::all_instances
+        .inner_join(all_symbols::dsl::all_symbols.on(all_instances::dsl::symbol.eq(all_symbols::dsl::id)))
+        .inner_join(symbol_types::dsl::symbol_types.on(all_symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
+        .filter(all_instances::dsl::id.eq_any(source_ids))
+        .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(all_instances::dsl::object_id)))
         .inner_join(
             contained_instance.on(
-                contained_instance.field(symbol_instances::dsl::object_id)
-                    .eq(symbol_instances::dsl::object_id)
+                contained_instance.field(all_instances::dsl::object_id)
+                    .eq(all_instances::dsl::object_id)
             ),
         )
         .inner_join(
             contained_symbol.on(
-                contained_symbol.field(symbols::dsl::id)
-                    .eq(contained_instance.field(symbol_instances::dsl::symbol))
+                contained_symbol.field(all_symbols::dsl::id)
+                    .eq(contained_instance.field(all_instances::dsl::symbol))
             ),
         )
         .inner_join(
             contained_type.on(
                 contained_type.field(symbol_types::dsl::id)
-                    .eq(contained_symbol.field(symbols::dsl::symbol_type))
+                    .eq(contained_symbol.field(all_symbols::dsl::symbol_type))
             ),
         )
         .filter(
             diesel::dsl::sql::<diesel::sql_types::Bool>(
-                "symbol_instances.offset_range @> contained_instances.offset_range"
+                "all_instances.offset_range @> contained_instances.offset_range"
             )
         )
         .filter(
@@ -329,14 +332,14 @@ fn build_has_children_query(
                 .ge(contained_type.field(symbol_types::dsl::level))
         )
         .filter(
-            symbol_instances::dsl::id
-                .ne(contained_instance.field(symbol_instances::dsl::id))
+            all_instances::dsl::id
+                .ne(contained_instance.field(all_instances::dsl::id))
         )
         .select((
             Symbol::as_select(),
             SymbolInstance::as_select(),
-            contained_symbol.fields(crate::schema_diesel::symbols::all_columns),
-            contained_instance.fields(crate::schema_diesel::symbol_instances::all_columns),
+            contained_symbol.fields(crate::schema_diesel::all_symbols::all_columns),
+            contained_instance.fields(crate::schema_diesel::all_instances::all_columns),
             Object::as_select(),
         ))
         .into_boxed::<Pg>()
@@ -552,8 +555,10 @@ impl Index {
         filter: &CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        overlay: &super::overlay::EphemeralOverlay,
     ) -> Result<Selection> {
         use crate::schema_diesel::*;
+        use super::overlay::with_overlay;
 
         let connection = &mut self
             .pool
@@ -572,7 +577,7 @@ impl Index {
                 joined_query = joined_query.filter(expr);
             }
 
-            joined_query
+            with_overlay(overlay, joined_query)
                 .load::<(Symbol, SymbolInstance, Object, Project)>(connection)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?
@@ -592,7 +597,7 @@ impl Index {
                 if let Some(expr) = filter.compose_parents() {
                     parents_query = parents_query.filter(expr);
                 }
-                parents_query
+                with_overlay(overlay, parents_query)
                     .load::<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)>(connection)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
@@ -602,7 +607,7 @@ impl Index {
                     tracing::info_span!("select_parents").entered();
 
                 let role = ScopeRole::Parents(current_instance_ids.clone());
-                let scope_ids = resolve_scope_ids(ids, scope_filter, Some(&role), connection).await?;
+                let scope_ids = resolve_scope_ids(ids, scope_filter, Some(&role), overlay, connection).await?;
 
                 let mut parents_query = build_parents_query(current_instance_ids.clone());
                 if let Some(expr) = filter.compose_parents() {
@@ -613,10 +618,10 @@ impl Index {
                 // correctly returns zero rows (scope specified but matched nothing).
                 let parent_decls = PARENT_DECLS_ALIAS;
                 parents_query = parents_query.filter(
-                    parent_decls.field(symbol_instances::dsl::id).eq_any(scope_ids)
+                    parent_decls.field(all_instances::dsl::id).eq_any(scope_ids)
                 );
 
-                parents_query
+                with_overlay(overlay, parents_query)
                     .load::<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)>(connection)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
@@ -632,7 +637,7 @@ impl Index {
                 if let Some(expr) = filter.compose_children() {
                     children_query = children_query.filter(expr);
                 }
-                children_query
+                with_overlay(overlay, children_query)
                     .load::<(Symbol, Symbol, SymbolInstance, SymbolInstance, SymbolRef, Object)>(connection)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
@@ -642,7 +647,7 @@ impl Index {
                     tracing::info_span!("select_children").entered();
 
                 let role = ScopeRole::Children(current_instance_ids.clone());
-                let scope_ids = resolve_scope_ids(ids, scope_filter, Some(&role), connection).await?;
+                let scope_ids = resolve_scope_ids(ids, scope_filter, Some(&role), overlay, connection).await?;
 
                 let mut children_query = build_children_query(current_instance_ids.clone());
                 if let Some(expr) = filter.compose_children() {
@@ -651,10 +656,10 @@ impl Index {
 
                 // Always apply scope filter.
                 children_query = children_query.filter(
-                    symbol_instances::dsl::id.eq_any(scope_ids)
+                    all_instances::dsl::id.eq_any(scope_ids)
                 );
 
-                children_query
+                with_overlay(overlay, children_query)
                     .load::<(Symbol, Symbol, SymbolInstance, SymbolInstance, SymbolRef, Object)>(connection)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
@@ -670,7 +675,7 @@ impl Index {
                 has_parents_query = has_parents_query.filter(expr);
             }
 
-            has_parents_query
+            with_overlay(overlay, has_parents_query)
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance)>(connection)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to load containment parents: {}", e))?
@@ -685,7 +690,7 @@ impl Index {
                 has_children_query = has_children_query.filter(expr);
             }
 
-            has_children_query
+            with_overlay(overlay, has_children_query)
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(connection)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?
@@ -782,7 +787,10 @@ impl Index {
         include_refs: bool,
         include_has: bool,
         filter: &CompositeFilter,
+        overlay: &super::overlay::EphemeralOverlay,
     ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
+        use super::overlay::with_overlay;
+
         let connection = &mut self
             .pool
             .get()
@@ -796,7 +804,7 @@ impl Index {
             if let Some(expr) = filter.compose_has_children() {
                 query = query.filter(expr);
             }
-            let results = query
+            let results = with_overlay(overlay, query)
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(&mut *connection)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to find has-child instance IDs: {}", e))?;
@@ -808,7 +816,7 @@ impl Index {
             if let Some(expr) = filter.compose_children() {
                 query = query.filter(expr);
             }
-            let results = query
+            let results = with_overlay(overlay, query)
                 .load::<(Symbol, Symbol, SymbolInstance, SymbolInstance, SymbolRef, Object)>(
                     &mut *connection,
                 )
@@ -829,7 +837,10 @@ impl Index {
         include_refs: bool,
         include_has: bool,
         filter: &CompositeFilter,
+        overlay: &super::overlay::EphemeralOverlay,
     ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
+        use super::overlay::with_overlay;
+
         let connection = &mut self
             .pool
             .get()
@@ -843,7 +854,7 @@ impl Index {
             if let Some(expr) = filter.compose_parents() {
                 query = query.filter(expr);
             }
-            let results = query
+            let results = with_overlay(overlay, query)
                 .load::<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)>(&mut *connection)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to find ref-parent instance IDs: {}", e))?;
@@ -855,7 +866,7 @@ impl Index {
             if let Some(expr) = filter.compose_has_parents() {
                 query = query.filter(expr);
             }
-            let results = query
+            let results = with_overlay(overlay, query)
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance)>(&mut *connection)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to find has-parent instance IDs: {}", e))?;
@@ -871,6 +882,7 @@ impl Index {
     pub async fn find_edges_between(
         &self,
         instance_ids: &[i32],
+        _overlay: &super::overlay::EphemeralOverlay,
     ) -> Result<Vec<ImplicitEdge>> {
         if instance_ids.is_empty() {
             return Ok(vec![]);
@@ -884,22 +896,25 @@ impl Index {
 
         let _span = tracing::info_span!("find_edges_between", count = instance_ids.len()).entered();
 
-        let results = diesel::sql_query(
-            "SELECT DISTINCT ON (from_inst.id, sr.id) \
+        let sql = format!(
+            "{}SELECT DISTINCT ON (from_inst.id, sr.id) \
                     sr.id AS ref_id, sr.to_symbol, sr.from_object, sr.from_offset_range, \
                     to_inst.id AS to_instance_id, \
                     from_inst.id AS from_instance_id \
-             FROM index.symbol_instances from_inst \
-             JOIN index.symbol_refs sr \
+             FROM all_instances from_inst \
+             JOIN all_refs sr \
                  ON sr.from_object = from_inst.object_id \
                  AND from_inst.offset_range @> sr.from_offset_range \
-             JOIN index.symbol_instances to_inst \
+             JOIN all_instances to_inst \
                  ON to_inst.symbol = sr.to_symbol \
              WHERE from_inst.id = ANY($1) \
                AND to_inst.id = ANY($1) \
                AND from_inst.id != to_inst.id \
-             ORDER BY from_inst.id, sr.id, to_inst.id"
-        )
+             ORDER BY from_inst.id, sr.id, to_inst.id",
+            super::overlay::EphemeralOverlay::static_cte_prefix(),
+        );
+
+        let results = diesel::sql_query(sql)
             .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(instance_ids)
             .load::<ImplicitEdge>(&mut *connection)
             .await
