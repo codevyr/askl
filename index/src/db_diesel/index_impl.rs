@@ -994,6 +994,56 @@ impl Index {
             .map_err(|e| anyhow::anyhow!("Failed to find edges between instances: {}", e))
     }
 
+    /// Returns `true` when a symbol with the given `id` exists in either the
+    /// persistent index or the supplied overlay.
+    pub async fn symbol_exists(
+        &self,
+        symbol_id: i64,
+        overlay: &super::overlay::EphemeralOverlay,
+    ) -> Result<bool> {
+        let connection = &mut self
+            .pool
+            .get()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+
+        let sql = format!(
+            "{}SELECT 1 AS found FROM all_symbols WHERE id = $19 LIMIT 1",
+            super::overlay::EphemeralOverlay::parameterized_cte_prefix(),
+        );
+        let rows: Vec<SymbolExistsRow> = diesel::sql_query(sql)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::BigInt>, _>(&overlay.symbol_ids)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(&overlay.symbol_names)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(&overlay.symbol_paths)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.symbol_project_ids)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.symbol_types)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Nullable<diesel::sql_types::Integer>>, _>(&overlay.symbol_scopes)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(&overlay.symbol_leaf_names)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.instance_ids)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::BigInt>, _>(&overlay.instance_symbols)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.instance_object_ids)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.instance_offset_starts)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.instance_offset_ends)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.instance_types)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.ref_ids)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::BigInt>, _>(&overlay.ref_to_symbols)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.ref_from_objects)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.ref_from_offset_starts)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.ref_from_offset_ends)
+            .bind::<diesel::sql_types::BigInt, _>(symbol_id)
+            .load::<SymbolExistsRow>(&mut *connection)
+            .await
+            .map_err(|e| anyhow::anyhow!("symbol_exists query failed: {}", e))?;
+        Ok(!rows.is_empty())
+    }
+
+}
+
+#[derive(diesel::QueryableByName)]
+struct SymbolExistsRow {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    #[allow(dead_code)]
+    found: i32,
 }
 
 /// Edge discovered between two selected instances via DB query.

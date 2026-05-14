@@ -250,6 +250,15 @@ impl Selector for EphemeralInstanceVerb {
         let filter = CompositeFilter::leaf(SymbolInstanceIdMixin::new(&instances));
         let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, &overlay).await?;
 
+        if selection.is_empty() {
+            bail!(
+                "ephemeral_instance: symbol_id {} not found in the index or overlay; \
+                 if it is an ephemeral symbol, add it with ephemeral_symbol first \
+                 (note: parallel ephemeral_symbol verbs are not visible here)",
+                self.symbol_id
+            );
+        }
+
         Ok((Some(selection), overlay))
     }
 }
@@ -343,7 +352,7 @@ impl Display for EphemeralRefVerb {
 impl Selector for EphemeralRefVerb {
     async fn select_from_all_impl(
         &self,
-        _cfg: &ControlFlowGraph,
+        cfg: &ControlFlowGraph,
         _filter: CompositeFilter,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
@@ -355,6 +364,14 @@ impl Selector for EphemeralRefVerb {
         overlay.ref_from_objects.push(self.from_object);
         overlay.ref_from_offset_starts.push(self.start);
         overlay.ref_from_offset_ends.push(self.end);
+
+        // Validate FK: to_symbol must exist in the persistent index or current overlay.
+        if !cfg.index.symbol_exists(self.to_symbol, &overlay).await? {
+            bail!(
+                "ephemeral_ref: to_symbol {} not found in the index or overlay",
+                self.to_symbol
+            );
+        }
 
         // Ref participates as graph data only; no selection returned.
         Ok((None, overlay))

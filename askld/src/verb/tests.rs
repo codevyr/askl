@@ -346,3 +346,34 @@ fn test_loc_line_out_of_range() {
         res.nodes.as_vec()
     );
 }
+
+// ============================================================================
+// FK validation tests — non-existent symbol/ref targets must error
+// ============================================================================
+
+#[test]
+fn test_ephemeral_instance_nonexistent_symbol() {
+    // symbol_id 999999 does not exist in the verb_test fixture → error.
+    const EPH_INST_ID: i32 = i32::MAX - 40;
+    let query = format!(
+        r#"ephemeral_instance(symbol_id="999999", instance_id="{inst}", object_id="1", start="0", end="1", instance_type="1")"#,
+        inst = EPH_INST_ID
+    );
+    let err = run_query_err(VERB_TEST, &query);
+    assert!(err.is_err(), "expected error for non-existent symbol_id");
+}
+
+#[test]
+fn test_ephemeral_ref_nonexistent_to_symbol() {
+    // to_symbol 999999 does not exist in the verb_test fixture → error.
+    const EPH_INST_X: i32 = i32::MAX - 41;
+    const EPH_REF_R: i32 = i32::MAX - 42;
+    let query = format!(
+        "ephemeral_instance(symbol_id=\"1\", instance_id=\"{inst_x}\", object_id=\"1\", start=\"800\", end=\"810\", instance_type=\"1\")\n\
+         ephemeral_ref(ref_id=\"{ref_r}\", to_symbol=\"999999\", from_object=\"1\", start=\"802\", end=\"803\")\n",
+        inst_x = EPH_INST_X,
+        ref_r = EPH_REF_R,
+    );
+    let err = run_query_err(VERB_TEST, &query);
+    assert!(err.is_err(), "expected error for non-existent to_symbol");
+}
