@@ -1,6 +1,6 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
-use crate::execution_state::DependencyRole;
+use crate::execution_state::{DependencyKind, DependencyRole};
 use crate::parser_context::{
     ParserContext, SYMBOL_TYPE_DATA, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FIELD, SYMBOL_TYPE_FILE,
     SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MACRO, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
@@ -132,11 +132,11 @@ impl Selector for ForcedVerb {
         Some(CompositeFilter::and(parts))
     }
 
-    fn dependency_ready(&self, dependency_role: DependencyRole) -> bool {
-        if dependency_role == DependencyRole::Parent {
-            false
-        } else {
-            true
+    fn dependency_kind(&self, role: DependencyRole) -> DependencyKind {
+        match role {
+            // ForcedVerb cannot compute without its parent's selection.
+            DependencyRole::Child => DependencyKind::Necessary,
+            _ => DependencyKind::Sufficient,
         }
     }
 

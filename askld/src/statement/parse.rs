@@ -1,5 +1,5 @@
 use crate::command::LabeledStatements;
-use crate::execution_state::{DependencyRole, RelationshipType, StatementDependency, StatementDependent};
+use crate::execution_state::{DependencyKind, DependencyRole, RelationshipType, StatementDependency, StatementDependent};
 use crate::hierarchy::Hierarchy;
 use crate::parser::Rule;
 use crate::parser_context::ParserContext;
@@ -119,7 +119,7 @@ pub fn build_empty_statement(ctx: Rc<ParserContext>, span: Span) -> Rc<Statement
     return statement;
 }
 
-pub fn init_dependencies(
+pub fn build_dependency_graph(
     statement: Rc<Statement>,
     labeled_statements_map: &LabeledStatements,
 ) -> Result<(), pest::error::Error<Rule>> {
@@ -130,15 +130,6 @@ pub fn init_dependencies(
             parent.clone(),
             DependencyRole::Parent,
         ));
-
-        // Add ourself as a dependency to the parent
-        parent
-            .get_state_mut()
-            .dependencies
-            .push(StatementDependency::new(
-                statement.clone(),
-                DependencyRole::Parent,
-            ));
     }
 
     for child in statement.children() {
@@ -148,12 +139,23 @@ pub fn init_dependencies(
         ));
 
         // Add ourself as a dependency to the child
+        let child_dep_kind = if child
+            .command()
+            .selectors()
+            .any(|s| s.dependency_kind(DependencyRole::Child) == DependencyKind::Necessary)
+        {
+            DependencyKind::Necessary
+        } else {
+            DependencyKind::Sufficient
+        };
+
         child
             .get_state_mut()
             .dependencies
-            .push(StatementDependency::new(
+            .push(StatementDependency::new_with_kind(
                 statement.clone(),
                 DependencyRole::Child,
+                child_dep_kind,
             ));
     }
 
@@ -184,9 +186,10 @@ pub fn init_dependencies(
                 ));
 
             // Add ourself as a dependency to the labeled statement
-            state.dependencies.push(StatementDependency::new(
+            state.dependencies.push(StatementDependency::new_with_kind(
                 labeled_statement.clone(),
                 DependencyRole::User,
+                user.dependency_kind(DependencyRole::User),
             ));
         }
     }

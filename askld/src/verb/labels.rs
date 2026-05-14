@@ -1,6 +1,6 @@
 use crate::{
     execution_context::{selector_state_with, SelectorRegistry},
-    execution_state::{DependencyRole, RelationshipType}, parser::Rule, span::Span,
+    execution_state::{DependencyKind, DependencyRole, RelationshipType}, parser::Rule, span::Span,
 };
 use anyhow::{bail, Result};
 use async_trait::async_trait;
@@ -151,23 +151,11 @@ impl Verb for UserVerb {
 
 #[async_trait(?Send)]
 impl Selector for UserVerb {
-    fn dependency_ready(&self, _dependency_role: DependencyRole) -> bool {
-        if !self.forced {
-            return true;
+    fn dependency_kind(&self, role: DependencyRole) -> DependencyKind {
+        match role {
+            DependencyRole::User => DependencyKind::Necessary,
+            _ => DependencyKind::Sufficient,
         }
-
-        self.selection.get().is_some()
-    }
-
-    fn score(&self, state: &SelectorState) -> Option<usize> {
-        if state.selection.is_some() {
-            return Some(state.selection.as_ref().unwrap().nodes.len());
-        }
-
-        if self.selection.get().is_none() {
-            return None;
-        }
-        self.selection.get().map(|s| s.nodes.len())
     }
 
     fn update_state(&self, state: &mut SelectorState) {

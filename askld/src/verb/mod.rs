@@ -1,6 +1,6 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::{selector_state_with, ExecutionContext, SelectorRegistry};
-use crate::execution_state::{DependencyRole, RelationshipType};
+use crate::execution_state::{DependencyKind, DependencyRole, RelationshipType};
 use crate::parser::Rule;
 use crate::parser_context::ParserContext;
 use crate::span::Span;
@@ -419,12 +419,11 @@ pub trait Selector: std::fmt::Debug + Verb {
         None
     }
 
-    fn score(&self, state: &SelectorState) -> Option<usize> {
-        state.selection.as_ref().map(|sel| sel.nodes.len())
-    }
-
-    fn dependency_ready(&self, _dependency_role: DependencyRole) -> bool {
-        true
+    /// The kind of dependency this selector imposes on the given role.
+    /// Default: Sufficient — the selector can produce initial output without this input.
+    /// Override to Necessary when the selector cannot produce any output without it.
+    fn dependency_kind(&self, _role: DependencyRole) -> DependencyKind {
+        DependencyKind::Sufficient
     }
 
     fn update_state(&self, _state: &mut SelectorState) {}
