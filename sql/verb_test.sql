@@ -10,6 +10,13 @@ INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, con
 VALUES
     (1, 1, 'main.c', '/main.c', 'cc', '');
 
+-- File contents for /main.c so that loc() can compute byte offsets.
+-- Line 1: 500 'a' + newline → bytes [0, 501)
+-- Line 2: 408 'b' + newline → bytes [501, 910)
+-- Line 3: 8   'c' + newline → bytes [910, 919)  ← matches function foo at [910, 919)
+INSERT INTO object_contents (object_id, content)
+VALUES (1, (repeat('a', 500) || chr(10) || repeat('b', 408) || chr(10) || repeat('c', 8) || chr(10))::bytea);
+
 -- Sentinel object for "/" directory
 INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, content_hash)
 VALUES (2, 1, '/', '/', 'directory', '');

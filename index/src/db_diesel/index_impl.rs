@@ -9,7 +9,7 @@ use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use diesel_migrations::MigrationHarness;
 
 use crate::models_diesel::{ContentRow, Object, Project, Symbol, SymbolInstance, SymbolRef};
-use crate::symbols::FileId;
+use crate::symbols::{FileId, ProjectId};
 
 use super::mixins::{
     CompositeFilter, CurrentQuery, OwnedSqlBound,
@@ -548,6 +548,50 @@ impl Index {
                 object_id
             )),
         }
+    }
+
+    /// Find objects by filesystem path suffix, optionally filtered by project name.
+    ///
+    /// Suffix match: `loc("main.c", 3)` matches `/main.c`, `/project/src/main.c`, etc.
+    /// Returns `(FileId, ProjectId)` pairs — one per matching object.
+    pub async fn find_objects_by_path(
+        &self,
+        path: &str,
+        project_name: Option<&str>,
+    ) -> Result<Vec<(FileId, ProjectId)>> {
+        let connection = &mut self
+            .pool
+            .get()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+
+        #[derive(QueryableByName)]
+        struct Row {
+            #[diesel(sql_type = diesel::sql_types::Integer)]
+            object_id: i32,
+            #[diesel(sql_type = diesel::sql_types::Integer)]
+            project_id: i32,
+        }
+
+        let rows: Vec<Row> = diesel::sql_query(
+            r#"
+            SELECT o.id AS object_id, o.project_id
+            FROM index.objects o
+            JOIN index.projects p ON p.id = o.project_id
+            WHERE (o.filesystem_path = $1 OR o.filesystem_path LIKE '%/' || $1)
+              AND ($2::text IS NULL OR p.project_name = $2)
+            "#,
+        )
+        .bind::<diesel::sql_types::Text, _>(path)
+        .bind::<diesel::sql_types::Nullable<diesel::sql_types::Text>, _>(project_name)
+        .load::<Row>(&mut *connection)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to query objects by path: {}", e))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| (FileId::from(r.object_id), ProjectId::from(r.project_id)))
+            .collect())
     }
 
     pub async fn find_symbol(

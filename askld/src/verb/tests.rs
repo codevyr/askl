@@ -259,3 +259,58 @@ fn test_ephemeral_instance_id_out_of_range() {
     let err = run_query_err(VERB_TEST, query);
     assert!(err.is_err(), "expected error for non-ephemeral IDs");
 }
+
+// ============================================================================
+// loc verb tests (PR 4)
+// ============================================================================
+
+#[test]
+fn test_loc_returns_synthetic_instance() {
+    // loc("main.c", "3"): line 3 in verb_test.sql fixture is bytes [910, 919),
+    // which exactly spans function foo's instance (id=91, range [910, 919)).
+    // Verifies that loc creates an ephemeral instance visible in query results.
+    let res = run_query(VERB_TEST, r#"loc("main.c", "3")"#);
+    // Result should contain exactly one node (the synthetic loc instance).
+    assert_eq!(
+        res.nodes.as_vec().len(),
+        1,
+        "expected 1 loc node, got {:?}",
+        res.nodes.as_vec()
+    );
+}
+
+#[test]
+fn test_func_has_loc() {
+    // func has { loc("main.c", "3") }
+    // Line 3 is [910, 919) which is exactly foo's offset range [910, 919).
+    // Expected: func instance 91 (foo) appears in the result, and the loc instance too.
+    let res = run_query(VERB_TEST, r#"func has { loc("main.c", "3") }"#);
+    let nodes = res.nodes.as_vec();
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(91)),
+        "expected foo instance 91 in func has {{ loc }}, got {:?}",
+        nodes
+    );
+}
+
+#[test]
+fn test_loc_nonexistent_file() {
+    // loc for a file that doesn't exist → empty result, no panic.
+    let res = run_query(VERB_TEST, r#"loc("nonexistent_xyz.c", "1")"#);
+    assert!(
+        res.nodes.as_vec().is_empty(),
+        "expected empty result for nonexistent file, got {:?}",
+        res.nodes.as_vec()
+    );
+}
+
+#[test]
+fn test_loc_line_out_of_range() {
+    // loc with a line number beyond the file → empty result, no panic.
+    let res = run_query(VERB_TEST, r#"loc("main.c", "999")"#);
+    assert!(
+        res.nodes.as_vec().is_empty(),
+        "expected empty result for out-of-range line, got {:?}",
+        res.nodes.as_vec()
+    );
+}

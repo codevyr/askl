@@ -70,7 +70,7 @@ impl Occurrence {
     }
 }
 
-fn offset_from_line_col(content: &[u8], line: usize, col: usize) -> Option<i32> {
+pub fn offset_from_line_col(content: &[u8], line: usize, col: usize) -> Option<i32> {
     if line == 0 || col == 0 {
         return None;
     }
@@ -254,6 +254,12 @@ impl From<i32> for ProjectId {
 impl From<i64> for ProjectId {
     fn from(value: i64) -> Self {
         Self(value as i32)
+    }
+}
+
+impl Into<i32> for ProjectId {
+    fn into(self) -> i32 {
+        self.0
     }
 }
 

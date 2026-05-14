@@ -18,6 +18,7 @@ use super::Verb;
 
 mod ephemeral;
 mod filters;
+mod loc;
 mod modifiers;
 mod selectors;
 
@@ -25,6 +26,7 @@ pub use self::filters::{DefaultTypeFilter, DirectOnlyFilter, GenericFilter};
 pub use self::selectors::{GenericSelector, NameSelector, UnitVerb};
 
 pub(super) use self::ephemeral::{EphemeralInstanceVerb, EphemeralRefVerb, EphemeralSymbolVerb};
+pub(super) use self::loc::LocSelector;
 pub(super) use self::filters::{IgnoreVerb, ProjectFilter};
 pub(super) use self::modifiers::{
     AnyModifier, DeriveModifier, HasModifier, IsolatedScope, RefsModifier, UnnestModifier,
@@ -80,6 +82,7 @@ pub(crate) fn build_generic_verb(
         EphemeralSymbolVerb::NAME => EphemeralSymbolVerb::new(verb_span, &positional, &named),
         EphemeralInstanceVerb::NAME => EphemeralInstanceVerb::new(verb_span, &positional, &named),
         EphemeralRefVerb::NAME => EphemeralRefVerb::new(verb_span, &positional, &named),
+        LocSelector::NAME => LocSelector::new(verb_span, &positional, &named),
         TypeSelector::NAME_FUNCTION => {
             TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FUNCTION)
         }

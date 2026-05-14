@@ -1,6 +1,7 @@
 use diesel::pg::Pg;
 use diesel::query_builder::{AstPass, Query, QueryFragment, QueryId};
 use diesel::sql_types::{Array, BigInt, Integer, Nullable, Text};
+use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
 // ============================================================================
 // EphemeralOverlay — per-query in-memory rows injected via CTE
@@ -286,4 +287,22 @@ pub fn is_ephemeral_instance_id(id: i32) -> bool {
 
 pub fn is_ephemeral_ref_id(id: i32) -> bool {
     id >= i32::MAX - 1_000_000
+}
+
+// ============================================================================
+// Global counters for auto-allocation (used by composite verbs like loc).
+// Decrement from MAX; valid as long as within the ephemeral range.
+// ============================================================================
+
+static GLOBAL_SYMBOL_ID: AtomicI64 = AtomicI64::new(i64::MAX);
+static GLOBAL_INSTANCE_ID: AtomicI32 = AtomicI32::new(i32::MAX);
+
+/// Allocate a fresh ephemeral symbol ID (auto-decrements from i64::MAX).
+pub fn alloc_ephemeral_symbol_id() -> i64 {
+    GLOBAL_SYMBOL_ID.fetch_sub(1, Ordering::Relaxed)
+}
+
+/// Allocate a fresh ephemeral instance ID (auto-decrements from i32::MAX).
+pub fn alloc_ephemeral_instance_id() -> i32 {
+    GLOBAL_INSTANCE_ID.fetch_sub(1, Ordering::Relaxed)
 }
