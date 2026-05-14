@@ -53,12 +53,6 @@ impl EphemeralOverlay {
         Self::default()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.symbol_ids.is_empty()
-            && self.instance_ids.is_empty()
-            && self.ref_ids.is_empty()
-    }
-
     /// Merge `other` into `self`, appending all its rows.
     ///
     /// Instance and ref rows are deduplicated by ID so that a selector whose
@@ -173,60 +167,6 @@ all_refs(id, to_symbol, from_object, from_offset_range) AS (\
     FROM eph_refs\
 ) "
     }
-
-    /// Returns a SQL `WITH` prefix that defines `all_symbols`, `all_instances`,
-    /// and `all_refs` as UNION ALL of the persistent tables and empty ephemeral
-    /// sets (as inline SQL literals). Use this for raw `diesel::sql_query` calls
-    /// where the CTE must come before the main query and bound parameters for
-    /// the CTE would require complex parameter-offset bookkeeping.
-    ///
-    /// For typed Diesel queries, use [`WithOverlay`] instead, which uses proper
-    /// bound parameters.
-    pub fn static_cte_prefix() -> &'static str {
-        "\
-WITH eph_symbols(id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name) AS (\
-    SELECT id, name, symbol_path::ltree, project_id, symbol_type, symbol_scope, leaf_name \
-    FROM unnest(\
-        ARRAY[]::int8[], ARRAY[]::text[], ARRAY[]::text[], \
-        ARRAY[]::int4[], ARRAY[]::int4[], ARRAY[]::int4[], ARRAY[]::text[]\
-    ) AS t(id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name)\
-), \
-all_symbols(id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name) AS (\
-    SELECT id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name \
-    FROM index.symbols \
-    UNION ALL \
-    SELECT id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name \
-    FROM eph_symbols\
-), \
-eph_instances(id, symbol, object_id, offset_range, instance_type) AS (\
-    SELECT id, symbol, object_id, int4range(offset_range_start, offset_range_end, '[)'), instance_type \
-    FROM unnest(\
-        ARRAY[]::int4[], ARRAY[]::int8[], ARRAY[]::int4[], \
-        ARRAY[]::int4[], ARRAY[]::int4[], ARRAY[]::int4[]\
-    ) AS t(id, symbol, object_id, offset_range_start, offset_range_end, instance_type)\
-), \
-all_instances(id, symbol, object_id, offset_range, instance_type) AS (\
-    SELECT id, symbol, object_id, offset_range, instance_type \
-    FROM index.symbol_instances \
-    UNION ALL \
-    SELECT id, symbol, object_id, offset_range, instance_type \
-    FROM eph_instances\
-), \
-eph_refs(id, to_symbol, from_object, from_offset_range) AS (\
-    SELECT id, to_symbol, from_object, int4range(from_offset_range_start, from_offset_range_end, '[)') \
-    FROM unnest(\
-        ARRAY[]::int4[], ARRAY[]::int8[], ARRAY[]::int4[], \
-        ARRAY[]::int4[], ARRAY[]::int4[]\
-    ) AS t(id, to_symbol, from_object, from_offset_range_start, from_offset_range_end)\
-), \
-all_refs(id, to_symbol, from_object, from_offset_range) AS (\
-    SELECT id, to_symbol, from_object, from_offset_range \
-    FROM index.symbol_refs \
-    UNION ALL \
-    SELECT id, to_symbol, from_object, from_offset_range \
-    FROM eph_refs\
-) "
-    }
 }
 
 // ============================================================================
@@ -268,93 +208,88 @@ impl<Q: QueryFragment<Pg> + Send> QueryFragment<Pg> for WithOverlay<Q> {
         // Disable prepared-statement caching: the CTE content changes per overlay.
         pass.unsafe_to_cache_prepared();
 
-        if self.overlay.is_empty() {
-            // For empty overlays emit CTEs with inline empty-array SQL literals.
-            // This avoids binding 18 parameters per query while still defining the
-            // `all_*` CTE names that the inner query references.
-            pass.push_sql(EphemeralOverlay::static_cte_prefix());
-        } else {
-            // Non-empty: bind actual overlay rows as array parameters.
-            // Parameter order: symbols (7) → instances (6) → refs (5) = 18 total.
-            // Inner query parameters start at $19.
-            pass.push_sql(
-                "WITH eph_symbols(id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name) AS (\
-                    SELECT id, name, symbol_path::ltree, project_id, symbol_type, symbol_scope, leaf_name \
-                    FROM unnest(",
-            );
-            pass.push_bind_param::<Array<BigInt>, _>(&self.overlay.symbol_ids)?;
-            pass.push_sql("::int8[],");
-            pass.push_bind_param::<Array<Text>, _>(&self.overlay.symbol_names)?;
-            pass.push_sql("::text[],");
-            pass.push_bind_param::<Array<Text>, _>(&self.overlay.symbol_paths)?;
-            pass.push_sql("::text[],");
-            pass.push_bind_param::<Array<Integer>, _>(&self.overlay.symbol_project_ids)?;
-            pass.push_sql("::int4[],");
-            pass.push_bind_param::<Array<Integer>, _>(&self.overlay.symbol_types)?;
-            pass.push_sql("::int4[],");
-            pass.push_bind_param::<Array<Nullable<Integer>>, _>(&self.overlay.symbol_scopes)?;
-            pass.push_sql("::int4[],");
-            pass.push_bind_param::<Array<Text>, _>(&self.overlay.symbol_leaf_names)?;
-            pass.push_sql(
-                "::text[]) AS t(id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name)\
-                ), \
-                all_symbols(id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name) AS (\
-                    SELECT id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name \
-                    FROM index.symbols \
-                    UNION ALL \
-                    SELECT id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name \
-                    FROM eph_symbols\
-                ), \
-                eph_instances(id, symbol, object_id, offset_range, instance_type) AS (\
-                    SELECT id, symbol, object_id, int4range(offset_range_start, offset_range_end, '[)'), instance_type \
-                    FROM unnest(",
-            );
-            pass.push_bind_param::<Array<Integer>, _>(&self.overlay.instance_ids)?;
-            pass.push_sql("::int4[],");
-            pass.push_bind_param::<Array<BigInt>, _>(&self.overlay.instance_symbols)?;
-            pass.push_sql("::int8[],");
-            pass.push_bind_param::<Array<Integer>, _>(&self.overlay.instance_object_ids)?;
-            pass.push_sql("::int4[],");
-            pass.push_bind_param::<Array<Integer>, _>(&self.overlay.instance_offset_starts)?;
-            pass.push_sql("::int4[],");
-            pass.push_bind_param::<Array<Integer>, _>(&self.overlay.instance_offset_ends)?;
-            pass.push_sql("::int4[],");
-            pass.push_bind_param::<Array<Integer>, _>(&self.overlay.instance_types)?;
-            pass.push_sql(
-                "::int4[]) AS t(id, symbol, object_id, offset_range_start, offset_range_end, instance_type)\
-                ), \
-                all_instances(id, symbol, object_id, offset_range, instance_type) AS (\
-                    SELECT id, symbol, object_id, offset_range, instance_type \
-                    FROM index.symbol_instances \
-                    UNION ALL \
-                    SELECT id, symbol, object_id, offset_range, instance_type \
-                    FROM eph_instances\
-                ), \
-                eph_refs(id, to_symbol, from_object, from_offset_range) AS (\
-                    SELECT id, to_symbol, from_object, int4range(from_offset_range_start, from_offset_range_end, '[)') \
-                    FROM unnest(",
-            );
-            pass.push_bind_param::<Array<Integer>, _>(&self.overlay.ref_ids)?;
-            pass.push_sql("::int4[],");
-            pass.push_bind_param::<Array<BigInt>, _>(&self.overlay.ref_to_symbols)?;
-            pass.push_sql("::int8[],");
-            pass.push_bind_param::<Array<Integer>, _>(&self.overlay.ref_from_objects)?;
-            pass.push_sql("::int4[],");
-            pass.push_bind_param::<Array<Integer>, _>(&self.overlay.ref_from_offset_starts)?;
-            pass.push_sql("::int4[],");
-            pass.push_bind_param::<Array<Integer>, _>(&self.overlay.ref_from_offset_ends)?;
-            pass.push_sql(
-                "::int4[]) AS t(id, to_symbol, from_object, from_offset_range_start, from_offset_range_end)\
-                ), \
-                all_refs(id, to_symbol, from_object, from_offset_range) AS (\
-                    SELECT id, to_symbol, from_object, from_offset_range \
-                    FROM index.symbol_refs \
-                    UNION ALL \
-                    SELECT id, to_symbol, from_object, from_offset_range \
-                    FROM eph_refs\
-                ) ",
-            );
-        }
+        // Always bind overlay arrays as parameters.
+        // Empty arrays produce zero rows from unnest() so the all_* CTEs are
+        // equivalent to the persistent tables when the overlay is empty.
+        // Parameter order: symbols (7) → instances (6) → refs (5) = 18 total.
+        // Inner query parameters start at $19.
+        pass.push_sql(
+            "WITH eph_symbols(id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name) AS (\
+                SELECT id, name, symbol_path::ltree, project_id, symbol_type, symbol_scope, leaf_name \
+                FROM unnest(",
+        );
+        pass.push_bind_param::<Array<BigInt>, _>(&self.overlay.symbol_ids)?;
+        pass.push_sql("::int8[],");
+        pass.push_bind_param::<Array<Text>, _>(&self.overlay.symbol_names)?;
+        pass.push_sql("::text[],");
+        pass.push_bind_param::<Array<Text>, _>(&self.overlay.symbol_paths)?;
+        pass.push_sql("::text[],");
+        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.symbol_project_ids)?;
+        pass.push_sql("::int4[],");
+        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.symbol_types)?;
+        pass.push_sql("::int4[],");
+        pass.push_bind_param::<Array<Nullable<Integer>>, _>(&self.overlay.symbol_scopes)?;
+        pass.push_sql("::int4[],");
+        pass.push_bind_param::<Array<Text>, _>(&self.overlay.symbol_leaf_names)?;
+        pass.push_sql(
+            "::text[]) AS t(id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name)\
+            ), \
+            all_symbols(id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name) AS (\
+                SELECT id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name \
+                FROM index.symbols \
+                UNION ALL \
+                SELECT id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name \
+                FROM eph_symbols\
+            ), \
+            eph_instances(id, symbol, object_id, offset_range, instance_type) AS (\
+                SELECT id, symbol, object_id, int4range(offset_range_start, offset_range_end, '[)'), instance_type \
+                FROM unnest(",
+        );
+        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.instance_ids)?;
+        pass.push_sql("::int4[],");
+        pass.push_bind_param::<Array<BigInt>, _>(&self.overlay.instance_symbols)?;
+        pass.push_sql("::int8[],");
+        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.instance_object_ids)?;
+        pass.push_sql("::int4[],");
+        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.instance_offset_starts)?;
+        pass.push_sql("::int4[],");
+        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.instance_offset_ends)?;
+        pass.push_sql("::int4[],");
+        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.instance_types)?;
+        pass.push_sql(
+            "::int4[]) AS t(id, symbol, object_id, offset_range_start, offset_range_end, instance_type)\
+            ), \
+            all_instances(id, symbol, object_id, offset_range, instance_type) AS (\
+                SELECT id, symbol, object_id, offset_range, instance_type \
+                FROM index.symbol_instances \
+                UNION ALL \
+                SELECT id, symbol, object_id, offset_range, instance_type \
+                FROM eph_instances\
+            ), \
+            eph_refs(id, to_symbol, from_object, from_offset_range) AS (\
+                SELECT id, to_symbol, from_object, int4range(from_offset_range_start, from_offset_range_end, '[)') \
+                FROM unnest(",
+        );
+        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.ref_ids)?;
+        pass.push_sql("::int4[],");
+        pass.push_bind_param::<Array<BigInt>, _>(&self.overlay.ref_to_symbols)?;
+        pass.push_sql("::int8[],");
+        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.ref_from_objects)?;
+        pass.push_sql("::int4[],");
+        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.ref_from_offset_starts)?;
+        pass.push_sql("::int4[],");
+        pass.push_bind_param::<Array<Integer>, _>(&self.overlay.ref_from_offset_ends)?;
+        pass.push_sql(
+            "::int4[]) AS t(id, to_symbol, from_object, from_offset_range_start, from_offset_range_end)\
+            ), \
+            all_refs(id, to_symbol, from_object, from_offset_range) AS (\
+                SELECT id, to_symbol, from_object, from_offset_range \
+                FROM index.symbol_refs \
+                UNION ALL \
+                SELECT id, to_symbol, from_object, from_offset_range \
+                FROM eph_refs\
+            ) ",
+        );
 
         self.inner.walk_ast(pass)
     }

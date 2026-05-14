@@ -945,76 +945,53 @@ impl Index {
 
         let _span = tracing::info_span!("find_edges_between", count = instance_ids.len()).entered();
 
-        if overlay.is_empty() {
-            let sql = format!(
-                "{}SELECT DISTINCT ON (from_inst.id, sr.id) \
-                        sr.id AS ref_id, sr.to_symbol, sr.from_object, sr.from_offset_range, \
-                        to_inst.id AS to_instance_id, \
-                        from_inst.id AS from_instance_id \
-                 FROM all_instances from_inst \
-                 JOIN all_refs sr \
-                     ON sr.from_object = from_inst.object_id \
-                     AND from_inst.offset_range @> sr.from_offset_range \
-                 JOIN all_instances to_inst \
-                     ON to_inst.symbol = sr.to_symbol \
-                 WHERE from_inst.id = ANY($1) \
-                   AND to_inst.id = ANY($1) \
-                   AND from_inst.id != to_inst.id \
-                 ORDER BY from_inst.id, sr.id, to_inst.id",
-                super::overlay::EphemeralOverlay::static_cte_prefix(),
-            );
-            diesel::sql_query(sql)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(instance_ids)
-                .load::<ImplicitEdge>(&mut *connection)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to find edges between instances: {}", e))
-        } else {
-            // Non-empty overlay: bind 18 overlay params ($1–$18) then instance_ids ($19).
-            let sql = format!(
-                "{}SELECT DISTINCT ON (from_inst.id, sr.id) \
-                        sr.id AS ref_id, sr.to_symbol, sr.from_object, sr.from_offset_range, \
-                        to_inst.id AS to_instance_id, \
-                        from_inst.id AS from_instance_id \
-                 FROM all_instances from_inst \
-                 JOIN all_refs sr \
-                     ON sr.from_object = from_inst.object_id \
-                     AND from_inst.offset_range @> sr.from_offset_range \
-                 JOIN all_instances to_inst \
-                     ON to_inst.symbol = sr.to_symbol \
-                 WHERE from_inst.id = ANY($19) \
-                   AND to_inst.id = ANY($19) \
-                   AND from_inst.id != to_inst.id \
-                 ORDER BY from_inst.id, sr.id, to_inst.id",
-                super::overlay::EphemeralOverlay::parameterized_cte_prefix(),
-            );
-            diesel::sql_query(sql)
-                // Overlay symbols ($1–$7)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::BigInt>, _>(&overlay.symbol_ids)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(&overlay.symbol_names)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(&overlay.symbol_paths)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.symbol_project_ids)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.symbol_types)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Nullable<diesel::sql_types::Integer>>, _>(&overlay.symbol_scopes)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(&overlay.symbol_leaf_names)
-                // Overlay instances ($8–$13)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.instance_ids)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::BigInt>, _>(&overlay.instance_symbols)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.instance_object_ids)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.instance_offset_starts)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.instance_offset_ends)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.instance_types)
-                // Overlay refs ($14–$18)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.ref_ids)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::BigInt>, _>(&overlay.ref_to_symbols)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.ref_from_objects)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.ref_from_offset_starts)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.ref_from_offset_ends)
-                // Instance IDs for WHERE clause ($19)
-                .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(instance_ids)
-                .load::<ImplicitEdge>(&mut *connection)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to find edges between instances: {}", e))
-        }
+        // Bind 18 overlay params ($1–$18) then instance_ids ($19).
+        // Empty overlay arrays produce zero rows from unnest() so the query is
+        // correct regardless of whether the overlay is populated.
+        let sql = format!(
+            "{}SELECT DISTINCT ON (from_inst.id, sr.id) \
+                    sr.id AS ref_id, sr.to_symbol, sr.from_object, sr.from_offset_range, \
+                    to_inst.id AS to_instance_id, \
+                    from_inst.id AS from_instance_id \
+             FROM all_instances from_inst \
+             JOIN all_refs sr \
+                 ON sr.from_object = from_inst.object_id \
+                 AND from_inst.offset_range @> sr.from_offset_range \
+             JOIN all_instances to_inst \
+                 ON to_inst.symbol = sr.to_symbol \
+             WHERE from_inst.id = ANY($19) \
+               AND to_inst.id = ANY($19) \
+               AND from_inst.id != to_inst.id \
+             ORDER BY from_inst.id, sr.id, to_inst.id",
+            super::overlay::EphemeralOverlay::parameterized_cte_prefix(),
+        );
+        diesel::sql_query(sql)
+            // Overlay symbols ($1–$7)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::BigInt>, _>(&overlay.symbol_ids)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(&overlay.symbol_names)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(&overlay.symbol_paths)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.symbol_project_ids)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.symbol_types)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Nullable<diesel::sql_types::Integer>>, _>(&overlay.symbol_scopes)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(&overlay.symbol_leaf_names)
+            // Overlay instances ($8–$13)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.instance_ids)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::BigInt>, _>(&overlay.instance_symbols)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.instance_object_ids)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.instance_offset_starts)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.instance_offset_ends)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.instance_types)
+            // Overlay refs ($14–$18)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.ref_ids)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::BigInt>, _>(&overlay.ref_to_symbols)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.ref_from_objects)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.ref_from_offset_starts)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(&overlay.ref_from_offset_ends)
+            // Instance IDs for WHERE clause ($19)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Integer>, _>(instance_ids)
+            .load::<ImplicitEdge>(&mut *connection)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to find edges between instances: {}", e))
     }
 
 }
