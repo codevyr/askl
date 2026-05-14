@@ -1,6 +1,7 @@
 use diesel::pg::Pg;
 use diesel::query_builder::{AstPass, Query, QueryFragment, QueryId};
 use diesel::sql_types::{Array, BigInt, Integer, Nullable, Text};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
 // ============================================================================
@@ -59,6 +60,12 @@ impl EphemeralOverlay {
     }
 
     /// Merge `other` into `self`, appending all its rows.
+    ///
+    /// Instance and ref rows are deduplicated by ID so that a selector whose
+    /// `select_from_all_impl` is somehow invoked twice does not produce
+    /// duplicate CTE rows (which would cause duplicate nodes in results).
+    /// Symbol rows are not deduplicated because they only participate in JOINs
+    /// and duplicate symbol rows are harmless.
     pub fn merge(&mut self, other: EphemeralOverlay) {
         self.symbol_ids.extend(other.symbol_ids);
         self.symbol_names.extend(other.symbol_names);
@@ -68,18 +75,103 @@ impl EphemeralOverlay {
         self.symbol_scopes.extend(other.symbol_scopes);
         self.symbol_leaf_names.extend(other.symbol_leaf_names);
 
-        self.instance_ids.extend(other.instance_ids);
-        self.instance_symbols.extend(other.instance_symbols);
-        self.instance_object_ids.extend(other.instance_object_ids);
-        self.instance_offset_starts.extend(other.instance_offset_starts);
-        self.instance_offset_ends.extend(other.instance_offset_ends);
-        self.instance_types.extend(other.instance_types);
+        let existing_inst: HashSet<i32> = self.instance_ids.iter().cloned().collect();
+        for (i, &id) in other.instance_ids.iter().enumerate() {
+            if existing_inst.contains(&id) {
+                continue;
+            }
+            self.instance_ids.push(id);
+            self.instance_symbols.push(other.instance_symbols[i]);
+            self.instance_object_ids.push(other.instance_object_ids[i]);
+            self.instance_offset_starts.push(other.instance_offset_starts[i]);
+            self.instance_offset_ends.push(other.instance_offset_ends[i]);
+            self.instance_types.push(other.instance_types[i]);
+        }
 
-        self.ref_ids.extend(other.ref_ids);
-        self.ref_to_symbols.extend(other.ref_to_symbols);
-        self.ref_from_objects.extend(other.ref_from_objects);
-        self.ref_from_offset_starts.extend(other.ref_from_offset_starts);
-        self.ref_from_offset_ends.extend(other.ref_from_offset_ends);
+        let existing_ref: HashSet<i32> = self.ref_ids.iter().cloned().collect();
+        for (i, &id) in other.ref_ids.iter().enumerate() {
+            if existing_ref.contains(&id) {
+                continue;
+            }
+            self.ref_ids.push(id);
+            self.ref_to_symbols.push(other.ref_to_symbols[i]);
+            self.ref_from_objects.push(other.ref_from_objects[i]);
+            self.ref_from_offset_starts.push(other.ref_from_offset_starts[i]);
+            self.ref_from_offset_ends.push(other.ref_from_offset_ends[i]);
+        }
+    }
+
+    /// Returns a SQL `WITH` prefix for use in raw `diesel::sql_query` calls
+    /// when the overlay is **non-empty**.
+    ///
+    /// The prelude uses positional placeholders `$1`–`$18` for the 18 overlay
+    /// array parameters (symbols $1–$7, instances $8–$13, refs $14–$18).
+    /// The caller is responsible for binding these parameters in order, then
+    /// binding any query-specific parameters starting at `$19`.
+    ///
+    /// Parameter order:
+    /// - $1  `symbol_ids`             `int8[]`
+    /// - $2  `symbol_names`           `text[]`
+    /// - $3  `symbol_paths`           `text[]`
+    /// - $4  `symbol_project_ids`     `int4[]`
+    /// - $5  `symbol_types`           `int4[]`
+    /// - $6  `symbol_scopes`          `int4[]`
+    /// - $7  `symbol_leaf_names`      `text[]`
+    /// - $8  `instance_ids`           `int4[]`
+    /// - $9  `instance_symbols`       `int8[]`
+    /// - $10 `instance_object_ids`    `int4[]`
+    /// - $11 `instance_offset_starts` `int4[]`
+    /// - $12 `instance_offset_ends`   `int4[]`
+    /// - $13 `instance_types`         `int4[]`
+    /// - $14 `ref_ids`                `int4[]`
+    /// - $15 `ref_to_symbols`         `int8[]`
+    /// - $16 `ref_from_objects`       `int4[]`
+    /// - $17 `ref_from_offset_starts` `int4[]`
+    /// - $18 `ref_from_offset_ends`   `int4[]`
+    pub fn parameterized_cte_prefix() -> &'static str {
+        "\
+WITH eph_symbols(id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name) AS (\
+    SELECT id, name, symbol_path::ltree, project_id, symbol_type, symbol_scope, leaf_name \
+    FROM unnest(\
+        $1::int8[], $2::text[], $3::text[], \
+        $4::int4[], $5::int4[], $6::int4[], $7::text[]\
+    ) AS t(id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name)\
+), \
+all_symbols(id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name) AS (\
+    SELECT id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name \
+    FROM index.symbols \
+    UNION ALL \
+    SELECT id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name \
+    FROM eph_symbols\
+), \
+eph_instances(id, symbol, object_id, offset_range, instance_type) AS (\
+    SELECT id, symbol, object_id, int4range(offset_range_start, offset_range_end, '[)'), instance_type \
+    FROM unnest(\
+        $8::int4[], $9::int8[], $10::int4[], \
+        $11::int4[], $12::int4[], $13::int4[]\
+    ) AS t(id, symbol, object_id, offset_range_start, offset_range_end, instance_type)\
+), \
+all_instances(id, symbol, object_id, offset_range, instance_type) AS (\
+    SELECT id, symbol, object_id, offset_range, instance_type \
+    FROM index.symbol_instances \
+    UNION ALL \
+    SELECT id, symbol, object_id, offset_range, instance_type \
+    FROM eph_instances\
+), \
+eph_refs(id, to_symbol, from_object, from_offset_range) AS (\
+    SELECT id, to_symbol, from_object, int4range(from_offset_range_start, from_offset_range_end, '[)') \
+    FROM unnest(\
+        $14::int4[], $15::int8[], $16::int4[], \
+        $17::int4[], $18::int4[]\
+    ) AS t(id, to_symbol, from_object, from_offset_range_start, from_offset_range_end)\
+), \
+all_refs(id, to_symbol, from_object, from_offset_range) AS (\
+    SELECT id, to_symbol, from_object, from_offset_range \
+    FROM index.symbol_refs \
+    UNION ALL \
+    SELECT id, to_symbol, from_object, from_offset_range \
+    FROM eph_refs\
+) "
     }
 
     /// Returns a SQL `WITH` prefix that defines `all_symbols`, `all_instances`,
@@ -291,18 +383,43 @@ pub fn is_ephemeral_ref_id(id: i32) -> bool {
 
 // ============================================================================
 // Global counters for auto-allocation (used by composite verbs like loc).
-// Decrement from MAX; valid as long as within the ephemeral range.
+// Decrement from MAX - 1; valid as long as within the ephemeral range.
+// Upper bound (MAX) is deliberately skipped to avoid any sentinel confusion.
 // ============================================================================
 
-static GLOBAL_SYMBOL_ID: AtomicI64 = AtomicI64::new(i64::MAX);
-static GLOBAL_INSTANCE_ID: AtomicI32 = AtomicI32::new(i32::MAX);
+static GLOBAL_SYMBOL_ID: AtomicI64 = AtomicI64::new(i64::MAX - 1);
+static GLOBAL_INSTANCE_ID: AtomicI32 = AtomicI32::new(i32::MAX - 1);
+static GLOBAL_REF_ID: AtomicI32 = AtomicI32::new(i32::MAX - 1);
 
-/// Allocate a fresh ephemeral symbol ID (auto-decrements from i64::MAX).
+/// Allocate a fresh ephemeral symbol ID (auto-decrements from i64::MAX - 1).
 pub fn alloc_ephemeral_symbol_id() -> i64 {
-    GLOBAL_SYMBOL_ID.fetch_sub(1, Ordering::Relaxed)
+    let id = GLOBAL_SYMBOL_ID.fetch_sub(1, Ordering::Relaxed);
+    debug_assert!(
+        is_ephemeral_symbol_id(id),
+        "ephemeral symbol ID counter exhausted: {} is outside ephemeral range",
+        id
+    );
+    id
 }
 
-/// Allocate a fresh ephemeral instance ID (auto-decrements from i32::MAX).
+/// Allocate a fresh ephemeral instance ID (auto-decrements from i32::MAX - 1).
 pub fn alloc_ephemeral_instance_id() -> i32 {
-    GLOBAL_INSTANCE_ID.fetch_sub(1, Ordering::Relaxed)
+    let id = GLOBAL_INSTANCE_ID.fetch_sub(1, Ordering::Relaxed);
+    debug_assert!(
+        is_ephemeral_instance_id(id),
+        "ephemeral instance ID counter exhausted: {} is outside ephemeral range",
+        id
+    );
+    id
+}
+
+/// Allocate a fresh ephemeral ref ID (auto-decrements from i32::MAX - 1).
+pub fn alloc_ephemeral_ref_id() -> i32 {
+    let id = GLOBAL_REF_ID.fetch_sub(1, Ordering::Relaxed);
+    debug_assert!(
+        is_ephemeral_ref_id(id),
+        "ephemeral ref ID counter exhausted: {} is outside ephemeral range",
+        id
+    );
+    id
 }

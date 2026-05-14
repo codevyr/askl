@@ -18,7 +18,7 @@ pub use mixins::{
     SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_FILE, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_TYPE, SYMBOL_TYPE_DATA, SYMBOL_TYPE_MACRO, SYMBOL_TYPE_FIELD,
     INSTANCE_TYPE_DEFINITION, INSTANCE_TYPE_DECLARATION, INSTANCE_TYPE_EXPANSION, INSTANCE_TYPE_SENTINEL, INSTANCE_TYPE_CONTAINMENT, INSTANCE_TYPE_SOURCE, INSTANCE_TYPE_HEADER, INSTANCE_TYPE_BUILD, INSTANCE_TYPE_FILE, INSTANCE_TYPE_DOCUMENTATION,
 };
-pub use overlay::{EphemeralOverlay, alloc_ephemeral_symbol_id, alloc_ephemeral_instance_id};
+pub use overlay::{EphemeralOverlay, alloc_ephemeral_symbol_id, alloc_ephemeral_instance_id, alloc_ephemeral_ref_id};
 pub use selection::{
     ChildReference, HasChildReference, HasParentReference, ObjectFullDiesel, ParentReference,
     QueryStatementRange, ReferenceFullDiesel, ReferenceResult, Selection, SelectionNode,

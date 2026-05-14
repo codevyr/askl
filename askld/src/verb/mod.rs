@@ -475,9 +475,9 @@ pub trait Selector: std::fmt::Debug + Verb {
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<(Option<Selection>, EphemeralOverlay)> {
-        let overlay = EphemeralOverlay::empty();
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, &overlay).await?;
-        Ok((Some(selection), overlay))
+        // Default implementation: no ephemeral data; query the persistent index only.
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, &EphemeralOverlay::empty()).await?;
+        Ok((Some(selection), EphemeralOverlay::empty()))
     }
 
     async fn derive_from_parent(

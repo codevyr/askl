@@ -757,6 +757,10 @@ impl FilterLeaf for InnermostOnlyMixin {
 }
 
 /// OuterParentFilterMixin — filters out nested parent instances from REFS queries.
+///
+/// NOTE: The subquery still references `index.symbol_instances` directly
+/// (via `OwnedSqlBound`) and is not CTE-wrapped.  Ephemeral instances are
+/// therefore not visible here.  Accepted PoC limitation; fix in follow-up.
 #[derive(Debug, Clone)]
 pub struct OuterParentFilterMixin {
     parent_ids: Vec<i32>,

@@ -123,7 +123,7 @@ impl Selector for LocSelector {
                 None => continue, // line out of range
             };
             let end = index::symbols::offset_from_line_col(bytes, self.line + 1, 1)
-                .unwrap_or(bytes.len() as i32);
+                .unwrap_or_else(|| i32::try_from(bytes.len()).unwrap_or(i32::MAX));
 
             let sym_id = alloc_ephemeral_symbol_id();
             let inst_id = alloc_ephemeral_instance_id();

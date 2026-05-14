@@ -2,7 +2,7 @@ use index::symbols::SymbolInstanceId;
 
 use crate::{
     cfg::ControlFlowGraph, span::Span,
-    test_util::{get_shared_index, run_query, run_query_err, VERB_TEST},
+    test_util::{format_edges, get_shared_index, run_query, run_query_err, VERB_TEST},
     verb::*,
 };
 
@@ -258,6 +258,43 @@ fn test_ephemeral_instance_id_out_of_range() {
     let query = r#"ephemeral_instance(symbol_id="1", instance_id="1", object_id="1", start="0", end="1", instance_type="1", name="x", path="x", project_id="1", symbol_type="1")"#;
     let err = run_query_err(VERB_TEST, query);
     assert!(err.is_err(), "expected error for non-ephemeral IDs");
+}
+
+// Verify that find_edges_between actually uses the overlay (was previously
+// ignoring it). Two ephemeral instances + one ephemeral ref between them:
+// the edge should appear in ExecutionResult.edges after the fix.
+#[test]
+fn test_ephemeral_ref_edge_discovery() {
+    const EPH_SYM_A: i64 = i64::MAX - 30;
+    const EPH_SYM_B: i64 = i64::MAX - 31;
+    const EPH_INST_X: i32 = i32::MAX - 30;
+    const EPH_INST_Y: i32 = i32::MAX - 31;
+    const EPH_REF_R: i32 = i32::MAX - 32;
+
+    // EPH_INST_X: symbol=EPH_SYM_A, range=[800, 810) in object_id=1
+    // EPH_INST_Y: symbol=EPH_SYM_B, range=[810, 820) in object_id=1
+    // EPH_REF_R:  to_symbol=EPH_SYM_B, from_object=1, from_range=[802, 803)
+    //             [802, 803) ⊂ [800, 810) → edge X→Y
+    let query = format!(
+        "ephemeral_instance(symbol_id=\"{sym_a}\", instance_id=\"{inst_x}\", object_id=\"1\", start=\"800\", end=\"810\", instance_type=\"1\", name=\"eph_x\", path=\"eph_x\", project_id=\"1\", symbol_type=\"1\")\n\
+         ephemeral_instance(symbol_id=\"{sym_b}\", instance_id=\"{inst_y}\", object_id=\"1\", start=\"810\", end=\"820\", instance_type=\"1\", name=\"eph_y\", path=\"eph_y\", project_id=\"1\", symbol_type=\"1\")\n\
+         ephemeral_ref(ref_id=\"{ref_r}\", to_symbol=\"{sym_b}\", from_object=\"1\", start=\"802\", end=\"803\")\n",
+        sym_a = EPH_SYM_A,
+        sym_b = EPH_SYM_B,
+        inst_x = EPH_INST_X,
+        inst_y = EPH_INST_Y,
+        ref_r = EPH_REF_R,
+    );
+
+    let res = run_query(VERB_TEST, &query);
+    let edges = format_edges(res.edges);
+    let expected_edge = format!("{}-{}", EPH_INST_X, EPH_INST_Y);
+    assert!(
+        edges.contains(&expected_edge),
+        "expected ephemeral edge {} in edges, got {:?}",
+        expected_edge,
+        edges
+    );
 }
 
 // ============================================================================
