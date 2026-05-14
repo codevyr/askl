@@ -127,16 +127,23 @@ impl Selector for EphemeralSymbolVerb {
 }
 
 // ============================================================================
-// EphemeralInstanceVerb — adds a symbol + instance to the overlay; returns
-// the instance as a selection node via find_symbol.
+// EphemeralInstanceVerb — adds an instance to the overlay; returns the
+// instance as a selection node via find_symbol.
 // ============================================================================
 
-/// Adds an ephemeral symbol and instance to the per-query overlay.
+/// Adds an ephemeral instance to the per-query overlay.
+///
+/// The instance references an existing symbol identified by `symbol_id`.
+/// That symbol may be persistent (already in the index) or ephemeral (added
+/// by a preceding `ephemeral_symbol` verb).  Note: because selectors run in
+/// parallel during `initialize_roots`, a same-query `ephemeral_symbol` verb's
+/// symbol will not be visible inside this selector's `find_symbol` call; the
+/// instance will still be present in `ctx.overlay` for graph queries but the
+/// selection returned by this verb will be empty unless `symbol_id` refers to
+/// a persistent symbol.
 ///
 /// Named args: symbol_id (i64), instance_id (i32), object_id (i32),
-///             start (i32), end (i32), instance_type (i32),
-///             name, path, project_id (i32), symbol_type (i32), leaf_name;
-///             optional: scope (i32).
+///             start (i32), end (i32), instance_type (i32).
 #[derive(Debug)]
 pub(in crate::verb) struct EphemeralInstanceVerb {
     span: Span,
@@ -146,12 +153,6 @@ pub(in crate::verb) struct EphemeralInstanceVerb {
     start: i32,
     end: i32,
     instance_type: i32,
-    name: String,
-    path: String,
-    project_id: i32,
-    symbol_type: i32,
-    scope: Option<i32>,
-    leaf_name: String,
 }
 
 impl EphemeralInstanceVerb {
@@ -186,28 +187,7 @@ impl EphemeralInstanceVerb {
             .get("instance_type")
             .ok_or_else(|| anyhow::anyhow!("ephemeral_instance requires instance_type"))?
             .parse::<i32>()?;
-        let name = named
-            .get("name")
-            .ok_or_else(|| anyhow::anyhow!("ephemeral_instance requires name"))?
-            .clone();
-        let path = named
-            .get("path")
-            .ok_or_else(|| anyhow::anyhow!("ephemeral_instance requires path"))?
-            .clone();
-        let project_id = named
-            .get("project_id")
-            .ok_or_else(|| anyhow::anyhow!("ephemeral_instance requires project_id"))?
-            .parse::<i32>()?;
-        let symbol_type = named
-            .get("symbol_type")
-            .ok_or_else(|| anyhow::anyhow!("ephemeral_instance requires symbol_type"))?
-            .parse::<i32>()?;
-        let leaf_name = named.get("leaf_name").cloned().unwrap_or_default();
-        let scope = named.get("scope").map(|s| s.parse::<i32>()).transpose()?;
 
-        if !index::db_diesel::overlay::is_ephemeral_symbol_id(symbol_id) {
-            bail!("symbol_id {} is not in the ephemeral range", symbol_id);
-        }
         if !index::db_diesel::overlay::is_ephemeral_instance_id(instance_id) {
             bail!("instance_id {} is not in the ephemeral range", instance_id);
         }
@@ -220,12 +200,6 @@ impl EphemeralInstanceVerb {
             start,
             end,
             instance_type,
-            name,
-            path,
-            project_id,
-            symbol_type,
-            scope,
-            leaf_name,
         }))
     }
 }
@@ -262,16 +236,6 @@ impl Selector for EphemeralInstanceVerb {
     ) -> Result<(Option<Selection>, EphemeralOverlay)> {
         let mut overlay = EphemeralOverlay::empty();
 
-        // Symbol entry
-        overlay.symbol_ids.push(self.symbol_id);
-        overlay.symbol_names.push(self.name.clone());
-        overlay.symbol_paths.push(self.path.clone());
-        overlay.symbol_project_ids.push(self.project_id);
-        overlay.symbol_types.push(self.symbol_type);
-        overlay.symbol_scopes.push(self.scope);
-        overlay.symbol_leaf_names.push(self.leaf_name.clone());
-
-        // Instance entry
         overlay.instance_ids.push(self.instance_id);
         overlay.instance_symbols.push(self.symbol_id);
         overlay.instance_object_ids.push(self.object_id);
@@ -280,6 +244,8 @@ impl Selector for EphemeralInstanceVerb {
         overlay.instance_types.push(self.instance_type);
 
         // Query via find_symbol to get the full SelectionNode with object/project data.
+        // symbol_id must refer to a symbol already visible in the overlay (if ephemeral)
+        // or in the persistent index.
         let instances = vec![SymbolInstanceId::new(self.instance_id)];
         let filter = CompositeFilter::leaf(SymbolInstanceIdMixin::new(&instances));
         let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, &overlay).await?;
