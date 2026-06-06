@@ -7,7 +7,7 @@ mod index_impl;
 pub(crate) mod mixins;
 mod selection;
 
-pub use index_impl::{ImplicitEdge, Index, ScopeContext};
+pub use index_impl::{EphInstanceRow, EphRefRow, EphScopedFut, EphSymbolRow, EphTransaction, ImplicitEdge, Index, LayerBatch, ScopeContext};
 pub use mixins::{
     CompositeFilter, CompoundNameMixin, CurrentQuery, DefaultSymbolTypeMixin,
     DirectOnlyMixin, ExactNameMixin, FilterLeaf, InnermostOnlyMixin,
@@ -18,9 +18,9 @@ pub use mixins::{
     INSTANCE_TYPE_DEFINITION, INSTANCE_TYPE_DECLARATION, INSTANCE_TYPE_EXPANSION, INSTANCE_TYPE_SENTINEL, INSTANCE_TYPE_CONTAINMENT, INSTANCE_TYPE_SOURCE, INSTANCE_TYPE_HEADER, INSTANCE_TYPE_BUILD, INSTANCE_TYPE_FILE, INSTANCE_TYPE_DOCUMENTATION,
 };
 pub use selection::{
-    ChildReference, HasChildReference, HasParentReference, ObjectFullDiesel, ParentReference,
-    QueryStatementRange, ReferenceFullDiesel, ReferenceResult, Selection, SelectionNode,
-    SymbolInstanceFullDiesel,
+    Checked, ChildReference, HasChildReference, HasEphLeak, HasParentReference, ObjectFullDiesel,
+    ParentReference, QueryStatementRange, ReferenceFullDiesel, ReferenceResult, Selection,
+    SelectionNode, SymbolInstanceFullDiesel, CANARY_LAYER_ID,
 };
 
 pub type Connection = AsyncPgConnection;

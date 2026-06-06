@@ -1,7 +1,8 @@
 use crate::test_util::{
-    format_edges, run_query, run_query_err, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC, TEST_INPUT_TREE_BROWSER, VERB_TEST,
+    format_edges, get_shared_db_url, get_shared_index, run_query, run_query_err, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC, TEST_INPUT_TREE_BROWSER, VERB_TEST,
 };
-use index::symbols::SymbolInstanceId;
+use index::symbols::{SymbolId, SymbolInstanceId};
+use sha2::Digest;
 
 #[test]
 fn single_node_query() {
@@ -2805,4 +2806,731 @@ fn multi_instance_nested_retains_both() {
     assert!(nodes.contains(&SymbolInstanceId::new(96)), "f (main.c) should be retained by symbol-level matching");
     assert!(nodes.contains(&SymbolInstanceId::new(88)), "h should be in results");
     assert!(res.warnings.is_empty(), "no warnings expected");
+}
+
+// ============================================================================
+// Ephemeral layer tests
+// ============================================================================
+
+#[test]
+fn ephemeral_verb_outside_layer_block_fails() {
+    // Ephemeral verbs are only allowed inside layer { } blocks.
+    // Using them standalone should produce a parse error.
+    const QUERY: &str = concat!(
+        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="50000", end="50100", instance_type="1"); "#,
+        r#""foo""#,
+    );
+    let res = run_query_err(VERB_TEST, QUERY);
+    assert!(res.is_err(), "standalone ephemeral_instance should fail");
+}
+
+#[test]
+fn ephemeral_instance_is_queryable() {
+    // Create an ephemeral instance for an existing symbol and verify
+    // it appears when querying that symbol.
+    // Symbol 1 = "foo", object 1 = main.c
+    // Existing instance 91 is at [910,919). Add a second at [50000,50100).
+    const QUERY: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="50000", end="50100", instance_type="1") "#,
+        r#"}; "#,
+        r#""foo""#,
+    );
+    let res = run_query(VERB_TEST, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    // Must contain the original persistent instance
+    assert!(nodes.contains(&SymbolInstanceId::new(91)), "persistent foo instance should be in results");
+    // Must also contain the ephemeral instance (negative ID)
+    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
+    assert!(has_eph, "ephemeral instance should appear with negative ID");
+}
+
+#[test]
+fn ephemeral_ref_creates_edge() {
+    // Create an ephemeral ref from foo's object to tar's symbol,
+    // then query foo → tar. Without the ephemeral ref, foo does not
+    // reference tar (only foo.bar and foobar via existing refs).
+    const QUERY: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_ref(to_symbol="4", from_object="1", "#,
+        r#"start="915", end="916") "#,
+        r#"}; "#,
+        r#""foo" { "tar" }"#,
+    );
+    let res = run_query(VERB_TEST, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(91)), "foo should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(94)), "tar should be reachable via ephemeral ref");
+}
+
+#[test]
+fn ephemeral_layers_are_isolated_between_queries() {
+    // Run two separate queries. An ephemeral instance created in one query
+    // must not leak into the other.
+    const QUERY1: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="51000", end="51100", instance_type="1") "#,
+        r#"}; "#,
+        r#""foo""#,
+    );
+    const QUERY2: &str = r#""foo""#;
+
+    let res1 = run_query(VERB_TEST, QUERY1);
+    let res2 = run_query(VERB_TEST, QUERY2);
+
+    let nodes1 = res1.nodes.as_vec();
+    let nodes2 = res2.nodes.as_vec();
+
+    let eph_count_1 = nodes1.iter().filter(|id| { let v: i64 = (**id).into(); v < 0 }).count();
+    let eph_count_2 = nodes2.iter().filter(|id| { let v: i64 = (**id).into(); v < 0 }).count();
+
+    assert!(eph_count_1 > 0, "query with ephemeral_instance should have negative IDs");
+    assert_eq!(eph_count_2, 0, "query without ephemeral verbs should have no negative IDs");
+}
+
+#[test]
+fn multiple_ephemeral_instances_same_symbol() {
+    // Create two ephemeral instances for the same symbol. Both should appear.
+    const QUERY: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="52000", end="52100", instance_type="1"); "#,
+        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="52200", end="52300", instance_type="1") "#,
+        r#"}; "#,
+        r#""foo""#,
+    );
+    let res = run_query(VERB_TEST, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    let eph_count = nodes.iter().filter(|id| { let v: i64 = (**id).into(); v < 0 }).count();
+    assert!(eph_count >= 2, "both ephemeral instances should appear, got {}", eph_count);
+}
+
+// --- A. Visibility filtering in relationship queries ---
+
+#[test]
+fn eph_ref_parent_traversal() {
+    // A1: Ephemeral ref enables traversal that doesn't exist in persistent data.
+    // foo has NO persistent ref to sort.IsSorted. An eph ref at [913,914)
+    // (inside foo's range [910,919)) pointing to sort.IsSorted (symbol 5)
+    // should make "foo" { "sort.IsSorted" } find sort.IsSorted as a child.
+    const QUERY: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_ref(to_symbol="5", from_object="1", "#,
+        r#"start="913", end="914") "#,
+        r#"}; "#,
+        r#""foo" { "sort.IsSorted" }"#,
+    );
+    let res = run_query(VERB_TEST, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(91)), "foo should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(95)),
+        "sort.IsSorted should be reachable via ephemeral ref");
+}
+
+#[test]
+fn eph_instance_in_containment() {
+    // A2: Ephemeral instance participates in HAS (offset containment) queries.
+    // Create eph instance of tar (symbol 4) at [911,912), which is inside
+    // foo's range [910,919). Query "foo" has { "tar" } — the eph instance
+    // should appear as a containment child of foo.
+    const QUERY: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_instance(symbol_id="4", object_id="1", "#,
+        r#"start="911", end="912", instance_type="1") "#,
+        r#"}; "#,
+        r#""foo" has { "tar" }"#,
+    );
+    let res = run_query(VERB_TEST, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(91)), "foo should be in results");
+    // The ephemeral instance of tar at [911,912) should appear as child
+    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
+    assert!(has_eph,
+        "ephemeral tar instance inside foo's range should appear in HAS query");
+}
+
+// --- B. Edge discovery with ephemeral rows ---
+
+#[test]
+fn eph_ref_produces_edge() {
+    // B1: Ephemeral ref appears in the edge list returned by find_edges_between.
+    // Create eph ref at [914,915) (inside foo's range) to sort.IsSorted.
+    // Edge 91→95 should appear.
+    // Uses different offset from A1 [913,914) to produce a different layer hash.
+    const QUERY: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_ref(to_symbol="5", from_object="1", "#,
+        r#"start="914", end="915") "#,
+        r#"}; "#,
+        r#""foo" { "sort.IsSorted" }"#,
+    );
+    let res = run_query(VERB_TEST, QUERY);
+
+    let edges = format_edges(res.edges);
+    assert!(edges.contains(&"91-95".to_string()),
+        "edge from foo(91) to sort.IsSorted(95) should exist via ephemeral ref, got {:?}", edges);
+}
+
+#[test]
+fn eph_instance_produces_edge() {
+    // B2: Ephemeral instance of foo.bar (symbol 2) makes both persistent (92)
+    // and ephemeral instances appear as children of foo.
+    const QUERY: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_instance(symbol_id="2", object_id="1", "#,
+        r#"start="53100", end="53200", instance_type="1") "#,
+        r#"}; "#,
+        r#""foo" { "foo.bar" }"#,
+    );
+    let res = run_query(VERB_TEST, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(91)), "foo should be in results");
+    assert!(nodes.contains(&SymbolInstanceId::new(92)), "persistent foo.bar instance");
+    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
+    assert!(has_eph,
+        "ephemeral foo.bar instance should also appear with negative ID");
+}
+
+// --- C. Phase 1 chaining — multiple ephemeral producers ---
+
+#[test]
+fn layer_block_symbol_then_instance() {
+    // C1: Symbol + instance in one layer block. The instance should be
+    // visible in the final query.
+    const QUERY: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_symbol(name="eph_chain", "#,
+        r#"project_id="1", symbol_type="1"); "#,
+        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="53300", end="53400", instance_type="1") "#,
+        r#"}; "#,
+        r#""foo""#,
+    );
+    let res = run_query(VERB_TEST, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(91)), "persistent foo");
+    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
+    assert!(has_eph,
+        "ephemeral instance from second producer should appear");
+}
+
+#[test]
+fn layer_block_instance_and_ref_enables_traversal() {
+    // C2: Instance + ref in one layer block. Create eph instance of
+    // sort.IsSorted, and eph ref from foo's range [916,917) to
+    // sort.IsSorted. Query should traverse foo → sort.IsSorted
+    // and find both the persistent instance (95) and the ephemeral one.
+    const QUERY: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_instance(symbol_id="5", object_id="1", "#,
+        r#"start="53500", end="53600", instance_type="1"); "#,
+        r#"ephemeral_ref(to_symbol="5", from_object="1", "#,
+        r#"start="916", end="917") "#,
+        r#"}; "#,
+        r#""foo" { "sort.IsSorted" }"#,
+    );
+    let res = run_query(VERB_TEST, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(91)), "foo");
+    assert!(nodes.contains(&SymbolInstanceId::new(95)),
+        "persistent sort.IsSorted instance");
+    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
+    assert!(has_eph,
+        "ephemeral sort.IsSorted instance should also appear");
+}
+
+// --- D. Content-addressed caching ---
+
+#[test]
+fn eph_instance_same_params_is_idempotent() {
+    // D1: Running the same layer block query twice should succeed both
+    // times. The second run hits the cache (find_eph_layer returns the existing
+    // layer) and reuses the existing data without re-inserting.
+    const QUERY: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="53700", end="53800", instance_type="1") "#,
+        r#"}; "#,
+        r#""foo""#,
+    );
+    let res1 = run_query(VERB_TEST, QUERY);
+    let res2 = run_query(VERB_TEST, QUERY);
+
+    let nodes1 = res1.nodes.as_vec();
+    let nodes2 = res2.nodes.as_vec();
+    assert!(nodes1.contains(&SymbolInstanceId::new(91)));
+    assert!(nodes2.contains(&SymbolInstanceId::new(91)));
+
+    let eph1 = nodes1.iter().filter(|id| { let v: i64 = (**id).into(); v < 0 }).count();
+    let eph2 = nodes2.iter().filter(|id| { let v: i64 = (**id).into(); v < 0 }).count();
+    assert!(eph1 > 0, "first run should have ephemeral instance");
+    assert!(eph2 > 0, "second run should reuse cached ephemeral instance");
+}
+
+// --- E. Baseline regression guard ---
+
+#[test]
+fn query_without_eph_verbs_returns_only_persistent() {
+    // E1: Queries without ephemeral verbs should return only persistent data.
+    // All instance IDs must be positive — no ephemeral leakage from other tests.
+    const QUERY: &str = r#""foo" { "foo.bar" }"#;
+    let res = run_query(VERB_TEST, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(!nodes.is_empty(), "should return results");
+    let all_positive = nodes.iter().all(|id| { let v: i64 = (*id).into(); v > 0 });
+    assert!(all_positive,
+        "all IDs should be positive (no ephemeral leakage), got {:?}", nodes);
+}
+
+// --- F. Ephemeral coexistence with persistent data ---
+
+#[test]
+fn eph_instance_at_persistent_offset_coexists() {
+    // F1: An ephemeral instance at the same (symbol, object_id, offset_range) as
+    // persistent instance 91 (foo at [910,919)) should succeed. The UNIQUE
+    // constraint is split: persistent rows enforce uniqueness among themselves,
+    // ephemeral rows enforce uniqueness within each layer. Cross-domain
+    // duplicates are allowed.
+    const QUERY: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="910", end="919", instance_type="1") "#,
+        r#"}; "#,
+        r#""foo""#,
+    );
+    let res = run_query(VERB_TEST, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(91)),
+        "persistent foo instance should still be present");
+    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
+    assert!(has_eph,
+        "ephemeral foo instance at same offset should coexist");
+}
+
+// --- G. Garbage collection ---
+
+#[test]
+fn eph_gc_purges_old_layers() {
+    // Verify GC works by creating an ephemeral layer, verifying it exists,
+    // deleting it explicitly, then re-running the query to confirm fresh
+    // layers are created (different IDs).
+    //
+    // We use delete_eph_layer (targeted) instead of purge_old_eph_layers
+    // (global TTL=0) to avoid interfering with concurrently running tests.
+    const QUERY: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="54000", end="54100", instance_type="1") "#,
+        r#"}; "#,
+        r#""foo""#,
+    );
+
+    // Run 1: create ephemeral layers.
+    let res1 = run_query(VERB_TEST, QUERY);
+    let eph_ids_1: Vec<_> = res1.nodes.as_vec().iter()
+        .filter(|id| { let v: i64 = (**id).into(); v < 0 })
+        .copied()
+        .collect();
+    assert!(!eph_ids_1.is_empty(), "should have ephemeral instances");
+
+    // Get the ephemeral layer IDs and delete them.
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(VERB_TEST).await;
+
+        // Verify layer has instances before deletion.
+        for &inst_id in &eph_ids_1 {
+            let layer_ids = index.get_eph_layer_for_instance(inst_id.into()).await.unwrap();
+            for layer_id in layer_ids {
+                let ids = index.get_eph_instance_ids_for_layer(layer_id).await.unwrap();
+                assert!(!ids.is_empty(),
+                    "layer {} should have instances before deletion", layer_id);
+                index.delete_eph_layer(layer_id).await.unwrap();
+            }
+        }
+    });
+
+    // Run 2: same query should create fresh layers (not cache hits).
+    let res2 = run_query(VERB_TEST, QUERY);
+    let eph_ids_2: Vec<_> = res2.nodes.as_vec().iter()
+        .filter(|id| { let v: i64 = (**id).into(); v < 0 })
+        .copied()
+        .collect();
+    assert!(!eph_ids_2.is_empty(), "should still produce ephemeral instances");
+    // Fresh layers get new negative IDs from the sequence, so they differ.
+    assert_ne!(eph_ids_1, eph_ids_2,
+        "after deletion, re-running should produce different ephemeral IDs");
+}
+
+// --- Layer block tests ---
+
+#[test]
+fn layer_block_groups_ops_into_single_layer() {
+    // Create an ephemeral symbol + ephemeral instance inside a layer block.
+    // Both ops go into a single layer. The instance (for symbol 1 = foo)
+    // should be queryable.
+    const QUERY: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_symbol(name="layer_test_sym", project_id="1", symbol_type="1"); "#,
+        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="55000", end="55100", instance_type="1") "#,
+        r#"}; "#,
+        r#""foo""#,
+    );
+    let res = run_query(VERB_TEST, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(91)), "persistent foo should be in results");
+    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
+    assert!(has_eph, "ephemeral instance from layer block should appear");
+}
+
+#[test]
+fn layer_block_cache_hit() {
+    // Run the same layer block query twice. Second run should hit cache
+    // and produce the same ephemeral IDs.
+    const QUERY: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="55100", end="55200", instance_type="1") "#,
+        r#"}; "#,
+        r#""foo""#,
+    );
+
+    let res1 = run_query(VERB_TEST, QUERY);
+    let eph_ids_1: Vec<_> = res1.nodes.as_vec().iter()
+        .filter(|id| { let v: i64 = (**id).into(); v < 0 })
+        .copied()
+        .collect();
+
+    let res2 = run_query(VERB_TEST, QUERY);
+    let eph_ids_2: Vec<_> = res2.nodes.as_vec().iter()
+        .filter(|id| { let v: i64 = (**id).into(); v < 0 })
+        .copied()
+        .collect();
+
+    assert_eq!(eph_ids_1, eph_ids_2,
+        "same layer block should produce same ephemeral IDs (cache hit)");
+}
+
+#[test]
+fn layer_block_includes_parent_context_in_hash() {
+    // Two sequential layer blocks. The second layer block's hash includes
+    // the parent context (the first layer block's layer ID).
+    // Verify both layers are created and the query works.
+    const QUERY: &str = concat!(
+        r#"layer { "#,
+        r#"ephemeral_ref(to_symbol="5", from_object="1", "#,
+        r#"start="55300", end="55310") "#,
+        r#"}; "#,
+        r#"layer { "#,
+        r#"ephemeral_instance(symbol_id="4", object_id="1", "#,
+        r#"start="55200", end="55300", instance_type="1") "#,
+        r#"}; "#,
+        r#""tar""#,
+    );
+    let res = run_query(VERB_TEST, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(94)), "persistent tar should be in results");
+    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
+    assert!(has_eph, "ephemeral instance from layer block should appear");
+}
+
+// ============================================================================
+// Loc verb tests
+// ============================================================================
+
+#[test]
+fn loc_matches_multiple_files() {
+    // verb_test.sql has two files named main.c in different projects:
+    //   object 1: /main.c      (project 1)
+    //   object 3: /src/main.c  (project 2)
+    // Both match the suffix "main.c". loc("main.c", "1") should create
+    // an ephemeral symbol+instance for each matching file.
+    const QUERY: &str = r#"loc("main.c", "1")"#;
+    let res = run_query(VERB_TEST, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    // All instances should be ephemeral (negative IDs).
+    assert!(nodes.len() >= 2, "loc should match at least 2 files, got {}", nodes.len());
+    assert!(
+        nodes.iter().all(|id| { let v: i64 = (*id).into(); v < 0 }),
+        "all loc instances should be ephemeral (negative IDs), got {:?}", nodes
+    );
+}
+
+#[test]
+fn loc_single_file_with_project_filter() {
+    // When a project filter is specified, only the matching project's file
+    // should be returned.
+    const QUERY: &str = r#"loc("main.c", "1", project="test_project_2")"#;
+    let res = run_query(VERB_TEST, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert_eq!(nodes.len(), 1, "loc with project filter should match exactly 1 file, got {:?}", nodes);
+    assert!(
+        { let v: i64 = nodes[0].into(); v < 0 },
+        "loc instance should be ephemeral (negative ID)"
+    );
+}
+
+#[test]
+fn eph_layer_rollback_prevents_poisoned_cache() {
+    // If create_eph_layer starts a transaction but it is rolled back
+    // (simulating a failed populate), the layer must not be visible.
+    // A subsequent request with the same hash must get created=true.
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(VERB_TEST).await;
+        let hash = sha2::Sha256::digest(b"rollback_test_unique_hash");
+
+        // Attempt 1: create layer, then rollback (simulate failure).
+        {
+            let txn = index
+                .create_eph_layer(None, &hash, "test").await.unwrap();
+            assert!(txn.created(), "first create should return created=true");
+            txn.rollback().await.unwrap();
+        }
+
+        // Attempt 2: same hash — must get created=true (layer was rolled back).
+        {
+            let txn = index
+                .create_eph_layer(None, &hash, "test").await.unwrap();
+            assert!(txn.created(), "after rollback, retry must get created=true");
+            txn.rollback().await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn canary_filtered_by_find_symbol() {
+    use index::db_diesel::{
+        CompositeFilter, LeafNameMixin, ScopeContext, CANARY_LAYER_ID,
+    };
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(TEST_INPUT_A).await;
+
+        // Build a filter that would match the canary symbol by name.
+        let filter = CompositeFilter::leaf(LeafNameMixin::new("__canary__", true));
+
+        // Call find_symbol with no ephemeral layers visible.
+        let result = index
+            .find_symbol(&filter, ScopeContext::Skip, ScopeContext::Skip, &[])
+            .await
+            .expect("find_symbol should succeed (canary must be filtered out)")
+            .into_inner();
+
+        // The canary row must never appear in results.
+        assert!(
+            result.nodes.is_empty(),
+            "canary symbol must not appear in results with eph_ids=[], got {} nodes",
+            result.nodes.len()
+        );
+
+        // Even with canary layer in eph_ids, the canary should be findable.
+        let result = index
+            .find_symbol(&filter, ScopeContext::Skip, ScopeContext::Skip, &[CANARY_LAYER_ID])
+            .await
+            .expect("find_symbol with canary in eph_ids should succeed")
+            .into_inner();
+        assert_eq!(
+            result.nodes.len(),
+            1,
+            "canary symbol should appear when its layer is in eph_ids"
+        );
+    });
+}
+
+#[test]
+fn canary_leak_detected_by_has_eph_leak() {
+    use index::db_diesel::{Selection, SelectionNode, CANARY_LAYER_ID};
+    use index::models_diesel::{Object, Project, Symbol, SymbolInstance};
+    use std::collections::Bound;
+
+    // Manually construct a Selection with a canary row — simulates a filter bypass.
+    let mut selection = Selection::new();
+    selection.nodes.push(SelectionNode {
+        symbol: Symbol {
+            id: -999999,
+            name: "__canary__".into(),
+            symbol_path: "canary".into(),
+            project_id: -999999,
+            symbol_type: 1,
+            symbol_scope: None,
+            leaf_name: "__canary__".into(),
+            eph_layer: Some(CANARY_LAYER_ID),
+        },
+        symbol_instance: SymbolInstance {
+            id: -999999,
+            symbol: -999999,
+            object_id: -999999,
+            offset_range: (Bound::Included(0), Bound::Excluded(1)),
+            instance_type: 1,
+            eph_layer: Some(CANARY_LAYER_ID),
+        },
+        object: Object {
+            id: -999999,
+            project_id: -999999,
+            module_path: "".into(),
+            filesystem_path: "/__canary__".into(),
+            filetype: "canary".into(),
+            content_hash: "".into(),
+        },
+        project: Project {
+            id: -999999,
+            project_name: "__canary__".into(),
+            root_path: "/__canary__".into(),
+            upload_status: "complete".into(),
+        },
+        query_statements: vec![],
+    });
+
+    // With empty eph_ids, the canary is a leak.
+    assert!(
+        selection.has_eph_leak(&[]),
+        "canary row must be detected as a leak with empty eph_ids"
+    );
+
+    // With some other layer, canary is still a leak.
+    assert!(
+        selection.has_eph_leak(&[-1]),
+        "canary row must be detected as a leak when its ID is not in eph_ids"
+    );
+
+    // Only when canary layer is explicitly included, it's not a leak.
+    assert!(
+        !selection.has_eph_leak(&[CANARY_LAYER_ID]),
+        "canary row must not be a leak when its ID is in eph_ids"
+    );
+}
+
+#[test]
+fn canary_not_reachable_via_run_query() {
+    let res = run_query(TEST_INPUT_A, r#""__canary__""#);
+    assert!(
+        res.nodes.as_vec().is_empty(),
+        "canary must not appear via full query path"
+    );
+}
+
+#[test]
+fn loc_bad_file_path_errors() {
+    let res = run_query_err(VERB_TEST, r#"loc("nonexistent_file.c", "1")"#);
+    let msg = res.err().expect("should be an error").to_string();
+    assert!(msg.contains("no file matching"), "expected 'no file matching' error, got: {}", msg);
+}
+
+#[test]
+fn loc_bad_line_number_errors() {
+    let res = run_query_err(VERB_TEST, r#"loc("main.c", "999")"#);
+    let msg = res.err().expect("should be an error").to_string();
+    assert!(msg.contains("out of range"), "expected 'out of range' error, got: {}", msg);
+}
+
+#[test]
+fn loc_missing_args_errors() {
+    let res = run_query_err(VERB_TEST, r#"loc("main.c")"#);
+    let msg = res.err().expect("should be an error").to_string();
+    assert!(msg.contains("requires two positional"), "expected 'requires two positional' error, got: {}", msg);
+}
+
+#[test]
+fn negative_id_with_null_eph_layer_rejected_by_check() {
+    // Regression: an orphan row shaped like `id < 0, eph_layer = NULL`
+    // would re-surface as a stale loc:* node (this is what produced the
+    // duplicate `-18` instance pre-CHECK).  The migration's CHECK
+    // constraints `id > 0 OR eph_layer IS NOT NULL` on symbols /
+    // symbol_instances / symbol_refs must reject any such insert.
+    use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        // Touch the fixture so the shared container is up before we
+        // open our own connection.
+        let _ = get_shared_index(VERB_TEST).await;
+        let url = get_shared_db_url(VERB_TEST);
+        let mut conn = AsyncPgConnection::establish(url)
+            .await
+            .expect("connect to test DB");
+
+        let err = diesel::sql_query(
+            "INSERT INTO index.symbol_instances \
+             (id, symbol, object_id, offset_range, instance_type, eph_layer) \
+             VALUES (-424242, 1, 1, int4range(0, 1), 1, NULL)",
+        )
+        .execute(&mut conn)
+        .await
+        .err()
+        .expect("CHECK constraint must reject id<0 with eph_layer=NULL");
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("eph_id_sign_check") || msg.contains("check constraint"),
+            "expected CHECK-constraint violation, got: {}",
+            msg
+        );
+    });
+}
+
+#[test]
+fn wrap_loc_yields_single_instance_and_parent_has_edge() {
+    // Regression for the {loc(...)} wrapper pattern.  The user's
+    // failing query had an inner `loc("qaic_drv.c", "100")` inside
+    // `{...}`; a leftover persistent loc-row caused two nodes plus a
+    // missing has-edge from the containing function.  On a clean DB
+    // the wrapper must yield exactly one ephemeral loc node and a
+    // has-edge from the containing function (fixture: wrap_loc_target,
+    // body covers line 1 of /main.c).
+    const QUERY: &str = r#"{loc("main.c", "1", project="test_project")}"#;
+    let res = run_query(VERB_TEST, QUERY);
+
+    let loc_nodes: Vec<_> = res
+        .nodes
+        .0
+        .iter()
+        .filter(|n| n.symbol.name == "loc:main.c:1")
+        .collect();
+    assert_eq!(
+        loc_nodes.len(),
+        1,
+        "expected exactly one loc:main.c:1 node, got {}: {:?}",
+        loc_nodes.len(),
+        loc_nodes
+            .iter()
+            .map(|n| (&n.symbol.name, n.symbol_instance.id))
+            .collect::<Vec<_>>()
+    );
+
+    let loc_inst_id = loc_nodes[0].symbol_instance.id;
+    assert!(loc_inst_id < 0, "loc instance must be ephemeral, got id {}", loc_inst_id);
+
+    let wrap_to_loc = res.has_edges.0.iter().any(|e| {
+        e.parent == SymbolId::new(9) && e.child_instance == SymbolInstanceId::new(loc_inst_id)
+    });
+    assert!(
+        wrap_to_loc,
+        "expected has-edge from wrap_loc_target (sym 9) to loc instance {}, got: {:?}",
+        loc_inst_id,
+        res.has_edges.0.iter().collect::<Vec<_>>()
+    );
 }

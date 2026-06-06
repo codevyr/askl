@@ -74,6 +74,7 @@ impl Selector for IsolatedScope {
         _filter: CompositeFilter,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
+        _eph_ids: &[i64],
     ) -> Result<Option<Selection>> {
         Ok(Some(Selection::new()))
     }

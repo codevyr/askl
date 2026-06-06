@@ -127,3 +127,44 @@ INSERT INTO symbol_refs(to_symbol, from_object, from_offset_range)
 VALUES
     (26, 1, int4range(350, 355)),
     (27, 1, int4range(370, 375));
+
+-- ============================================================================
+-- Multi-file loc test data
+-- A second project with a file named main.c at a different path.
+-- Both match the suffix "main.c" so loc("main.c", ...) should find both.
+-- ============================================================================
+
+INSERT INTO projects (id, project_name, root_path)
+VALUES (2, 'test_project_2', '/test_project_2');
+
+INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, content_hash)
+VALUES (3, 2, 'main.c', '/src/main.c', 'cc', '');
+
+-- File symbol for project 2's main.c (type=2)
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
+VALUES (102, '/src/main.c', 2, 2, NULL);
+
+-- File instance for project 2's main.c
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES (1004, 102, 3, int4range(0, 500), 6);
+
+-- File contents: both files have at least 2 lines so loc("main.c", "1") works.
+INSERT INTO object_contents (object_id, content)
+VALUES
+    (1, E'int main() { return 0; }\nint foo() { return 1; }\n'),
+    (3, E'void setup() {}\nvoid loop() {}\n');
+
+-- ============================================================================
+-- wrap_loc test fixture
+-- A function whose body offset range strictly contains line 1 of object 1
+-- (/main.c, content "int main() { return 0; }\nint foo() { return 1; }\n").
+-- Line 1 occupies bytes 0..24; this function's body spans 0..50 so the
+-- containment query will return wrap_loc_target as the has-parent of
+-- loc("main.c", "1"). Used by `wrap_loc_yields_single_instance_and_parent_has_edge`.
+-- ============================================================================
+
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
+VALUES (9, 'wrap_loc_target', 1, 1, 1);
+
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES (99, 9, 1, int4range(0, 50), 1);

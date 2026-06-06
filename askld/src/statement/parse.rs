@@ -46,6 +46,10 @@ pub fn build_statement<'a>(
                 sub_ctx.set_default_symbol_types(vec![]);
 
                 scope = build_scope(sub_ctx.clone(), pair)?;
+                // Discard ghost children from layer scope — ops already collected
+                if sub_ctx.get_eph_ops().is_some() {
+                    scope = Rc::new(EmptyScope::new());
+                }
                 break;
             }
             _ => Err(Error::new_from_span(

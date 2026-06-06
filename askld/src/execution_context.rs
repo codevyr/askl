@@ -71,6 +71,8 @@ where
 pub struct ExecutionContext {
     pub registry: SelectorRegistry,
     pub current_statement_span: Option<Span>,
+    /// Ephemeral layer IDs visible to queries (ancestor chain).
+    pub eph_ids: Vec<i64>,
 }
 
 impl ExecutionContext {
@@ -78,6 +80,7 @@ impl ExecutionContext {
         Self {
             registry: SelectorRegistry::new(),
             current_statement_span: None,
+            eph_ids: Vec::new(),
         }
     }
 }

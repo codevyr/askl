@@ -184,6 +184,7 @@ impl Selector for UserVerb {
         _filter: CompositeFilter,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
+        _eph_ids: &[i64],
     ) -> Result<Option<Selection>> {
         Ok(None)
     }
@@ -255,6 +256,7 @@ impl Selector for UserVerb {
                         to_symbol: child_node.symbol.id,
                         from_object: parent_node.object.id,
                         from_offset_range: parent_node.symbol_instance.offset_range.clone(),
+                        eph_layer: None,
                     },
                 };
                 fake_parent_references.push(reference);
@@ -291,7 +293,7 @@ impl Selector for UserVerb {
         let child_ids = child.get_instance_ids();
         let mut find_parts: Vec<CompositeFilter> = vec![];
         if !notif_ctx.unnest {
-            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin));
+            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new(&ctx.eph_ids)));
         }
         let find_filter = CompositeFilter::and(find_parts);
         let parent_ids = index.find_parent_instance_ids(
@@ -299,9 +301,10 @@ impl Selector for UserVerb {
             notif_ctx.rel_type.contains(RelationshipType::REFS),
             notif_ctx.rel_type.contains(RelationshipType::HAS),
             &find_filter,
+            &ctx.eph_ids,
         ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
-        let parent_id_set: std::collections::HashSet<i32> =
-            parent_ids.into_iter().map(Into::<i32>::into).collect();
+        let parent_id_set: std::collections::HashSet<i64> =
+            parent_ids.into_iter().map(Into::<i64>::into).collect();
 
         cached_selection.nodes.retain(|s|
             parent_id_set.contains(&s.symbol_instance.id)

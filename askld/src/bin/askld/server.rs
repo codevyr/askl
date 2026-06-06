@@ -5,13 +5,13 @@ use askld::cfg::ControlFlowGraph;
 use askld::index_store::IndexStore;
 use diesel::pg::PgConnection;
 use diesel_async::pooled_connection::bb8::Pool as AsyncPool;
-use diesel_async::pooled_connection::{AsyncDieselConnectionManager, ManagerConfig};
+use diesel_async::pooled_connection::{AsyncDieselConnectionManager, ManagerConfig, RecyclingMethod};
 use diesel_async::{AsyncConnection, AsyncPgConnection};
 use diesel_migrations::MigrationHarness;
 use futures::FutureExt;
 
 use index::db_diesel::Index;
-use log::info;
+use log::{info, warn};
 use tracing_chrome::ChromeLayerBuilder;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -92,9 +92,12 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
     }
 
     // Async pool for IndexStore and AuthStore (no statement_timeout)
+    let mut auth_pool_config = ManagerConfig::<AsyncPgConnection>::default();
+    auth_pool_config.recycling_method = RecyclingMethod::CustomQuery("ROLLBACK".into());
     let async_config =
-        AsyncDieselConnectionManager::<AsyncPgConnection>::new(&serve_args.database_url);
+        AsyncDieselConnectionManager::new_with_config(&serve_args.database_url, auth_pool_config);
     let async_pool: AsyncPool<AsyncPgConnection> = AsyncPool::builder()
+        .test_on_check_out(false)
         .build(async_config)
         .await
         .expect("Failed to build async database pool");
@@ -103,6 +106,7 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
     let query_timeout_secs = serve_args.query_timeout;
     let query_timeout_ms = query_timeout_secs * 1000;
     let mut index_pool_config = ManagerConfig::<AsyncPgConnection>::default();
+    index_pool_config.recycling_method = RecyclingMethod::CustomQuery("ROLLBACK".into());
     index_pool_config.custom_setup = Box::new(move |url| {
         async move {
             let mut conn = AsyncPgConnection::establish(url).await?;
@@ -119,6 +123,7 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
     let index_config =
         AsyncDieselConnectionManager::new_with_config(&serve_args.database_url, index_pool_config);
     let index_pool: AsyncPool<AsyncPgConnection> = AsyncPool::builder()
+        .test_on_check_out(false)
         .build(index_config)
         .await
         .expect("Failed to build index database pool");
@@ -131,9 +136,60 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
     let index_store = web::Data::new(index_store);
 
     let index_query = Index::from_pool(index_pool);
+    index_query
+        .validate_canary()
+        .await
+        .expect("ephemeral leak-detection canary missing — re-apply migrations");
     let askl_data = web::Data::new(AsklData {
         cfg: ControlFlowGraph::from_symbols(index_query),
         query_timeout: std::time::Duration::from_secs(query_timeout_secs),
+    });
+
+    // Background GC: periodically purge ephemeral layers idle past the TTL.
+    //
+    // Interval tuned so the table is checked frequently enough to bound peak
+    // size, but not so often that the DB sees idle DELETEs.  TTL chosen so a
+    // single user query session can re-use a cached layer across iterations
+    // without the layer being evicted between requests.
+    const EPH_GC_INTERVAL_SECS: u64 = 600;   // 10 min: how often we scan
+    const EPH_GC_TTL_SECS: u64 = 3600;       // 1 h: minimum idle age to delete
+    let gc_index = askl_data.cfg.index.clone();
+    tokio::spawn(async move {
+        let interval = std::time::Duration::from_secs(EPH_GC_INTERVAL_SECS);
+        let ttl = std::time::Duration::from_secs(EPH_GC_TTL_SECS);
+        let mut consecutive_failures: u32 = 0;
+        let mut shutdown = Box::pin(async {
+            let _ = tokio::signal::ctrl_c().await;
+        });
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => {
+                    info!("GC: shutdown signal received, exiting");
+                    break;
+                }
+                _ = tokio::time::sleep(interval) => {}
+            }
+            match gc_index.purge_old_eph_layers(ttl).await {
+                Ok(n) => {
+                    consecutive_failures = 0;
+                    info!("GC: purged {} ephemeral layers", n);
+                }
+                Err(e) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    // Escalate as failures pile up: a single hiccup is noise,
+                    // but a stuck GC is a real availability problem.
+                    if consecutive_failures >= 3 {
+                        tracing::error!(
+                            consecutive_failures, error = %e,
+                            "GC: ephemeral layer purge persistently failing"
+                        );
+                    } else {
+                        warn!("GC: ephemeral layer purge failed (attempt {}): {}", consecutive_failures, e);
+                    }
+                }
+            }
+        }
     });
 
     info!(

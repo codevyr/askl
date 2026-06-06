@@ -8,9 +8,34 @@ use crate::statement::Statement;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    CompositeFilter, DirectOnlyMixin, InnermostOnlyMixin, OuterParentFilterMixin,
-    ScopeContext, SymbolInstanceIdMixin, Index, Selection,
+    CompositeFilter, DirectOnlyMixin, EphScopedFut, EphTransaction, InnermostOnlyMixin,
+    OuterParentFilterMixin, ScopeContext, SymbolInstanceIdMixin, Index, Selection,
 };
+
+/// Populate-callback type used by [`LayerSpec`].  Called by the statement-
+/// execution layer inside [`Index::with_eph_layer`] only when the layer is
+/// freshly inserted (cache miss); on hit the executor skips it.
+///
+/// The closure borrows mutably from the `EphTransaction` across `.await`
+/// points; the boxed `Future` carries the inner borrow lifetime.
+pub type LayerPopulate =
+    Box<dyn for<'b> FnOnce(&'b mut EphTransaction<'_>) -> EphScopedFut<'b, ()>>;
+
+/// Specification for an ephemeral layer that a [`Selector`] wants the
+/// statement-execution layer to materialize before its query runs.
+///
+/// Layer-creating selectors (e.g. `layer { … }`, `loc(…)`) implement
+/// [`Selector::layer_spec`] returning `Some(LayerSpec)`.  The statement layer
+/// calls [`Index::with_eph_layer`], passes the resulting `layer_id` into
+/// `ctx.eph_ids`, and then builds the `Selection` from the layer's instances.
+/// The selector itself does not own the transaction, the layer id, or any
+/// mutable interior state.
+pub struct LayerSpec {
+    pub hash: [u8; 32],
+    pub kind: &'static str,
+    pub parent_id: Option<i64>,
+    pub populate: LayerPopulate,
+}
 use index::symbols::SymbolInstanceId;
 use log::debug;
 use pest::error::Error;
@@ -26,6 +51,7 @@ mod labels;
 mod preamble;
 
 pub use self::generic::{DefaultTypeFilter, DirectOnlyFilter, GenericFilter, GenericSelector, NameSelector, UnitVerb};
+pub(crate) use self::generic::EphemeralOps;
 
 use self::generic::{build_generic_verb, ForcedVerb};
 use self::labels::{LabelVerb, UserVerb};
@@ -50,6 +76,14 @@ pub fn build_verb(
     let verb = if let Rule::generic_verb = verb.as_rule() {
         build_generic_verb(ctx.clone(), verb)?
     } else {
+        if ctx.get_eph_ops().is_some() {
+            return Err(Error::new_from_span(
+                CustomError {
+                    message: "Only ephemeral verbs are allowed inside layer blocks".into(),
+                },
+                verb_span.as_pest_span(),
+            ));
+        }
         match verb.as_rule() {
             Rule::label_shortcut => {
                 let label_ident = verb.into_inner().next().unwrap();
@@ -246,13 +280,13 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
 ///   When both are implemented, the SQL filter should be at least as broad as the
 ///   in-memory filter (it pre-filters, the in-memory path refines).
 pub trait Filter: std::fmt::Debug + Display + Verb {
-    fn get_composite_filter(&self) -> Option<CompositeFilter> {
+    fn get_composite_filter(&self, _eph_ids: &[i64]) -> Option<CompositeFilter> {
         None
     }
 
     fn filter(&self, selection: &mut Selection) {
         let filter_name = format!("{}", self);
-        let _filter = tracing::info_span!("filter", name = %filter_name).entered();
+        let _filter = tracing::debug_span!("filter", name = %filter_name).entered();
         self.filter_impl(selection);
     }
 
@@ -415,7 +449,7 @@ pub trait Selector: std::fmt::Debug + Verb {
     /// Used by scope builders to construct ScopeContext for parent/children scoping.
     /// Default: `None` (no scope filter — scope is unscoped). Override in selectors
     /// that should contribute to scope narrowing.
-    fn build_composite_filter(&self, _command: &crate::command::Command) -> Option<CompositeFilter> {
+    fn build_composite_filter(&self, _command: &crate::command::Command, _eph_ids: &[i64]) -> Option<CompositeFilter> {
         None
     }
 
@@ -468,15 +502,48 @@ pub trait Selector: std::fmt::Debug + Verb {
         }
     }
 
+    /// Layer-creating selectors (e.g. `layer { … }`, `loc(…)`) return
+    /// `Some(LayerSpec)` describing the ephemeral layer they want materialized
+    /// before this command's query runs. The statement-execution layer is
+    /// responsible for creating the layer, extending `eph_ids`, and building
+    /// the [`Selection`] from the layer's instances.
+    ///
+    /// Returning `Some(...)` implicitly marks this selector as a barrier:
+    /// pending statements drain before the layer is created so the layer
+    /// `parent_id` and `eph_ids` reflect prior side effects in order.
+    ///
+    /// **Do not call `layer_spec` from inside [`Selector::derive_from_parent`],
+    /// [`Selector::derive_from_child`], or [`Selector::derive_from_provider`]**.
+    /// Those derive methods run *after* `compute_selected` has already
+    /// materialised the layer for this selector; calling `layer_spec` again
+    /// would either re-materialise (with a stale parent chain) or hit the
+    /// cache redundantly.  If your selector implements `layer_spec`, leave
+    /// the derive methods at their trait defaults.
+    ///
+    /// Default: `None`.
+    async fn layer_spec(
+        &self,
+        _cfg: &ControlFlowGraph,
+        _eph_ids: &[i64],
+    ) -> Result<Option<LayerSpec>> {
+        Ok(None)
+    }
+
+    /// True iff `layer_spec` ever returns `Some`. Used by the statement
+    /// executor as a sync check to decide whether to drain pending futures
+    /// before this command.
+    fn has_layer_spec(&self) -> bool { false }
+
     async fn select_from_all_impl(
         &self,
         cfg: &ControlFlowGraph,
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        eph_ids: &[i64],
     ) -> Result<Option<Selection>> {
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope).await?;
-        Ok(Some(selection))
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, eph_ids).await?;
+        Ok(Some(selection.into_inner()))
     }
 
     async fn derive_from_parent(
@@ -496,18 +563,20 @@ pub trait Selector: std::fmt::Debug + Verb {
         let parent_ids = parent_sel.get_instance_ids();
         let mut find_parts: Vec<CompositeFilter> = vec![];
         if !notif_ctx.unnest {
-            find_parts.push(CompositeFilter::leaf(DirectOnlyMixin));
-            find_parts.push(CompositeFilter::leaf(OuterParentFilterMixin::new(&parent_ids)));
+            find_parts.push(CompositeFilter::leaf(DirectOnlyMixin::new(&ctx.eph_ids)));
+            find_parts.push(CompositeFilter::leaf(OuterParentFilterMixin::new(&parent_ids, &ctx.eph_ids)));
         }
         let find_filter = CompositeFilter::and(find_parts);
+        let eph_ids = &ctx.eph_ids;
         let decl_ids = index.find_child_instance_ids(
             &parent_ids,
             notif_ctx.rel_type.contains(RelationshipType::REFS),
             notif_ctx.rel_type.contains(RelationshipType::HAS),
             &find_filter,
+            eph_ids,
         ).await.map_err(|e| anyhow::anyhow!("Failed to find child instance IDs: {}", e))?;
 
-        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope)
+        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope, eph_ids)
             .await?;
 
         Ok(Some(selection))
@@ -530,17 +599,19 @@ pub trait Selector: std::fmt::Debug + Verb {
         let child_ids = child_sel.get_instance_ids();
         let mut find_parts: Vec<CompositeFilter> = vec![];
         if !notif_ctx.unnest {
-            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin));
+            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new(&ctx.eph_ids)));
         }
         let find_filter = CompositeFilter::and(find_parts);
+        let eph_ids = &ctx.eph_ids;
         let decl_ids = index.find_parent_instance_ids(
             &child_ids,
             notif_ctx.rel_type.contains(RelationshipType::REFS),
             notif_ctx.rel_type.contains(RelationshipType::HAS),
             &find_filter,
+            eph_ids,
         ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
 
-        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope)
+        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope, eph_ids)
             .await?;
 
         Ok(Some(selection))
@@ -568,14 +639,15 @@ pub(crate) async fn find_symbol_by_instance_id(
     instances: &Vec<SymbolInstanceId>,
     parent_scope: ScopeContext,
     children_scope: ScopeContext,
+    eph_ids: &[i64],
 ) -> Result<Selection> {
     let mut parts: Vec<CompositeFilter> = selector_filters
         .iter()
-        .filter_map(|f| f.get_composite_filter())
+        .filter_map(|f| f.get_composite_filter(eph_ids))
         .collect();
     parts.push(CompositeFilter::leaf(SymbolInstanceIdMixin::new(instances)));
     let filter = CompositeFilter::and(parts);
-    index.find_symbol(&filter, parent_scope, children_scope).await
+    Ok(index.find_symbol(&filter, parent_scope, children_scope, eph_ids).await?.into_inner())
 }
 
 pub trait Labeler: std::fmt::Debug {

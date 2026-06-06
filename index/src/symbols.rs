@@ -257,6 +257,12 @@ impl From<i64> for ProjectId {
     }
 }
 
+impl From<ProjectId> for i32 {
+    fn from(val: ProjectId) -> Self {
+        val.0
+    }
+}
+
 impl fmt::Display for ProjectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -351,32 +357,32 @@ impl serde::Serialize for FileId {
 }
 
 #[derive(Debug, Default, Deserialize, Copy, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct SymbolInstanceId(i32);
+pub struct SymbolInstanceId(i64);
 
 impl SymbolInstanceId {
     pub fn invalid() -> Self {
         Self(-1)
     }
 
-    pub fn new(id: i32) -> Self {
+    pub fn new(id: i64) -> Self {
         Self(id)
     }
 }
 
 impl From<i64> for SymbolInstanceId {
     fn from(value: i64) -> Self {
-        Self(value as i32)
+        Self(value)
     }
 }
 
 impl From<Option<i64>> for SymbolInstanceId {
     fn from(value: Option<i64>) -> Self {
-        Self(value.unwrap() as i32)
+        Self(value.unwrap())
     }
 }
 
-impl Into<i32> for SymbolInstanceId {
-    fn into(self) -> i32 {
+impl Into<i64> for SymbolInstanceId {
+    fn into(self) -> i64 {
         self.0
     }
 }
@@ -384,12 +390,6 @@ impl Into<i32> for SymbolInstanceId {
 impl fmt::Display for SymbolInstanceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
-    }
-}
-
-impl From<i32> for SymbolInstanceId {
-    fn from(value: i32) -> Self {
-        Self(value)
     }
 }
 

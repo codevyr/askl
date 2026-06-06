@@ -62,9 +62,9 @@ impl Verb for NameSelector {
 
 #[async_trait(?Send)]
 impl Selector for NameSelector {
-    fn build_composite_filter(&self, command: &crate::command::Command) -> Option<CompositeFilter> {
+    fn build_composite_filter(&self, command: &crate::command::Command, eph_ids: &[i64]) -> Option<CompositeFilter> {
         let mut parts: Vec<CompositeFilter> =
-            command.filters().filter_map(|f| f.get_composite_filter()).collect();
+            command.filters().filter_map(|f| f.get_composite_filter(eph_ids)).collect();
         parts.push(name_filter(&self.name));
         Some(CompositeFilter::and(parts))
     }
@@ -75,9 +75,10 @@ impl Selector for NameSelector {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        eph_ids: &[i64],
     ) -> Result<Option<Selection>> {
         let combined = CompositeFilter::and(vec![filter, name_filter(&self.name)]);
-        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope).await?;
+        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope, eph_ids).await?.into_inner();
         Ok(Some(selection))
     }
 }
@@ -125,9 +126,9 @@ impl Verb for ForcedVerb {
 
 #[async_trait(?Send)]
 impl Selector for ForcedVerb {
-    fn build_composite_filter(&self, command: &crate::command::Command) -> Option<CompositeFilter> {
+    fn build_composite_filter(&self, command: &crate::command::Command, eph_ids: &[i64]) -> Option<CompositeFilter> {
         let mut parts: Vec<CompositeFilter> =
-            command.filters().filter_map(|f| f.get_composite_filter()).collect();
+            command.filters().filter_map(|f| f.get_composite_filter(eph_ids)).collect();
         parts.push(name_filter(&self.name));
         Some(CompositeFilter::and(parts))
     }
@@ -146,9 +147,10 @@ impl Selector for ForcedVerb {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        eph_ids: &[i64],
     ) -> Result<Option<Selection>> {
         let combined = CompositeFilter::and(vec![filter, name_filter(&self.name)]);
-        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope).await?;
+        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope, eph_ids).await?.into_inner();
 
         // Cache the forced selection so derivations can fabricate the
         // correct parent <-> child relationship later on.
@@ -197,6 +199,7 @@ impl Selector for ForcedVerb {
                         to_symbol: child_node.symbol.id,
                         from_object: parent_node.object.id,
                         from_offset_range: parent_node.symbol_instance.offset_range.clone(),
+                        eph_layer: None,
                     },
                 };
                 fake_parent_references.push(reference);
@@ -256,6 +259,7 @@ impl Selector for UnitVerb {
         _filter: CompositeFilter,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
+        _eph_ids: &[i64],
     ) -> Result<Option<Selection>> {
         Ok(None)
     }
@@ -517,7 +521,7 @@ impl Verb for TypeSelector {
 }
 
 impl Filter for TypeSelector {
-    fn get_composite_filter(&self) -> Option<CompositeFilter> {
+    fn get_composite_filter(&self, _eph_ids: &[i64]) -> Option<CompositeFilter> {
         if self.filter_only && self.name_pattern.is_some() {
             // When used as a namespace filter (e.g., mod("test", filter="true")),
             // only constrain by name pattern, not by type.
@@ -535,11 +539,11 @@ impl Filter for TypeSelector {
 
 #[async_trait(?Send)]
 impl Selector for TypeSelector {
-    fn build_composite_filter(&self, command: &crate::command::Command) -> Option<CompositeFilter> {
+    fn build_composite_filter(&self, command: &crate::command::Command, eph_ids: &[i64]) -> Option<CompositeFilter> {
         // TypeSelector implements as_filter(), so its get_composite_filter()
         // is already included via command.filters().
         let parts: Vec<CompositeFilter> =
-            command.filters().filter_map(|f| f.get_composite_filter()).collect();
+            command.filters().filter_map(|f| f.get_composite_filter(eph_ids)).collect();
         if parts.is_empty() { None } else { Some(CompositeFilter::and(parts)) }
     }
 
@@ -549,6 +553,7 @@ impl Selector for TypeSelector {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        eph_ids: &[i64],
     ) -> Result<Option<Selection>> {
         if self.filter_only {
             return Ok(None);
@@ -556,7 +561,7 @@ impl Selector for TypeSelector {
 
         // `filter` already contains this TypeSelector's get_composite_filter()
         // (collected at compute_selected). Just use it directly.
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope).await?;
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, eph_ids).await?.into_inner();
         Ok(Some(selection))
     }
 }
@@ -626,9 +631,9 @@ impl Verb for GenericSelector {
 
 #[async_trait(?Send)]
 impl Selector for GenericSelector {
-    fn build_composite_filter(&self, command: &crate::command::Command) -> Option<CompositeFilter> {
+    fn build_composite_filter(&self, command: &crate::command::Command, eph_ids: &[i64]) -> Option<CompositeFilter> {
         let parts: Vec<CompositeFilter> =
-            command.filters().filter_map(|f| f.get_composite_filter()).collect();
+            command.filters().filter_map(|f| f.get_composite_filter(eph_ids)).collect();
         if parts.is_empty() { None } else { Some(CompositeFilter::and(parts)) }
     }
 
@@ -638,8 +643,9 @@ impl Selector for GenericSelector {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        eph_ids: &[i64],
     ) -> Result<Option<Selection>> {
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope).await?;
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, eph_ids).await?.into_inner();
         Ok(Some(selection))
     }
 }

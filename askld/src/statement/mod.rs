@@ -1,8 +1,8 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, HasEdge, HasEdgeList, NodeList, SymbolNodeId};
-use crate::command::{Command, LabeledStatements};
+use crate::command::{Command, ComputeResult, LabeledStatements};
 use crate::execution_context::ExecutionContext;
 use crate::execution_state::{
-    DependencyKind, DependencyRole, ExecutionState, RelationshipType, StatementDependent,
+    DependencyRole, ExecutionState, RelationshipType, StatementDependent,
 };
 use crate::hierarchy::Hierarchy;
 use crate::offset_range::range_bounds_to_offsets;
@@ -14,6 +14,8 @@ use core::fmt::Debug;
 use index::db_diesel::{ScopeContext, Selection};
 use index::symbols::{SymbolInstanceId, FileId, Occurrence, SymbolId};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use pest::error::Error;
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashSet;
@@ -146,13 +148,27 @@ impl Statement {
         selection
     }
 
+    /// Count total selected nodes across all selectors, without cloning.
+    /// Returns None if no selector has a selection.
+    fn selection_node_count(&self, ctx: &ExecutionContext) -> Option<usize> {
+        let mut total: Option<usize> = None;
+        ctx.registry
+            .for_each_selector(self.command().selectors(), |selector, state| {
+                if let Some(sel) = selector.get_selection(state) {
+                    *total.get_or_insert(0) += sel.nodes.len();
+                } else {
+                    total = None;
+                }
+            });
+        total
+    }
+
     pub fn has_selection(&self, ctx: &ExecutionContext) -> bool {
-        self.get_selection(ctx).is_some()
+        self.selection_node_count(ctx).is_some()
     }
 
     pub fn propagation_priority(&self, ctx: &ExecutionContext) -> usize {
-        self.get_selection(ctx)
-            .map_or(usize::MAX, |sel| sel.nodes.len())
+        self.selection_node_count(ctx).unwrap_or(usize::MAX)
     }
 
     /// Check if this statement's selectors have been computed (added to registry).
@@ -173,43 +189,69 @@ impl Statement {
         !has_selector || has_any_selection
     }
 
-    // Statements that have dependencies resolved and are ready to execute
-    async fn initialize_roots(
+    /// Compute initial selections for all statements.
+    ///
+    /// Every statement creates a future and pushes it to the pending list.
+    /// Barrier selectors (ephemeral layers) trigger a drain after pushing,
+    /// which awaits all pending futures via `join_all` — ensuring they see
+    /// prior layers' `eph_ids`. Non-barrier selectors accumulate and run
+    /// concurrently at the next drain point, overlapping DB round-trips.
+    async fn compute_roots(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         statements: &Vec<Rc<Statement>>,
     ) -> Result<(), pest::error::Error<Rule>> {
-        let _select_nodes: tracing::span::EnteredSpan =
-            tracing::info_span!("select_nodes").entered();
+        let _span = tracing::info_span!("compute_roots").entered();
 
-        // Build scopes (reads registry) and create futures
-        let futures: Vec<_> = statements
-            .iter()
-            .map(|statement| {
-                let stmt = statement.clone();
-                let parent_scope = build_parent_scope(&stmt, ctx);
-                let children_scope = build_children_scope(&stmt, ctx);
-                async move {
-                    stmt.command()
-                        .compute_selected(cfg, parent_scope, children_scope)
-                        .await
-                }
-            })
-            .collect();
-
-        // Run all DB queries concurrently
-        let results = futures::future::join_all(futures).await;
-
-        // Write results to registry sequentially
-        for (statement, result) in statements.iter().zip(results) {
-            ctx.current_statement_span = Some(statement.command().span().clone());
-            let (selector_results, warnings) = result?;
-            for (id, selection) in selector_results {
-                ctx.registry.add_by_id(id, selection);
-            }
-            statement.get_state_mut().warnings.extend(warnings);
+        struct PendingCompute<'a> {
+            statement: Rc<Statement>,
+            future: Pin<Box<dyn Future<Output = Result<ComputeResult, pest::error::Error<Rule>>> + 'a>>,
         }
+
+        async fn drain_pending(
+            pending: &mut Vec<PendingCompute<'_>>,
+            ctx: &mut ExecutionContext,
+        ) -> Result<(), pest::error::Error<Rule>> {
+            if pending.is_empty() { return Ok(()); }
+            let entries: Vec<_> = pending.drain(..).collect();
+            let (stmts, futs): (Vec<_>, Vec<_>) = entries.into_iter()
+                .map(|p| (p.statement, p.future))
+                .unzip();
+            let results = futures::future::join_all(futs).await;
+            // Check all results before applying any — avoid partial ctx mutation on error.
+            let computed: Result<Vec<_>, _> = stmts.into_iter().zip(results)
+                .map(|(stmt, r)| r.map(|cr| (stmt, cr)))
+                .collect();
+            for (stmt, cr) in computed? {
+                cr.apply(ctx, &stmt);
+            }
+            Ok(())
+        }
+
+        let mut pending: Vec<PendingCompute<'_>> = vec![];
+
+        for statement in statements.iter() {
+            let eph_ids = ctx.eph_ids.clone();
+            let parent_scope = build_parent_scope(statement, ctx, &eph_ids);
+            let children_scope = build_children_scope(statement, ctx, &eph_ids);
+            let stmt = statement.clone();
+
+            pending.push(PendingCompute {
+                statement: stmt.clone(),
+                future: Box::pin(async move {
+                    stmt.command()
+                        .compute_selected(cfg, parent_scope, children_scope, &eph_ids)
+                        .await
+                }),
+            });
+
+            if statement.command().has_layer_spec() {
+                drain_pending(&mut pending, ctx).await?;
+            }
+        }
+
+        drain_pending(&mut pending, ctx).await?;
         Ok(())
     }
 
@@ -217,6 +259,7 @@ impl Statement {
         &self,
         labeled_statements_map: &LabeledStatements,
     ) -> Result<(), pest::error::Error<Rule>> {
+        let _span = tracing::debug_span!("build_dependency_graph").entered();
         crate::scope::visit(self.scope(), &mut |statement| -> Result<
             bool,
             pest::error::Error<Rule>,
@@ -235,6 +278,7 @@ impl Statement {
     /// - All its children are weak
     /// - Its parent is weak
     fn mark_weak_statements(&self, statements: &Vec<Rc<Statement>>) {
+        let _span = tracing::debug_span!("mark_weak_statements").entered();
         // This iterative algorithm is inefficient but the dependency
         // graph is expected to be small.
         let mut changed = true;
@@ -288,13 +332,6 @@ impl Statement {
         }
 
         while let Some(current_statement) = worklist.pop_next(ctx) {
-            // Yield to the runtime so tokio::time::timeout can fire if the
-            // query has exceeded its deadline.
-            tokio::task::yield_now().await;
-
-            let _statement_iteration: tracing::span::EnteredSpan =
-                tracing::info_span!("statement_iteration").entered();
-
             // Apply update_state + filter to narrow the selection.
             ctx.registry.for_each_selector_mut(
                 current_statement.command().selectors(),
@@ -310,6 +347,17 @@ impl Statement {
             if !current_statement.has_selection(ctx) {
                 continue;
             }
+
+            let stmt_label: String = current_statement.command().selectors()
+                .map(|s| s.name().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _statement_iteration: tracing::span::EnteredSpan =
+                tracing::info_span!("statement_iteration", stmt = %stmt_label).entered();
+
+            // Yield to the runtime so tokio::time::timeout can fire if the
+            // query has exceeded its deadline.
+            tokio::task::yield_now().await;
 
             // Notify dependents; reschedule those whose selection changed.
             let dependents = current_statement.get_state().dependents.clone();
@@ -337,8 +385,8 @@ impl Statement {
             Ok(true)
         })?;
 
-        // First, run all root selectors to seed initial selections
-        self.initialize_roots(ctx, cfg, &statements).await?;
+        // Compute initial selections via phased readiness loop
+        self.compute_roots(ctx, cfg, &statements).await?;
 
         self.build_dependency_graph(&labeled_statements)?;
 
@@ -401,6 +449,7 @@ impl Statement {
         all_nodes: &HashSet<SymbolInstanceId>,
         index: &index::db_diesel::Index,
     ) -> EdgeList {
+        let _span = tracing::debug_span!("collect_ref_edges").entered();
         let mut all_references = EdgeList::new();
         // Dedup key: (from_instance_id, to_symbol_id, occurrence)
         // Instance-level on from side prevents suppressing edges between different
@@ -535,7 +584,7 @@ impl Statement {
 
         // 3. Discover implicit edges via DB query
         // Build instance→(symbol_id, instance_id) lookup for mapping DB results to nodes.
-        let mut instance_to_node: HashMap<i32, (SymbolId, SymbolInstanceId)> = HashMap::new();
+        let mut instance_to_node: HashMap<i64, (SymbolId, SymbolInstanceId)> = HashMap::new();
         for statement in statements {
             if let Some(sel) = statement.get_selection(ctx) {
                 for node in &sel.nodes {
@@ -550,8 +599,8 @@ impl Statement {
             }
         }
 
-        let all_ids: Vec<i32> = all_nodes.iter().map(|id| Into::<i32>::into(*id)).collect();
-        if let Ok(implicit_edges) = index.find_edges_between(&all_ids).await {
+        let all_ids: Vec<i64> = all_nodes.iter().map(|id| Into::<i64>::into(*id)).collect();
+        if let Ok(implicit_edges) = index.find_edges_between(&all_ids, &ctx.eph_ids).await {
             for edge in implicit_edges {
                 let from_node = instance_to_node.get(&edge.from_instance_id);
                 let to_node = instance_to_node.get(&edge.to_instance_id);
@@ -591,6 +640,7 @@ impl Statement {
         ctx: &ExecutionContext,
         all_nodes: &HashSet<SymbolInstanceId>,
     ) -> HasEdgeList {
+        let _span = tracing::debug_span!("collect_has_edges").entered();
         // For each child instance, track only the best (tightest) parent.
         // Key: child instance ID, Value: (HasEdge, parent_span) where smaller span = tighter container.
         let mut best_per_child: HashMap<SymbolInstanceId, (HasEdge, i64)> = HashMap::new();
@@ -661,7 +711,8 @@ impl Statement {
 
         let warnings = self.gather_warnings(&statements);
 
-        let mut node_map: HashMap<i32, index::db_diesel::SelectionNode> = HashMap::new();
+        let _collect_results = tracing::debug_span!("collect_results").entered();
+        let mut node_map: HashMap<i64, index::db_diesel::SelectionNode> = HashMap::new();
         for statement in &statements {
             if let Some(selection) = statement.get_selection(ctx) {
                 let span = statement.command.query_statement_span();
@@ -714,7 +765,7 @@ impl Statement {
         dependent: &StatementDependent,
     ) -> Result<PropagationResult, pest::error::Error<Rule>> {
         let _update_dependency: tracing::span::EnteredSpan =
-            tracing::info_span!("notify").entered();
+            tracing::debug_span!("notify").entered();
 
         if dependent.dependency_role == DependencyRole::Parent {
             // Child notifying parent — defer until all children have selections.
@@ -750,7 +801,7 @@ impl Statement {
             let rel_type = self.get_relationship_type();
 
             let unnest = dependent.statement.is_unnest();
-            let parent_scope = build_parent_scope(&dependent.statement, ctx);
+            let parent_scope = build_parent_scope(&dependent.statement, ctx, &ctx.eph_ids);
             let children_scope = ScopeContext::Scope {
                 ids: merged.get_instance_ids(),
                 filter: None,
@@ -787,8 +838,8 @@ impl Statement {
             rel_type,
             unnest: dependent.statement.is_unnest(),
         };
-        let parent_scope = build_parent_scope(&dependent.statement, ctx);
-        let children_scope = build_children_scope(&dependent.statement, ctx);
+        let parent_scope = build_parent_scope(&dependent.statement, ctx, &ctx.eph_ids);
+        let children_scope = build_children_scope(&dependent.statement, ctx, &ctx.eph_ids);
         let res = dependent
             .statement
             .command()
