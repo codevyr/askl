@@ -510,6 +510,34 @@ struct CountRow {
     c: i64,
 }
 
+/// SQL predicate matching every row in `index.eph_layers` **except** the
+/// canary.  Use this in any DELETE / UPDATE on the table that must leave
+/// the canary intact — running without the canary disarms the leak
+/// detection wired up in [`Index::validate_canary`] and
+/// [`super::selection::Checked`].
+const NOT_CANARY_PREDICATE: &str = "kind != 'canary'";
+
+/// Drop every non-canary ephemeral layer.  Run this on a connection that
+/// is already inside the write transaction that mutated the persistent
+/// index, so the cache purge and the mutation commit (or roll back)
+/// atomically together.
+///
+/// `ON DELETE CASCADE` on the `eph_layer` FK cleans up dependent
+/// `symbols`, `symbol_instances`, and `symbol_refs` rows.
+///
+/// Call this any time `index.objects` / `index.symbols` /
+/// `index.symbol_*` gain or lose persistent rows; otherwise
+/// input-only-keyed lookups (`loc(path, line)`, `layer { … }`) will
+/// keep returning rows derived from the pre-mutation state of the
+/// index.
+pub async fn purge_eph_cache(
+    conn: &mut AsyncPgConnection,
+) -> Result<usize, diesel::result::Error> {
+    use diesel_async::RunQueryDsl;
+    let sql = format!("DELETE FROM index.eph_layers WHERE {}", NOT_CANARY_PREDICATE);
+    RunQueryDsl::execute(diesel::sql_query(sql), conn).await
+}
+
 /// Batch of ephemeral rows to insert into a single layer.
 pub struct LayerBatch {
     pub symbols: Vec<EphSymbolRow>,
@@ -1341,9 +1369,12 @@ impl Index {
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let interval_secs = older_than.as_secs() as i64;
-        let result = diesel::sql_query(
-            "DELETE FROM index.eph_layers WHERE last_used < now() - make_interval(secs => $1) AND kind != 'canary'"
-        )
+        let sql = format!(
+            "DELETE FROM index.eph_layers \
+             WHERE last_used < now() - make_interval(secs => $1) AND {}",
+            NOT_CANARY_PREDICATE,
+        );
+        let result = diesel::sql_query(sql)
             .bind::<diesel::sql_types::BigInt, _>(interval_secs)
             .execute(&mut *connection)
             .await

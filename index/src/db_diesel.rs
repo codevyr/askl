@@ -7,7 +7,7 @@ mod index_impl;
 pub(crate) mod mixins;
 mod selection;
 
-pub use index_impl::{EphInstanceRow, EphRefRow, EphScopedFut, EphSymbolRow, EphTransaction, ImplicitEdge, Index, LayerBatch, ScopeContext};
+pub use index_impl::{EphInstanceRow, EphRefRow, EphScopedFut, EphSymbolRow, EphTransaction, ImplicitEdge, Index, LayerBatch, ScopeContext, purge_eph_cache};
 pub use mixins::{
     CompositeFilter, CompoundNameMixin, CurrentQuery, DefaultSymbolTypeMixin,
     DirectOnlyMixin, ExactNameMixin, FilterLeaf, InnermostOnlyMixin,

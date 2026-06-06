@@ -204,16 +204,10 @@ impl IndexStore {
                         .execute(conn)
                         .await?;
 
-                        // Persistent data has changed: drop the ephemeral
-                        // layer cache so input-only-keyed lookups (loc, layer)
-                        // don't keep returning rows derived from the pre-push
-                        // state.  In-flight requests will recompute on their
-                        // next query.
-                        let purged: usize = diesel::sql_query(
-                            "DELETE FROM index.eph_layers WHERE kind != 'canary'"
-                        )
-                        .execute(conn)
-                        .await?;
+                        // Persistent data has changed; drop the ephemeral layer
+                        // cache atomically with the upload commit.  See
+                        // `index::db_diesel::purge_eph_cache` for the rationale.
+                        let purged = index::db_diesel::purge_eph_cache(conn).await?;
                         tracing::info!(
                             project_id,
                             purged_layers = purged,
