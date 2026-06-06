@@ -233,8 +233,8 @@ impl Statement {
 
         for statement in statements.iter() {
             let eph_ids = ctx.eph_ids.clone();
-            let parent_scope = build_parent_scope(statement, ctx, &eph_ids);
-            let children_scope = build_children_scope(statement, ctx, &eph_ids);
+            let parent_scope = build_parent_scope(statement, ctx);
+            let children_scope = build_children_scope(statement, ctx);
             let stmt = statement.clone();
 
             pending.push(PendingCompute {
@@ -801,7 +801,7 @@ impl Statement {
             let rel_type = self.get_relationship_type();
 
             let unnest = dependent.statement.is_unnest();
-            let parent_scope = build_parent_scope(&dependent.statement, ctx, &ctx.eph_ids);
+            let parent_scope = build_parent_scope(&dependent.statement, ctx);
             let children_scope = ScopeContext::Scope {
                 ids: merged.get_instance_ids(),
                 filter: None,
@@ -838,8 +838,8 @@ impl Statement {
             rel_type,
             unnest: dependent.statement.is_unnest(),
         };
-        let parent_scope = build_parent_scope(&dependent.statement, ctx, &ctx.eph_ids);
-        let children_scope = build_children_scope(&dependent.statement, ctx, &ctx.eph_ids);
+        let parent_scope = build_parent_scope(&dependent.statement, ctx);
+        let children_scope = build_children_scope(&dependent.statement, ctx);
         let res = dependent
             .statement
             .command()

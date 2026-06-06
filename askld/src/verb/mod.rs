@@ -252,6 +252,10 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
         bail!("Not a filter verb")
     }
 
+    fn as_eph_aware_filter<'a>(&'a self) -> Result<&'a dyn EphAwareFilter> {
+        bail!("Not an eph-aware filter verb")
+    }
+
     fn as_labeler<'a>(&'a self) -> Result<&'a dyn Labeler> {
         bail!("Not a marker verb")
     }
@@ -279,8 +283,11 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
 ///   Use only when SQL cannot express the constraint (e.g., application-level logic).
 ///   When both are implemented, the SQL filter should be at least as broad as the
 ///   in-memory filter (it pre-filters, the in-memory path refines).
+///
+/// Filters whose SQL predicate depends on the request's ephemeral
+/// visibility chain implement [`EphAwareFilter`] instead.
 pub trait Filter: std::fmt::Debug + Display + Verb {
-    fn get_composite_filter(&self, _eph_ids: &[i64]) -> Option<CompositeFilter> {
+    fn get_composite_filter(&self) -> Option<CompositeFilter> {
         None
     }
 
@@ -291,6 +298,14 @@ pub trait Filter: std::fmt::Debug + Display + Verb {
     }
 
     fn filter_impl(&self, _selection: &mut Selection) {}
+}
+
+/// Filter whose SQL predicate must reference the request's ephemeral
+/// visibility chain.  Implement this trait — not [`Filter`] — when the
+/// composite filter would need to bind `eph_ids` into its SQL.  At
+/// time of writing, the only implementor is `DirectOnlyFilter`.
+pub trait EphAwareFilter: std::fmt::Debug + Display + Verb {
+    fn get_composite_filter(&self, eph_ids: &[i64]) -> Option<CompositeFilter>;
 }
 
 #[derive(Debug)]
@@ -449,7 +464,12 @@ pub trait Selector: std::fmt::Debug + Verb {
     /// Used by scope builders to construct ScopeContext for parent/children scoping.
     /// Default: `None` (no scope filter — scope is unscoped). Override in selectors
     /// that should contribute to scope narrowing.
-    fn build_composite_filter(&self, _command: &crate::command::Command, _eph_ids: &[i64]) -> Option<CompositeFilter> {
+    ///
+    /// Scope filters never include eph-aware filters: `DirectOnlyMixin` only
+    /// contributes to `children_expr`/`has_children_expr`, but scope filters
+    /// are consumed via `resolve_filter_to_ids` (which composes through
+    /// `compose_current`), so the mixin would be inert there anyway.
+    fn build_composite_filter(&self, _command: &crate::command::Command) -> Option<CompositeFilter> {
         None
     }
 
@@ -551,6 +571,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         ctx: &mut ExecutionContext,
         index: &Index,
         selector_filters: &[&dyn Filter],
+        eph_aware_filters: &[&dyn EphAwareFilter],
         parent: &Statement,
         notif_ctx: NotificationContext,
         parent_scope: ScopeContext,
@@ -576,7 +597,7 @@ pub trait Selector: std::fmt::Debug + Verb {
             eph_ids,
         ).await.map_err(|e| anyhow::anyhow!("Failed to find child instance IDs: {}", e))?;
 
-        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope, eph_ids)
+        let selection = find_symbol_by_instance_id(index, selector_filters, eph_aware_filters, &decl_ids, parent_scope, children_scope, eph_ids)
             .await?;
 
         Ok(Some(selection))
@@ -587,6 +608,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         ctx: &mut ExecutionContext,
         index: &Index,
         selector_filters: &[&dyn Filter],
+        eph_aware_filters: &[&dyn EphAwareFilter],
         child: &Statement,
         notif_ctx: NotificationContext,
         parent_scope: ScopeContext,
@@ -611,7 +633,7 @@ pub trait Selector: std::fmt::Debug + Verb {
             eph_ids,
         ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
 
-        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope, eph_ids)
+        let selection = find_symbol_by_instance_id(index, selector_filters, eph_aware_filters, &decl_ids, parent_scope, children_scope, eph_ids)
             .await?;
 
         Ok(Some(selection))
@@ -636,6 +658,7 @@ pub trait Selector: std::fmt::Debug + Verb {
 pub(crate) async fn find_symbol_by_instance_id(
     index: &Index,
     selector_filters: &[&dyn Filter],
+    eph_aware_filters: &[&dyn EphAwareFilter],
     instances: &Vec<SymbolInstanceId>,
     parent_scope: ScopeContext,
     children_scope: ScopeContext,
@@ -643,7 +666,8 @@ pub(crate) async fn find_symbol_by_instance_id(
 ) -> Result<Selection> {
     let mut parts: Vec<CompositeFilter> = selector_filters
         .iter()
-        .filter_map(|f| f.get_composite_filter(eph_ids))
+        .filter_map(|f| f.get_composite_filter())
+        .chain(eph_aware_filters.iter().filter_map(|f| f.get_composite_filter(eph_ids)))
         .collect();
     parts.push(CompositeFilter::leaf(SymbolInstanceIdMixin::new(instances)));
     let filter = CompositeFilter::and(parts);

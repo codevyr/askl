@@ -13,7 +13,7 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use super::selectors::TypeSelector;
-use super::super::{DeriveMethod, Filter, Verb, VerbTag};
+use super::super::{DeriveMethod, EphAwareFilter, Filter, Verb, VerbTag};
 
 #[derive(Debug)]
 pub(in crate::verb) struct IgnoreVerb {
@@ -74,7 +74,7 @@ impl Verb for IgnoreVerb {
 }
 
 impl Filter for IgnoreVerb {
-    fn get_composite_filter(&self, _eph_ids: &[i64]) -> Option<CompositeFilter> {
+    fn get_composite_filter(&self) -> Option<CompositeFilter> {
         let mut parts = vec![];
         if let Some(ref name) = self.name {
             // Same CompoundNameMixin the positive name filter uses — replaces
@@ -155,7 +155,7 @@ impl Verb for ProjectFilter {
 }
 
 impl Filter for ProjectFilter {
-    fn get_composite_filter(&self, _eph_ids: &[i64]) -> Option<CompositeFilter> {
+    fn get_composite_filter(&self) -> Option<CompositeFilter> {
         Some(CompositeFilter::leaf(ProjectFilterMixin::new(&self.project)))
     }
 }
@@ -189,7 +189,7 @@ impl Verb for DirectOnlyFilter {
         self.span.as_pest_span()
     }
 
-    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
+    fn as_eph_aware_filter<'a>(&'a self) -> Result<&'a dyn EphAwareFilter> {
         Ok(self)
     }
 
@@ -199,7 +199,7 @@ impl Verb for DirectOnlyFilter {
     }
 }
 
-impl Filter for DirectOnlyFilter {
+impl EphAwareFilter for DirectOnlyFilter {
     fn get_composite_filter(&self, eph_ids: &[i64]) -> Option<CompositeFilter> {
         Some(CompositeFilter::leaf(index::db_diesel::DirectOnlyMixin::new(eph_ids)))
     }
@@ -248,7 +248,7 @@ impl Verb for DefaultTypeFilter {
 }
 
 impl Filter for DefaultTypeFilter {
-    fn get_composite_filter(&self, _eph_ids: &[i64]) -> Option<CompositeFilter> {
+    fn get_composite_filter(&self) -> Option<CompositeFilter> {
         if self.symbol_type_ids.is_empty() {
             return None;
         }
@@ -332,7 +332,7 @@ impl FilterKind {
         matches!(self, FilterKind::Type { .. })
     }
 
-    fn get_composite_filter(&self, _eph_ids: &[i64]) -> Option<CompositeFilter> {
+    fn get_composite_filter(&self) -> Option<CompositeFilter> {
         match self {
             FilterKind::Type { symbol_type_ids } => {
                 if symbol_type_ids.len() == 1 {
@@ -469,8 +469,8 @@ impl Verb for GenericFilter {
 }
 
 impl Filter for GenericFilter {
-    fn get_composite_filter(&self, eph_ids: &[i64]) -> Option<CompositeFilter> {
-        self.kind.get_composite_filter(eph_ids)
+    fn get_composite_filter(&self) -> Option<CompositeFilter> {
+        self.kind.get_composite_filter()
     }
 }
 

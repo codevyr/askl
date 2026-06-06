@@ -39,7 +39,7 @@ fn all_descendants_weak(stmt: &Statement) -> bool {
 /// If the parent already has a selection, use its instance IDs.
 /// If no parent exists, return Skip.
 /// If the parent hasn't been selected yet, fall back to mixin-based scoping.
-pub(super) fn build_parent_scope(statement: &Statement, ctx: &ExecutionContext, eph_ids: &[i64]) -> ScopeContext {
+pub(super) fn build_parent_scope(statement: &Statement, ctx: &ExecutionContext) -> ScopeContext {
     match statement.parent().and_then(|p| p.upgrade()) {
         Some(parent) => {
             if parent.is_computed(ctx) {
@@ -51,7 +51,7 @@ pub(super) fn build_parent_scope(statement: &Statement, ctx: &ExecutionContext, 
                 }
             } else {
                 // Parent not yet computed — fall back to filter-based scoping
-                match parent.command().get_selector_composite_filter(eph_ids) {
+                match parent.command().get_selector_composite_filter() {
                     Some(f) => ScopeContext::Scope { ids: vec![], filter: Some(f) },
                     None => ScopeContext::Unscoped,
                 }
@@ -64,7 +64,7 @@ pub(super) fn build_parent_scope(statement: &Statement, ctx: &ExecutionContext, 
 /// Build scope context for the children side of a statement's children query.
 /// Collects instance IDs from already-selected children + filters from unselected children.
 /// If no children exist, return Skip.
-pub(super) fn build_children_scope(statement: &Statement, ctx: &ExecutionContext, eph_ids: &[i64]) -> ScopeContext {
+pub(super) fn build_children_scope(statement: &Statement, ctx: &ExecutionContext) -> ScopeContext {
     let mut has_children = false;
     let mut any_uncomputed = false;
     let mut any_transparent = false;
@@ -80,7 +80,7 @@ pub(super) fn build_children_scope(statement: &Statement, ctx: &ExecutionContext
             }
         } else {
             any_uncomputed = true;
-            if let Some(f) = child.command().get_selector_composite_filter(eph_ids) {
+            if let Some(f) = child.command().get_selector_composite_filter() {
                 unselected_filters.push(f);
             }
         }
