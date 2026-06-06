@@ -27,7 +27,33 @@ pub(crate) trait EphemeralOp: std::fmt::Debug + Send + Sync {
     fn collect_rows(&self, batch: &mut LayerBatch);
 }
 
-/// Shared, mutable collection of ephemeral operations for a layer.
+/// Shared, mutable collection of ephemeral operations for a `layer { … }`
+/// block.
+///
+/// # Why `Arc<Mutex<...>>` rather than `Arc<RefCell<...>>`?
+///
+/// The [`Verb`] trait is bound by `Send + Sync` (see
+/// `askld/src/verb/mod.rs`), so every `dyn Verb` — including
+/// [`LayerVerb`] which holds an `EphemeralOps` — must be `Sync`.
+/// `RefCell` is `Send` but **not** `Sync`, so a `RefCell` here would
+/// stop `LayerVerb` from being usable as a `Verb`.  The `Sync` bound
+/// itself is load-bearing for actix-web's multi-worker dispatch of
+/// `ControlFlowGraph` (which carries the parsed verbs).
+///
+/// In practice the lock is never contended:
+///
+/// 1. Writes happen single-threaded during parsing
+///    (`build_generic_verb` at `verb/generic/mod.rs:142` pushes
+///    ephemeral ops into the vec).
+/// 2. Reads happen single-threaded during execution
+///    ([`LayerVerb::layer_spec`] hashes the ops and collects the
+///    batch).
+/// 3. The two phases never overlap — execution begins only after the
+///    whole AST is built — and each `LayerVerb` instance is touched by
+///    exactly one execution future.
+///
+/// So each `.lock().unwrap()` is essentially an uncontested atomic.
+/// The lock is here for the trait bound, not for mutual exclusion.
 pub(crate) type EphemeralOps = Arc<Mutex<Vec<Arc<dyn EphemeralOp>>>>;
 
 macro_rules! parse_required {
@@ -304,7 +330,8 @@ impl Selector for LayerVerb {
         eph_ids: &[i64],
     ) -> Result<Option<crate::verb::LayerSpec>> {
         // Compute hash and collect batch synchronously, then release the lock
-        // before any .await points.
+        // before any .await points.  The `Mutex` is uncontended at this point
+        // — see `EphemeralOps` rustdoc for why the lock exists at all.
         let (hash, batch) = {
             let ops = self.ops.lock().unwrap();
             if ops.is_empty() {
@@ -348,6 +375,7 @@ impl Selector for LayerVerb {
 
 impl Display for LayerVerb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Lock is uncontended — see `EphemeralOps` rustdoc.
         write!(f, "LayerVerb({} ops)", self.ops.lock().unwrap().len())
     }
 }
