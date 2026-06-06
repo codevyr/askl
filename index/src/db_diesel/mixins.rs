@@ -10,6 +10,7 @@ use diesel::query_builder::{AstPass, QueryFragment, QueryId};
 use diesel::query_source::{Alias, AliasedField};
 use diesel::sql_types::{BigInt, Bool, Int4range, Integer, Nullable, Text};
 
+use crate::db_diesel::selection::EphContext;
 use crate::ltree::Ltree;
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::schema_diesel as index_schema;
@@ -347,7 +348,7 @@ enum EphSqlPart {
 ///                       WHERE op.id = ANY(")
 ///     .bind(self.parent_ids.clone())
 ///     .sql(") AND ")
-///     .eph_visibility("op.eph_layer", self.eph_ids.clone())
+///     .eph_visibility("op.eph_layer", &self.eph)
 ///     .sql(")")
 ///     .build()
 /// ```
@@ -385,17 +386,17 @@ impl<ST> EphSqlBuilder<ST> {
     }
 
     /// Emit `(<column> IS NULL OR <column> = ANY($N))` where `$N` is the
-    /// position of the bound `eph_ids` array.  Each call binds the array
+    /// position of the bound `eph` array.  Each call binds the array
     /// separately; if the same array is referenced from multiple call sites
     /// in one fragment, the wire payload is duplicated — acceptable for the
     /// short arrays we deal with in practice.
-    pub(crate) fn eph_visibility(mut self, column: &str, eph_ids: Vec<i64>) -> Self {
+    pub(crate) fn eph_visibility(mut self, column: &str, eph: &EphContext) -> Self {
         let sql = format!("({} IS NULL OR {} = ANY(", column, column);
         match self.parts.last_mut() {
             Some(EphSqlPart::Sql(buf)) => buf.push_str(&sql),
             _ => self.parts.push(EphSqlPart::Sql(sql)),
         }
-        self.parts.push(EphSqlPart::BindI64Array(eph_ids));
+        self.parts.push(EphSqlPart::BindI64Array(eph.as_slice().to_vec()));
         self.parts.push(EphSqlPart::Sql("))".to_string()));
         self
     }
@@ -750,12 +751,12 @@ impl FilterLeaf for ProjectFilterMixin {
 /// DirectOnlyMixin — filters children/has_children to "direct" only.
 #[derive(Debug, Clone)]
 pub struct DirectOnlyMixin {
-    eph_ids: Vec<i64>,
+    eph: EphContext,
 }
 
 impl DirectOnlyMixin {
-    pub fn new(eph_ids: &[i64]) -> Self {
-        Self { eph_ids: eph_ids.to_vec() }
+    pub fn new(eph: &EphContext) -> Self {
+        Self { eph: eph.clone() }
     }
 }
 
@@ -776,9 +777,9 @@ impl FilterLeaf for DirectOnlyMixin {
                           AND mid.id != contained_instances.id \
                           AND symbol_types.level >= mid_type.level \
                           AND ")
-                .eph_visibility("mid.eph_layer", self.eph_ids.clone())
+                .eph_visibility("mid.eph_layer", &self.eph)
                 .sql(" AND ")
-                .eph_visibility("mid_sym.eph_layer", self.eph_ids.clone())
+                .eph_visibility("mid_sym.eph_layer", &self.eph)
                 .sql(")")
                 .build()
         ))
@@ -799,9 +800,9 @@ impl FilterLeaf for DirectOnlyMixin {
                           AND container.id != parent_decls.id \
                           AND cont_type.level <= parent_type.level \
                           AND ")
-                .eph_visibility("container.eph_layer", self.eph_ids.clone())
+                .eph_visibility("container.eph_layer", &self.eph)
                 .sql(" AND ")
-                .eph_visibility("cont_sym.eph_layer", self.eph_ids.clone())
+                .eph_visibility("cont_sym.eph_layer", &self.eph)
                 .sql(")")
                 .build()
         ))
@@ -811,12 +812,12 @@ impl FilterLeaf for DirectOnlyMixin {
 /// InnermostOnlyMixin — filters has_parents to innermost container only.
 #[derive(Debug, Clone)]
 pub struct InnermostOnlyMixin {
-    eph_ids: Vec<i64>,
+    eph: EphContext,
 }
 
 impl InnermostOnlyMixin {
-    pub fn new(eph_ids: &[i64]) -> Self {
-        Self { eph_ids: eph_ids.to_vec() }
+    pub fn new(eph: &EphContext) -> Self {
+        Self { eph: eph.clone() }
     }
 }
 
@@ -835,9 +836,9 @@ impl FilterLeaf for InnermostOnlyMixin {
                           AND mid.id != container_instances.id \
                           AND mid.id != symbol_instances.id \
                           AND ")
-                .eph_visibility("mid.eph_layer", self.eph_ids.clone())
+                .eph_visibility("mid.eph_layer", &self.eph)
                 .sql(" AND ")
-                .eph_visibility("mid_sym.eph_layer", self.eph_ids.clone())
+                .eph_visibility("mid_sym.eph_layer", &self.eph)
                 .sql(")")
                 .build()
         ))
@@ -848,14 +849,14 @@ impl FilterLeaf for InnermostOnlyMixin {
 #[derive(Debug, Clone)]
 pub struct OuterParentFilterMixin {
     parent_ids: Vec<i64>,
-    eph_ids: Vec<i64>,
+    eph: EphContext,
 }
 
 impl OuterParentFilterMixin {
-    pub fn new(parent_ids: &[i64], eph_ids: &[i64]) -> Self {
+    pub fn new(parent_ids: &[i64], eph: &EphContext) -> Self {
         Self {
             parent_ids: parent_ids.to_vec(),
-            eph_ids: eph_ids.to_vec(),
+            eph: eph.clone(),
         }
     }
 }
@@ -877,7 +878,7 @@ impl FilterLeaf for OuterParentFilterMixin {
                           AND op.offset_range @> parent_decls.offset_range \
                           AND op.offset_range != parent_decls.offset_range \
                           AND ")
-                .eph_visibility("op.eph_layer", self.eph_ids.clone())
+                .eph_visibility("op.eph_layer", &self.eph)
                 .sql(")")
                 .build()
         ))

@@ -18,9 +18,9 @@ pub use mixins::{
     INSTANCE_TYPE_DEFINITION, INSTANCE_TYPE_DECLARATION, INSTANCE_TYPE_EXPANSION, INSTANCE_TYPE_SENTINEL, INSTANCE_TYPE_CONTAINMENT, INSTANCE_TYPE_SOURCE, INSTANCE_TYPE_HEADER, INSTANCE_TYPE_BUILD, INSTANCE_TYPE_FILE, INSTANCE_TYPE_DOCUMENTATION,
 };
 pub use selection::{
-    Checked, ChildReference, HasChildReference, HasEphLeak, HasParentReference, ObjectFullDiesel,
-    ParentReference, QueryStatementRange, ReferenceFullDiesel, ReferenceResult, Selection,
-    SelectionNode, SymbolInstanceFullDiesel, CANARY_LAYER_ID,
+    Checked, ChildReference, EphContext, HasChildReference, HasEphLeak, HasParentReference,
+    ObjectFullDiesel, ParentReference, QueryStatementRange, ReferenceFullDiesel, ReferenceResult,
+    Selection, SelectionNode, SymbolInstanceFullDiesel, CANARY_LAYER_ID,
 };
 
 pub type Connection = AsyncPgConnection;

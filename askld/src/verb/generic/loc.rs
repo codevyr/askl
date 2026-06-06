@@ -4,7 +4,7 @@ use crate::verb::LayerSpec;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    EphInstanceRow, EphSymbolRow, LayerBatch,
+    EphContext, EphInstanceRow, EphSymbolRow, LayerBatch,
     INSTANCE_TYPE_DEFINITION, SYMBOL_TYPE_FUNCTION,
 };
 use index::symbols::symbol_path_and_leaf;
@@ -106,11 +106,11 @@ impl Selector for LocSelector {
     async fn layer_spec(
         &self,
         cfg: &ControlFlowGraph,
-        eph_ids: &[i64],
+        eph: &EphContext,
     ) -> Result<Option<LayerSpec>> {
         // 1. Compute content-addressed hash from inputs only.
         let mut hasher = Sha256::new();
-        hasher.update(eph_ids.last().copied().unwrap_or(0i64).to_le_bytes());
+        hasher.update(eph.last().unwrap_or(0i64).to_le_bytes());
         hasher.update(b"loc");
         hasher.update((self.file_path.len() as u64).to_le_bytes());
         hasher.update(self.file_path.as_bytes());
@@ -214,7 +214,7 @@ impl Selector for LocSelector {
         Ok(Some(LayerSpec {
             hash,
             kind: "loc",
-            parent_id: eph_ids.last().copied(),
+            parent_id: eph.last(),
             populate,
         }))
     }

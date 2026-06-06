@@ -4,7 +4,7 @@ use crate::span::Span;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    EphInstanceRow, EphRefRow, EphSymbolRow, LayerBatch,
+    EphContext, EphInstanceRow, EphRefRow, EphSymbolRow, LayerBatch,
     SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_FIELD,
     INSTANCE_TYPE_DEFINITION, INSTANCE_TYPE_DOCUMENTATION,
 };
@@ -327,7 +327,7 @@ impl Selector for LayerVerb {
     async fn layer_spec(
         &self,
         _cfg: &ControlFlowGraph,
-        eph_ids: &[i64],
+        eph: &EphContext,
     ) -> Result<Option<crate::verb::LayerSpec>> {
         // Compute hash and collect batch synchronously, then release the lock
         // before any .await points.  The `Mutex` is uncontended at this point
@@ -338,7 +338,7 @@ impl Selector for LayerVerb {
                 bail!("layer block must contain at least one ephemeral verb");
             }
 
-            let parent_id = eph_ids.last().copied();
+            let parent_id = eph.last();
             let mut h = Sha256::new();
             h.update(b"layer");
             h.update(parent_id.unwrap_or(0i64).to_le_bytes());
@@ -367,7 +367,7 @@ impl Selector for LayerVerb {
         Ok(Some(crate::verb::LayerSpec {
             hash,
             kind: "layer",
-            parent_id: eph_ids.last().copied(),
+            parent_id: eph.last(),
             populate,
         }))
     }

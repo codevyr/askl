@@ -200,8 +200,8 @@ impl Verb for DirectOnlyFilter {
 }
 
 impl EphAwareFilter for DirectOnlyFilter {
-    fn get_composite_filter(&self, eph_ids: &[i64]) -> Option<CompositeFilter> {
-        Some(CompositeFilter::leaf(index::db_diesel::DirectOnlyMixin::new(eph_ids)))
+    fn get_composite_filter(&self, eph: &index::db_diesel::EphContext) -> Option<CompositeFilter> {
+        Some(CompositeFilter::leaf(index::db_diesel::DirectOnlyMixin::new(eph)))
     }
 }
 

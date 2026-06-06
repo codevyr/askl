@@ -9,7 +9,46 @@ use std::hash::{Hash, Hasher};
 /// bypassed — a data-isolation violation.
 pub const CANARY_LAYER_ID: i64 = -999999;
 
+/// Chain of ephemeral layer IDs visible to the current request.
+///
+/// Conceptually the request's view of the eph-layer DAG: each layer in the
+/// chain is a scope the request has materialised so far, in the order they
+/// were materialised.  Used at every public boundary that needs to bind the
+/// visibility chain into SQL or check it against row eph_layers.
+///
+/// `as_slice()` is the boundary into the diesel binding layer — internal
+/// SQL helpers keep `&[i64]` because they're private and immediately bind.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EphContext(Vec<i64>);
+
+impl EphContext {
+    pub fn new() -> Self { Self::default() }
+    pub fn from_slice(ids: &[i64]) -> Self { Self(ids.to_vec()) }
+    pub fn from_vec(ids: Vec<i64>) -> Self { Self(ids) }
+
+    /// Append a freshly materialised layer to the visibility chain.
+    pub fn push(&mut self, layer_id: i64) { self.0.push(layer_id); }
+
+    /// Append a batch of freshly materialised layers (in order).
+    pub fn extend<I: IntoIterator<Item = i64>>(&mut self, ids: I) {
+        self.0.extend(ids);
+    }
+
+    /// Most recently materialised layer (the parent for the next one).
+    pub fn last(&self) -> Option<i64> { self.0.last().copied() }
+
+    pub fn contains(&self, id: i64) -> bool { self.0.contains(&id) }
+    pub fn is_empty(&self) -> bool { self.0.is_empty() }
+    pub fn len(&self) -> usize { self.0.len() }
+    pub fn iter(&self) -> std::slice::Iter<'_, i64> { self.0.iter() }
+
+    /// Boundary into the diesel binding layer.
+    pub fn as_slice(&self) -> &[i64] { &self.0 }
+}
+
 /// Returns `true` if a single eph_layer value represents a leak relative to `eph_ids`.
+/// Internal slice form: used by the index crate's row-level leak checks alongside
+/// `eph.as_slice()` at the public boundary.
 pub(crate) fn is_eph_leak(eph_layer: Option<i64>, eph_ids: &[i64]) -> bool {
     match eph_layer {
         None => false,
@@ -20,25 +59,25 @@ pub(crate) fn is_eph_leak(eph_layer: Option<i64>, eph_ids: &[i64]) -> bool {
 /// Trait for values that can be checked for ephemeral-layer leaks.
 /// Implemented by [`Selection`].
 pub trait HasEphLeak {
-    fn has_eph_leak(&self, eph_ids: &[i64]) -> bool;
+    fn has_eph_leak(&self, eph: &EphContext) -> bool;
 }
 
 /// A wrapper proving that an `eph_layer` isolation check has been performed.
 ///
 /// Produced only by [`Checked::new`], which runs `HasEphLeak::has_eph_leak`
 /// and bails on a leak.  Callers receiving a `Checked<T>` can be sure no
-/// row inside has an `eph_layer` outside the visible `eph_ids` set at
+/// row inside has an `eph_layer` outside the visible `eph` set at
 /// construction time.
 ///
 /// Access the underlying value via [`Checked::into_inner`].
 pub struct Checked<T>(T);
 
 impl<T: HasEphLeak> Checked<T> {
-    /// Construct a `Checked<T>`, verifying isolation against `eph_ids`.
+    /// Construct a `Checked<T>`, verifying isolation against `eph`.
     /// Returns `Err` (and logs the violation) if a leak is detected.
-    pub fn new(value: T, eph_ids: &[i64]) -> anyhow::Result<Self> {
-        if value.has_eph_leak(eph_ids) {
-            tracing::error!(?eph_ids, "eph_layer leak detected — aborting request");
+    pub fn new(value: T, eph: &EphContext) -> anyhow::Result<Self> {
+        if value.has_eph_leak(eph) {
+            tracing::error!(eph_ids = ?eph.as_slice(), "eph_layer leak detected — aborting request");
             anyhow::bail!("internal error: ephemeral layer isolation violation");
         }
         Ok(Self(value))
@@ -199,20 +238,21 @@ impl Selection {
 }
 
 impl HasEphLeak for Selection {
-    fn has_eph_leak(&self, eph_ids: &[i64]) -> bool {
-        Selection::has_eph_leak(self, eph_ids)
+    fn has_eph_leak(&self, eph: &EphContext) -> bool {
+        Selection::has_eph_leak(self, eph)
     }
 }
 
 impl Selection {
 
     /// Returns `true` if any row in this selection has an `eph_layer` that is
-    /// not in `eph_ids`.  A `true` return means the eph_layer filter was
+    /// not in `eph`.  A `true` return means the eph_layer filter was
     /// bypassed and foreign ephemeral data leaked into the result.
     ///
     /// Prefer wrapping in [`Checked`] at construction time; callers receiving
     /// a `Checked<Selection>` need not re-check.
-    pub fn has_eph_leak(&self, eph_ids: &[i64]) -> bool {
+    pub fn has_eph_leak(&self, eph: &EphContext) -> bool {
+        let eph_ids = eph.as_slice();
         for n in &self.nodes {
             if is_eph_leak(n.symbol.eph_layer, eph_ids)
                 || is_eph_leak(n.symbol_instance.eph_layer, eph_ids)
@@ -325,31 +365,31 @@ mod tests {
 
     #[test]
     fn empty_selection_no_leak() {
-        assert!(!Selection::new().has_eph_leak(&[]));
+        assert!(!Selection::new().has_eph_leak(&EphContext::new()));
     }
 
     #[test]
     fn persistent_rows_no_leak() {
         let s = selection_with_node(None, None);
-        assert!(!s.has_eph_leak(&[]));
+        assert!(!s.has_eph_leak(&EphContext::new()));
     }
 
     #[test]
     fn eph_row_in_eph_ids_no_leak() {
         let s = selection_with_node(Some(-1), Some(-1));
-        assert!(!s.has_eph_leak(&[-1]));
+        assert!(!s.has_eph_leak(&EphContext::from_slice(&[-1])));
     }
 
     #[test]
     fn eph_row_not_in_eph_ids_is_leak() {
         let s = selection_with_node(Some(-1), Some(-1));
-        assert!(s.has_eph_leak(&[]));
+        assert!(s.has_eph_leak(&EphContext::new()));
     }
 
     #[test]
     fn canary_row_detected() {
         let s = selection_with_node(Some(CANARY_LAYER_ID), Some(CANARY_LAYER_ID));
-        assert!(s.has_eph_leak(&[-1]));
+        assert!(s.has_eph_leak(&EphContext::from_slice(&[-1])));
     }
 
     #[test]
@@ -362,19 +402,19 @@ mod tests {
             project: test_project(),
             query_statements: vec![],
         });
-        assert!(s.has_eph_leak(&[]));
+        assert!(s.has_eph_leak(&EphContext::new()));
     }
 
     #[test]
     fn symbol_leak_only() {
         let s = selection_with_node(Some(-1), None);
-        assert!(s.has_eph_leak(&[]));
+        assert!(s.has_eph_leak(&EphContext::new()));
     }
 
     #[test]
     fn instance_leak_only() {
         let s = selection_with_node(None, Some(-1));
-        assert!(s.has_eph_leak(&[]));
+        assert!(s.has_eph_leak(&EphContext::new()));
     }
 }
 

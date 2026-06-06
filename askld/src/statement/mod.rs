@@ -232,7 +232,7 @@ impl Statement {
         let mut pending: Vec<PendingCompute<'_>> = vec![];
 
         for statement in statements.iter() {
-            let eph_ids = ctx.eph_ids.clone();
+            let eph = ctx.eph.clone();
             let parent_scope = build_parent_scope(statement, ctx);
             let children_scope = build_children_scope(statement, ctx);
             let stmt = statement.clone();
@@ -241,7 +241,7 @@ impl Statement {
                 statement: stmt.clone(),
                 future: Box::pin(async move {
                     stmt.command()
-                        .compute_selected(cfg, parent_scope, children_scope, &eph_ids)
+                        .compute_selected(cfg, parent_scope, children_scope, &eph)
                         .await
                 }),
             });
@@ -600,7 +600,7 @@ impl Statement {
         }
 
         let all_ids: Vec<i64> = all_nodes.iter().map(|id| Into::<i64>::into(*id)).collect();
-        if let Ok(implicit_edges) = index.find_edges_between(&all_ids, &ctx.eph_ids).await {
+        if let Ok(implicit_edges) = index.find_edges_between(&all_ids, &ctx.eph).await {
             for edge in implicit_edges {
                 let from_node = instance_to_node.get(&edge.from_instance_id);
                 let to_node = instance_to_node.get(&edge.to_instance_id);

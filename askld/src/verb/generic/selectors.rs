@@ -10,7 +10,7 @@ use crate::statement::Statement;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    CompoundNameMixin, CompositeFilter, ExactNameMixin, Index,
+    CompoundNameMixin, CompositeFilter, EphContext, ExactNameMixin, Index,
     LeafNameMixin, ParentReference, ScopeContext, Selection, SymbolTypeMixin,
 };
 use index::models_diesel::SymbolRef;
@@ -75,10 +75,10 @@ impl Selector for NameSelector {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
-        eph_ids: &[i64],
+        eph: &EphContext,
     ) -> Result<Option<Selection>> {
         let combined = CompositeFilter::and(vec![filter, name_filter(&self.name)]);
-        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope, eph_ids).await?.into_inner();
+        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope, eph).await?.into_inner();
         Ok(Some(selection))
     }
 }
@@ -147,10 +147,10 @@ impl Selector for ForcedVerb {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
-        eph_ids: &[i64],
+        eph: &EphContext,
     ) -> Result<Option<Selection>> {
         let combined = CompositeFilter::and(vec![filter, name_filter(&self.name)]);
-        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope, eph_ids).await?.into_inner();
+        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope, eph).await?.into_inner();
 
         // Cache the forced selection so derivations can fabricate the
         // correct parent <-> child relationship later on.
@@ -260,7 +260,7 @@ impl Selector for UnitVerb {
         _filter: CompositeFilter,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
-        _eph_ids: &[i64],
+        _eph: &EphContext,
     ) -> Result<Option<Selection>> {
         Ok(None)
     }
@@ -554,7 +554,7 @@ impl Selector for TypeSelector {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
-        eph_ids: &[i64],
+        eph: &EphContext,
     ) -> Result<Option<Selection>> {
         if self.filter_only {
             return Ok(None);
@@ -562,7 +562,7 @@ impl Selector for TypeSelector {
 
         // `filter` already contains this TypeSelector's get_composite_filter()
         // (collected at compute_selected). Just use it directly.
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, eph_ids).await?.into_inner();
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, eph).await?.into_inner();
         Ok(Some(selection))
     }
 }
@@ -644,9 +644,9 @@ impl Selector for GenericSelector {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
-        eph_ids: &[i64],
+        eph: &EphContext,
     ) -> Result<Option<Selection>> {
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, eph_ids).await?.into_inner();
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, eph).await?.into_inner();
         Ok(Some(selection))
     }
 }

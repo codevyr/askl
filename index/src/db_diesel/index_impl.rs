@@ -25,7 +25,7 @@ use super::mixins::{
     CONTAINED_INSTANCE_ALIAS, CONTAINED_SYMBOL_ALIAS, CONTAINED_TYPE_ALIAS,
     ParentsQuery, ChildrenQuery, HasParentsQuery, HasChildrenQuery,
 };
-use super::selection::{ChildReference, HasChildReference, HasParentReference, ParentReference, Selection, SelectionNode, is_eph_leak};
+use super::selection::{ChildReference, EphContext, HasChildReference, HasParentReference, ParentReference, Selection, SelectionNode, is_eph_leak};
 use super::Connection;
 
 // ============================================================================
@@ -104,6 +104,7 @@ async fn resolve_filter_to_ids(
 ) -> Result<Vec<i64>> {
     use diesel::sql_types::Bool;
 
+    let eph = EphContext::from_slice(eph_ids);
     let mut query = build_current_query(eph_ids);
     if let Some(expr) = filter.compose_current() {
         query = query.filter(expr);
@@ -120,11 +121,11 @@ async fn resolve_filter_to_ids(
                             JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
                               AND pd.offset_range @> sr.from_offset_range \
                             WHERE ")
-                    .eph_visibility("sr.eph_layer", eph_ids.to_vec())
+                    .eph_visibility("sr.eph_layer", &eph)
                     .sql(" AND ")
-                    .eph_visibility("si.eph_layer", eph_ids.to_vec())
+                    .eph_visibility("si.eph_layer", &eph)
                     .sql(" AND ")
-                    .eph_visibility("pd.eph_layer", eph_ids.to_vec())
+                    .eph_visibility("pd.eph_layer", &eph)
                     .sql(" AND pd.id = ANY(")
                     .bind(parent_ids.clone())
                     .sql("))")
@@ -140,11 +141,11 @@ async fn resolve_filter_to_ids(
                               AND pd.offset_range @> sr.from_offset_range \
                             JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
                             WHERE ")
-                    .eph_visibility("sr.eph_layer", eph_ids.to_vec())
+                    .eph_visibility("sr.eph_layer", &eph)
                     .sql(" AND ")
-                    .eph_visibility("si.eph_layer", eph_ids.to_vec())
+                    .eph_visibility("si.eph_layer", &eph)
                     .sql(" AND ")
-                    .eph_visibility("pd.eph_layer", eph_ids.to_vec())
+                    .eph_visibility("pd.eph_layer", &eph)
                     .sql(" AND si.id = ANY(")
                     .bind(child_ids.clone())
                     .sql("))")
@@ -780,8 +781,9 @@ impl Index {
         filter: &CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
-        eph_ids: &[i64],
+        eph: &EphContext,
     ) -> Result<super::selection::Checked<Selection>> {
+        let eph_ids = eph.as_slice();
         use crate::schema_diesel::*;
 
         let connection = &mut self
@@ -1002,7 +1004,7 @@ impl Index {
         };
 
         // Checked::new runs has_eph_leak; bails with a uniform error on leak.
-        super::selection::Checked::new(selection?, eph_ids)
+        super::selection::Checked::new(selection?, eph)
     }
 
     /// Query child instance IDs directly from DB given parent instance IDs.
@@ -1012,8 +1014,9 @@ impl Index {
         include_refs: bool,
         include_has: bool,
         filter: &CompositeFilter,
-        eph_ids: &[i64],
+        eph: &EphContext,
     ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
+        let eph_ids = eph.as_slice();
         let connection = &mut self
             .pool
             .get()
@@ -1081,8 +1084,9 @@ impl Index {
         include_refs: bool,
         include_has: bool,
         filter: &CompositeFilter,
-        eph_ids: &[i64],
+        eph: &EphContext,
     ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
+        let eph_ids = eph.as_slice();
         let connection = &mut self
             .pool
             .get()
@@ -1144,8 +1148,9 @@ impl Index {
     pub async fn find_edges_between(
         &self,
         instance_ids: &[i64],
-        eph_ids: &[i64],
+        eph: &EphContext,
     ) -> Result<Vec<ImplicitEdge>> {
+        let eph_ids = eph.as_slice();
         if instance_ids.is_empty() {
             return Ok(vec![]);
         }
@@ -1415,13 +1420,13 @@ impl Index {
     }
 
     /// Check if a symbol exists in the persistent index or in the given ephemeral layers.
-    pub async fn symbol_exists(&self, symbol_id: i64, eph_ids: &[i64]) -> Result<bool> {
+    pub async fn symbol_exists(&self, symbol_id: i64, eph: &EphContext) -> Result<bool> {
         use crate::schema_diesel::symbols;
 
         let connection = &mut self.pool.get().await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
-        let eph_ids_owned = eph_ids.to_vec();
+        let eph_ids_owned = eph.as_slice().to_vec();
         let exists = symbols::table
             .filter(symbols::id.eq(symbol_id))
             .filter(

@@ -1,4 +1,4 @@
-use crate::db_diesel::{CompositeFilter, CompoundNameMixin, ScopeContext};
+use crate::db_diesel::{CompositeFilter, CompoundNameMixin, EphContext, ScopeContext};
 use crate::symbols::{package_match, partial_name_match, Symbol, SymbolId};
 use diesel::pg::PgConnection;
 use diesel::Connection;
@@ -93,7 +93,7 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
 
     // Test with empty database first
     let empty_filter = CompositeFilter::leaf(CompoundNameMixin::new("nonexistent"));
-    let empty_selection = index.find_symbol(&empty_filter, ScopeContext::Skip, ScopeContext::Skip, &[]).await?.into_inner();
+    let empty_selection = index.find_symbol(&empty_filter, ScopeContext::Skip, ScopeContext::Skip, &EphContext::new()).await?.into_inner();
     assert!(empty_selection.nodes.is_empty());
     assert!(empty_selection.parents.is_empty());
     assert!(empty_selection.children.is_empty());
@@ -103,7 +103,7 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
 
     // Test searching for symbols - use "a" which we know exists
     let a_filter = CompositeFilter::leaf(CompoundNameMixin::new("a"));
-    let selection = index.find_symbol(&a_filter, ScopeContext::Skip, ScopeContext::Skip, &[]).await?.into_inner();
+    let selection = index.find_symbol(&a_filter, ScopeContext::Skip, ScopeContext::Skip, &EphContext::new()).await?.into_inner();
     assert!(
         !selection.nodes.is_empty(),
         "Should find symbols with 'a' in the name"
@@ -111,7 +111,7 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
 
     // Test searching for symbols - use "main" which we know exists
     let main_filter = CompositeFilter::leaf(CompoundNameMixin::new("main"));
-    let selection = index.find_symbol(&main_filter, ScopeContext::Skip, ScopeContext::Skip, &[]).await?.into_inner();
+    let selection = index.find_symbol(&main_filter, ScopeContext::Skip, ScopeContext::Skip, &EphContext::new()).await?.into_inner();
     assert!(
         !selection.nodes.is_empty(),
         "Should find symbols with 'main' in the name"
@@ -129,7 +129,7 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
 
     // Test compound name search
     let compound_filter = CompositeFilter::leaf(CompoundNameMixin::new("mai.n"));
-    let compound_selection = index.find_symbol(&compound_filter, ScopeContext::Skip, ScopeContext::Skip, &[]).await?.into_inner();
+    let compound_selection = index.find_symbol(&compound_filter, ScopeContext::Skip, ScopeContext::Skip, &EphContext::new()).await?.into_inner();
     assert!(
         compound_selection.nodes.is_empty(),
         "Should find no symbols with compound name search"
@@ -153,7 +153,7 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
 
     let long_name = format!("kubelet.{}.run", "a".repeat(11));
     let filter1 = CompositeFilter::leaf(CompoundNameMixin::new("kubelet.run"));
-    let selection = index.find_symbol(&filter1, ScopeContext::Skip, ScopeContext::Skip, &[]).await?.into_inner();
+    let selection = index.find_symbol(&filter1, ScopeContext::Skip, ScopeContext::Skip, &EphContext::new()).await?.into_inner();
     let mut found_names: Vec<String> = selection
         .nodes
         .iter()
@@ -169,7 +169,7 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
 
     let kubelet_run = "(*k8s.io/kubernetes/pkg/kubelet.Kubelet).Run".to_string();
     let filter2 = CompositeFilter::leaf(CompoundNameMixin::new("kubelet"));
-    let selection = index.find_symbol(&filter2, ScopeContext::Skip, ScopeContext::Skip, &[]).await?.into_inner();
+    let selection = index.find_symbol(&filter2, ScopeContext::Skip, ScopeContext::Skip, &EphContext::new()).await?.into_inner();
     let mut found_names: Vec<String> = selection
         .nodes
         .iter()
@@ -184,7 +184,7 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
     );
 
     let filter3 = CompositeFilter::leaf(CompoundNameMixin::new("run.kubelet"));
-    let reverse_selection = index.find_symbol(&filter3, ScopeContext::Skip, ScopeContext::Skip, &[]).await?.into_inner();
+    let reverse_selection = index.find_symbol(&filter3, ScopeContext::Skip, ScopeContext::Skip, &EphContext::new()).await?.into_inner();
     assert!(
         reverse_selection.nodes.is_empty(),
         "Expected token order mismatch to return no results"

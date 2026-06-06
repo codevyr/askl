@@ -8,7 +8,7 @@ use crate::statement::Statement;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    CompositeFilter, DirectOnlyMixin, EphScopedFut, EphTransaction, InnermostOnlyMixin,
+    CompositeFilter, DirectOnlyMixin, EphContext, EphScopedFut, EphTransaction, InnermostOnlyMixin,
     OuterParentFilterMixin, ScopeContext, SymbolInstanceIdMixin, Index, Selection,
 };
 
@@ -302,10 +302,10 @@ pub trait Filter: std::fmt::Debug + Display + Verb {
 
 /// Filter whose SQL predicate must reference the request's ephemeral
 /// visibility chain.  Implement this trait — not [`Filter`] — when the
-/// composite filter would need to bind `eph_ids` into its SQL.  At
-/// time of writing, the only implementor is `DirectOnlyFilter`.
+/// composite filter would need to bind the request's `EphContext` into
+/// its SQL.  At time of writing, the only implementor is `DirectOnlyFilter`.
 pub trait EphAwareFilter: std::fmt::Debug + Display + Verb {
-    fn get_composite_filter(&self, eph_ids: &[i64]) -> Option<CompositeFilter>;
+    fn get_composite_filter(&self, eph: &EphContext) -> Option<CompositeFilter>;
 }
 
 #[derive(Debug)]
@@ -544,7 +544,7 @@ pub trait Selector: std::fmt::Debug + Verb {
     async fn layer_spec(
         &self,
         _cfg: &ControlFlowGraph,
-        _eph_ids: &[i64],
+        _eph: &EphContext,
     ) -> Result<Option<LayerSpec>> {
         Ok(None)
     }
@@ -560,9 +560,9 @@ pub trait Selector: std::fmt::Debug + Verb {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
-        eph_ids: &[i64],
+        eph: &EphContext,
     ) -> Result<Option<Selection>> {
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, eph_ids).await?;
+        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, eph).await?;
         Ok(Some(selection.into_inner()))
     }
 
@@ -584,20 +584,20 @@ pub trait Selector: std::fmt::Debug + Verb {
         let parent_ids = parent_sel.get_instance_ids();
         let mut find_parts: Vec<CompositeFilter> = vec![];
         if !notif_ctx.unnest {
-            find_parts.push(CompositeFilter::leaf(DirectOnlyMixin::new(&ctx.eph_ids)));
-            find_parts.push(CompositeFilter::leaf(OuterParentFilterMixin::new(&parent_ids, &ctx.eph_ids)));
+            find_parts.push(CompositeFilter::leaf(DirectOnlyMixin::new(&ctx.eph)));
+            find_parts.push(CompositeFilter::leaf(OuterParentFilterMixin::new(&parent_ids, &ctx.eph)));
         }
         let find_filter = CompositeFilter::and(find_parts);
-        let eph_ids = &ctx.eph_ids;
+        let eph = &ctx.eph;
         let decl_ids = index.find_child_instance_ids(
             &parent_ids,
             notif_ctx.rel_type.contains(RelationshipType::REFS),
             notif_ctx.rel_type.contains(RelationshipType::HAS),
             &find_filter,
-            eph_ids,
+            eph,
         ).await.map_err(|e| anyhow::anyhow!("Failed to find child instance IDs: {}", e))?;
 
-        let selection = find_symbol_by_instance_id(index, selector_filters, eph_aware_filters, &decl_ids, parent_scope, children_scope, eph_ids)
+        let selection = find_symbol_by_instance_id(index, selector_filters, eph_aware_filters, &decl_ids, parent_scope, children_scope, eph)
             .await?;
 
         Ok(Some(selection))
@@ -621,19 +621,19 @@ pub trait Selector: std::fmt::Debug + Verb {
         let child_ids = child_sel.get_instance_ids();
         let mut find_parts: Vec<CompositeFilter> = vec![];
         if !notif_ctx.unnest {
-            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new(&ctx.eph_ids)));
+            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new(&ctx.eph)));
         }
         let find_filter = CompositeFilter::and(find_parts);
-        let eph_ids = &ctx.eph_ids;
+        let eph = &ctx.eph;
         let decl_ids = index.find_parent_instance_ids(
             &child_ids,
             notif_ctx.rel_type.contains(RelationshipType::REFS),
             notif_ctx.rel_type.contains(RelationshipType::HAS),
             &find_filter,
-            eph_ids,
+            eph,
         ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
 
-        let selection = find_symbol_by_instance_id(index, selector_filters, eph_aware_filters, &decl_ids, parent_scope, children_scope, eph_ids)
+        let selection = find_symbol_by_instance_id(index, selector_filters, eph_aware_filters, &decl_ids, parent_scope, children_scope, eph)
             .await?;
 
         Ok(Some(selection))
@@ -662,16 +662,16 @@ pub(crate) async fn find_symbol_by_instance_id(
     instances: &Vec<SymbolInstanceId>,
     parent_scope: ScopeContext,
     children_scope: ScopeContext,
-    eph_ids: &[i64],
+    eph: &EphContext,
 ) -> Result<Selection> {
     let mut parts: Vec<CompositeFilter> = selector_filters
         .iter()
         .filter_map(|f| f.get_composite_filter())
-        .chain(eph_aware_filters.iter().filter_map(|f| f.get_composite_filter(eph_ids)))
+        .chain(eph_aware_filters.iter().filter_map(|f| f.get_composite_filter(eph)))
         .collect();
     parts.push(CompositeFilter::leaf(SymbolInstanceIdMixin::new(instances)));
     let filter = CompositeFilter::and(parts);
-    Ok(index.find_symbol(&filter, parent_scope, children_scope, eph_ids).await?.into_inner())
+    Ok(index.find_symbol(&filter, parent_scope, children_scope, eph).await?.into_inner())
 }
 
 pub trait Labeler: std::fmt::Debug {

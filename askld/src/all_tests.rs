@@ -3322,7 +3322,7 @@ fn eph_layer_rollback_prevents_poisoned_cache() {
 #[test]
 fn canary_filtered_by_find_symbol() {
     use index::db_diesel::{
-        CompositeFilter, LeafNameMixin, ScopeContext, CANARY_LAYER_ID,
+        CompositeFilter, EphContext, LeafNameMixin, ScopeContext, CANARY_LAYER_ID,
     };
 
     let mut rt = tokio::runtime::Runtime::new().unwrap();
@@ -3335,7 +3335,7 @@ fn canary_filtered_by_find_symbol() {
 
         // Call find_symbol with no ephemeral layers visible.
         let result = index
-            .find_symbol(&filter, ScopeContext::Skip, ScopeContext::Skip, &[])
+            .find_symbol(&filter, ScopeContext::Skip, ScopeContext::Skip, &EphContext::new())
             .await
             .expect("find_symbol should succeed (canary must be filtered out)")
             .into_inner();
@@ -3349,7 +3349,7 @@ fn canary_filtered_by_find_symbol() {
 
         // Even with canary layer in eph_ids, the canary should be findable.
         let result = index
-            .find_symbol(&filter, ScopeContext::Skip, ScopeContext::Skip, &[CANARY_LAYER_ID])
+            .find_symbol(&filter, ScopeContext::Skip, ScopeContext::Skip, &EphContext::from_slice(&[CANARY_LAYER_ID]))
             .await
             .expect("find_symbol with canary in eph_ids should succeed")
             .into_inner();
@@ -3363,7 +3363,7 @@ fn canary_filtered_by_find_symbol() {
 
 #[test]
 fn canary_leak_detected_by_has_eph_leak() {
-    use index::db_diesel::{Selection, SelectionNode, CANARY_LAYER_ID};
+    use index::db_diesel::{EphContext, Selection, SelectionNode, CANARY_LAYER_ID};
     use index::models_diesel::{Object, Project, Symbol, SymbolInstance};
     use std::collections::Bound;
 
@@ -3407,19 +3407,19 @@ fn canary_leak_detected_by_has_eph_leak() {
 
     // With empty eph_ids, the canary is a leak.
     assert!(
-        selection.has_eph_leak(&[]),
+        selection.has_eph_leak(&EphContext::new()),
         "canary row must be detected as a leak with empty eph_ids"
     );
 
     // With some other layer, canary is still a leak.
     assert!(
-        selection.has_eph_leak(&[-1]),
+        selection.has_eph_leak(&EphContext::from_slice(&[-1])),
         "canary row must be detected as a leak when its ID is not in eph_ids"
     );
 
     // Only when canary layer is explicitly included, it's not a leak.
     assert!(
-        !selection.has_eph_leak(&[CANARY_LAYER_ID]),
+        !selection.has_eph_leak(&EphContext::from_slice(&[CANARY_LAYER_ID])),
         "canary row must not be a leak when its ID is in eph_ids"
     );
 }
