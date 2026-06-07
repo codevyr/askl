@@ -205,6 +205,11 @@ pub fn build_dependency_graph(
     // selector iteration above.  Surface them explicitly so the labelled
     // statement runs first and `compute_roots` can resolve the label
     // to symbol IDs at push time.
+    //
+    // Dedupes against the User edges added by the selector loop above:
+    // a label appearing both as a `#label` user selector AND as a
+    // `@label` inside an ephemeral verb arg in the same statement
+    // shouldn't get a duplicate dep + dependent pair.
     for label in statement.command().layer_label_refs() {
         let labeled_statements = if let Some(labeled_statements) =
             labeled_statements_map.get_statements(&label)
@@ -223,6 +228,13 @@ pub fn build_dependency_graph(
         };
 
         for labeled_statement in labeled_statements {
+            let already_dep = state.dependencies.iter().any(|d| {
+                d.dependency_role == DependencyRole::User
+                    && Rc::ptr_eq(&d.dependency, labeled_statement)
+            });
+            if already_dep {
+                continue;
+            }
             labeled_statement
                 .get_state_mut()
                 .dependents

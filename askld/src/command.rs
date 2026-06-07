@@ -182,6 +182,12 @@ impl Command {
     /// Labels referenced by any layer-creating verb in this command.
     /// Used by `build_dependency_graph` to add User edges so the
     /// labelled statements run before this command's layer materialises.
+    ///
+    /// Iterates *all* verbs (not just selectors) so any future verb kind
+    /// — including non-selector verbs that grow ephemeral semantics —
+    /// can contribute label refs without changes here.  The default
+    /// `Verb::layer_label_refs()` returns an empty `Vec`, so the
+    /// iteration cost is negligible for the common no-label case.
     pub fn layer_label_refs(&self) -> Vec<String> {
         self.verbs.iter().flat_map(|v| v.layer_label_refs()).collect()
     }
@@ -203,6 +209,18 @@ impl Command {
             1 => Ok(Some(specs.into_iter().next().unwrap())),
             _ => {
                 let parent_id = specs[0].parent_id;
+                // Invariant: every spec was built from the same `eph`
+                // snapshot inside `compute_selected`, so they all derive
+                // `parent_id = eph.last()`.  Catch any future selector
+                // that breaks this in dev — silent inheritance from
+                // `specs[0]` would silently misattribute the composite.
+                debug_assert!(
+                    specs.iter().all(|s| s.parent_id == parent_id),
+                    "all specs in a composite must share parent_id; \
+                     got {:?} from kinds {:?}",
+                    specs.iter().map(|s| s.parent_id).collect::<Vec<_>>(),
+                    specs.iter().map(|s| s.kind).collect::<Vec<_>>(),
+                );
                 let mut h = Sha256::new();
                 h.update(EphLayerKind::Composite.as_str().as_bytes());
                 for spec in &specs {

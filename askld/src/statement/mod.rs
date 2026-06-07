@@ -283,7 +283,22 @@ impl Statement {
                 {
                     if let Some(sel) = labelled.get_selection(ctx) {
                         let ids: Vec<i64> = sel.nodes.iter().map(|n| n.symbol.id).collect();
+                        if ids.is_empty() {
+                            tracing::warn!(
+                                label = %label,
+                                "ephemeral verb '@{}' resolved to 0 symbols; \
+                                 layer will emit no rows",
+                                label,
+                            );
+                        }
                         resolved.insert(label, ids);
+                    } else {
+                        tracing::warn!(
+                            label = %label,
+                            "ephemeral verb '@{}' labelled statement has no \
+                             selection at resolution time; layer will emit no rows",
+                            label,
+                        );
                     }
                 }
             }
@@ -329,7 +344,11 @@ impl Statement {
         // they're pure ordering — see [`DependencyRole::Sibling`].
         //
         // We only consider top-level statements (no parent); nested
-        // siblings still rely on Parent/Child edges.
+        // siblings still rely on Parent/Child edges, plus the
+        // label-refs pre-drain in `compute_roots` for the
+        // nested-layer-using-a-label case.  This is a deliberate
+        // scoping choice (per the design discussion); a nested
+        // `loc(...) ; loc(...)` pair does NOT get a Sibling edge.
         let top_level: Vec<Rc<Statement>> = self.scope().statements().collect();
         for j in 0..top_level.len() {
             for i in 0..j {
