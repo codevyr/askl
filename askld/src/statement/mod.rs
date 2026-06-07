@@ -189,13 +189,24 @@ impl Statement {
         !has_selector || has_any_selection
     }
 
-    /// Compute initial selections for all statements.
+    /// Compute initial selections for every statement.  Walks the
+    /// statement list (top-level + nested, pre-order) in source order;
+    /// for each statement, queues a `compute_selected` future and
+    /// joins them in batches via `join_all` to overlap DB round-trips.
     ///
-    /// Every statement creates a future and pushes it to the pending list.
-    /// Barrier selectors (ephemeral layers) trigger a drain after pushing,
-    /// which awaits all pending futures via `join_all` — ensuring they see
-    /// prior layers' `eph_ids`. Non-barrier selectors accumulate and run
-    /// concurrently at the next drain point, overlapping DB round-trips.
+    /// **Pre-drain ordering.**  Before queuing a statement that has
+    /// any [`DependencyRole::Sibling`] dependency or any `@label`
+    /// reference inside a layer-creating verb, drain pending so the
+    /// statement's `eph` capture and (if any) `LabelResolutions`
+    /// reflect prior applied state.  Sibling edges are installed by
+    /// [`Self::build_dependency_graph`] between top-level statements
+    /// where at least one creates an ephemeral layer; label-ref
+    /// pre-drains catch nested layer-using statements whose labelled
+    /// statement isn't a top-level sibling.
+    ///
+    /// Requires `build_dependency_graph` to have run already so the
+    /// Sibling edges exist.  The ordering is enforced in
+    /// [`Self::compute_nodes`].
     async fn compute_roots(
         &self,
         ctx: &mut ExecutionContext,

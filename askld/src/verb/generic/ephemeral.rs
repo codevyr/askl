@@ -175,11 +175,21 @@ impl EphemeralOp for EphemeralSymbolVerb {
     }
 }
 
-/// Symbol-ID input for [`EphemeralInstanceVerb`]: either a literal i64 or
-/// a `@label` reference resolved at materialise time.  When `Label`,
-/// each resolved symbol gets its own instance row (so e.g.
-/// `symbol="@func"` against a selection of three symbols emits three
-/// rows, one per symbol).
+/// Symbol-ID input for an ephemeral verb.  Resolves to a *set* of
+/// symbol IDs at materialise time; the verb emits one row per
+/// resolved symbol.
+///
+/// **Multi-row semantics by default.**  An ephemeral verb takes a
+/// `SymbolRef` and emits N rows, where N is the resolved set's size:
+///   - `symbol_id="1"` → `Literal(1)` → resolves to one symbol → one row.
+///   - `symbol_id="@foo"` → `Label("foo")` → resolves to whatever the
+///     `@foo` statement selected → N rows.
+///   - If a label resolves to zero symbols (statement matched nothing),
+///     zero rows are emitted and a `tracing::warn!` is logged from
+///     `compute_roots` so the operator can tell the layer was a no-op.
+///
+/// Authors writing queries should think in N-row terms: a literal is
+/// just the degenerate `N=1` case.
 #[derive(Debug)]
 enum SymbolRef {
     Literal(i64),
@@ -196,14 +206,18 @@ impl SymbolRef {
             Ok(SymbolRef::Label(label.to_string()))
         } else {
             let id: i64 = raw.parse().map_err(|_| {
-                anyhow::anyhow!("'{}' must be a valid i64 or a @label reference", key)
+                anyhow::anyhow!(
+                    "'{}' must be a valid i64 or a label reference \
+                     (labels start with '@', e.g. '@foo')",
+                    key,
+                )
             })?;
             Ok(SymbolRef::Literal(id))
         }
     }
 
-    /// Resolve to the actual symbol IDs to materialise.  Literal → one
-    /// element; Label → the labelled statement's selected symbol IDs.
+    /// Resolve to the set of symbol IDs the verb should materialise.
+    /// Always returns 0..N elements; `Literal` is the `N=1` case.
     fn resolve_vec(&self, resolved: &LabelResolutions) -> Vec<i64> {
         match self {
             SymbolRef::Literal(id) => vec![*id],
@@ -219,13 +233,15 @@ impl SymbolRef {
     }
 }
 
-/// EphemeralInstanceVerb - creates an ephemeral instance row.
+/// EphemeralInstanceVerb - creates ephemeral instance rows.
 ///
-/// Only available inside `layer { }` blocks.
+/// Only available inside `layer { }` blocks.  Emits one row per
+/// resolved symbol — see [`SymbolRef`] for the multi-row semantic.
+///
 /// Usage: `ephemeral_instance(symbol_id="<id>", object_id="1",
-///        start="0", end="10", instance_type="1")`
-///        or `symbol_id="@label"` to emit one row per symbol selected by
-///        the labelled statement.
+///        start="0", end="10", instance_type="1")` for a literal
+///        (single-row) input, or `symbol_id="@label"` for a
+///        label-resolved (`N`-row) input.
 #[derive(Debug)]
 pub(in crate::verb) struct EphemeralInstanceVerb {
     symbol: SymbolRef,
@@ -307,13 +323,15 @@ impl EphemeralOp for EphemeralInstanceVerb {
     }
 }
 
-/// EphemeralRefVerb - creates an ephemeral ref row.
+/// EphemeralRefVerb - creates ephemeral ref rows.
 ///
-/// Only available inside `layer { }` blocks.
+/// Only available inside `layer { }` blocks.  Emits one row per
+/// resolved to-symbol — see [`SymbolRef`] for the multi-row semantic.
+///
 /// Usage: `ephemeral_ref(to_symbol="<id>", from_object="1",
-///        start="0", end="10")`
-///        or `to_symbol="@label"` to emit one row per symbol selected by
-///        the labelled statement.
+///        start="0", end="10")` for a literal (single-row) input,
+///        or `to_symbol="@label"` for a label-resolved (`N`-row)
+///        input.
 #[derive(Debug)]
 pub(in crate::verb) struct EphemeralRefVerb {
     to_symbol: SymbolRef,

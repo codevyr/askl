@@ -209,6 +209,21 @@ impl Command {
                     h.update(spec.hash);
                 }
                 let composite_hash: [u8; 32] = h.finalize().into();
+
+                // Diagnostic crumb: composite layers show up in
+                // `eph_layers.kind = 'composite'` without any structured
+                // record of which verbs contributed.  Log the contributing
+                // (kind, hash-prefix) pairs so an operator debugging a
+                // composite row can `grep` for it and find this line.
+                tracing::debug!(
+                    composite_hash = ?&composite_hash[..8],
+                    parts = ?specs
+                        .iter()
+                        .map(|s| (s.kind, &s.hash[..8]))
+                        .collect::<Vec<_>>(),
+                    "composite layer synthesised",
+                );
+
                 let populate: LayerPopulate = Box::new(move |txn| {
                     Box::pin(async move {
                         for spec in specs {
