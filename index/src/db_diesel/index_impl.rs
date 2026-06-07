@@ -578,6 +578,12 @@ pub enum EphLayerKind {
     Layer,
     /// `loc(path, line)` cache rows.
     Loc,
+    /// Synthesised by `Command::layer_spec` when a single statement
+    /// contains multiple layer-creating verbs.  The composite's hash
+    /// chains the per-verb specs in source order; the populate batch
+    /// runs each verb's contribution in turn.  Single-verb statements
+    /// keep their original `Layer`/`Loc` kind for cache continuity.
+    Composite,
 }
 
 impl EphLayerKind {
@@ -587,6 +593,7 @@ impl EphLayerKind {
             Self::Canary => "canary",
             Self::Layer => "layer",
             Self::Loc => "loc",
+            Self::Composite => "composite",
         }
     }
 }
