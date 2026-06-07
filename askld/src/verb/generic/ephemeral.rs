@@ -16,15 +16,56 @@ use std::sync::{Arc, Mutex};
 
 use super::super::{DeriveMethod, Selector, Verb};
 
+/// Resolved selections for labels referenced by ephemeral verbs.  An
+/// ephemeral verb that takes `symbol="@foo"` looks up the symbol IDs of
+/// the statement labelled `@foo` here at hash/materialise time.
+///
+/// Populated by `compute_roots` immediately before pushing a layer-creating
+/// statement's compute future: the prior labelled statement's selection is
+/// guaranteed-applied by then (via the User dependency edge installed at
+/// parse time).  Empty for statements with no `@label` references.
+///
+/// Keys are `Rc<str>` — the same shape used by
+/// `DependencyRole::PreSeedLabel` upstream, so inserts move the label
+/// in without re-allocating.
+#[derive(Debug, Clone, Default)]
+pub struct LabelResolutions {
+    /// label name → symbol IDs from the labelled statement's selection.
+    map: HashMap<std::rc::Rc<str>, Vec<i64>>,
+}
+
+impl LabelResolutions {
+    pub fn new() -> Self {
+        Self { map: HashMap::new() }
+    }
+
+    pub fn insert(&mut self, label: std::rc::Rc<str>, symbol_ids: Vec<i64>) {
+        self.map.insert(label, symbol_ids);
+    }
+
+    /// Look up the resolved symbol IDs for `label`.  Returns an empty
+    /// slice if the label is missing — an ephemeral op should treat
+    /// that as "no rows to emit" rather than panicking.
+    pub fn get(&self, label: &str) -> &[i64] {
+        self.map.get(label).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+}
+
 /// Trait for ephemeral operations that can be batched into a layer block.
 ///
 /// Ephemeral verbs are only available inside `layer { }` blocks — this trait
 /// is the only interface through which they execute.
 pub(crate) trait EphemeralOp: std::fmt::Debug + Send + Sync {
-    /// Contribute this operation's parameters to a combined hash.
-    fn hash_params(&self, h: &mut Sha256);
+    /// Contribute this operation's parameters to a combined hash.  Ops that
+    /// reference `@label` arguments hash the *resolved* IDs (not the label
+    /// string) so the cache key reflects the actual rows the op will emit.
+    fn hash_params(&self, h: &mut Sha256, resolved: &LabelResolutions);
     /// Collect this operation's rows into the batch for bulk insert.
-    fn collect_rows(&self, batch: &mut LayerBatch);
+    fn collect_rows(&self, batch: &mut LayerBatch, resolved: &LabelResolutions);
+    /// Labels referenced by this op's arguments, if any.  Used by
+    /// `build_dependency_graph` to add User edges so the labelled statement
+    /// runs before this op's enclosing layer materialises.  Default empty.
+    fn label_refs(&self) -> Vec<String> { Vec::new() }
 }
 
 /// Shared, mutable collection of ephemeral operations for a `layer { … }`
@@ -113,7 +154,7 @@ impl EphemeralSymbolVerb {
 }
 
 impl EphemeralOp for EphemeralSymbolVerb {
-    fn hash_params(&self, h: &mut Sha256) {
+    fn hash_params(&self, h: &mut Sha256, _resolved: &LabelResolutions) {
         h.update(b"ephemeral_symbol");
         h.update((self.name.len() as u64).to_le_bytes());
         h.update(self.name.as_bytes());
@@ -125,7 +166,7 @@ impl EphemeralOp for EphemeralSymbolVerb {
         }
     }
 
-    fn collect_rows(&self, batch: &mut LayerBatch) {
+    fn collect_rows(&self, batch: &mut LayerBatch, _resolved: &LabelResolutions) {
         let (path, leaf_name) = symbol_path_and_leaf(&self.name, self.symbol_type);
         batch.symbols.push(EphSymbolRow {
             name: self.name.clone(),
@@ -138,14 +179,76 @@ impl EphemeralOp for EphemeralSymbolVerb {
     }
 }
 
-/// EphemeralInstanceVerb - creates an ephemeral instance row.
+/// Symbol-ID input for an ephemeral verb.  Resolves to a *set* of
+/// symbol IDs at materialise time; the verb emits one row per
+/// resolved symbol.
 ///
-/// Only available inside `layer { }` blocks.
-/// Usage: ephemeral_instance(symbol_id="<id>", object_id="1",
-///        start="0", end="10", instance_type="1")
+/// **Multi-row semantics by default.**  An ephemeral verb takes a
+/// `SymbolRef` and emits N rows, where N is the resolved set's size:
+///   - `symbol_id="1"` → `Literal(1)` → resolves to one symbol → one row.
+///   - `symbol_id="@foo"` → `Label("foo")` → resolves to whatever the
+///     `@foo` statement selected → N rows.
+///   - If a label resolves to zero symbols (statement matched nothing),
+///     zero rows are emitted and a `tracing::warn!` is logged from
+///     `compute_roots` so the operator can tell the layer was a no-op.
+///
+/// Authors writing queries should think in N-row terms: a literal is
+/// just the degenerate `N=1` case.
+#[derive(Debug)]
+enum SymbolRef {
+    Literal(i64),
+    Label(String),
+}
+
+impl SymbolRef {
+    /// Parse `"123"` → `Literal(123)` or `"@foo"` → `Label("foo".into())`.
+    fn parse(raw: &str, key: &str) -> Result<Self> {
+        if let Some(label) = raw.strip_prefix('@') {
+            if label.is_empty() {
+                bail!("'{}' label reference must not be empty", key);
+            }
+            Ok(SymbolRef::Label(label.to_string()))
+        } else {
+            let id: i64 = raw.parse().map_err(|_| {
+                anyhow::anyhow!(
+                    "'{}' must be a valid i64 or a label reference \
+                     (labels start with '@', e.g. '@foo')",
+                    key,
+                )
+            })?;
+            Ok(SymbolRef::Literal(id))
+        }
+    }
+
+    /// Resolve to the set of symbol IDs the verb should materialise.
+    /// Always returns 0..N elements; `Literal` is the `N=1` case.
+    fn resolve_vec(&self, resolved: &LabelResolutions) -> Vec<i64> {
+        match self {
+            SymbolRef::Literal(id) => vec![*id],
+            SymbolRef::Label(label) => resolved.get(label).to_vec(),
+        }
+    }
+
+    fn label(&self) -> Option<&str> {
+        match self {
+            SymbolRef::Literal(_) => None,
+            SymbolRef::Label(l) => Some(l.as_str()),
+        }
+    }
+}
+
+/// EphemeralInstanceVerb - creates ephemeral instance rows.
+///
+/// Only available inside `layer { }` blocks.  Emits one row per
+/// resolved symbol — see [`SymbolRef`] for the multi-row semantic.
+///
+/// Usage: `ephemeral_instance(symbol_id="<id>", object_id="1",
+///        start="0", end="10", instance_type="1")` for a literal
+///        (single-row) input, or `symbol_id="@label"` for a
+///        label-resolved (`N`-row) input.
 #[derive(Debug)]
 pub(in crate::verb) struct EphemeralInstanceVerb {
-    symbol_id: i64,
+    symbol: SymbolRef,
     object_id: i32,
     start: i64,
     end: i64,
@@ -159,7 +262,9 @@ impl EphemeralInstanceVerb {
         _positional: &Vec<String>,
         named: &HashMap<String, String>,
     ) -> Result<Self> {
-        let symbol_id: i64 = parse_required!(named, "symbol_id", i64);
+        let symbol_raw = named.get("symbol_id")
+            .ok_or_else(|| anyhow::anyhow!("requires 'symbol_id' parameter"))?;
+        let symbol = SymbolRef::parse(symbol_raw, "symbol_id")?;
         let object_id: i32 = parse_required!(named, "object_id", i32);
         let start: i64 = parse_required!(named, "start", i64);
         let end: i64 = parse_required!(named, "end", i64);
@@ -169,7 +274,7 @@ impl EphemeralInstanceVerb {
         }
 
         Ok(Self {
-            symbol_id,
+            symbol,
             object_id,
             start,
             end,
@@ -187,34 +292,53 @@ impl EphemeralInstanceVerb {
 }
 
 impl EphemeralOp for EphemeralInstanceVerb {
-    fn hash_params(&self, h: &mut Sha256) {
+    fn hash_params(&self, h: &mut Sha256, resolved: &LabelResolutions) {
         h.update(b"ephemeral_instance");
-        h.update(self.symbol_id.to_le_bytes());
+        // Hash the *resolved* symbol IDs (not the label string), so the
+        // cache key reflects the actual rows we'll emit.  A literal
+        // `symbol_id="42"` hashes the same as before; `symbol="@x"` where
+        // @x resolves to [42] hashes identically (cache shared if the
+        // resolved set matches).
+        let ids = self.symbol.resolve_vec(resolved);
+        h.update((ids.len() as u64).to_le_bytes());
+        for id in &ids {
+            h.update(id.to_le_bytes());
+        }
         h.update(self.object_id.to_le_bytes());
         h.update(self.start.to_le_bytes());
         h.update(self.end.to_le_bytes());
         h.update(self.instance_type.to_le_bytes());
     }
 
-    fn collect_rows(&self, batch: &mut LayerBatch) {
-        batch.instances.push(EphInstanceRow {
-            symbol_id: self.symbol_id,
-            object_id: self.object_id,
-            start: self.start,
-            end: self.end,
-            instance_type: self.instance_type,
-        });
+    fn collect_rows(&self, batch: &mut LayerBatch, resolved: &LabelResolutions) {
+        for symbol_id in self.symbol.resolve_vec(resolved) {
+            batch.instances.push(EphInstanceRow {
+                symbol_id,
+                object_id: self.object_id,
+                start: self.start,
+                end: self.end,
+                instance_type: self.instance_type,
+            });
+        }
+    }
+
+    fn label_refs(&self) -> Vec<String> {
+        self.symbol.label().map(|l| vec![l.to_string()]).unwrap_or_default()
     }
 }
 
-/// EphemeralRefVerb - creates an ephemeral ref row.
+/// EphemeralRefVerb - creates ephemeral ref rows.
 ///
-/// Only available inside `layer { }` blocks.
-/// Usage: ephemeral_ref(to_symbol="<id>", from_object="1",
-///        start="0", end="10")
+/// Only available inside `layer { }` blocks.  Emits one row per
+/// resolved to-symbol — see [`SymbolRef`] for the multi-row semantic.
+///
+/// Usage: `ephemeral_ref(to_symbol="<id>", from_object="1",
+///        start="0", end="10")` for a literal (single-row) input,
+///        or `to_symbol="@label"` for a label-resolved (`N`-row)
+///        input.
 #[derive(Debug)]
 pub(in crate::verb) struct EphemeralRefVerb {
-    to_symbol: i64,
+    to_symbol: SymbolRef,
     from_object: i32,
     start: i64,
     end: i64,
@@ -227,7 +351,9 @@ impl EphemeralRefVerb {
         _positional: &Vec<String>,
         named: &HashMap<String, String>,
     ) -> Result<Self> {
-        let to_symbol: i64 = parse_required!(named, "to_symbol", i64);
+        let to_symbol_raw = named.get("to_symbol")
+            .ok_or_else(|| anyhow::anyhow!("requires 'to_symbol' parameter"))?;
+        let to_symbol = SymbolRef::parse(to_symbol_raw, "to_symbol")?;
         let from_object: i32 = parse_required!(named, "from_object", i32);
         let start: i64 = parse_required!(named, "start", i64);
         let end: i64 = parse_required!(named, "end", i64);
@@ -250,21 +376,31 @@ impl EphemeralRefVerb {
 }
 
 impl EphemeralOp for EphemeralRefVerb {
-    fn hash_params(&self, h: &mut Sha256) {
+    fn hash_params(&self, h: &mut Sha256, resolved: &LabelResolutions) {
         h.update(b"ephemeral_ref");
-        h.update(self.to_symbol.to_le_bytes());
+        let ids = self.to_symbol.resolve_vec(resolved);
+        h.update((ids.len() as u64).to_le_bytes());
+        for id in &ids {
+            h.update(id.to_le_bytes());
+        }
         h.update(self.from_object.to_le_bytes());
         h.update(self.start.to_le_bytes());
         h.update(self.end.to_le_bytes());
     }
 
-    fn collect_rows(&self, batch: &mut LayerBatch) {
-        batch.refs.push(EphRefRow {
-            to_symbol: self.to_symbol,
-            from_object: self.from_object,
-            start: self.start,
-            end: self.end,
-        });
+    fn collect_rows(&self, batch: &mut LayerBatch, resolved: &LabelResolutions) {
+        for to_symbol in self.to_symbol.resolve_vec(resolved) {
+            batch.refs.push(EphRefRow {
+                to_symbol,
+                from_object: self.from_object,
+                start: self.start,
+                end: self.end,
+            });
+        }
+    }
+
+    fn label_refs(&self) -> Vec<String> {
+        self.to_symbol.label().map(|l| vec![l.to_string()]).unwrap_or_default()
     }
 }
 
@@ -324,10 +460,17 @@ impl Verb for LayerVerb {
 impl Selector for LayerVerb {
     fn has_layer_spec(&self) -> bool { true }
 
+    fn layer_label_refs(&self) -> Vec<String> {
+        // Uncontended — see EphemeralOps rustdoc.
+        let ops = self.ops.lock().unwrap();
+        ops.iter().flat_map(|op| op.label_refs()).collect()
+    }
+
     async fn layer_spec(
         &self,
         _cfg: &ControlFlowGraph,
         eph: &EphContext,
+        resolved: &LabelResolutions,
     ) -> Result<Option<crate::verb::LayerSpec>> {
         // Compute hash and collect batch synchronously, then release the lock
         // before any .await points.  The `Mutex` is uncontended at this point
@@ -345,14 +488,15 @@ impl Selector for LayerVerb {
             for op in ops.iter() {
                 // Op insertion order is significant for the cache key by design;
                 // two layers with the same ops in different order will not share
-                // cache state.
-                op.hash_params(&mut h);
+                // cache state.  Resolved labels (if any) feed into the hash via
+                // the op itself, so the cache key reflects the actual rows.
+                op.hash_params(&mut h, resolved);
             }
             let hash_vec = h.finalize().to_vec();
 
             let mut batch = LayerBatch::new();
             for op in ops.iter() {
-                op.collect_rows(&mut batch);
+                op.collect_rows(&mut batch, resolved);
             }
             let mut hash = [0u8; 32];
             hash.copy_from_slice(&hash_vec);

@@ -1418,6 +1418,25 @@ impl Index {
     }
 
 
+    /// Count the non-canary ephemeral layers currently in the table.
+    /// Used by tests that verify cache reuse (a query that hits the
+    /// cache should leave this count unchanged).  The canary is
+    /// excluded so the count reflects only request-driven layers.
+    pub async fn eph_layer_count(&self) -> Result<i64> {
+        use diesel_async::RunQueryDsl;
+        let connection = &mut self.pool.get().await
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+        let sql = format!(
+            "SELECT COUNT(*) AS c FROM index.eph_layers WHERE {}",
+            not_canary_predicate(),
+        );
+        let row: CountRow = diesel::sql_query(sql)
+            .get_result(&mut *connection)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to count eph layers: {}", e))?;
+        Ok(row.c)
+    }
+
     /// Delete ephemeral layers older than the given duration. CASCADE cleans up rows.
     pub async fn purge_old_eph_layers(&self, older_than: Duration) -> Result<u64> {
         let connection = &mut self.pool.get().await
