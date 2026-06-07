@@ -52,7 +52,7 @@ mod labels;
 mod preamble;
 
 pub use self::generic::{DefaultTypeFilter, DirectOnlyFilter, GenericFilter, GenericSelector, NameSelector, UnitVerb};
-pub(crate) use self::generic::EphemeralOps;
+pub(crate) use self::generic::{EphemeralOps, LabelResolutions};
 
 use self::generic::{build_generic_verb, ForcedVerb};
 use self::labels::{LabelVerb, UserVerb};
@@ -256,6 +256,14 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
     fn as_labeler<'a>(&'a self) -> Result<&'a dyn Labeler> {
         bail!("Not a marker verb")
     }
+
+    /// Labels referenced by this verb's layer-creation inputs (e.g. an
+    /// `ephemeral_instance(symbol="@foo", …)` inside a `layer { … }`
+    /// block exposes `["foo"]` here).  Used by
+    /// `build_dependency_graph` to add User edges from the labelled
+    /// statement to this verb's enclosing statement so the labelled
+    /// statement runs first.  Default empty.
+    fn layer_label_refs(&self) -> Vec<String> { Vec::new() }
 
     fn suppresses_default_type_filter(&self) -> bool {
         false
@@ -530,6 +538,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         &self,
         _cfg: &ControlFlowGraph,
         _eph: &EphContext,
+        _resolved: &LabelResolutions,
     ) -> Result<Option<LayerSpec>> {
         Ok(None)
     }

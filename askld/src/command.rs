@@ -4,7 +4,7 @@ use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::Rule;
 use crate::span::Span;
 use crate::statement::Statement;
-use crate::verb::{add_verb, ConstraintAction, DeriveMethod, Filter, Labeler, LayerPopulate, LayerSpec, NotificationContext, Selector, SelectorId, Verb, VerbTag, find_symbol_by_instance_id};
+use crate::verb::{add_verb, ConstraintAction, DeriveMethod, Filter, Labeler, LabelResolutions, LayerPopulate, LayerSpec, NotificationContext, Selector, SelectorId, Verb, VerbTag, find_symbol_by_instance_id};
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::{CompositeFilter, EphContext, EphLayerKind, InnermostOnlyMixin, Index, ScopeContext, Selection, SymbolInstanceIdMixin};
@@ -179,14 +179,22 @@ impl Command {
     ///   contribution in turn, `kind = Composite`, `parent_id` taken from
     ///   the first spec (all specs were built from the same `eph`
     ///   snapshot, so they agree).
+    /// Labels referenced by any layer-creating verb in this command.
+    /// Used by `build_dependency_graph` to add User edges so the
+    /// labelled statements run before this command's layer materialises.
+    pub fn layer_label_refs(&self) -> Vec<String> {
+        self.verbs.iter().flat_map(|v| v.layer_label_refs()).collect()
+    }
+
     pub async fn aggregate_layer_spec(
         &self,
         cfg: &ControlFlowGraph,
         eph: &EphContext,
+        resolved: &LabelResolutions,
     ) -> Result<Option<LayerSpec>> {
         let mut specs: Vec<LayerSpec> = Vec::new();
         for selector in self.selectors() {
-            if let Some(spec) = selector.layer_spec(cfg, eph).await? {
+            if let Some(spec) = selector.layer_spec(cfg, eph, resolved).await? {
                 specs.push(spec);
             }
         }
@@ -403,6 +411,7 @@ impl Command {
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
         eph: &EphContext,
+        resolved: &LabelResolutions,
     ) -> Result<ComputeResult, pest::error::Error<Rule>> {
         let selectors: Vec<&dyn Selector> = self.selectors().collect();
 
@@ -447,7 +456,7 @@ impl Command {
         // aggregation is in `Command::aggregate_layer_spec`.
         let mut local_eph = eph.clone();
         let materialised_layer_id: Option<i64> = if let Some(spec) =
-            self.aggregate_layer_spec(cfg, &local_eph).await.map_err(to_pest)?
+            self.aggregate_layer_spec(cfg, &local_eph, resolved).await.map_err(to_pest)?
         {
             let (layer_id, created, _) = cfg.index.with_eph_layer(
                 spec.parent_id, &spec.hash, spec.kind,

@@ -8,7 +8,7 @@ use crate::hierarchy::Hierarchy;
 use crate::offset_range::range_bounds_to_offsets;
 use crate::parser::Rule;
 use crate::scope::{Scope, StatementIter};
-use crate::verb::NotificationContext;
+use crate::verb::{LabelResolutions, NotificationContext};
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::{ScopeContext, Selection};
@@ -201,6 +201,7 @@ impl Statement {
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         statements: &Vec<Rc<Statement>>,
+        labeled_statements: &LabeledStatements,
     ) -> Result<(), pest::error::Error<Rule>> {
         let _span = tracing::info_span!("compute_roots").entered();
 
@@ -248,8 +249,32 @@ impl Statement {
                 .dependencies
                 .iter()
                 .any(|d| d.dependency_role == DependencyRole::Sibling);
-            if has_sibling_dep {
+            // Pre-drain when this statement either has a Sibling edge
+            // (sequence-with-prior-layer-creating-sibling) **or** has any
+            // `@label` reference inside a layer-creating verb.  In the
+            // latter case the labelled statement must have applied its
+            // selection so we can resolve the label to symbol IDs before
+            // pushing the future.
+            let label_refs = statement.command().layer_label_refs();
+            if has_sibling_dep || !label_refs.is_empty() {
                 drain_pending(&mut pending, ctx).await?;
+            }
+
+            // Resolve any `@label` references against the now-applied
+            // labelled statements' selections.  Empty `LabelResolutions`
+            // for the vast majority of statements that don't reference
+            // labels inside layer-creating verbs.
+            let mut resolved = LabelResolutions::new();
+            for label in label_refs {
+                if let Some(labelled) = labeled_statements
+                    .get_statements(&label)
+                    .and_then(|stmts| stmts.first())
+                {
+                    if let Some(sel) = labelled.get_selection(ctx) {
+                        let ids: Vec<i64> = sel.nodes.iter().map(|n| n.symbol.id).collect();
+                        resolved.insert(label, ids);
+                    }
+                }
             }
 
             let eph = ctx.eph.clone();
@@ -261,7 +286,7 @@ impl Statement {
                 statement: stmt.clone(),
                 future: Box::pin(async move {
                     stmt.command()
-                        .compute_selected(cfg, parent_scope, children_scope, &eph)
+                        .compute_selected(cfg, parent_scope, children_scope, &eph, &resolved)
                         .await
                 }),
             });
@@ -441,8 +466,10 @@ impl Statement {
         self.mark_weak_statements(&statements);
 
         // Compute initial selections; layer-creating statements
-        // pre-drain pending via the Sibling edges installed above.
-        self.compute_roots(ctx, cfg, &statements).await?;
+        // pre-drain pending via the Sibling edges installed above, and
+        // layer-creating statements with `@label` references resolve
+        // them against the labelled statements' selections at push time.
+        self.compute_roots(ctx, cfg, &statements, &labeled_statements).await?;
 
         self.run_worklist(ctx, cfg, &statements).await?;
 

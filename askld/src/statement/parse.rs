@@ -198,5 +198,45 @@ pub fn build_dependency_graph(
         }
     }
 
+    // Labels referenced from inside layer-creating verbs
+    // (e.g. `ephemeral_instance(symbol="@foo", …)` inside `layer { … }`).
+    // The verb itself isn't a user-selector — its label reference is
+    // buried inside its arguments — so it doesn't get picked up by the
+    // selector iteration above.  Surface them explicitly so the labelled
+    // statement runs first and `compute_roots` can resolve the label
+    // to symbol IDs at push time.
+    for label in statement.command().layer_label_refs() {
+        let labeled_statements = if let Some(labeled_statements) =
+            labeled_statements_map.get_statements(&label)
+        {
+            labeled_statements
+        } else {
+            return Err(Error::new_from_span(
+                pest::error::ErrorVariant::CustomError {
+                    message: format!(
+                        "Label '{}' not found for layer-creating verb argument",
+                        label
+                    ),
+                },
+                statement.command().span().as_pest_span(),
+            ));
+        };
+
+        for labeled_statement in labeled_statements {
+            labeled_statement
+                .get_state_mut()
+                .dependents
+                .push(StatementDependent::new_user(
+                    statement.clone(),
+                    label.as_str(),
+                ));
+            state.dependencies.push(StatementDependency::new_with_kind(
+                labeled_statement.clone(),
+                DependencyRole::User,
+                DependencyKind::Necessary,
+            ));
+        }
+    }
+
     Ok(())
 }
