@@ -2,7 +2,7 @@ use crate::cfg::{ControlFlowGraph, EdgeList, HasEdge, HasEdgeList, NodeList, Sym
 use crate::command::{Command, ComputeResult, LabeledStatements};
 use crate::execution_context::ExecutionContext;
 use crate::execution_state::{
-    DependencyRole, ExecutionState, RelationshipType, StatementDependent,
+    DependencyRole, ExecutionState, RelationshipType, StatementDependency, StatementDependent,
 };
 use crate::hierarchy::Hierarchy;
 use crate::offset_range::range_bounds_to_offsets;
@@ -267,6 +267,35 @@ impl Statement {
             build_dependency_graph(statement, &labeled_statements_map)?;
             Ok(true)
         })?;
+
+        // Top-level sibling-ordering edges: between every pair of
+        // top-level statements `(S_i, S_j)` with `i < j` where at least
+        // one has a layer-creating verb, add a Sibling dependency
+        // `S_j depends on S_i`.  The edge expresses "S_j's ephemeral
+        // context must reflect S_i's materialised layer before S_j
+        // computes."  No notification data flows along these edges —
+        // they're pure ordering — see [`DependencyRole::Sibling`].
+        //
+        // We only consider top-level statements (no parent); nested
+        // siblings still rely on Parent/Child edges.
+        let top_level: Vec<Rc<Statement>> = self.scope().statements().collect();
+        for j in 0..top_level.len() {
+            for i in 0..j {
+                let s_i = &top_level[i];
+                let s_j = &top_level[j];
+                if !s_i.command().has_layer_spec() && !s_j.command().has_layer_spec() {
+                    continue;
+                }
+                s_i.get_state_mut().dependents.push(StatementDependent::new(
+                    s_j.clone(),
+                    DependencyRole::Sibling,
+                ));
+                s_j.get_state_mut().dependencies.push(StatementDependency::new(
+                    s_i.clone(),
+                    DependencyRole::Sibling,
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -767,6 +796,14 @@ impl Statement {
         let _update_dependency: tracing::span::EnteredSpan =
             tracing::debug_span!("notify").entered();
 
+        // Sibling edges carry no selection data — they exist only to
+        // express "compute me after this sibling's ephemeral layer has
+        // materialised."  No re-derivation needed; the receiver's
+        // initial compute_selected already saw the right ctx.eph.
+        if dependent.dependency_role == DependencyRole::Sibling {
+            return Ok(PropagationResult { changed: false });
+        }
+
         if dependent.dependency_role == DependencyRole::Parent {
             // Child notifying parent — defer until all children have selections.
             let all_children_resolved = dependent
@@ -832,6 +869,10 @@ impl Statement {
         let rel_type = match dependent.dependency_role {
             DependencyRole::Child => dependent.statement.get_relationship_type(),
             DependencyRole::Parent | DependencyRole::User => self.get_relationship_type(),
+            // Unreachable: Sibling notifications are short-circuited at the
+            // top of `notify`.  Use the notifier's rel_type as a defensive
+            // default rather than panic.
+            DependencyRole::Sibling => self.get_relationship_type(),
         };
         let notif_ctx = NotificationContext {
             role: dependent.dependency_role,

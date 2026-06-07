@@ -8,6 +8,12 @@ pub enum DependencyRole {
     Parent,
     Child,
     User,
+    /// Source-order ordering edge between top-level sibling statements
+    /// when at least one creates an ephemeral layer.  Pure ordering —
+    /// carries no selection data, so notification is a no-op for the
+    /// receiver.  Exists so the dependency graph can express
+    /// "compute me after this sibling's layer has materialised."
+    Sibling,
 }
 
 /// Whether a dependency must be satisfied before any output can be produced,

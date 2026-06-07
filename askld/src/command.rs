@@ -309,6 +309,10 @@ impl Command {
                     selector.derive_from_provider(ctx, index, &selector_filters, notifier)
                         .await
                 }
+                // Sibling notifications never reach this dispatch — they're
+                // short-circuited to a no-op in `Statement::notify`.  If they
+                // somehow do, treat as a no-op (no selection produced).
+                DependencyRole::Sibling => Ok(None),
             }
             .map_err(|e| {
                 pest::error::Error::new_from_span(

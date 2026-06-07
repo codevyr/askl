@@ -329,6 +329,8 @@ impl SelectorState {
                 DependencyRole::User => {
                     self.constrain_by_owner(dependency);
                 }
+                // Sibling edges carry no constraint data — pure ordering.
+                DependencyRole::Sibling => {}
             }
         }
 
