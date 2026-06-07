@@ -3660,3 +3660,117 @@ fn wrap_loc_yields_single_instance_and_parent_has_edge() {
         res.has_edges.0.iter().collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn ephemeral_instance_with_label_input_resolves_to_labelled_selection() {
+    // Phase 5 integration test for the data-flow refactor:
+    // an `ephemeral_instance` argument can reference a `@label` of a prior
+    // statement, and the verb resolves the label to the labelled
+    // statement's selected symbol IDs at materialise time.  This is the
+    // proof that ephemeral layer creation can depend on a real-DB
+    // selection — impossible under the old phase-based "all layers
+    // before all selections" model.
+    //
+    // Query:
+    //   @target "foo";
+    //   layer { ephemeral_instance(symbol_id="@target", object_id="1",
+    //                              start="50000", end="50100",
+    //                              instance_type="1") }
+    //
+    // Expected:
+    //   - The labelled statement's selection includes "foo" instance 91.
+    //   - The layer materialises a new ephemeral instance (negative id)
+    //     pointing at the same symbol id (=1) that "@target" resolved to.
+    //   - End-to-end ordering: parser adds a User edge from @target's
+    //     statement to the layer statement; `compute_roots` pre-drains
+    //     before pushing the layer statement; `LabelResolutions`
+    //     resolves @target → [1] at push time; the populate batch
+    //     emits one EphInstanceRow with symbol_id=1.
+    const QUERY: &str = concat!(
+        r#"@target "foo"; "#,
+        r#"layer { ephemeral_instance(symbol_id="@target", object_id="1", "#,
+        r#"start="50000", end="50100", instance_type="1") }"#,
+    );
+    let res = run_query(VERB_TEST, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(91)),
+        "labelled @target should resolve to persistent foo instance 91; got {:?}",
+        nodes
+    );
+    let has_eph = nodes.iter().any(|id| {
+        let v: i64 = (*id).into();
+        v < 0
+    });
+    assert!(
+        has_eph,
+        "layer should materialise a new ephemeral instance with negative id; got {:?}",
+        nodes
+    );
+}
+
+#[test]
+fn ephemeral_instance_label_hash_matches_equivalent_literal() {
+    // Validates the cache-key semantic: an ephemeral_instance with
+    // symbol_id="@target" where @target resolves to symbol id 1 must
+    // produce the same layer hash as symbol_id="1" — same resolved
+    // symbol IDs in the hash inputs means the same cache entry.
+    //
+    // Hashes are private, but cache sharing has a direct
+    // observable: a shared layer means a shared row in
+    // `symbol_instances` with a shared negative `id`.  We assert that
+    // the negative-ID set produced by the literal form intersects the
+    // negative-ID set produced by the label form — only possible if
+    // both runs hit the same eph_layers row.  (Using identical
+    // start/end ensures the rows are byte-identical; running the
+    // label form after the literal means the literal's already-
+    // committed row is what the label run finds via ON CONFLICT.)
+    //
+    // Robust against concurrent shared-DB pollution: we compare the
+    // *negative IDs we produced* across the two runs, not absolute
+    // table counts.
+    const LITERAL_FIRST: &str = concat!(
+        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="60500", end="60600", instance_type="1") }"#,
+    );
+    const LABEL_VARIANT: &str = concat!(
+        r#"@target "foo"; "#,
+        r#"layer { ephemeral_instance(symbol_id="@target", object_id="1", "#,
+        r#"start="60500", end="60600", instance_type="1") }"#,
+    );
+
+    let res_literal = run_query(VERB_TEST, LITERAL_FIRST);
+    let res_label = run_query(VERB_TEST, LABEL_VARIANT);
+
+    let neg_ids = |res: &crate::statement::ExecutionResult| -> std::collections::HashSet<i64> {
+        res.nodes
+            .as_vec()
+            .iter()
+            .map(|id| <SymbolInstanceId as Into<i64>>::into(*id))
+            .filter(|id| *id < 0)
+            .collect()
+    };
+    let literal_eph = neg_ids(&res_literal);
+    let label_eph = neg_ids(&res_label);
+
+    assert!(
+        !literal_eph.is_empty(),
+        "literal form must produce at least one ephemeral instance"
+    );
+    assert!(
+        !label_eph.is_empty(),
+        "label form must produce at least one ephemeral instance"
+    );
+
+    let shared: std::collections::HashSet<_> =
+        literal_eph.intersection(&label_eph).copied().collect();
+    assert!(
+        !shared.is_empty(),
+        "ephemeral_instance(symbol_id=\"@target\") where @target → [1] \
+         must share at least one materialised instance row with the \
+         equivalent literal form (same layer hash means same eph_layers \
+         row means same instance id).  literal_eph={:?}, label_eph={:?}",
+        literal_eph, label_eph,
+    );
+}

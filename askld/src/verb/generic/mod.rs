@@ -26,7 +26,7 @@ pub use self::filters::{DefaultTypeFilter, DirectOnlyFilter, GenericFilter};
 pub use self::selectors::{GenericSelector, NameSelector, UnitVerb};
 
 pub(super) use self::filters::{IgnoreVerb, ProjectFilter};
-pub(crate) use self::ephemeral::EphemeralOps;
+pub(crate) use self::ephemeral::{EphemeralOps, LabelResolutions};
 pub(super) use self::ephemeral::LayerVerb;
 use self::ephemeral::{EphemeralInstanceVerb, EphemeralRefVerb, EphemeralSymbolVerb};
 pub(super) use self::loc::LocSelector;

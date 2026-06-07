@@ -198,5 +198,68 @@ pub fn build_dependency_graph(
         }
     }
 
+    // Labels referenced from inside layer-creating verbs
+    // (e.g. `ephemeral_instance(symbol="@foo", …)` inside `layer { … }`).
+    // The verb itself isn't a user-selector — its label reference is
+    // buried inside its arguments — so it doesn't get picked up by the
+    // selector iteration above.  Surface them as `PreSeedLabel` edges
+    // so (a) `compute_roots` pre-drains pending before pushing this
+    // statement, and (b) the label name travels with the edge for
+    // resolution at push time without needing the `labeled_statements`
+    // map at execution time.
+    //
+    // We use `PreSeedLabel`, not `User`, because the notification path
+    // (`run_worklist` → `derive_from_provider`) is a no-op for
+    // layer-using statements (their selection is already determined by
+    // `compute_selected` once the layer materialises).  `User` would
+    // fire pointless notifications.  `PreSeedLabel` is the right
+    // semantic name for "drain before me, and bring this label's IDs."
+    for label in statement.command().layer_label_refs() {
+        let labeled_statements = if let Some(labeled_statements) =
+            labeled_statements_map.get_statements(&label)
+        {
+            labeled_statements
+        } else {
+            return Err(Error::new_from_span(
+                pest::error::ErrorVariant::CustomError {
+                    message: format!(
+                        "Label '{}' not found for layer-creating verb argument",
+                        label
+                    ),
+                },
+                statement.command().span().as_pest_span(),
+            ));
+        };
+
+        let label_rc: Rc<str> = Rc::from(label.as_str());
+        for labeled_statement in labeled_statements {
+            // Dedupe: same (statement, label) pair shouldn't get
+            // duplicate PreSeedLabel edges if two ephemeral verbs in
+            // the same statement reference the same `@label`.
+            let already_dep = state.dependencies.iter().any(|d| {
+                matches!(
+                    &d.dependency_role,
+                    DependencyRole::PreSeedLabel(l) if l.as_ref() == label.as_str()
+                ) && Rc::ptr_eq(&d.dependency, labeled_statement)
+            });
+            if already_dep {
+                continue;
+            }
+            let role = DependencyRole::PreSeedLabel(label_rc.clone());
+            labeled_statement
+                .get_state_mut()
+                .dependents
+                .push(StatementDependent::new(
+                    statement.clone(),
+                    role.clone(),
+                ));
+            state.dependencies.push(StatementDependency::new_with_kind(
+                labeled_statement.clone(),
+                role,
+                DependencyKind::Necessary,
+            ));
+        }
+    }
+
     Ok(())
 }

@@ -107,6 +107,7 @@ impl Selector for LocSelector {
         &self,
         cfg: &ControlFlowGraph,
         eph: &EphContext,
+        _resolved: &crate::verb::LabelResolutions,
     ) -> Result<Option<LayerSpec>> {
         // 1. Compute content-addressed hash from inputs only.
         let mut hasher = Sha256::new();
