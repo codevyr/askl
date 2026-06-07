@@ -232,6 +232,26 @@ impl Statement {
         let mut pending: Vec<PendingCompute<'_>> = vec![];
 
         for statement in statements.iter() {
+            // Pre-drain when this statement has any Sibling dependency:
+            // its `eph` capture must reflect every prior layer-creating
+            // sibling's materialised layer before its `compute_selected`
+            // starts.  The Sibling edges (added in
+            // `Self::build_dependency_graph`) record exactly this:
+            // "compute me after these statements have applied."
+            //
+            // This replaces the old post-`has_layer_spec` drain.  The two
+            // are equivalent for correctness; the explicit edge form lets
+            // the dependency graph carry the ordering instead of an ad-hoc
+            // check in the executor.
+            let has_sibling_dep = statement
+                .get_state()
+                .dependencies
+                .iter()
+                .any(|d| d.dependency_role == DependencyRole::Sibling);
+            if has_sibling_dep {
+                drain_pending(&mut pending, ctx).await?;
+            }
+
             let eph = ctx.eph.clone();
             let parent_scope = build_parent_scope(statement, ctx, &eph);
             let children_scope = build_children_scope(statement, ctx, &eph);
@@ -245,10 +265,6 @@ impl Statement {
                         .await
                 }),
             });
-
-            if statement.command().has_layer_spec() {
-                drain_pending(&mut pending, ctx).await?;
-            }
         }
 
         drain_pending(&mut pending, ctx).await?;
@@ -414,12 +430,19 @@ impl Statement {
             Ok(true)
         })?;
 
-        // Compute initial selections via phased readiness loop
-        self.compute_roots(ctx, cfg, &statements).await?;
-
+        // Build the dependency graph first — `compute_roots` consults
+        // `DependencyRole::Sibling` edges to decide when to pre-drain
+        // pending compute futures so each statement's `eph` capture
+        // reflects every prior layer-creating sibling's materialised
+        // layer.  See `Self::build_dependency_graph` (sibling edges)
+        // and `compute_roots` (pre-drain).
         self.build_dependency_graph(&labeled_statements)?;
 
         self.mark_weak_statements(&statements);
+
+        // Compute initial selections; layer-creating statements
+        // pre-drain pending via the Sibling edges installed above.
+        self.compute_roots(ctx, cfg, &statements).await?;
 
         self.run_worklist(ctx, cfg, &statements).await?;
 
