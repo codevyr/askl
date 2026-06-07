@@ -16,7 +16,7 @@ use std::{collections::HashMap, sync::OnceLock};
 use crate::{cfg::ControlFlowGraph, execution_context::ExecutionContext, statement::Statement};
 
 use super::{ConstraintAction, DeriveMethod, Labeler, NotificationContext, Selector, SelectorState, Verb};
-use crate::verb::{EphAwareFilter, Filter};
+use crate::verb::Filter;
 
 #[derive(Debug)]
 pub(super) struct LabelVerb {
@@ -217,7 +217,6 @@ impl Selector for UserVerb {
         ctx: &mut ExecutionContext,
         _index: &Index,
         _selector_filters: &[&dyn Filter],
-        _eph_aware_filters: &[&dyn EphAwareFilter],
         parent: &Statement,
         _notif_ctx: NotificationContext,
         _parent_scope: ScopeContext,
@@ -274,7 +273,6 @@ impl Selector for UserVerb {
         ctx: &mut ExecutionContext,
         index: &Index,
         _selector_filters: &[&dyn Filter],
-        _eph_aware_filters: &[&dyn EphAwareFilter],
         child: &Statement,
         notif_ctx: NotificationContext,
         _parent_scope: ScopeContext,

@@ -4,7 +4,7 @@ use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::Rule;
 use crate::span::Span;
 use crate::statement::Statement;
-use crate::verb::{add_verb, ConstraintAction, DeriveMethod, EphAwareFilter, Filter, Labeler, NotificationContext, Selector, SelectorId, Verb, VerbTag, find_symbol_by_instance_id};
+use crate::verb::{add_verb, ConstraintAction, DeriveMethod, Filter, Labeler, NotificationContext, Selector, SelectorId, Verb, VerbTag, find_symbol_by_instance_id};
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::{CompositeFilter, EphContext, InnermostOnlyMixin, Index, ScopeContext, Selection, SymbolInstanceIdMixin};
@@ -101,10 +101,6 @@ impl Command {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_filter().ok()))
     }
 
-    pub(crate) fn eph_aware_filters<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn EphAwareFilter> + 'a> {
-        Box::new(self.verbs.iter().filter_map(|verb| verb.as_eph_aware_filter().ok()))
-    }
-
     pub fn selectors<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Selector> + 'a> {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_selector().ok()))
     }
@@ -150,11 +146,10 @@ impl Command {
     }
 
     /// Build a composite filter from all selectors (ORed across selectors).
-    /// Used by scope builders to construct ScopeContext.  Scope filters do
-    /// not include eph-aware filters — see [`Selector::build_composite_filter`].
-    pub fn get_selector_composite_filter(&self) -> Option<CompositeFilter> {
+    /// Used by scope builders to construct ScopeContext.
+    pub fn get_selector_composite_filter(&self, eph: &EphContext) -> Option<CompositeFilter> {
         let parts: Vec<_> = self.selectors()
-            .filter_map(|sel| sel.build_composite_filter(self))
+            .filter_map(|sel| sel.build_composite_filter(self, eph))
             .collect();
         match parts.len() {
             0 => None,
@@ -187,7 +182,6 @@ impl Command {
         let mut changed = false;
         let mut warnings = vec![];
         let selector_filters: Vec<&dyn Filter> = self.filters().collect();
-        let eph_aware_filters: Vec<&dyn EphAwareFilter> = self.eph_aware_filters().collect();
         let mut derivation_ids = None;
         for selector in self.selectors() {
             let span = selector.span();
@@ -230,7 +224,7 @@ impl Command {
             }
             let decl_ids = derivation_ids.as_ref().unwrap();
 
-            let mut selection = find_symbol_by_instance_id(index, &selector_filters, &eph_aware_filters, decl_ids, parent_scope.clone(), children_scope.clone(), &ctx.eph)
+            let mut selection = find_symbol_by_instance_id(index, &selector_filters, decl_ids, parent_scope.clone(), children_scope.clone(), &ctx.eph)
                 .await
                 .map_err(|e| {
                     pest::error::Error::new_from_span(
@@ -274,7 +268,6 @@ impl Command {
         let mut changed = false;
         let mut warnings = vec![];
         let selector_filters: Vec<&dyn Filter> = self.filters().collect();
-        let eph_aware_filters: Vec<&dyn EphAwareFilter> = self.eph_aware_filters().collect();
         let notifier_labels = if notif_ctx.role == DependencyRole::User {
             Some(notifier.command().get_labels())
         } else {
@@ -305,11 +298,11 @@ impl Command {
             // Derive selection: dispatch based on dependency role
             let mut selection = match notif_ctx.role {
                 DependencyRole::Child => {
-                    selector.derive_from_parent(ctx, index, &selector_filters, &eph_aware_filters, notifier, notif_ctx, parent_scope.clone(), children_scope.clone())
+                    selector.derive_from_parent(ctx, index, &selector_filters, notifier, notif_ctx, parent_scope.clone(), children_scope.clone())
                         .await
                 }
                 DependencyRole::Parent => {
-                    selector.derive_from_child(ctx, index, &selector_filters, &eph_aware_filters, notifier, notif_ctx, parent_scope.clone(), children_scope.clone())
+                    selector.derive_from_child(ctx, index, &selector_filters, notifier, notif_ctx, parent_scope.clone(), children_scope.clone())
                         .await
                 }
                 DependencyRole::User => {
@@ -392,8 +385,7 @@ impl Command {
         let mut local_eph = eph.clone();
 
         let filter_parts: Vec<CompositeFilter> = self.filters()
-            .filter_map(|f| f.get_composite_filter())
-            .chain(self.eph_aware_filters().filter_map(|f| f.get_composite_filter(eph)))
+            .filter_map(|f| f.get_composite_filter(eph))
             .collect();
 
         for selector in selectors.into_iter() {
