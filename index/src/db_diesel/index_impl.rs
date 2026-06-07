@@ -435,6 +435,147 @@ fn build_has_children_query(
         .into_boxed::<Pg>()
 }
 
+/// Variant of `build_has_children_query` whose source-row filter is
+/// `symbol_instances.id IN (SELECT id FROM candidates)`, where
+/// `candidates` is a CTE supplied by an enclosing `CteHasChildren`
+/// wrapper.  All other joins / filters / projection are identical to
+/// `build_has_children_query`, so the result shape stays
+/// `HasChildrenQuery<'static>` and rows deserialize as the natural
+/// tuple `(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)`.
+fn build_has_children_query_against_cte(eph_ids: &[i64]) -> HasChildrenQuery<'static> {
+    use crate::schema_diesel::*;
+
+    let contained_instance = CONTAINED_INSTANCE_ALIAS;
+    let contained_symbol = CONTAINED_SYMBOL_ALIAS;
+    let contained_type = CONTAINED_TYPE_ALIAS;
+    let eph_ids_owned = eph_ids.to_vec();
+
+    symbol_instances::dsl::symbol_instances
+        .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
+        .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
+        // SOURCE-row filter: read IDs from the CTE supplied by CteHasChildren.
+        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
+            "symbol_instances.id IN (SELECT id FROM candidates)"
+        ))
+        .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(symbol_instances::dsl::object_id)))
+        .inner_join(
+            contained_instance.on(
+                contained_instance.field(symbol_instances::dsl::object_id)
+                    .eq(symbol_instances::dsl::object_id)
+            ),
+        )
+        .inner_join(
+            contained_symbol.on(
+                contained_symbol.field(symbols::dsl::id)
+                    .eq(contained_instance.field(symbol_instances::dsl::symbol))
+            ),
+        )
+        .inner_join(
+            contained_type.on(
+                contained_type.field(symbol_types::dsl::id)
+                    .eq(contained_symbol.field(symbols::dsl::symbol_type))
+            ),
+        )
+        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
+            "symbol_instances.offset_range @> contained_instances.offset_range"
+        ))
+        .filter(symbol_types::dsl::level.ge(contained_type.field(symbol_types::dsl::level)))
+        .filter(symbol_instances::dsl::id.ne(contained_instance.field(symbol_instances::dsl::id)))
+        .filter(symbols::eph_layer.is_null().or(symbols::eph_layer.eq_any(eph_ids_owned.clone())))
+        .filter(symbol_instances::eph_layer.is_null().or(symbol_instances::eph_layer.eq_any(eph_ids_owned.clone())))
+        .filter(contained_symbol.field(symbols::eph_layer).is_null()
+            .or(contained_symbol.field(symbols::eph_layer).eq_any(eph_ids_owned.clone())))
+        .filter(contained_instance.field(symbol_instances::eph_layer).is_null()
+            .or(contained_instance.field(symbol_instances::eph_layer).eq_any(eph_ids_owned)))
+        .select((
+            Symbol::as_select(),
+            SymbolInstance::as_select(),
+            contained_symbol.fields(crate::schema_diesel::symbols::all_columns),
+            contained_instance.fields(crate::schema_diesel::symbol_instances::all_columns),
+            Object::as_select(),
+        ))
+        .into_boxed::<Pg>()
+}
+
+/// Custom Diesel query that wraps the typed `HasChildrenQuery` with
+/// `WITH candidates AS MATERIALIZED (…)` so PG's planner sees the
+/// exact cardinality of the source `symbol_instances` set and picks
+/// a from-candidates-driven join order instead of GIST-scanning the
+/// 27M-row `symbol_instances`.
+///
+/// The pattern follows the suggestion in
+/// <https://github.com/diesel-rs/diesel/discussions/4817#discussioncomment-14676297>:
+/// `walk_ast` emits the CTE prelude as raw SQL and then walks two
+/// typed Diesel sub-queries (`cte_body` and `outer`), so the result
+/// row type, the JOINs, the projection and the eph_visibility filters
+/// all stay typed DSL — no flat `QueryableByName` row struct, no
+/// hand-written SELECT.
+///
+/// Used only when the caller's filter has no `compose_has_children()`
+/// expression (the common case).  When a filter is present, the
+/// caller falls back to `build_has_children_query`'s DSL form because
+/// the filter SQL fragments reference unaliased table names that the
+/// DSL emits.
+struct CteHasChildren<CteBody, Outer> {
+    cte_body: CteBody,
+    outer: Outer,
+}
+
+impl<CteBody, Outer> diesel::query_builder::QueryId for CteHasChildren<CteBody, Outer> {
+    type QueryId = ();
+    const HAS_STATIC_QUERY_ID: bool = false;
+}
+
+impl<CteBody, Outer> diesel::query_builder::Query for CteHasChildren<CteBody, Outer>
+where
+    Outer: diesel::query_builder::Query,
+{
+    type SqlType = Outer::SqlType;
+}
+
+impl<CteBody, Outer> diesel::query_builder::QueryFragment<Pg> for CteHasChildren<CteBody, Outer>
+where
+    CteBody: diesel::query_builder::QueryFragment<Pg>,
+    Outer: diesel::query_builder::QueryFragment<Pg>,
+{
+    fn walk_ast<'b>(
+        &'b self,
+        mut out: diesel::query_builder::AstPass<'_, 'b, Pg>,
+    ) -> diesel::QueryResult<()> {
+        out.push_sql("WITH candidates AS MATERIALIZED (");
+        self.cte_body.walk_ast(out.reborrow())?;
+        out.push_sql(") ");
+        self.outer.walk_ast(out.reborrow())?;
+        Ok(())
+    }
+}
+
+// diesel_async provides a blanket `impl<T, Conn> RunQueryDsl<Conn> for T`,
+// so no explicit impl needed here.
+
+/// Build the inner CTE body: the source-row filter, projected to just
+/// `id`.  Typed Diesel so the binds (`source_ids`, `eph_ids`) are
+/// emitted via the normal DSL mechanism.
+fn build_has_children_cte_body(
+    source_ids: Vec<i64>,
+    eph_ids: &[i64],
+) -> diesel::query_builder::BoxedSelectStatement<
+    'static,
+    diesel::sql_types::BigInt,
+    diesel::query_builder::FromClause<crate::schema_diesel::symbol_instances::table>,
+    Pg,
+> {
+    use crate::schema_diesel::symbol_instances;
+    let eph_ids_owned = eph_ids.to_vec();
+    symbol_instances::table
+        .filter(symbol_instances::id.eq_any(source_ids))
+        .filter(symbol_instances::eph_layer.is_null()
+            .or(symbol_instances::eph_layer.eq_any(eph_ids_owned)))
+        .select(symbol_instances::id)
+        .into_boxed::<Pg>()
+}
+
+
 #[derive(Clone)]
 pub struct Index {
     pub(super) pool: bb8::Pool<AsyncPgConnection>,
@@ -1013,15 +1154,23 @@ impl Index {
                 ).entered();
             let t0 = std::time::Instant::now();
 
-            let mut has_children_query = build_has_children_query(current_instance_ids, eph_ids);
-            if let Some(expr) = filter.compose_has_children() {
-                has_children_query = has_children_query.filter(expr);
-            }
-
-            let rows = has_children_query
+            let maybe_filter = filter.compose_has_children();
+            let rows = if let Some(expr) = maybe_filter {
+                build_has_children_query(current_instance_ids, eph_ids)
+                    .filter(expr)
+                    .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(connection)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?
+            } else {
+                // Fast path: CTE-materialised source set (planner-hint fix).
+                CteHasChildren {
+                    cte_body: build_has_children_cte_body(current_instance_ids, eph_ids),
+                    outer: build_has_children_query_against_cte(eph_ids),
+                }
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(connection)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?
+            };
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = rows.len(),
@@ -1139,14 +1288,23 @@ impl Index {
                 eph_count = eph_ids.len(),
             ).entered();
             let t0 = std::time::Instant::now();
-            let mut query = build_has_children_query(parent_ids.to_vec(), eph_ids);
-            if let Some(expr) = filter.compose_has_children() {
-                query = query.filter(expr);
-            }
-            let results = query
+            let maybe_filter = filter.compose_has_children();
+            let results = if let Some(expr) = maybe_filter {
+                build_has_children_query(parent_ids.to_vec(), eph_ids)
+                    .filter(expr)
+                    .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(&mut *connection)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to find has-child instance IDs: {}", e))?
+            } else {
+                // Fast path: CTE-materialised source set (planner-hint fix).
+                CteHasChildren {
+                    cte_body: build_has_children_cte_body(parent_ids.to_vec(), eph_ids),
+                    outer: build_has_children_query_against_cte(eph_ids),
+                }
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(&mut *connection)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to find has-child instance IDs: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to find has-child instance IDs: {}", e))?
+            };
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = results.len(),
