@@ -516,7 +516,12 @@ struct CountRow {
 /// the canary intact — running without the canary disarms the leak
 /// detection wired up in [`Index::validate_canary`] and
 /// [`super::selection::Checked`].
-const NOT_CANARY_PREDICATE: &str = "kind != 'canary'";
+///
+/// Built once from [`EphLayerKind::Canary`] so the string and the enum
+/// can never drift.
+fn not_canary_predicate() -> String {
+    format!("kind != '{}'", EphLayerKind::Canary.as_str())
+}
 
 /// Drop every non-canary ephemeral layer.  Run this on a connection that
 /// is already inside the write transaction that mutated the persistent
@@ -535,7 +540,7 @@ pub async fn purge_eph_cache(
     conn: &mut AsyncPgConnection,
 ) -> Result<usize, diesel::result::Error> {
     use diesel_async::RunQueryDsl;
-    let sql = format!("DELETE FROM index.eph_layers WHERE {}", NOT_CANARY_PREDICATE);
+    let sql = format!("DELETE FROM index.eph_layers WHERE {}", not_canary_predicate());
     RunQueryDsl::execute(diesel::sql_query(sql), conn).await
 }
 
@@ -556,6 +561,57 @@ impl LayerBatch {
     }
 }
 
+/// Discriminator for an ephemeral layer's origin.  Stored in the
+/// `eph_layers.kind` column and bound into the layer's hash chain.
+///
+/// `Canary` is reserved for the leak-detection sentinel (see
+/// `migrations/2026-06-06-000001_eph_layers/up.sql:86-109` and
+/// [`Index::validate_canary`]); only `Layer` and `Loc` are created at
+/// query time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EphLayerKind {
+    /// The leak-detection sentinel layer.  Never created at runtime;
+    /// inserted once by migration and preserved across
+    /// `purge_eph_cache` / `purge_old_eph_layers`.
+    Canary,
+    /// User-created `layer { … }` blocks bundling ephemeral verbs.
+    Layer,
+    /// `loc(path, line)` cache rows.
+    Loc,
+}
+
+impl EphLayerKind {
+    /// String form stored in `eph_layers.kind` and bound into the hash.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Canary => "canary",
+            Self::Layer => "layer",
+            Self::Loc => "loc",
+        }
+    }
+}
+
+impl std::fmt::Display for EphLayerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// SQL the bb8 pool must run on every checkout.  `EphTransaction::Drop` is
+/// synchronous (cannot issue an async `ROLLBACK` itself); cleanup of a
+/// transaction left open by a cancelled / `?`-returned future depends
+/// entirely on this query running before the connection is handed to the
+/// next caller.  Bb8's `RecyclingMethod::Fast` (the default) does *not*
+/// run cleanup; `CustomQuery(EPH_POOL_RECYCLING_QUERY.into())` does.
+///
+/// All three pool-builder sites — `Index::build_async_manager` (this
+/// crate) and the two pools in `askld/src/bin/askld/server.rs` — must
+/// use this constant.  Changing the value or the manager config without
+/// updating *all* sites silently disarms ephemeral-layer cancellation
+/// safety; see the rustdoc on [`Index::with_eph_layer`] for the
+/// load-bearing contract.
+pub const EPH_POOL_RECYCLING_QUERY: &str = "ROLLBACK";
+
 impl Index {
     pub fn from_pool(pool: bb8::Pool<AsyncPgConnection>) -> Self {
         Self { pool, database_url: None }
@@ -563,7 +619,7 @@ impl Index {
 
     fn build_async_manager(database_url: &str) -> AsyncDieselConnectionManager<AsyncPgConnection> {
         let mut config = ManagerConfig::default();
-        config.recycling_method = RecyclingMethod::CustomQuery("ROLLBACK".into());
+        config.recycling_method = RecyclingMethod::CustomQuery(EPH_POOL_RECYCLING_QUERY.into());
         AsyncDieselConnectionManager::new_with_config(database_url, config)
     }
 
@@ -597,17 +653,22 @@ impl Index {
         use diesel_async::RunQueryDsl;
         let mut connection = self.pool.get().await
             .map_err(|e| anyhow::anyhow!("Failed to get connection for canary validation: {}", e))?;
-        let row: CountRow = diesel::sql_query(
+        let sql = format!(
             "SELECT COUNT(*) AS c FROM index.eph_layers \
-             WHERE id = -999999 AND kind = 'canary'"
-        )
+             WHERE id = {} AND kind = '{}'",
+            super::selection::CANARY_LAYER_ID,
+            EphLayerKind::Canary.as_str(),
+        );
+        let row: CountRow = diesel::sql_query(sql)
             .get_result(&mut *connection)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to validate canary row: {}", e))?;
         if row.c != 1 {
             anyhow::bail!(
-                "canary row missing from index.eph_layers (kind='canary', id=-999999); \
-                 leak detection is not armed. Re-apply the eph_layers migration."
+                "canary row missing from index.eph_layers (kind='{}', id={}); \
+                 leak detection is not armed. Re-apply the eph_layers migration.",
+                EphLayerKind::Canary.as_str(),
+                super::selection::CANARY_LAYER_ID,
             );
         }
         Ok(())
@@ -642,12 +703,6 @@ impl Index {
         Ok(Self { pool, database_url: Some(database_url.to_string()) })
     }
 
-    pub async fn new_in_memory() -> Result<Self> {
-        Err(anyhow::anyhow!(
-            "In-memory Postgres is not supported; use Index::connect with a test database"
-        ))
-    }
-
     pub const TEST_INPUT_A: &'static str = "test_input_a.sql";
     pub const TEST_INPUT_B: &'static str = "test_input_b.sql";
     pub const TEST_INPUT_MODULES: &'static str = "test_input_modules.sql";
@@ -658,64 +713,30 @@ impl Index {
     pub const TEST_INPUT_TYPE_FILTER: &'static str = "test_input_type_filter.sql";
     pub const VERB_TEST: &'static str = "verb_test.sql";
 
+    /// Lookup table of test-fixture file name → embedded SQL.  Kept here so
+    /// each new fixture only needs to land its file under `askl/sql/` and add
+    /// one line to this list (vs. an `include_str!` arm per fixture).
+    const TEST_FIXTURES: &'static [(&'static str, &'static str)] = &[
+        ("test_input_a.sql",             include_str!("../../../sql/test_input_a.sql")),
+        ("test_input_b.sql",             include_str!("../../../sql/test_input_b.sql")),
+        ("test_input_modules.sql",       include_str!("../../../sql/test_input_modules.sql")),
+        ("test_input_symbol_tokens.sql", include_str!("../../../sql/test_input_symbol_tokens.sql")),
+        ("verb_test.sql",                include_str!("../../../sql/verb_test.sql")),
+        ("test_input_containment.sql",   include_str!("../../../sql/test_input_containment.sql")),
+        ("test_input_tree_browser.sql",  include_str!("../../../sql/test_input_tree_browser.sql")),
+        ("test_input_nested_func.sql",   include_str!("../../../sql/test_input_nested_func.sql")),
+        ("test_input_type_filter.sql",   include_str!("../../../sql/test_input_type_filter.sql")),
+    ];
+
     fn load_sql(connection: &mut PgConnection, input_path: &str) {
-        match input_path {
-            "test_input_a.sql" => {
-                connection
-                    .batch_execute(include_str!("../../../sql/test_input_a.sql"))
-                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
-                    .unwrap();
-            }
-            "test_input_b.sql" => {
-                connection
-                    .batch_execute(include_str!("../../../sql/test_input_b.sql"))
-                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
-                    .unwrap();
-            }
-            "test_input_modules.sql" => {
-                connection
-                    .batch_execute(include_str!("../../../sql/test_input_modules.sql"))
-                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
-                    .unwrap();
-            }
-            "test_input_symbol_tokens.sql" => {
-                connection
-                    .batch_execute(include_str!("../../../sql/test_input_symbol_tokens.sql"))
-                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
-                    .unwrap();
-            }
-            "verb_test.sql" => {
-                connection
-                    .batch_execute(include_str!("../../../sql/verb_test.sql"))
-                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
-                    .unwrap();
-            }
-            "test_input_containment.sql" => {
-                connection
-                    .batch_execute(include_str!("../../../sql/test_input_containment.sql"))
-                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
-                    .unwrap();
-            }
-            "test_input_tree_browser.sql" => {
-                connection
-                    .batch_execute(include_str!("../../../sql/test_input_tree_browser.sql"))
-                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
-                    .unwrap();
-            }
-            "test_input_nested_func.sql" => {
-                connection
-                    .batch_execute(include_str!("../../../sql/test_input_nested_func.sql"))
-                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
-                    .unwrap();
-            }
-            "test_input_type_filter.sql" => {
-                connection
-                    .batch_execute(include_str!("../../../sql/test_input_type_filter.sql"))
-                    .map_err(|e| anyhow::anyhow!("Failed to execute SQL file: {}", e))
-                    .unwrap();
-            }
-            _ => panic!("Impossible input file"),
-        };
+        let sql = Self::TEST_FIXTURES
+            .iter()
+            .find_map(|(name, body)| (*name == input_path).then_some(*body))
+            .unwrap_or_else(|| panic!("Unknown test fixture: {}", input_path));
+        connection
+            .batch_execute(sql)
+            .map_err(|e| anyhow::anyhow!("Failed to execute SQL file '{}': {}", input_path, e))
+            .unwrap();
     }
 
     pub async fn load_test_input(&mut self, input_path: &str) -> Result<()> {
@@ -1213,7 +1234,7 @@ impl Index {
     /// Opens a database transaction and performs an atomic upsert on `eph_layers`.
     /// Returns an `EphTransaction` that holds the connection with an open transaction.
     /// Most callers should use [`Index::with_eph_layer`] instead, which owns
-    /// commit/rollback through a scoped closure.
+    /// commit/rollback and the 2-phase `populated` flip through a scoped closure.
     ///
     /// The `created` flag uses PostgreSQL's `xmax = 0` trick: a freshly inserted row
     /// has xmax=0, while an ON CONFLICT UPDATE sets xmax to the updating transaction.
@@ -1223,13 +1244,13 @@ impl Index {
     /// Two requests with the same `hash` that race for the layer will both
     /// reach the `INSERT … ON CONFLICT` statement; the loser blocks on a
     /// row-level lock until the winner's transaction commits or rolls back.
-    /// That ordering is the only thing keeping the loser from seeing an
-    /// empty layer: the winner is expected to populate-and-commit (or
-    /// rollback) before returning.  Callers must hold this contract — *do
-    /// not* commit the layer row separately from the populate batch.
-    /// A future migration tracked at
-    /// `feedback_design_preferences` → "project-eph-layer-2phase" will make
-    /// this explicit via a `populated` flag and two-phase commit.
+    /// The winner inserts with `populated = FALSE`, runs the populate batch,
+    /// flips `populated = TRUE`, and commits — all in one transaction.  The
+    /// loser unblocks after the commit and sees `created = false, populated
+    /// = true`.  A `created = false, populated = false` cache hit is an
+    /// anomaly (someone committed the layer row without running the populate
+    /// batch — e.g. a future writer that bypasses [`Index::with_eph_layer`]);
+    /// it surfaces as an error rather than a silently-half-built layer.
     ///
     /// ## `parent_id` semantics under cache collision
     ///
@@ -1244,7 +1265,7 @@ impl Index {
         &self,
         parent_id: Option<i64>,
         hash: &[u8],
-        kind: &str,
+        kind: EphLayerKind,
     ) -> Result<EphTransaction<'_>> {
         let mut conn = self.pool.get().await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
@@ -1255,14 +1276,14 @@ impl Index {
             .map_err(|e| anyhow::anyhow!("Failed to BEGIN transaction: {}", e))?;
 
         let row = match diesel::sql_query(
-            "INSERT INTO index.eph_layers (parent_id, hash, kind) \
-             VALUES ($1, $2, $3) \
+            "INSERT INTO index.eph_layers (parent_id, hash, kind, populated) \
+             VALUES ($1, $2, $3, FALSE) \
              ON CONFLICT (hash) DO UPDATE SET last_used = now() \
-             RETURNING id, (xmax = 0) AS created"
+             RETURNING id, (xmax = 0) AS created, populated"
         )
             .bind::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>, _>(parent_id)
             .bind::<diesel::sql_types::Bytea, _>(hash)
-            .bind::<diesel::sql_types::Text, _>(kind)
+            .bind::<diesel::sql_types::Text, _>(kind.as_str())
             .get_result::<CreateLayerRow>(&mut *conn)
             .await
         {
@@ -1272,6 +1293,21 @@ impl Index {
                 return Err(anyhow::anyhow!("Failed to upsert eph layer: {}", e));
             }
         };
+
+        // 2-PC sanity check: cache hits must be populated.  A
+        // `created=false, populated=false` row means a previous writer
+        // committed the layer without running the populate batch — an
+        // invariant violation we'd rather see than silently feed callers
+        // half-built state.
+        if !row.created && !row.populated {
+            let _ = diesel::sql_query("ROLLBACK").execute(&mut *conn).await;
+            anyhow::bail!(
+                "eph_layers row id={} found with populated=false on cache hit; \
+                 a previous writer committed without running the populate batch \
+                 (this would silently return wrong results — see Index::with_eph_layer)",
+                row.id,
+            );
+        }
 
         Ok(EphTransaction {
             conn,
@@ -1311,7 +1347,7 @@ impl Index {
         &'s self,
         parent_id: Option<i64>,
         hash: &[u8],
-        kind: &str,
+        kind: EphLayerKind,
         body: F,
     ) -> Result<(i64, bool, R)>
     where
@@ -1322,6 +1358,13 @@ impl Index {
         let created = txn.created();
         match body(&mut txn).await {
             Ok(r) => {
+                // 2-PC: only mark populated=TRUE for layers we just inserted
+                // (created=true).  Cache-hit (created=false) rows were already
+                // marked populated by their original writer; create_eph_layer
+                // has already rejected any cache-hit with populated=false.
+                if created {
+                    txn.mark_populated().await?;
+                }
                 txn.commit().await?;
                 Ok((layer_id, created, r))
             }
@@ -1377,7 +1420,7 @@ impl Index {
         let sql = format!(
             "DELETE FROM index.eph_layers \
              WHERE last_used < now() - make_interval(secs => $1) AND {}",
-            NOT_CANARY_PREDICATE,
+            not_canary_predicate(),
         );
         let result = diesel::sql_query(sql)
             .bind::<diesel::sql_types::BigInt, _>(interval_secs)
@@ -1491,6 +1534,13 @@ struct CreateLayerRow {
     id: i64,
     #[diesel(sql_type = diesel::sql_types::Bool)]
     created: bool,
+    /// 2-phase commit flag.  Set to `FALSE` on initial insert; flipped to
+    /// `TRUE` by `with_eph_layer` just before COMMIT.  A `created=false`
+    /// cache hit with `populated=false` is an anomaly (a previous writer
+    /// committed the layer row without running the populate batch) and
+    /// surfaces as an error rather than silently using a half-built layer.
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    populated: bool,
 }
 
 /// Edge discovered between two selected instances via DB query.
@@ -1650,6 +1700,19 @@ impl<'a> EphTransaction<'a> {
             .execute(conn)
             .await
             .map_err(|e| explain_eph_insert_err("Failed to batch insert eph refs", e))?;
+        Ok(())
+    }
+
+    /// Flip the 2-PC `populated` flag for this layer to `TRUE`.  Called by
+    /// [`Index::with_eph_layer`] just before COMMIT once the populate batch
+    /// has succeeded.  Must run inside the same transaction as the populate
+    /// inserts so the flag and the rows commit atomically.
+    pub async fn mark_populated(&mut self) -> Result<()> {
+        diesel::sql_query("UPDATE index.eph_layers SET populated = TRUE WHERE id = $1")
+            .bind::<diesel::sql_types::BigInt, _>(self.layer_id)
+            .execute(&mut *self.conn)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to mark eph layer populated: {}", e))?;
         Ok(())
     }
 

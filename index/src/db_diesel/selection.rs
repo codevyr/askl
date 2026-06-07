@@ -18,6 +18,12 @@ pub const CANARY_LAYER_ID: i64 = -999999;
 ///
 /// `as_slice()` is the boundary into the diesel binding layer — internal
 /// SQL helpers keep `&[i64]` because they're private and immediately bind.
+///
+/// `clone()` is a full `Vec<i64>` copy.  This is intentional: chains are
+/// 0-2 elements in practice, the snapshot semantics at statement-queue
+/// time are clearer when each pending future captures its own buffer, and
+/// the refcount overhead of an `Arc` wrapper isn't worth it.  Do not
+/// "optimise" by wrapping in `Arc` without measuring.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EphContext(Vec<i64>);
 

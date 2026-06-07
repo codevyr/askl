@@ -8,8 +8,9 @@ use crate::statement::Statement;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    CompositeFilter, DirectOnlyMixin, EphContext, EphScopedFut, EphTransaction, InnermostOnlyMixin,
-    OuterParentFilterMixin, ScopeContext, SymbolInstanceIdMixin, Index, Selection,
+    CompositeFilter, DirectOnlyMixin, EphContext, EphLayerKind, EphScopedFut, EphTransaction,
+    InnermostOnlyMixin, OuterParentFilterMixin, ScopeContext, SymbolInstanceIdMixin, Index,
+    Selection,
 };
 
 /// Populate-callback type used by [`LayerSpec`].  Called by the statement-
@@ -32,7 +33,7 @@ pub type LayerPopulate =
 /// mutable interior state.
 pub struct LayerSpec {
     pub hash: [u8; 32],
-    pub kind: &'static str,
+    pub kind: EphLayerKind,
     pub parent_id: Option<i64>,
     pub populate: LayerPopulate,
 }

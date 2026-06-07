@@ -3304,7 +3304,7 @@ fn eph_layer_rollback_prevents_poisoned_cache() {
         // Attempt 1: create layer, then rollback (simulate failure).
         {
             let txn = index
-                .create_eph_layer(None, &hash, "test").await.unwrap();
+                .create_eph_layer(None, &hash, index::db_diesel::EphLayerKind::Layer).await.unwrap();
             assert!(txn.created(), "first create should return created=true");
             txn.rollback().await.unwrap();
         }
@@ -3312,7 +3312,7 @@ fn eph_layer_rollback_prevents_poisoned_cache() {
         // Attempt 2: same hash — must get created=true (layer was rolled back).
         {
             let txn = index
-                .create_eph_layer(None, &hash, "test").await.unwrap();
+                .create_eph_layer(None, &hash, index::db_diesel::EphLayerKind::Layer).await.unwrap();
             assert!(txn.created(), "after rollback, retry must get created=true");
             txn.rollback().await.unwrap();
         }
@@ -3430,6 +3430,132 @@ fn canary_not_reachable_via_run_query() {
     assert!(
         res.nodes.as_vec().is_empty(),
         "canary must not appear via full query path"
+    );
+}
+
+/// Leak-detection coverage for every relationship field in `Selection`,
+/// not just `.nodes`.  A leak in any of `.parents`, `.children`,
+/// `.has_parents`, `.has_children` is just as dangerous (the row would
+/// surface in the result graph even though the user did not authorise
+/// its layer); `Checked<Selection>` must catch all of them.
+#[test]
+fn canary_leak_in_each_relationship_field_detected() {
+    use index::db_diesel::{
+        Checked, ChildReference, EphContext, HasChildReference, HasParentReference,
+        ParentReference, Selection, CANARY_LAYER_ID,
+    };
+    use index::models_diesel::{Object, Symbol, SymbolInstance, SymbolRef};
+    use std::collections::Bound;
+
+    fn canary_symbol() -> Symbol {
+        Symbol {
+            id: -999999,
+            name: "__canary__".into(),
+            symbol_path: "canary".into(),
+            project_id: -999999,
+            symbol_type: 1,
+            symbol_scope: None,
+            leaf_name: "__canary__".into(),
+            eph_layer: Some(CANARY_LAYER_ID),
+        }
+    }
+    fn canary_instance() -> SymbolInstance {
+        SymbolInstance {
+            id: -999999,
+            symbol: -999999,
+            object_id: -999999,
+            offset_range: (Bound::Included(0), Bound::Excluded(1)),
+            instance_type: 1,
+            eph_layer: Some(CANARY_LAYER_ID),
+        }
+    }
+    fn canary_object() -> Object {
+        Object {
+            id: -999999,
+            project_id: -999999,
+            module_path: "".into(),
+            filesystem_path: "/__canary__".into(),
+            filetype: "canary".into(),
+            content_hash: "".into(),
+        }
+    }
+    fn canary_ref() -> SymbolRef {
+        SymbolRef {
+            id: -999999,
+            to_symbol: -999999,
+            from_object: -999999,
+            from_offset_range: (Bound::Included(0), Bound::Excluded(1)),
+            eph_layer: Some(CANARY_LAYER_ID),
+        }
+    }
+
+    let empty_eph = EphContext::new();
+
+    let mut s = Selection::new();
+    s.parents.push(ParentReference {
+        to_symbol: canary_symbol(),
+        to_instance: canary_instance(),
+        from_instance: canary_instance(),
+        symbol_ref: canary_ref(),
+    });
+    assert!(
+        s.has_eph_leak(&empty_eph),
+        "canary in .parents must be detected as a leak"
+    );
+    assert!(
+        Checked::new(s, &empty_eph).is_err(),
+        "Checked::new must bail when .parents leaks"
+    );
+
+    let mut s = Selection::new();
+    s.children.push(ChildReference {
+        parent_symbol: canary_symbol(),
+        symbol: canary_symbol(),
+        symbol_instance: canary_instance(),
+        from_instance: canary_instance(),
+        symbol_ref: canary_ref(),
+        from_object: canary_object(),
+    });
+    assert!(
+        s.has_eph_leak(&empty_eph),
+        "canary in .children must be detected as a leak"
+    );
+    assert!(
+        Checked::new(s, &empty_eph).is_err(),
+        "Checked::new must bail when .children leaks"
+    );
+
+    let mut s = Selection::new();
+    s.has_parents.push(HasParentReference {
+        child_symbol: canary_symbol(),
+        child_instance: canary_instance(),
+        parent_symbol: canary_symbol(),
+        parent_instance: canary_instance(),
+    });
+    assert!(
+        s.has_eph_leak(&empty_eph),
+        "canary in .has_parents must be detected as a leak"
+    );
+    assert!(
+        Checked::new(s, &empty_eph).is_err(),
+        "Checked::new must bail when .has_parents leaks"
+    );
+
+    let mut s = Selection::new();
+    s.has_children.push(HasChildReference {
+        parent_symbol: canary_symbol(),
+        parent_instance: canary_instance(),
+        child_symbol: canary_symbol(),
+        child_instance: canary_instance(),
+        parent_object: canary_object(),
+    });
+    assert!(
+        s.has_eph_leak(&empty_eph),
+        "canary in .has_children must be detected as a leak"
+    );
+    assert!(
+        Checked::new(s, &empty_eph).is_err(),
+        "Checked::new must bail when .has_children leaks"
     );
 }
 

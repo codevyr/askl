@@ -10,7 +10,7 @@ use diesel_async::{AsyncConnection, AsyncPgConnection};
 use diesel_migrations::MigrationHarness;
 use futures::FutureExt;
 
-use index::db_diesel::Index;
+use index::db_diesel::{Index, EPH_POOL_RECYCLING_QUERY};
 use log::{info, warn};
 use tracing_chrome::ChromeLayerBuilder;
 use tracing_subscriber::layer::SubscriberExt;
@@ -91,9 +91,11 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
             .expect("Failed to run migrations");
     }
 
-    // Async pool for IndexStore and AuthStore (no statement_timeout)
+    // Async pool for IndexStore and AuthStore (no statement_timeout).
+    // Recycling query is load-bearing for ephemeral-layer cancellation
+    // safety — see EPH_POOL_RECYCLING_QUERY rustdoc.
     let mut auth_pool_config = ManagerConfig::<AsyncPgConnection>::default();
-    auth_pool_config.recycling_method = RecyclingMethod::CustomQuery("ROLLBACK".into());
+    auth_pool_config.recycling_method = RecyclingMethod::CustomQuery(EPH_POOL_RECYCLING_QUERY.into());
     let async_config =
         AsyncDieselConnectionManager::new_with_config(&serve_args.database_url, auth_pool_config);
     let async_pool: AsyncPool<AsyncPgConnection> = AsyncPool::builder()
@@ -106,7 +108,7 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
     let query_timeout_secs = serve_args.query_timeout;
     let query_timeout_ms = query_timeout_secs * 1000;
     let mut index_pool_config = ManagerConfig::<AsyncPgConnection>::default();
-    index_pool_config.recycling_method = RecyclingMethod::CustomQuery("ROLLBACK".into());
+    index_pool_config.recycling_method = RecyclingMethod::CustomQuery(EPH_POOL_RECYCLING_QUERY.into());
     index_pool_config.custom_setup = Box::new(move |url| {
         async move {
             let mut conn = AsyncPgConnection::establish(url).await?;
