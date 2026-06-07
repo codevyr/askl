@@ -104,6 +104,9 @@ async fn resolve_filter_to_ids(
 ) -> Result<Vec<i64>> {
     use diesel::sql_types::Bool;
 
+    let _span = tracing::info_span!("resolve_filter_to_ids", eph_count = eph_ids.len()).entered();
+    let t0 = std::time::Instant::now();
+
     let eph = EphContext::from_slice(eph_ids);
     let mut query = build_current_query(eph_ids);
     if let Some(expr) = filter.compose_current() {
@@ -159,6 +162,11 @@ async fn resolve_filter_to_ids(
         .load::<(Symbol, SymbolInstance, Object, Project)>(conn)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to resolve filter to IDs: {}", e))?;
+    tracing::info!(
+        elapsed_ms = t0.elapsed().as_millis() as u64,
+        result_rows = results.len(),
+        "resolve_filter_to_ids SQL completed",
+    );
     let mut ids: Vec<i64> = results.iter().map(|(_, inst, _, _)| inst.id).collect();
     ids.sort_unstable();
     ids.dedup();
@@ -823,7 +831,8 @@ impl Index {
 
         let current = {
             let _select_current: tracing::span::EnteredSpan =
-                tracing::debug_span!("select_current").entered();
+                tracing::info_span!("select_current", eph_count = eph_ids.len()).entered();
+            let t0 = std::time::Instant::now();
 
             let mut joined_query = build_current_query(eph_ids);
 
@@ -831,10 +840,16 @@ impl Index {
                 joined_query = joined_query.filter(expr);
             }
 
-            joined_query
+            let rows = joined_query
                 .load::<(Symbol, SymbolInstance, Object, Project)>(connection)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?
+                .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?;
+            tracing::info!(
+                elapsed_ms = t0.elapsed().as_millis() as u64,
+                result_rows = rows.len(),
+                "select_current SQL completed",
+            );
+            rows
         };
 
         // Use the IDs that survived current's filters (type, name, etc.)
@@ -846,19 +861,35 @@ impl Index {
             ScopeContext::Skip => vec![],
             ScopeContext::Unscoped => {
                 let _parents_span: tracing::span::EnteredSpan =
-                    tracing::debug_span!("select_parents").entered();
+                    tracing::info_span!("select_parents",
+                        scope = "unscoped",
+                        source_count = current_instance_ids.len(),
+                        eph_count = eph_ids.len(),
+                    ).entered();
+                let t0 = std::time::Instant::now();
                 let mut parents_query = build_parents_query(current_instance_ids.clone(), eph_ids);
                 if let Some(expr) = filter.compose_parents() {
                     parents_query = parents_query.filter(expr);
                 }
-                parents_query
+                let rows = parents_query
                     .load::<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)>(connection)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
+                    .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
+                tracing::info!(
+                    elapsed_ms = t0.elapsed().as_millis() as u64,
+                    result_rows = rows.len(),
+                    "select_parents SQL completed",
+                );
+                rows
             }
             ScopeContext::Scope { ref ids, filter: ref scope_filter } => {
                 let _parents_span: tracing::span::EnteredSpan =
-                    tracing::debug_span!("select_parents").entered();
+                    tracing::info_span!("select_parents",
+                        scope = "scoped",
+                        source_count = current_instance_ids.len(),
+                        eph_count = eph_ids.len(),
+                    ).entered();
+                let t0 = std::time::Instant::now();
 
                 let role = ScopeRole::Parents(current_instance_ids.clone());
                 let scope_ids = resolve_scope_ids(ids, scope_filter, Some(&role), eph_ids, connection).await?;
@@ -875,10 +906,16 @@ impl Index {
                     parent_decls.field(symbol_instances::dsl::id).eq_any(scope_ids)
                 );
 
-                parents_query
+                let rows = parents_query
                     .load::<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)>(connection)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
+                    .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
+                tracing::info!(
+                    elapsed_ms = t0.elapsed().as_millis() as u64,
+                    result_rows = rows.len(),
+                    "select_parents SQL completed",
+                );
+                rows
             }
         };
 
@@ -886,19 +923,35 @@ impl Index {
             ScopeContext::Skip => vec![],
             ScopeContext::Unscoped => {
                 let _select_children: tracing::span::EnteredSpan =
-                    tracing::debug_span!("select_children").entered();
+                    tracing::info_span!("select_children",
+                        scope = "unscoped",
+                        source_count = current_instance_ids.len(),
+                        eph_count = eph_ids.len(),
+                    ).entered();
+                let t0 = std::time::Instant::now();
                 let mut children_query = build_children_query(current_instance_ids.clone(), eph_ids);
                 if let Some(expr) = filter.compose_children() {
                     children_query = children_query.filter(expr);
                 }
-                children_query
+                let rows = children_query
                     .load::<(Symbol, Symbol, SymbolInstance, SymbolInstance, SymbolRef, Object)>(connection)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
+                    .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
+                tracing::info!(
+                    elapsed_ms = t0.elapsed().as_millis() as u64,
+                    result_rows = rows.len(),
+                    "select_children SQL completed",
+                );
+                rows
             }
             ScopeContext::Scope { ref ids, filter: ref scope_filter } => {
                 let _select_children: tracing::span::EnteredSpan =
-                    tracing::debug_span!("select_children").entered();
+                    tracing::info_span!("select_children",
+                        scope = "scoped",
+                        source_count = current_instance_ids.len(),
+                        eph_count = eph_ids.len(),
+                    ).entered();
+                let t0 = std::time::Instant::now();
 
                 let role = ScopeRole::Children(current_instance_ids.clone());
                 let scope_ids = resolve_scope_ids(ids, scope_filter, Some(&role), eph_ids, connection).await?;
@@ -913,41 +966,68 @@ impl Index {
                     symbol_instances::dsl::id.eq_any(scope_ids)
                 );
 
-                children_query
+                let rows = children_query
                     .load::<(Symbol, Symbol, SymbolInstance, SymbolInstance, SymbolRef, Object)>(connection)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?
+                    .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
+                tracing::info!(
+                    elapsed_ms = t0.elapsed().as_millis() as u64,
+                    result_rows = rows.len(),
+                    "select_children SQL completed",
+                );
+                rows
             }
         };
 
         let has_parents = {
             let _has_parents_span: tracing::span::EnteredSpan =
-                tracing::debug_span!("select_has_parents").entered();
+                tracing::info_span!("select_has_parents",
+                    source_count = current_instance_ids.len(),
+                    eph_count = eph_ids.len(),
+                ).entered();
+            let t0 = std::time::Instant::now();
 
             let mut has_parents_query = build_has_parents_query(current_instance_ids.clone(), eph_ids);
             if let Some(expr) = filter.compose_has_parents() {
                 has_parents_query = has_parents_query.filter(expr);
             }
 
-            has_parents_query
+            let rows = has_parents_query
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance)>(connection)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to load containment parents: {}", e))?
+                .map_err(|e| anyhow::anyhow!("Failed to load containment parents: {}", e))?;
+            tracing::info!(
+                elapsed_ms = t0.elapsed().as_millis() as u64,
+                result_rows = rows.len(),
+                "select_has_parents SQL completed",
+            );
+            rows
         };
 
         let has_children = {
+            let source_count = current_instance_ids.len();
             let _has_children_span: tracing::span::EnteredSpan =
-                tracing::debug_span!("select_has_children").entered();
+                tracing::info_span!("select_has_children",
+                    source_count = source_count,
+                    eph_count = eph_ids.len(),
+                ).entered();
+            let t0 = std::time::Instant::now();
 
             let mut has_children_query = build_has_children_query(current_instance_ids, eph_ids);
             if let Some(expr) = filter.compose_has_children() {
                 has_children_query = has_children_query.filter(expr);
             }
 
-            has_children_query
+            let rows = has_children_query
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(connection)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?
+                .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?;
+            tracing::info!(
+                elapsed_ms = t0.elapsed().as_millis() as u64,
+                result_rows = rows.len(),
+                "select_has_children SQL completed",
+            );
+            rows
         };
 
         let selection: Result<Selection> = {
@@ -1054,6 +1134,11 @@ impl Index {
         let mut all_ids: Vec<i64> = Vec::new();
 
         if include_has {
+            let _span = tracing::info_span!("find_child_instance_ids_has",
+                source_count = parent_ids.len(),
+                eph_count = eph_ids.len(),
+            ).entered();
+            let t0 = std::time::Instant::now();
             let mut query = build_has_children_query(parent_ids.to_vec(), eph_ids);
             if let Some(expr) = filter.compose_has_children() {
                 query = query.filter(expr);
@@ -1062,6 +1147,11 @@ impl Index {
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(&mut *connection)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to find has-child instance IDs: {}", e))?;
+            tracing::info!(
+                elapsed_ms = t0.elapsed().as_millis() as u64,
+                result_rows = results.len(),
+                "find_child_instance_ids (has) SQL completed",
+            );
             for (ps, pi, cs, ci, _) in &results {
                 if is_eph_leak(ps.eph_layer, eph_ids)
                     || is_eph_leak(pi.eph_layer, eph_ids)
@@ -1076,6 +1166,11 @@ impl Index {
         }
 
         if include_refs {
+            let _span = tracing::info_span!("find_child_instance_ids_refs",
+                source_count = parent_ids.len(),
+                eph_count = eph_ids.len(),
+            ).entered();
+            let t0 = std::time::Instant::now();
             let mut query = build_children_query(parent_ids.to_vec(), eph_ids);
             if let Some(expr) = filter.compose_children() {
                 query = query.filter(expr);
@@ -1086,6 +1181,11 @@ impl Index {
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to find ref-child instance IDs: {}", e))?;
+            tracing::info!(
+                elapsed_ms = t0.elapsed().as_millis() as u64,
+                result_rows = results.len(),
+                "find_child_instance_ids (refs) SQL completed",
+            );
             for (ps, cs, ci, fi, sr, _) in &results {
                 if is_eph_leak(ps.eph_layer, eph_ids)
                     || is_eph_leak(cs.eph_layer, eph_ids)
@@ -1124,6 +1224,11 @@ impl Index {
         let mut all_ids: Vec<i64> = Vec::new();
 
         if include_refs {
+            let _span = tracing::info_span!("find_parent_instance_ids_refs",
+                source_count = child_ids.len(),
+                eph_count = eph_ids.len(),
+            ).entered();
+            let t0 = std::time::Instant::now();
             let mut query = build_parents_query(child_ids.to_vec(), eph_ids);
             if let Some(expr) = filter.compose_parents() {
                 query = query.filter(expr);
@@ -1132,6 +1237,11 @@ impl Index {
                 .load::<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)>(&mut *connection)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to find ref-parent instance IDs: {}", e))?;
+            tracing::info!(
+                elapsed_ms = t0.elapsed().as_millis() as u64,
+                result_rows = results.len(),
+                "find_parent_instance_ids (refs) SQL completed",
+            );
             for (sr, s, ci, pi) in &results {
                 if is_eph_leak(sr.eph_layer, eph_ids)
                     || is_eph_leak(s.eph_layer, eph_ids)
@@ -1146,6 +1256,11 @@ impl Index {
         }
 
         if include_has {
+            let _span = tracing::info_span!("find_parent_instance_ids_has",
+                source_count = child_ids.len(),
+                eph_count = eph_ids.len(),
+            ).entered();
+            let t0 = std::time::Instant::now();
             let mut query = build_has_parents_query(child_ids.to_vec(), eph_ids);
             if let Some(expr) = filter.compose_has_parents() {
                 query = query.filter(expr);
@@ -1154,6 +1269,11 @@ impl Index {
                 .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance)>(&mut *connection)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to find has-parent instance IDs: {}", e))?;
+            tracing::info!(
+                elapsed_ms = t0.elapsed().as_millis() as u64,
+                result_rows = results.len(),
+                "find_parent_instance_ids (has) SQL completed",
+            );
             for (cs, ci, ps, pi) in &results {
                 if is_eph_leak(cs.eph_layer, eph_ids)
                     || is_eph_leak(ci.eph_layer, eph_ids)
