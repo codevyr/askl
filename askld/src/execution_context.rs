@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use index::db_diesel::Selection;
+use index::db_diesel::{EphContext, Selection};
 
 use crate::span::Span;
 use crate::verb::{Selector, SelectorId, SelectorState};
@@ -71,6 +71,8 @@ where
 pub struct ExecutionContext {
     pub registry: SelectorRegistry,
     pub current_statement_span: Option<Span>,
+    /// Ephemeral visibility chain for the current request.
+    pub eph: EphContext,
 }
 
 impl ExecutionContext {
@@ -78,6 +80,7 @@ impl ExecutionContext {
         Self {
             registry: SelectorRegistry::new(),
             current_statement_span: None,
+            eph: EphContext::new(),
         }
     }
 }

@@ -7,10 +7,28 @@ use crate::statement::Statement;
 use crate::verb::{add_verb, ConstraintAction, DeriveMethod, Filter, Labeler, NotificationContext, Selector, SelectorId, Verb, VerbTag, find_symbol_by_instance_id};
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{CompositeFilter, InnermostOnlyMixin, Index, ScopeContext, Selection};
+use index::db_diesel::{CompositeFilter, EphContext, InnermostOnlyMixin, Index, ScopeContext, Selection, SymbolInstanceIdMixin};
+use index::symbols::SymbolInstanceId;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+
+/// Result of computing initial selections for a statement's selectors.
+pub struct ComputeResult {
+    pub selections: Vec<(SelectorId, Option<Selection>)>,
+    pub warnings: Vec<pest::error::Error<Rule>>,
+    pub new_eph_ids: Vec<i64>,
+}
+
+impl ComputeResult {
+    pub fn apply(self, ctx: &mut ExecutionContext, statement: &Statement) {
+        for (id, selection) in self.selections {
+            ctx.registry.add_by_id(id, selection);
+        }
+        statement.get_state_mut().warnings.extend(self.warnings);
+        ctx.eph.extend(self.new_eph_ids);
+    }
+}
 
 pub struct NotificationResult {
     pub changed: bool,
@@ -96,6 +114,14 @@ impl Command {
         self.verbs.iter().any(|verb| verb.as_selector().is_ok())
     }
 
+    /// Whether any selector in this command materializes an ephemeral layer.
+    /// Layer-creating commands are implicit barriers: the statement executor
+    /// drains pending statements before this one so the layer's `parent_id`
+    /// and the visible `eph_ids` reflect prior side effects in order.
+    pub fn has_layer_spec(&self) -> bool {
+        self.selectors().any(|s| s.has_layer_spec())
+    }
+
     /// Check if any verb has the given tag.
     pub fn has_verb_tag(&self, tag: &VerbTag) -> bool {
         self.verbs.iter().any(|v| v.get_tag().as_ref() == Some(tag))
@@ -121,9 +147,9 @@ impl Command {
 
     /// Build a composite filter from all selectors (ORed across selectors).
     /// Used by scope builders to construct ScopeContext.
-    pub fn get_selector_composite_filter(&self) -> Option<CompositeFilter> {
+    pub fn get_selector_composite_filter(&self, eph: &EphContext) -> Option<CompositeFilter> {
         let parts: Vec<_> = self.selectors()
-            .filter_map(|sel| sel.build_composite_filter(self))
+            .filter_map(|sel| sel.build_composite_filter(self, eph))
             .collect();
         match parts.len() {
             0 => None,
@@ -134,7 +160,7 @@ impl Command {
 
     pub fn filter(&self, selection: &mut Selection) {
         let _command_filter: tracing::span::EnteredSpan =
-            tracing::info_span!("command_filter").entered();
+            tracing::debug_span!("command_filter").entered();
         for verb in self.filters() {
             verb.filter(selection);
         }
@@ -178,7 +204,7 @@ impl Command {
                 let child_ids = dependency.get_instance_ids();
                 let mut find_parts: Vec<CompositeFilter> = vec![];
                 if !unnest {
-                    find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin));
+                    find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new(&ctx.eph)));
                 }
                 let find_filter = CompositeFilter::and(find_parts);
                 derivation_ids = Some(index.find_parent_instance_ids(
@@ -186,6 +212,7 @@ impl Command {
                     rel_type.contains(RelationshipType::REFS),
                     rel_type.contains(RelationshipType::HAS),
                     &find_filter,
+                    &ctx.eph,
                 ).await.map_err(|e| {
                     pest::error::Error::new_from_span(
                         pest::error::ErrorVariant::CustomError {
@@ -197,7 +224,7 @@ impl Command {
             }
             let decl_ids = derivation_ids.as_ref().unwrap();
 
-            let mut selection = find_symbol_by_instance_id(index, &selector_filters, decl_ids, parent_scope.clone(), children_scope.clone())
+            let mut selection = find_symbol_by_instance_id(index, &selector_filters, decl_ids, parent_scope.clone(), children_scope.clone(), &ctx.eph)
                 .await
                 .map_err(|e| {
                     pest::error::Error::new_from_span(
@@ -318,19 +345,22 @@ impl Command {
         cfg: &ControlFlowGraph,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
-    ) -> Result<
-        (Vec<(SelectorId, Option<Selection>)>, Vec<pest::error::Error<Rule>>),
-        pest::error::Error<Rule>,
-    > {
+        eph: &EphContext,
+    ) -> Result<ComputeResult, pest::error::Error<Rule>> {
         let selectors: Vec<&dyn Selector> = self.selectors().collect();
 
         // Nothing to do
         if selectors.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok(ComputeResult {
+                selections: Vec::new(),
+                warnings: Vec::new(),
+                new_eph_ids: Vec::new(),
+            });
         }
 
         let mut warnings = vec![];
-        let mut results = vec![];
+        let mut selections = vec![];
+        let mut new_eph_ids = vec![];
 
         // Validate: each selector that requires a name constraint must have one
         // command-wide (any filter verb on the command counts).
@@ -349,26 +379,66 @@ impl Command {
             }
         }
 
-        let filter_parts: Vec<CompositeFilter> =
-            self.filters().filter_map(|f| f.get_composite_filter()).collect();
+        // Local copy of eph that grows as we materialize layers within
+        // this command; selectors that run after a layer-creating selector
+        // see them in their visible eph chain.
+        let mut local_eph = eph.clone();
+
+        let filter_parts: Vec<CompositeFilter> = self.filters()
+            .filter_map(|f| f.get_composite_filter(eph))
+            .collect();
 
         for selector in selectors.into_iter() {
-            let filter = CompositeFilter::and(filter_parts.clone());
+            let to_pest = |e: anyhow::Error| pest::error::Error::new_from_span(
+                pest::error::ErrorVariant::CustomError { message: e.to_string() },
+                self.span().as_pest_span(),
+            );
 
-            let select_from_all_name = format!("{:?}", selector);
-            let _select_from_all =
-                tracing::info_span!("select_from_all", name = %select_from_all_name).entered();
-            let mut current_selection = selector
-                .select_from_all_impl(cfg, filter, parent_scope.clone(), children_scope.clone())
-                .await
-                .map_err(|e| {
-                    pest::error::Error::new_from_span(
-                        pest::error::ErrorVariant::CustomError {
-                            message: e.to_string(),
-                        },
-                        self.span().as_pest_span(),
-                    )
-                })?;
+            let mut current_selection = if let Some(spec) =
+                selector.layer_spec(cfg, &local_eph).await.map_err(to_pest)?
+            {
+                // Layer-creating selector: materialize the layer, then build
+                // its Selection from the layer's instances.  The selector
+                // itself does not own the transaction or the layer_id.
+                let (layer_id, created, _) = cfg.index.with_eph_layer(
+                    spec.parent_id, &spec.hash, spec.kind,
+                    |txn| if txn.created() {
+                        (spec.populate)(txn)
+                    } else {
+                        Box::pin(async { Ok(()) })
+                    },
+                ).await.map_err(to_pest)?;
+
+                if !created {
+                    let _ = cfg.index.touch_eph_layer(layer_id).await;
+                }
+                new_eph_ids.push(layer_id);
+                local_eph.push(layer_id);
+
+                let instance_ids = cfg.index.get_eph_instance_ids_for_layer(layer_id)
+                    .await.map_err(to_pest)?;
+                if instance_ids.is_empty() {
+                    None
+                } else {
+                    let ids: Vec<_> = instance_ids.into_iter().map(SymbolInstanceId::new).collect();
+                    let filter = CompositeFilter::leaf(SymbolInstanceIdMixin::new(&ids));
+                    Some(cfg.index.find_symbol(
+                        &filter, parent_scope.clone(), children_scope.clone(), &local_eph
+                    ).await.map_err(to_pest)?.into_inner())
+                }
+            } else {
+                // Normal selector: query via select_from_all_impl with the
+                // command's composite filter.
+                let filter = CompositeFilter::and(filter_parts.clone());
+                let select_from_all_name = format!("{:?}", selector);
+                let _select_from_all =
+                    tracing::debug_span!("select_from_all", name = %select_from_all_name).entered();
+                selector
+                    .select_from_all_impl(cfg, filter, parent_scope.clone(), children_scope.clone(), &local_eph)
+                    .await
+                    .map_err(to_pest)?
+            };
+
             if let Some(selection) = &mut current_selection {
                 self.filter(selection);
                 if selection.is_empty() {
@@ -383,9 +453,9 @@ impl Command {
                     ));
                 }
             }
-            results.push((selector.id(), current_selection));
+            selections.push((selector.id(), current_selection));
         }
-        Ok((results, warnings))
+        Ok(ComputeResult { selections, warnings, new_eph_ids })
     }
 }
 

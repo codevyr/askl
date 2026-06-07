@@ -20,11 +20,12 @@ diesel::table! {
     use diesel::sql_types::*;
 
     index.symbol_instances (id) {
-        id -> Integer,
+        id -> BigInt,
         symbol -> BigInt,
         object_id -> Integer,
         offset_range -> Int4range,
         instance_type -> Integer,
+        eph_layer -> Nullable<BigInt>,
     }
 }
 
@@ -91,10 +92,11 @@ diesel::table! {
     use diesel::sql_types::*;
 
     index.symbol_refs (id) {
-        id -> Integer,
+        id -> BigInt,
         to_symbol -> BigInt,
         from_object -> Integer,
         from_offset_range -> Int4range,
+        eph_layer -> Nullable<BigInt>,
     }
 }
 
@@ -110,6 +112,17 @@ diesel::table! {
         symbol_type -> Integer,
         symbol_scope -> Nullable<Integer>,
         leaf_name -> Text,
+        eph_layer -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    index.eph_layers (id) {
+        id -> BigInt,
+        parent_id -> Nullable<BigInt>,
+        hash -> Binary,
+        kind -> Text,
+        last_used -> Timestamptz,
     }
 }
 
@@ -124,6 +137,7 @@ diesel::joinable!(symbol_refs -> symbols (to_symbol));
 diesel::joinable!(symbols -> projects (project_id));
 diesel::joinable!(symbols -> symbol_types (symbol_type));
 diesel::allow_tables_to_appear_in_same_query!(
+    eph_layers,
     instance_types,
     symbol_instances,
     symbol_types,

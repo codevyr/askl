@@ -25,11 +25,11 @@ fn is_statement_timeout(err: &pest::error::Error<askld::parser::Rule>) -> bool {
 pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
     let _query = tracing::info_span!("query").entered();
 
-    println!("Received query: {}", req_body);
+    debug!("Received query: {}", req_body);
     let ast = match parse(&req_body) {
         Ok(ast) => ast,
         Err(err) => {
-            println!("Parse error: {}", err);
+            info!("Parse error: {}", err);
             let json_err = serde_json::to_string(&ErrorResponse::from_pest(&err)).unwrap();
             return HttpResponse::BadRequest().body(json_err);
         }
@@ -72,6 +72,7 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
     info!("Edges: {:#?}", res.edges.0.len());
     info!("Has edges: {:#?}", res.has_edges.0.len());
 
+    let _build_response = tracing::debug_span!("build_response").entered();
     let mut result_graph = Graph::new();
 
     let mut all_symbols = HashSet::new();
@@ -140,7 +141,7 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
             });
         }
 
-        println!("Symbol instances for symbol {}: {:?}", symbol.id, symbol_instances);
+        debug!("Symbol instances for symbol {}: {:?}", symbol.id, symbol_instances);
         result_graph.add_node(Node::new(
             SymbolId(symbol.id),
             symbol.name.clone(),
@@ -178,7 +179,7 @@ pub async fn file(
 
     let file_id = *file_id;
 
-    println!("Received request for file: {}", file_id);
+    debug!("Received request for file: {}", file_id);
     if let Ok(source) = data.cfg.index.get_file_contents(file_id).await {
         let content = source.into_bytes();
         match slice_content(content, range.start_offset, range.end_offset) {

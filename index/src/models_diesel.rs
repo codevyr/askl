@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use diesel::QueryableByName;
 use std::collections::Bound;
@@ -17,11 +18,12 @@ pub struct SymbolType {
 #[diesel(belongs_to(Symbol, foreign_key = symbol))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct SymbolInstance {
-    pub id: i32,
+    pub id: i64,
     pub symbol: i64,
     pub object_id: i32,
     pub offset_range: (Bound<i32>, Bound<i32>),
     pub instance_type: i32,
+    pub eph_layer: Option<i64>,
 }
 
 #[derive(Clone, Queryable, Selectable, Identifiable, Associations, Debug, PartialEq, Eq, Hash)]
@@ -71,6 +73,7 @@ pub struct Symbol {
     pub symbol_type: i32,
     pub symbol_scope: Option<i32>,
     pub leaf_name: String,
+    pub eph_layer: Option<i64>,
 }
 
 #[derive(Debug, QueryableByName)]
@@ -83,8 +86,28 @@ pub struct ContentRow {
 #[diesel(table_name = crate::schema_diesel::symbol_refs)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct SymbolRef {
-    pub id: i32,
+    pub id: i64,
     pub to_symbol: i64,
     pub from_object: i32,
     pub from_offset_range: (Bound<i32>, Bound<i32>),
+    pub eph_layer: Option<i64>,
+}
+
+#[derive(Clone, Queryable, Selectable, Identifiable, Debug, PartialEq)]
+#[diesel(table_name = crate::schema_diesel::eph_layers)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct EphLayer {
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub hash: Vec<u8>,
+    pub kind: String,
+    pub last_used: DateTime<Utc>,
+}
+
+#[derive(Insertable, Debug)]
+#[diesel(table_name = crate::schema_diesel::eph_layers)]
+pub struct NewEphLayer<'a> {
+    pub parent_id: Option<i64>,
+    pub hash: &'a [u8],
+    pub kind: &'a str,
 }

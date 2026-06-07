@@ -1,6 +1,6 @@
 use crate::execution_context::ExecutionContext;
 use crate::hierarchy::Hierarchy;
-use index::db_diesel::{CompositeFilter, ScopeContext};
+use index::db_diesel::{CompositeFilter, EphContext, ScopeContext};
 
 use super::Statement;
 
@@ -39,7 +39,7 @@ fn all_descendants_weak(stmt: &Statement) -> bool {
 /// If the parent already has a selection, use its instance IDs.
 /// If no parent exists, return Skip.
 /// If the parent hasn't been selected yet, fall back to mixin-based scoping.
-pub(super) fn build_parent_scope(statement: &Statement, ctx: &ExecutionContext) -> ScopeContext {
+pub(super) fn build_parent_scope(statement: &Statement, ctx: &ExecutionContext, eph: &EphContext) -> ScopeContext {
     match statement.parent().and_then(|p| p.upgrade()) {
         Some(parent) => {
             if parent.is_computed(ctx) {
@@ -51,7 +51,7 @@ pub(super) fn build_parent_scope(statement: &Statement, ctx: &ExecutionContext) 
                 }
             } else {
                 // Parent not yet computed — fall back to filter-based scoping
-                match parent.command().get_selector_composite_filter() {
+                match parent.command().get_selector_composite_filter(eph) {
                     Some(f) => ScopeContext::Scope { ids: vec![], filter: Some(f) },
                     None => ScopeContext::Unscoped,
                 }
@@ -64,11 +64,11 @@ pub(super) fn build_parent_scope(statement: &Statement, ctx: &ExecutionContext) 
 /// Build scope context for the children side of a statement's children query.
 /// Collects instance IDs from already-selected children + filters from unselected children.
 /// If no children exist, return Skip.
-pub(super) fn build_children_scope(statement: &Statement, ctx: &ExecutionContext) -> ScopeContext {
+pub(super) fn build_children_scope(statement: &Statement, ctx: &ExecutionContext, eph: &EphContext) -> ScopeContext {
     let mut has_children = false;
     let mut any_uncomputed = false;
     let mut any_transparent = false;
-    let mut selected_ids: Vec<i32> = Vec::new();
+    let mut selected_ids: Vec<i64> = Vec::new();
     let mut unselected_filters: Vec<CompositeFilter> = Vec::new();
 
     for child in statement.children() {
@@ -80,7 +80,7 @@ pub(super) fn build_children_scope(statement: &Statement, ctx: &ExecutionContext
             }
         } else {
             any_uncomputed = true;
-            if let Some(f) = child.command().get_selector_composite_filter() {
+            if let Some(f) = child.command().get_selector_composite_filter(eph) {
                 unselected_filters.push(f);
             }
         }

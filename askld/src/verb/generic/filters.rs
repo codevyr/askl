@@ -74,7 +74,7 @@ impl Verb for IgnoreVerb {
 }
 
 impl Filter for IgnoreVerb {
-    fn get_composite_filter(&self) -> Option<CompositeFilter> {
+    fn get_composite_filter(&self, _eph: &index::db_diesel::EphContext) -> Option<CompositeFilter> {
         let mut parts = vec![];
         if let Some(ref name) = self.name {
             // Same CompoundNameMixin the positive name filter uses — replaces
@@ -155,7 +155,7 @@ impl Verb for ProjectFilter {
 }
 
 impl Filter for ProjectFilter {
-    fn get_composite_filter(&self) -> Option<CompositeFilter> {
+    fn get_composite_filter(&self, _eph: &index::db_diesel::EphContext) -> Option<CompositeFilter> {
         Some(CompositeFilter::leaf(ProjectFilterMixin::new(&self.project)))
     }
 }
@@ -200,8 +200,8 @@ impl Verb for DirectOnlyFilter {
 }
 
 impl Filter for DirectOnlyFilter {
-    fn get_composite_filter(&self) -> Option<CompositeFilter> {
-        Some(CompositeFilter::leaf(index::db_diesel::DirectOnlyMixin))
+    fn get_composite_filter(&self, eph: &index::db_diesel::EphContext) -> Option<CompositeFilter> {
+        Some(CompositeFilter::leaf(index::db_diesel::DirectOnlyMixin::new(eph)))
     }
 }
 
@@ -248,7 +248,7 @@ impl Verb for DefaultTypeFilter {
 }
 
 impl Filter for DefaultTypeFilter {
-    fn get_composite_filter(&self) -> Option<CompositeFilter> {
+    fn get_composite_filter(&self, _eph: &index::db_diesel::EphContext) -> Option<CompositeFilter> {
         if self.symbol_type_ids.is_empty() {
             return None;
         }
@@ -332,7 +332,7 @@ impl FilterKind {
         matches!(self, FilterKind::Type { .. })
     }
 
-    fn get_composite_filter(&self) -> Option<CompositeFilter> {
+    fn get_composite_filter(&self, _eph: &index::db_diesel::EphContext) -> Option<CompositeFilter> {
         match self {
             FilterKind::Type { symbol_type_ids } => {
                 if symbol_type_ids.len() == 1 {
@@ -469,8 +469,8 @@ impl Verb for GenericFilter {
 }
 
 impl Filter for GenericFilter {
-    fn get_composite_filter(&self) -> Option<CompositeFilter> {
-        self.kind.get_composite_filter()
+    fn get_composite_filter(&self, eph: &index::db_diesel::EphContext) -> Option<CompositeFilter> {
+        self.kind.get_composite_filter(eph)
     }
 }
 

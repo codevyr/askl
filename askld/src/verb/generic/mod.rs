@@ -16,7 +16,9 @@ use super::labels::{LabelVerb, UserVerb};
 use super::preamble::PreambleVerb;
 use super::Verb;
 
+mod ephemeral;
 mod filters;
+mod loc;
 mod modifiers;
 mod selectors;
 
@@ -24,6 +26,10 @@ pub use self::filters::{DefaultTypeFilter, DirectOnlyFilter, GenericFilter};
 pub use self::selectors::{GenericSelector, NameSelector, UnitVerb};
 
 pub(super) use self::filters::{IgnoreVerb, ProjectFilter};
+pub(crate) use self::ephemeral::EphemeralOps;
+pub(super) use self::ephemeral::LayerVerb;
+use self::ephemeral::{EphemeralInstanceVerb, EphemeralRefVerb, EphemeralSymbolVerb};
+pub(super) use self::loc::LocSelector;
 pub(super) use self::modifiers::{
     AnyModifier, DeriveModifier, HasModifier, IsolatedScope, RefsModifier, UnnestModifier,
 };
@@ -60,7 +66,27 @@ pub(crate) fn build_generic_verb(
     .collect::<Result<Vec<_>, _>>()?;
 
     let span = ident.as_span();
-    let res = match Identifier::build(ident)?.0.as_str() {
+    let ident_name = Identifier::build(ident)?.0;
+
+    // Reject non-ephemeral verbs inside layer blocks.
+    if ctx.get_eph_ops().is_some() {
+        match ident_name.as_str() {
+            EphemeralSymbolVerb::NAME | EphemeralInstanceVerb::NAME | EphemeralRefVerb::NAME | "_" => {}
+            other => {
+                return Err(Error::new_from_span(
+                    CustomError {
+                        message: format!(
+                            "only ephemeral verbs are allowed inside layer blocks, found '{}'",
+                            other
+                        ),
+                    },
+                    span,
+                ));
+            }
+        }
+    }
+
+    let res = match ident_name.as_str() {
         GenericSelector::NAME => GenericSelector::new(verb_span, &positional, &named),
         GenericFilter::NAME => GenericFilter::new(verb_span, &positional, &named),
         IgnoreVerb::NAME => IgnoreVerb::new(verb_span, &positional, &named),
@@ -98,6 +124,24 @@ pub(crate) fn build_generic_verb(
         }
         TypeSelector::NAME_FIELD | TypeSelector::NAME_METHOD => {
             TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FIELD)
+        }
+        LocSelector::NAME => LocSelector::new(verb_span, &positional, &named),
+        LayerVerb::NAME => LayerVerb::new(verb_span, &positional, &named),
+        EphemeralSymbolVerb::NAME | EphemeralInstanceVerb::NAME | EphemeralRefVerb::NAME => {
+            ctx.get_eph_ops()
+                .ok_or_else(|| anyhow::anyhow!(
+                    "'{}' can only be used inside a layer {{ }} block", ident_name
+                ))
+                .and_then(|eph_ops| {
+                    let op = match ident_name.as_str() {
+                        EphemeralSymbolVerb::NAME => EphemeralSymbolVerb::new_op(verb_span.clone(), &positional, &named)?,
+                        EphemeralInstanceVerb::NAME => EphemeralInstanceVerb::new_op(verb_span.clone(), &positional, &named)?,
+                        EphemeralRefVerb::NAME => EphemeralRefVerb::new_op(verb_span.clone(), &positional, &named)?,
+                        _ => unreachable!(),
+                    };
+                    eph_ops.lock().unwrap().push(op);
+                    Ok(UnitVerb::new(verb_span))
+                })
         }
         "_" => Ok(UnitVerb::new(verb_span)),
         unknown => Err(anyhow::anyhow!("unknown verb : {}", unknown)),

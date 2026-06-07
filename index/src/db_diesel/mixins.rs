@@ -10,6 +10,7 @@ use diesel::query_builder::{AstPass, QueryFragment, QueryId};
 use diesel::query_source::{Alias, AliasedField};
 use diesel::sql_types::{BigInt, Bool, Int4range, Integer, Nullable, Text};
 
+use crate::db_diesel::selection::EphContext;
 use crate::ltree::Ltree;
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::schema_diesel as index_schema;
@@ -67,9 +68,9 @@ pub type CurrentQuery<'a> = BoxedSelectStatement<
     Pg,
 >;
 
-type SymbolInstanceColumnsSqlType = (Integer, BigInt, Integer, Int4range, Integer);
+type SymbolInstanceColumnsSqlType = (BigInt, BigInt, Integer, Int4range, Integer, Nullable<BigInt>);
 
-type SymbolColumnsSqlType = (BigInt, Text, Ltree, Integer, Integer, Nullable<Integer>, Text);  // (id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name)
+type SymbolColumnsSqlType = (BigInt, Text, Ltree, Integer, Integer, Nullable<Integer>, Text, Nullable<BigInt>);  // (id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name, eph_layer)
 
 type ParentSelectionTuple = (
     AsSelect<SymbolRef, Pg>,
@@ -320,66 +321,125 @@ impl<ST: 'static + Send + diesel::sql_types::SingleValue, GB> ValidGrouping<GB> 
 }
 
 // ============================================================================
-// OwnedSqlBound — like OwnedSql but binds a Vec<i32> via ANY($N)
+// EphSqlFragment — composable SQL pieces interleaved with i64 array binds
 // ============================================================================
 
-/// Like [`OwnedSql`] but holds a `Vec<i32>` that is sent as a bound `int[]`
-/// parameter via PostgreSQL `ANY($N)`.
+/// One piece of an [`EphSqlFragment`].  The fragment serialises by emitting
+/// each part in order: `Sql` text is pushed as-is, `BindI64Array` is sent as
+/// a single `Array<BigInt>` bind parameter — Diesel assigns positional
+/// `$N` placeholders.
+#[derive(Debug, Clone)]
+enum EphSqlPart {
+    Sql(String),
+    BindI64Array(Vec<i64>),
+}
+
+/// SQL builder that allows interleaving `push_sql` with one or more
+/// `Array<BigInt>` bind parameters.  Replaces the older pattern of inlining
+/// `ANY(ARRAY[1,2,3]::bigint[])` into raw SQL text, which produced a fresh
+/// prepared-statement entry per distinct id vector.  Using bind parameters
+/// keeps the statement text constant, so the PostgreSQL plan cache (and
+/// `pg_stat_statements`) sees one query shape per logical query.
 ///
-/// Use this instead of `format!("... IN ({ids_csv})")` to keep integer ID
-/// lists as proper bind parameters rather than inline SQL text.
-///
-/// Example:
+/// Usage (inside a [`FilterLeaf`] implementation):
 /// ```rust,ignore
-/// OwnedSqlBound::<Bool>::new(
-///     "col IN (SELECT id FROM t WHERE other_id = ANY(".into(),
-///     ids,
-///     "))".into(),
-/// )
+/// EphSqlFragment::<Bool>::builder()
+///     .sql("NOT EXISTS (SELECT 1 FROM index.symbol_instances op \
+///                       WHERE op.id = ANY(")
+///     .bind(self.parent_ids.clone())
+///     .sql(") AND ")
+///     .eph_visibility("op.eph_layer", &self.eph)
+///     .sql(")")
+///     .build()
 /// ```
 #[derive(Debug, Clone)]
-pub(crate) struct OwnedSqlBound<ST> {
-    before: String,
-    ids: Vec<i32>,
-    after: String,
+pub(crate) struct EphSqlFragment<ST> {
+    parts: Vec<EphSqlPart>,
     _marker: PhantomData<ST>,
 }
 
-impl<ST> OwnedSqlBound<ST> {
-    pub(crate) fn new(before: String, ids: Vec<i32>, after: String) -> Self {
-        Self { before, ids, after, _marker: PhantomData }
+pub(crate) struct EphSqlBuilder<ST> {
+    parts: Vec<EphSqlPart>,
+    _marker: PhantomData<ST>,
+}
+
+impl<ST> EphSqlFragment<ST> {
+    pub(crate) fn builder() -> EphSqlBuilder<ST> {
+        EphSqlBuilder { parts: Vec::new(), _marker: PhantomData }
     }
 }
 
-impl<ST: 'static + Send + diesel::sql_types::SingleValue> Expression for OwnedSqlBound<ST> {
+impl<ST> EphSqlBuilder<ST> {
+    /// Append a literal SQL fragment.
+    pub(crate) fn sql(mut self, s: impl Into<String>) -> Self {
+        match self.parts.last_mut() {
+            Some(EphSqlPart::Sql(buf)) => buf.push_str(&s.into()),
+            _ => self.parts.push(EphSqlPart::Sql(s.into())),
+        }
+        self
+    }
+
+    /// Bind an `Array<BigInt>` parameter at this position in the SQL.
+    pub(crate) fn bind(mut self, ids: Vec<i64>) -> Self {
+        self.parts.push(EphSqlPart::BindI64Array(ids));
+        self
+    }
+
+    /// Emit `(<column> IS NULL OR <column> = ANY($N))` where `$N` is the
+    /// position of the bound `eph` array.  Each call binds the array
+    /// separately; if the same array is referenced from multiple call sites
+    /// in one fragment, the wire payload is duplicated — acceptable for the
+    /// short arrays we deal with in practice.
+    pub(crate) fn eph_visibility(mut self, column: &str, eph: &EphContext) -> Self {
+        let sql = format!("({} IS NULL OR {} = ANY(", column, column);
+        match self.parts.last_mut() {
+            Some(EphSqlPart::Sql(buf)) => buf.push_str(&sql),
+            _ => self.parts.push(EphSqlPart::Sql(sql)),
+        }
+        self.parts.push(EphSqlPart::BindI64Array(eph.as_slice().to_vec()));
+        self.parts.push(EphSqlPart::Sql("))".to_string()));
+        self
+    }
+
+    pub(crate) fn build(self) -> EphSqlFragment<ST> {
+        EphSqlFragment { parts: self.parts, _marker: PhantomData }
+    }
+}
+
+impl<ST: 'static + Send + diesel::sql_types::SingleValue> Expression for EphSqlFragment<ST> {
     type SqlType = ST;
 }
 
-impl<ST: 'static + Send> QueryFragment<Pg> for OwnedSqlBound<ST> {
+impl<ST: 'static + Send> QueryFragment<Pg> for EphSqlFragment<ST> {
     fn walk_ast<'b>(&'b self, mut pass: AstPass<'_, 'b, Pg>) -> diesel::QueryResult<()> {
-        pass.push_sql(&self.before);
-        pass.push_bind_param::<diesel::sql_types::Array<Integer>, _>(&self.ids)?;
-        pass.push_sql(&self.after);
+        for part in &self.parts {
+            match part {
+                EphSqlPart::Sql(s) => pass.push_sql(s),
+                EphSqlPart::BindI64Array(arr) => {
+                    pass.push_bind_param::<diesel::sql_types::Array<BigInt>, _>(arr)?;
+                }
+            }
+        }
         Ok(())
     }
 }
 
 impl<ST: 'static + Send + diesel::sql_types::SingleValue, QS> SelectableExpression<QS>
-    for OwnedSqlBound<ST>
+    for EphSqlFragment<ST>
 {
 }
 impl<ST: 'static + Send + diesel::sql_types::SingleValue, QS> AppearsOnTable<QS>
-    for OwnedSqlBound<ST>
+    for EphSqlFragment<ST>
 {
 }
 
-impl<ST> QueryId for OwnedSqlBound<ST> {
+impl<ST> QueryId for EphSqlFragment<ST> {
     type QueryId = ();
     const HAS_STATIC_QUERY_ID: bool = false;
 }
 
 impl<ST: 'static + Send + diesel::sql_types::SingleValue, GB> ValidGrouping<GB>
-    for OwnedSqlBound<ST>
+    for EphSqlFragment<ST>
 {
     type IsAggregate = is_aggregate::No;
 }
@@ -648,13 +708,13 @@ impl FilterLeaf for ExactNameMixin {
 
 #[derive(Debug, Clone)]
 pub struct SymbolInstanceIdMixin {
-    instance_ids: Vec<i32>,
+    instance_ids: Vec<i64>,
 }
 
 impl SymbolInstanceIdMixin {
     pub fn new(ids: &[SymbolInstanceId]) -> Self {
         Self {
-            instance_ids: ids.iter().map(|id| Into::<i32>::into(*id)).collect(),
+            instance_ids: ids.iter().map(|id| Into::<i64>::into(*id)).collect(),
         }
     }
 }
@@ -690,78 +750,114 @@ impl FilterLeaf for ProjectFilterMixin {
 
 /// DirectOnlyMixin — filters children/has_children to "direct" only.
 #[derive(Debug, Clone)]
-pub struct DirectOnlyMixin;
+pub struct DirectOnlyMixin {
+    eph: EphContext,
+}
 
-const DIRECT_ONLY_HAS_CHILDREN_SQL: &str = "\
-    NOT EXISTS (\
-        SELECT 1 FROM index.symbol_instances mid \
-        JOIN index.symbols mid_sym ON mid.symbol = mid_sym.id \
-        JOIN index.symbol_types mid_type ON mid_sym.symbol_type = mid_type.id \
-        WHERE mid.object_id = symbol_instances.object_id \
-          AND symbol_instances.offset_range @> mid.offset_range \
-          AND mid.offset_range @> contained_instances.offset_range \
-          AND mid.offset_range != symbol_instances.offset_range \
-          AND mid.offset_range != contained_instances.offset_range \
-          AND mid.id != symbol_instances.id \
-          AND mid.id != contained_instances.id \
-          AND symbol_types.level >= mid_type.level\
-    )";
-
-const DIRECT_ONLY_CHILDREN_SQL: &str = "\
-    NOT EXISTS (\
-        SELECT 1 FROM index.symbol_instances container \
-        JOIN index.symbols cont_sym ON container.symbol = cont_sym.id \
-        JOIN index.symbol_types cont_type ON cont_sym.symbol_type = cont_type.id \
-        JOIN index.symbol_types parent_type ON parent_type.id = parent_symbols.symbol_type \
-        WHERE container.object_id = parent_decls.object_id \
-          AND parent_decls.offset_range @> container.offset_range \
-          AND container.offset_range @> symbol_refs.from_offset_range \
-          AND container.offset_range != parent_decls.offset_range \
-          AND container.id != parent_decls.id \
-          AND cont_type.level <= parent_type.level\
-    )";
+impl DirectOnlyMixin {
+    pub fn new(eph: &EphContext) -> Self {
+        Self { eph: eph.clone() }
+    }
+}
 
 impl FilterLeaf for DirectOnlyMixin {
     fn has_children_expr(&self) -> Option<HasChildrenBoolExpr> {
-        Some(Box::new(OwnedSql::<Bool>::new(DIRECT_ONLY_HAS_CHILDREN_SQL.to_string())))
+        Some(Box::new(
+            EphSqlFragment::<Bool>::builder()
+                .sql("NOT EXISTS (\
+                        SELECT 1 FROM index.symbol_instances mid \
+                        JOIN index.symbols mid_sym ON mid.symbol = mid_sym.id \
+                        JOIN index.symbol_types mid_type ON mid_sym.symbol_type = mid_type.id \
+                        WHERE mid.object_id = symbol_instances.object_id \
+                          AND symbol_instances.offset_range @> mid.offset_range \
+                          AND mid.offset_range @> contained_instances.offset_range \
+                          AND mid.offset_range != symbol_instances.offset_range \
+                          AND mid.offset_range != contained_instances.offset_range \
+                          AND mid.id != symbol_instances.id \
+                          AND mid.id != contained_instances.id \
+                          AND symbol_types.level >= mid_type.level \
+                          AND ")
+                .eph_visibility("mid.eph_layer", &self.eph)
+                .sql(" AND ")
+                .eph_visibility("mid_sym.eph_layer", &self.eph)
+                .sql(")")
+                .build()
+        ))
     }
 
     fn children_expr(&self) -> Option<ChildrenBoolExpr> {
-        Some(Box::new(OwnedSql::<Bool>::new(DIRECT_ONLY_CHILDREN_SQL.to_string())))
+        Some(Box::new(
+            EphSqlFragment::<Bool>::builder()
+                .sql("NOT EXISTS (\
+                        SELECT 1 FROM index.symbol_instances container \
+                        JOIN index.symbols cont_sym ON container.symbol = cont_sym.id \
+                        JOIN index.symbol_types cont_type ON cont_sym.symbol_type = cont_type.id \
+                        JOIN index.symbol_types parent_type ON parent_type.id = parent_symbols.symbol_type \
+                        WHERE container.object_id = parent_decls.object_id \
+                          AND parent_decls.offset_range @> container.offset_range \
+                          AND container.offset_range @> symbol_refs.from_offset_range \
+                          AND container.offset_range != parent_decls.offset_range \
+                          AND container.id != parent_decls.id \
+                          AND cont_type.level <= parent_type.level \
+                          AND ")
+                .eph_visibility("container.eph_layer", &self.eph)
+                .sql(" AND ")
+                .eph_visibility("cont_sym.eph_layer", &self.eph)
+                .sql(")")
+                .build()
+        ))
     }
 }
 
 /// InnermostOnlyMixin — filters has_parents to innermost container only.
 #[derive(Debug, Clone)]
-pub struct InnermostOnlyMixin;
+pub struct InnermostOnlyMixin {
+    eph: EphContext,
+}
 
-const INNERMOST_ONLY_SQL: &str = "\
-    NOT EXISTS (\
-        SELECT 1 FROM index.symbol_instances mid \
-        WHERE mid.object_id = container_instances.object_id \
-          AND container_instances.offset_range @> mid.offset_range \
-          AND mid.offset_range @> symbol_instances.offset_range \
-          AND mid.offset_range != container_instances.offset_range \
-          AND mid.offset_range != symbol_instances.offset_range \
-          AND mid.id != container_instances.id \
-          AND mid.id != symbol_instances.id\
-    )";
+impl InnermostOnlyMixin {
+    pub fn new(eph: &EphContext) -> Self {
+        Self { eph: eph.clone() }
+    }
+}
 
 impl FilterLeaf for InnermostOnlyMixin {
     fn has_parents_expr(&self) -> Option<HasParentsBoolExpr> {
-        Some(Box::new(OwnedSql::<Bool>::new(INNERMOST_ONLY_SQL.to_string())))
+        Some(Box::new(
+            EphSqlFragment::<Bool>::builder()
+                .sql("NOT EXISTS (\
+                        SELECT 1 FROM index.symbol_instances mid \
+                        JOIN index.symbols mid_sym ON mid_sym.id = mid.symbol \
+                        WHERE mid.object_id = container_instances.object_id \
+                          AND container_instances.offset_range @> mid.offset_range \
+                          AND mid.offset_range @> symbol_instances.offset_range \
+                          AND mid.offset_range != container_instances.offset_range \
+                          AND mid.offset_range != symbol_instances.offset_range \
+                          AND mid.id != container_instances.id \
+                          AND mid.id != symbol_instances.id \
+                          AND ")
+                .eph_visibility("mid.eph_layer", &self.eph)
+                .sql(" AND ")
+                .eph_visibility("mid_sym.eph_layer", &self.eph)
+                .sql(")")
+                .build()
+        ))
     }
 }
 
 /// OuterParentFilterMixin — filters out nested parent instances from REFS queries.
 #[derive(Debug, Clone)]
 pub struct OuterParentFilterMixin {
-    parent_ids: Vec<i32>,
+    parent_ids: Vec<i64>,
+    eph: EphContext,
 }
 
 impl OuterParentFilterMixin {
-    pub fn new(parent_ids: &[i32]) -> Self {
-        Self { parent_ids: parent_ids.to_vec() }
+    pub fn new(parent_ids: &[i64], eph: &EphContext) -> Self {
+        Self {
+            parent_ids: parent_ids.to_vec(),
+            eph: eph.clone(),
+        }
     }
 }
 
@@ -770,18 +866,22 @@ impl FilterLeaf for OuterParentFilterMixin {
         if self.parent_ids.is_empty() {
             return None;
         }
-        Some(Box::new(OwnedSqlBound::<Bool>::new(
-            "NOT EXISTS (\
-                SELECT 1 FROM index.symbol_instances op \
-                WHERE op.id = ANY(".into(),
-            self.parent_ids.clone(),
-            ") \
-                  AND op.id != parent_decls.id \
-                  AND op.object_id = parent_decls.object_id \
-                  AND op.offset_range @> parent_decls.offset_range \
-                  AND op.offset_range != parent_decls.offset_range\
-            )".into(),
-        )))
+        Some(Box::new(
+            EphSqlFragment::<Bool>::builder()
+                .sql("NOT EXISTS (\
+                        SELECT 1 FROM index.symbol_instances op \
+                        WHERE op.id = ANY(")
+                .bind(self.parent_ids.clone())
+                .sql(") \
+                          AND op.id != parent_decls.id \
+                          AND op.object_id = parent_decls.object_id \
+                          AND op.offset_range @> parent_decls.offset_range \
+                          AND op.offset_range != parent_decls.offset_range \
+                          AND ")
+                .eph_visibility("op.eph_layer", &self.eph)
+                .sql(")")
+                .build()
+        ))
     }
 }
 
@@ -870,3 +970,4 @@ pub const INSTANCE_TYPE_HEADER: i32 = 7;
 pub const INSTANCE_TYPE_BUILD: i32 = 8;
 pub const INSTANCE_TYPE_FILE: i32 = 9;
 pub const INSTANCE_TYPE_DOCUMENTATION: i32 = 10;
+

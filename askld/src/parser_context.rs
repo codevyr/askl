@@ -4,7 +4,7 @@ use crate::{
     scope::{DefaultScope, Scope},
     span::Span,
     statement::Statement,
-    verb::{UnitVerb, Verb},
+    verb::{EphemeralOps, UnitVerb, Verb},
 };
 use anyhow::Result;
 use std::{
@@ -57,6 +57,10 @@ pub struct ParserContext {
     /// When true, derive() copies both has_relationship_modifier and inherit_relationship_modifier
     /// to child contexts, so the relationship type propagates to all descendants.
     inherit_relationship_modifier: RefCell<bool>,
+    /// Shared ephemeral ops vec for the current layer block.
+    /// Set by LayerVerb::update_context(), inherited by derive() so child
+    /// contexts push ops to the same vec.
+    eph_ops: RefCell<Option<EphemeralOps>>,
 }
 
 impl ParserContext {
@@ -72,6 +76,7 @@ impl ParserContext {
             default_symbol_types: RefCell::new(None),
             has_relationship_modifier: RefCell::new(false),
             inherit_relationship_modifier: RefCell::new(false),
+            eph_ops: RefCell::new(None),
         })
     }
 
@@ -90,6 +95,7 @@ impl ParserContext {
             // UNLESS inherit_relationship_modifier is set, in which case propagate both flags
             has_relationship_modifier: RefCell::new(*from.inherit_relationship_modifier.borrow()),
             inherit_relationship_modifier: RefCell::new(*from.inherit_relationship_modifier.borrow()),
+            eph_ops: RefCell::new(from.get_eph_ops()),
         })
     }
 
@@ -207,6 +213,16 @@ impl ParserContext {
     /// This covers: @func, @file, @mod, @dir, @filter("type", ...)
     pub fn has_type_selector(&self) -> bool {
         self.command.borrow().has_suppress_default_type_filter()
+    }
+
+    /// Set the shared ephemeral ops vec (called by LayerVerb::update_context).
+    pub(crate) fn set_eph_ops(&self, ops: EphemeralOps) {
+        *self.eph_ops.borrow_mut() = Some(ops);
+    }
+
+    /// Get the shared ephemeral ops vec (clones the Option<Arc>).
+    pub(crate) fn get_eph_ops(&self) -> Option<EphemeralOps> {
+        self.eph_ops.borrow().clone()
     }
 
 }

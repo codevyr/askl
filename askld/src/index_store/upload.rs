@@ -203,6 +203,24 @@ impl IndexStore {
                         .set(index_schema::projects::upload_status.eq(UploadStatus::Complete))
                         .execute(conn)
                         .await?;
+
+                        // Persistent data has changed; drop the ephemeral layer
+                        // cache atomically with the upload commit.  See
+                        // `index::db_diesel::purge_eph_cache` for the rationale.
+                        //
+                        // **Invariant for future authors**: any *other* code
+                        // path that mutates the persistent index (delete
+                        // project, content-overwrite, schema-migrating data
+                        // moves, …) must also call `purge_eph_cache` in the
+                        // same transaction.  Stale `loc(...)` / `layer {…}`
+                        // results would otherwise re-surface against the
+                        // pre-mutation state.
+                        let purged = index::db_diesel::purge_eph_cache(conn).await?;
+                        tracing::info!(
+                            project_id,
+                            purged_layers = purged,
+                            "purged ephemeral layer cache after project finalize"
+                        );
                         Ok(true)
                     }
                     Some((_, _, _)) => Err(UploadError::Conflict),
