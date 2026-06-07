@@ -1189,28 +1189,45 @@ impl Index {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
-        let _span = tracing::debug_span!("find_edges_between", count = instance_ids.len()).entered();
+        let _span = tracing::info_span!(
+            "find_edges_between",
+            count = instance_ids.len(),
+            eph_count = eph_ids.len(),
+        ).entered();
+        let t0 = std::time::Instant::now();
 
+        // CTE-materialised candidate set: PG's planner picks a much
+        // better nested-loop join order when it knows the from/to
+        // candidate set is exactly 52-ish rows.  Without the CTE, the
+        // planner with empty `$2` (no ephemeral layers visible) picks
+        // a to_inst → sr (by to_symbol, ~2.7K rows per to_inst) →
+        // from_inst (GIST) plan and scans ~141K rows; with the CTE
+        // materialised, it scans ~2.7K and runs ~1000× faster on the
+        // empty-eph case while staying ~equivalent on the non-empty
+        // case.  See the EXPLAIN-ANALYZE comparison documented in
+        // the commit that added this.
         let results = diesel::sql_query(
-            "SELECT DISTINCT ON (from_inst.id, sr.id) \
+            "WITH candidates AS MATERIALIZED ( \
+                 SELECT id, symbol, object_id, offset_range, eph_layer \
+                 FROM index.symbol_instances \
+                 WHERE id = ANY($1) \
+                   AND (eph_layer IS NULL OR eph_layer = ANY($2)) \
+             ) \
+             SELECT DISTINCT ON (from_inst.id, sr.id) \
                     sr.id AS ref_id, sr.to_symbol, sr.from_object, sr.from_offset_range, \
                     to_inst.id AS to_instance_id, \
                     from_inst.id AS from_instance_id, \
                     sr.eph_layer AS sr_eph_layer, \
                     from_inst.eph_layer AS from_eph_layer, \
                     to_inst.eph_layer AS to_eph_layer \
-             FROM index.symbol_instances from_inst \
+             FROM candidates from_inst \
              JOIN index.symbol_refs sr \
                  ON sr.from_object = from_inst.object_id \
                  AND from_inst.offset_range @> sr.from_offset_range \
-             JOIN index.symbol_instances to_inst \
+             JOIN candidates to_inst \
                  ON to_inst.symbol = sr.to_symbol \
-             WHERE from_inst.id = ANY($1) \
-               AND to_inst.id = ANY($1) \
-               AND from_inst.id != to_inst.id \
+             WHERE from_inst.id != to_inst.id \
                AND (sr.eph_layer IS NULL OR sr.eph_layer = ANY($2)) \
-               AND (from_inst.eph_layer IS NULL OR from_inst.eph_layer = ANY($2)) \
-               AND (to_inst.eph_layer IS NULL OR to_inst.eph_layer = ANY($2)) \
              ORDER BY from_inst.id, sr.id, to_inst.id"
         )
             .bind::<diesel::sql_types::Array<diesel::sql_types::BigInt>, _>(instance_ids)
@@ -1218,6 +1235,12 @@ impl Index {
             .load::<ImplicitEdge>(&mut *connection)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to find edges between instances: {}", e))?;
+
+        tracing::info!(
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            result_rows = results.len(),
+            "find_edges_between SQL completed",
+        );
 
         for edge in &results {
             if is_eph_leak(edge.sr_eph_layer, eph_ids)
