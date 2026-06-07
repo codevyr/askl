@@ -218,7 +218,7 @@ impl Selector for UserVerb {
         _index: &Index,
         _selector_filters: &[&dyn Filter],
         parent: &Statement,
-        _notif_ctx: NotificationContext,
+        _notif_ctx: &NotificationContext,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
@@ -274,7 +274,7 @@ impl Selector for UserVerb {
         index: &Index,
         _selector_filters: &[&dyn Filter],
         child: &Statement,
-        notif_ctx: NotificationContext,
+        notif_ctx: &NotificationContext,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
@@ -313,11 +313,14 @@ impl Selector for UserVerb {
         Ok(Some(cached_selection))
     }
 
+    /// Override that forwards through to the default — kept as an
+    /// override only because of UserVerb's labelled-forced semantics
+    /// (see body).
     fn try_constrain_notification(
         &self,
         registry: &mut SelectorRegistry,
         dependency: &Selection,
-        notif_ctx: NotificationContext,
+        notif_ctx: &NotificationContext,
         _notifier: &Statement,
     ) -> Result<ConstraintAction, pest::error::Error<Rule>> {
         // For forced parent dependencies, we always derive fake selection.
@@ -325,7 +328,7 @@ impl Selector for UserVerb {
             let mut changed = false;
             let constrained = selector_state_with(registry, self, |state| {
                 if state.selection.is_some() {
-                    changed = state.constrain_selection(dependency, notif_ctx.role, notif_ctx.rel_type);
+                    changed = state.constrain_selection(dependency, &notif_ctx.role, notif_ctx.rel_type);
                     true
                 } else {
                     false

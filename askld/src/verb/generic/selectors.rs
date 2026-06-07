@@ -169,7 +169,7 @@ impl Selector for ForcedVerb {
         _index: &Index,
         _selector_filters: &[&dyn Filter],
         parent: &Statement,
-        _notif_ctx: super::super::NotificationContext,
+        _notif_ctx: &super::super::NotificationContext,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {

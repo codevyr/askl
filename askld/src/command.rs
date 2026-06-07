@@ -280,7 +280,7 @@ impl Command {
         for selector in self.selectors() {
             let span = selector.span();
             let (constrained, sel_changed, sel_warnings) = selector_state_with(&mut ctx.registry, selector, |state| {
-                state.constrain_with_warning(dependency, role, rel_type, span, "children")
+                state.constrain_with_warning(dependency, &role, rel_type, span, "children")
             });
             changed |= sel_changed;
             warnings.extend(sel_warnings);
@@ -379,7 +379,7 @@ impl Command {
                 }
             }
 
-            match selector.try_constrain_notification(&mut ctx.registry, &dependency, notif_ctx, notifier)? {
+            match selector.try_constrain_notification(&mut ctx.registry, &dependency, &notif_ctx, notifier)? {
                 ConstraintAction::Skip => continue,
                 ConstraintAction::Constrained(sel_changed, sel_warnings) => {
                     changed |= sel_changed;
@@ -392,21 +392,21 @@ impl Command {
             // Derive selection: dispatch based on dependency role
             let mut selection = match notif_ctx.role {
                 DependencyRole::Child => {
-                    selector.derive_from_parent(ctx, index, &selector_filters, notifier, notif_ctx, parent_scope.clone(), children_scope.clone())
+                    selector.derive_from_parent(ctx, index, &selector_filters, notifier, &notif_ctx, parent_scope.clone(), children_scope.clone())
                         .await
                 }
                 DependencyRole::Parent => {
-                    selector.derive_from_child(ctx, index, &selector_filters, notifier, notif_ctx, parent_scope.clone(), children_scope.clone())
+                    selector.derive_from_child(ctx, index, &selector_filters, notifier, &notif_ctx, parent_scope.clone(), children_scope.clone())
                         .await
                 }
                 DependencyRole::User => {
                     selector.derive_from_provider(ctx, index, &selector_filters, notifier)
                         .await
                 }
-                // Sibling notifications never reach this dispatch — they're
+                // PreSeed notifications never reach this dispatch — they're
                 // short-circuited to a no-op in `Statement::notify`.  If they
                 // somehow do, treat as a no-op (no selection produced).
-                DependencyRole::Sibling => Ok(None),
+                DependencyRole::PreSeed { .. } => Ok(None),
             }
             .map_err(|e| {
                 pest::error::Error::new_from_span(

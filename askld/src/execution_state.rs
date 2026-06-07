@@ -3,17 +3,32 @@ use std::rc::Rc;
 use crate::{parser::Rule, statement::Statement};
 
 /// The role of a dependency in the execution state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Copy` was dropped to make room for `PreSeed`'s optional label.
+/// Most call sites pattern-match by reference (`&dep.dependency_role`)
+/// or clone explicitly, so the impact is limited.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DependencyRole {
     Parent,
     Child,
     User,
-    /// Source-order ordering edge between top-level sibling statements
-    /// when at least one creates an ephemeral layer.  Pure ordering —
-    /// carries no selection data, so notification is a no-op for the
-    /// receiver.  Exists so the dependency graph can express
-    /// "compute me after this sibling's layer has materialised."
-    Sibling,
+    /// "This dependency must apply its selection before my
+    /// `compute_selected` starts."  Used in two cases:
+    ///
+    /// 1. **Sibling ordering** (`label = None`): added between
+    ///    top-level statements where at least one creates an
+    ///    ephemeral layer, so the second statement's `eph` capture
+    ///    reflects the first's materialised layer.
+    /// 2. **Label resolution** (`label = Some(name)`): added when a
+    ///    layer-creating verb has a `@label` argument, so
+    ///    `compute_roots` can resolve the label to symbol IDs at
+    ///    push time and pass them through `LabelResolutions`.
+    ///
+    /// Both cases require the same action at the scheduling layer:
+    /// drain pending before pushing.  No selection-data notification
+    /// flows along these edges — they're pure ordering (with optional
+    /// resolution as a side-effect).
+    PreSeed { label: Option<Rc<str>> },
 }
 
 /// Whether a dependency must be satisfied before any output can be produced,

@@ -195,7 +195,7 @@ impl Statement {
     /// joins them in batches via `join_all` to overlap DB round-trips.
     ///
     /// **Pre-drain ordering.**  Before queuing a statement that has
-    /// any [`DependencyRole::Sibling`] dependency or any `@label`
+    /// any [`DependencyRole::PreSeed`] dependency or any `@label`
     /// reference inside a layer-creating verb, drain pending so the
     /// statement's `eph` capture and (if any) `LabelResolutions`
     /// reflect prior applied state.  Sibling edges are installed by
@@ -212,7 +212,6 @@ impl Statement {
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
         statements: &Vec<Rc<Statement>>,
-        labeled_statements: &LabeledStatements,
     ) -> Result<(), pest::error::Error<Rule>> {
         let _span = tracing::info_span!("compute_roots").entered();
 
@@ -255,51 +254,55 @@ impl Statement {
             // are equivalent for correctness; the explicit edge form lets
             // the dependency graph carry the ordering instead of an ad-hoc
             // check in the executor.
-            let has_sibling_dep = statement
+            // One walk over PreSeed edges handles both the
+            // sibling-ordering case (`label = None`) and the
+            // label-resolution case (`label = Some(name)`).  Both
+            // require the same action: drain pending so the prior
+            // statement's selection has applied before we capture
+            // `eph` and resolve labels.  Pre-resolved labels travel
+            // into `compute_selected` via `LabelResolutions`.
+            let mut resolved = LabelResolutions::new();
+            let mut needs_drain = false;
+            // Snapshot the PreSeed deps (cheap clones of the Rc<Statement>
+            // + Option<Rc<str>>) so we don't hold a borrow on `statement`
+            // across the await below.
+            let pre_seed_deps: Vec<(Rc<Statement>, Option<Rc<str>>)> = statement
                 .get_state()
                 .dependencies
                 .iter()
-                .any(|d| d.dependency_role == DependencyRole::Sibling);
-            // Pre-drain when this statement either has a Sibling edge
-            // (sequence-with-prior-layer-creating-sibling) **or** has any
-            // `@label` reference inside a layer-creating verb.  In the
-            // latter case the labelled statement must have applied its
-            // selection so we can resolve the label to symbol IDs before
-            // pushing the future.
-            let label_refs = statement.command().layer_label_refs();
-            if has_sibling_dep || !label_refs.is_empty() {
+                .filter_map(|d| match &d.dependency_role {
+                    DependencyRole::PreSeed { label } => {
+                        Some((d.dependency.clone(), label.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !pre_seed_deps.is_empty() {
+                needs_drain = true;
+            }
+            if needs_drain {
                 drain_pending(&mut pending, ctx).await?;
             }
-
-            // Resolve any `@label` references against the now-applied
-            // labelled statements' selections.  Empty `LabelResolutions`
-            // for the vast majority of statements that don't reference
-            // labels inside layer-creating verbs.
-            let mut resolved = LabelResolutions::new();
-            for label in label_refs {
-                if let Some(labelled) = labeled_statements
-                    .get_statements(&label)
-                    .and_then(|stmts| stmts.first())
-                {
-                    if let Some(sel) = labelled.get_selection(ctx) {
-                        let ids: Vec<i64> = sel.nodes.iter().map(|n| n.symbol.id).collect();
-                        if ids.is_empty() {
-                            tracing::warn!(
-                                label = %label,
-                                "ephemeral verb '@{}' resolved to 0 symbols; \
-                                 layer will emit no rows",
-                                label,
-                            );
-                        }
-                        resolved.insert(label, ids);
-                    } else {
+            for (dep_stmt, label) in pre_seed_deps {
+                let Some(label) = label else { continue };
+                if let Some(sel) = dep_stmt.get_selection(ctx) {
+                    let ids: Vec<i64> = sel.nodes.iter().map(|n| n.symbol.id).collect();
+                    if ids.is_empty() {
                         tracing::warn!(
                             label = %label,
-                            "ephemeral verb '@{}' labelled statement has no \
-                             selection at resolution time; layer will emit no rows",
+                            "ephemeral verb '@{}' resolved to 0 symbols; \
+                             layer will emit no rows",
                             label,
                         );
                     }
+                    resolved.insert(label.to_string(), ids);
+                } else {
+                    tracing::warn!(
+                        label = %label,
+                        "ephemeral verb '@{}' labelled statement has no \
+                         selection at resolution time; layer will emit no rows",
+                        label,
+                    );
                 }
             }
 
@@ -341,7 +344,7 @@ impl Statement {
         // `S_j depends on S_i`.  The edge expresses "S_j's ephemeral
         // context must reflect S_i's materialised layer before S_j
         // computes."  No notification data flows along these edges —
-        // they're pure ordering — see [`DependencyRole::Sibling`].
+        // they're pure ordering — see [`DependencyRole::PreSeed`].
         //
         // We only consider top-level statements (no parent); nested
         // siblings still rely on Parent/Child edges, plus the
@@ -359,11 +362,11 @@ impl Statement {
                 }
                 s_i.get_state_mut().dependents.push(StatementDependent::new(
                     s_j.clone(),
-                    DependencyRole::Sibling,
+                    DependencyRole::PreSeed { label: None },
                 ));
                 s_j.get_state_mut().dependencies.push(StatementDependency::new(
                     s_i.clone(),
-                    DependencyRole::Sibling,
+                    DependencyRole::PreSeed { label: None },
                 ));
             }
         }
@@ -486,7 +489,7 @@ impl Statement {
         })?;
 
         // Build the dependency graph first — `compute_roots` consults
-        // `DependencyRole::Sibling` edges to decide when to pre-drain
+        // `DependencyRole::PreSeed` edges to decide when to pre-drain
         // pending compute futures so each statement's `eph` capture
         // reflects every prior layer-creating sibling's materialised
         // layer.  See `Self::build_dependency_graph` (sibling edges)
@@ -495,11 +498,12 @@ impl Statement {
 
         self.mark_weak_statements(&statements);
 
-        // Compute initial selections; layer-creating statements
-        // pre-drain pending via the Sibling edges installed above, and
-        // layer-creating statements with `@label` references resolve
-        // them against the labelled statements' selections at push time.
-        self.compute_roots(ctx, cfg, &statements, &labeled_statements).await?;
+        // Compute initial selections.  `compute_roots` consults the
+        // `PreSeed` edges installed above to (a) pre-drain pending
+        // futures before any statement whose `eph` capture must
+        // reflect prior layer materialisation, and (b) resolve any
+        // `@label` references that come bundled with those edges.
+        self.compute_roots(ctx, cfg, &statements).await?;
 
         self.run_worklist(ctx, cfg, &statements).await?;
 
@@ -876,11 +880,13 @@ impl Statement {
         let _update_dependency: tracing::span::EnteredSpan =
             tracing::debug_span!("notify").entered();
 
-        // Sibling edges carry no selection data — they exist only to
-        // express "compute me after this sibling's ephemeral layer has
-        // materialised."  No re-derivation needed; the receiver's
-        // initial compute_selected already saw the right ctx.eph.
-        if dependent.dependency_role == DependencyRole::Sibling {
+        // PreSeed edges carry no selection data — they exist only to
+        // express "compute me after this dep's selection has applied."
+        // The pre-drain happens in `compute_roots`; by the time
+        // `run_worklist` is calling `notify`, the receiver's
+        // `compute_selected` has already run with the right `eph` and
+        // resolved labels.  Nothing to propagate.
+        if matches!(dependent.dependency_role, DependencyRole::PreSeed { .. }) {
             return Ok(PropagationResult { changed: false });
         }
 
@@ -949,13 +955,13 @@ impl Statement {
         let rel_type = match dependent.dependency_role {
             DependencyRole::Child => dependent.statement.get_relationship_type(),
             DependencyRole::Parent | DependencyRole::User => self.get_relationship_type(),
-            // Unreachable: Sibling notifications are short-circuited at the
+            // Unreachable: PreSeed notifications are short-circuited at the
             // top of `notify`.  Use the notifier's rel_type as a defensive
             // default rather than panic.
-            DependencyRole::Sibling => self.get_relationship_type(),
+            DependencyRole::PreSeed { .. } => self.get_relationship_type(),
         };
         let notif_ctx = NotificationContext {
-            role: dependent.dependency_role,
+            role: dependent.dependency_role.clone(),
             rel_type,
             unnest: dependent.statement.is_unnest(),
         };

@@ -178,7 +178,12 @@ pub enum VerbTag {
 /// Bundles the notification parameters that always travel together through
 /// the notification chain: dependency role, resolved relationship type, and
 /// whether the receiver uses unnest mode.
-#[derive(Debug, Clone, Copy)]
+///
+/// `Copy` dropped along with `DependencyRole::PreSeed { label: Option<Rc<str>> }`
+/// — the role's optional label string can't be a static type.  Most call
+/// sites passed this by value; they now call `.clone()` (cheap: one `Rc`
+/// bump + a couple of ints).
+#[derive(Debug, Clone)]
 pub struct NotificationContext {
     pub role: DependencyRole,
     pub rel_type: RelationshipType,
@@ -317,7 +322,7 @@ impl SelectorState {
     pub fn constrain_selection(
         &mut self,
         dependency: &Selection,
-        role: DependencyRole,
+        role: &DependencyRole,
         rel_type: RelationshipType,
     ) -> bool {
         if self.selection.is_none() {
@@ -337,8 +342,10 @@ impl SelectorState {
                 DependencyRole::User => {
                     self.constrain_by_owner(dependency);
                 }
-                // Sibling edges carry no constraint data — pure ordering.
-                DependencyRole::Sibling => {}
+                // PreSeed edges carry no constraint data — pure ordering
+                // (with optional label-resolution as a side-effect at
+                // `compute_roots` time, not here).
+                DependencyRole::PreSeed { .. } => {}
             }
         }
 
@@ -400,7 +407,7 @@ impl SelectorState {
     pub fn constrain_with_warning(
         &mut self,
         dependency: &Selection,
-        role: DependencyRole,
+        role: &DependencyRole,
         rel_type: RelationshipType,
         span: pest::Span<'_>,
         context: &str,
@@ -490,7 +497,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         &self,
         registry: &mut SelectorRegistry,
         dependency: &Selection,
-        notif_ctx: NotificationContext,
+        notif_ctx: &NotificationContext,
         notifier: &Statement,
     ) -> Result<ConstraintAction, pest::error::Error<Rule>> {
         // Weak statements do not constrain the selection of their dependencies.
@@ -505,7 +512,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         let span = self.span();
         let context = format!("{}", notifier.command().span());
         let (constrained, changed, warnings) = selector_state_with(registry, self, |state| {
-            state.constrain_with_warning(dependency, notif_ctx.role, notif_ctx.rel_type, span, &context)
+            state.constrain_with_warning(dependency, &notif_ctx.role, notif_ctx.rel_type, span, &context)
         });
 
         if constrained {
@@ -566,7 +573,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         index: &Index,
         selector_filters: &[&dyn Filter],
         parent: &Statement,
-        notif_ctx: NotificationContext,
+        notif_ctx: &NotificationContext,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
@@ -602,7 +609,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         index: &Index,
         selector_filters: &[&dyn Filter],
         child: &Statement,
-        notif_ctx: NotificationContext,
+        notif_ctx: &NotificationContext,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
