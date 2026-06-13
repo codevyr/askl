@@ -24,10 +24,14 @@ use super::super::{DeriveMethod, Selector, Verb};
 /// statement's compute future: the prior labelled statement's selection is
 /// guaranteed-applied by then (via the User dependency edge installed at
 /// parse time).  Empty for statements with no `@label` references.
+///
+/// Keys are `Rc<str>` — the same shape used by
+/// `DependencyRole::PreSeedLabel` upstream, so inserts move the label
+/// in without re-allocating.
 #[derive(Debug, Clone, Default)]
 pub struct LabelResolutions {
     /// label name → symbol IDs from the labelled statement's selection.
-    map: HashMap<String, Vec<i64>>,
+    map: HashMap<std::rc::Rc<str>, Vec<i64>>,
 }
 
 impl LabelResolutions {
@@ -35,7 +39,7 @@ impl LabelResolutions {
         Self { map: HashMap::new() }
     }
 
-    pub fn insert(&mut self, label: String, symbol_ids: Vec<i64>) {
+    pub fn insert(&mut self, label: std::rc::Rc<str>, symbol_ids: Vec<i64>) {
         self.map.insert(label, symbol_ids);
     }
 
@@ -450,17 +454,17 @@ impl Verb for LayerVerb {
         ctx.set_eph_ops(self.ops.clone());
         Ok(false) // stays in command
     }
+}
+
+#[async_trait(?Send)]
+impl Selector for LayerVerb {
+    fn has_layer_spec(&self) -> bool { true }
 
     fn layer_label_refs(&self) -> Vec<String> {
         // Uncontended — see EphemeralOps rustdoc.
         let ops = self.ops.lock().unwrap();
         ops.iter().flat_map(|op| op.label_refs()).collect()
     }
-}
-
-#[async_trait(?Send)]
-impl Selector for LayerVerb {
-    fn has_layer_spec(&self) -> bool { true }
 
     async fn layer_spec(
         &self,

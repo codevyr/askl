@@ -179,17 +179,18 @@ impl Command {
     ///   contribution in turn, `kind = Composite`, `parent_id` taken from
     ///   the first spec (all specs were built from the same `eph`
     ///   snapshot, so they agree).
-    /// Labels referenced by any layer-creating verb in this command.
-    /// Used by `build_dependency_graph` to add User edges so the
-    /// labelled statements run before this command's layer materialises.
+    /// Labels referenced by any layer-creating selector in this
+    /// command.  Used by `build_dependency_graph` to add
+    /// `PreSeedLabel` edges so the labelled statements run before
+    /// this command's layer materialises.
     ///
-    /// Iterates *all* verbs (not just selectors) so any future verb kind
-    /// — including non-selector verbs that grow ephemeral semantics —
-    /// can contribute label refs without changes here.  The default
-    /// `Verb::layer_label_refs()` returns an empty `Vec`, so the
+    /// Iterates selectors only — `layer_label_refs` lives on the
+    /// `Selector` trait next to `layer_spec`, so non-selector verbs
+    /// (filters, markers, labelers) don't carry the API.  The default
+    /// `Selector::layer_label_refs()` returns an empty `Vec`, so the
     /// iteration cost is negligible for the common no-label case.
     pub fn layer_label_refs(&self) -> Vec<String> {
-        self.verbs.iter().flat_map(|v| v.layer_label_refs()).collect()
+        self.selectors().flat_map(|s| s.layer_label_refs()).collect()
     }
 
     pub async fn aggregate_layer_spec(
@@ -211,16 +212,22 @@ impl Command {
                 let parent_id = specs[0].parent_id;
                 // Invariant: every spec was built from the same `eph`
                 // snapshot inside `compute_selected`, so they all derive
-                // `parent_id = eph.last()`.  Catch any future selector
-                // that breaks this in dev — silent inheritance from
-                // `specs[0]` would silently misattribute the composite.
-                debug_assert!(
-                    specs.iter().all(|s| s.parent_id == parent_id),
-                    "all specs in a composite must share parent_id; \
-                     got {:?} from kinds {:?}",
-                    specs.iter().map(|s| s.parent_id).collect::<Vec<_>>(),
-                    specs.iter().map(|s| s.kind).collect::<Vec<_>>(),
-                );
+                // `parent_id = eph.last()`.  A mismatch means a selector
+                // is producing a `LayerSpec` from a different `eph` than
+                // the others — silent fall-through to `specs[0]` would
+                // misattribute the composite parent and poison the cache
+                // for every future query that hashes to the same key.
+                // Hard-error: this is data-corruption territory, worth a
+                // visible failure even in release builds.
+                if !specs.iter().all(|s| s.parent_id == parent_id) {
+                    anyhow::bail!(
+                        "internal error: layer-creating selectors disagree on parent_id \
+                         (composite cache key would be incorrect); \
+                         parent_ids = {:?}, kinds = {:?}",
+                        specs.iter().map(|s| s.parent_id).collect::<Vec<_>>(),
+                        specs.iter().map(|s| s.kind).collect::<Vec<_>>(),
+                    );
+                }
                 let mut h = Sha256::new();
                 h.update(EphLayerKind::Composite.as_str().as_bytes());
                 for spec in &specs {
@@ -403,10 +410,11 @@ impl Command {
                     selector.derive_from_provider(ctx, index, &selector_filters, notifier)
                         .await
                 }
-                // PreSeed notifications never reach this dispatch — they're
-                // short-circuited to a no-op in `Statement::notify`.  If they
-                // somehow do, treat as a no-op (no selection produced).
-                DependencyRole::PreSeed { .. } => Ok(None),
+                // PreSeed* notifications never reach this dispatch —
+                // they're short-circuited to a no-op in
+                // `Statement::notify`.  If they somehow do, treat as a
+                // no-op (no selection produced).
+                DependencyRole::PreSeedSibling | DependencyRole::PreSeedLabel(_) => Ok(None),
             }
             .map_err(|e| {
                 pest::error::Error::new_from_span(

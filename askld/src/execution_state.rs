@@ -4,31 +4,38 @@ use crate::{parser::Rule, statement::Statement};
 
 /// The role of a dependency in the execution state.
 ///
-/// `Copy` was dropped to make room for `PreSeed`'s optional label.
-/// Most call sites pattern-match by reference (`&dep.dependency_role`)
-/// or clone explicitly, so the impact is limited.
+/// `Copy` was dropped along with the introduction of `PreSeedLabel`,
+/// which carries an `Rc<str>`.  Most call sites pattern-match by
+/// reference (`&dep.dependency_role`) or clone explicitly, so the
+/// impact is limited.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DependencyRole {
     Parent,
     Child,
     User,
-    /// "This dependency must apply its selection before my
-    /// `compute_selected` starts."  Used in two cases:
-    ///
-    /// 1. **Sibling ordering** (`label = None`): added between
-    ///    top-level statements where at least one creates an
-    ///    ephemeral layer, so the second statement's `eph` capture
-    ///    reflects the first's materialised layer.
-    /// 2. **Label resolution** (`label = Some(name)`): added when a
-    ///    layer-creating verb has a `@label` argument, so
-    ///    `compute_roots` can resolve the label to symbol IDs at
-    ///    push time and pass them through `LabelResolutions`.
-    ///
-    /// Both cases require the same action at the scheduling layer:
-    /// drain pending before pushing.  No selection-data notification
-    /// flows along these edges — they're pure ordering (with optional
-    /// resolution as a side-effect).
-    PreSeed { label: Option<Rc<str>> },
+    /// Sibling ordering between top-level statements where at least
+    /// one creates an ephemeral layer.  The dependent statement's
+    /// `eph` capture must reflect the dep's materialised layer
+    /// before its `compute_selected` starts.  No selection data
+    /// flows along this edge — it's pure ordering.  Carries no
+    /// payload.
+    PreSeedSibling,
+    /// Label resolution edge from an `@label` argument inside a
+    /// layer-creating verb to the labelled statement.  Like
+    /// `PreSeedSibling` this is pure ordering, but additionally
+    /// names the label so `compute_roots` can read out the dep's
+    /// resolved symbol IDs and pass them through `LabelResolutions`
+    /// before pushing the dependent's compute future.
+    PreSeedLabel(Rc<str>),
+}
+
+impl DependencyRole {
+    /// Both `PreSeedSibling` and `PreSeedLabel` trigger a drain in
+    /// `compute_roots` — they share the same scheduler semantic
+    /// even though only the label form carries a payload.
+    pub fn is_pre_seed(&self) -> bool {
+        matches!(self, Self::PreSeedSibling | Self::PreSeedLabel(_))
+    }
 }
 
 /// Whether a dependency must be satisfied before any output can be produced,

@@ -179,10 +179,10 @@ pub enum VerbTag {
 /// the notification chain: dependency role, resolved relationship type, and
 /// whether the receiver uses unnest mode.
 ///
-/// `Copy` dropped along with `DependencyRole::PreSeed { label: Option<Rc<str>> }`
-/// — the role's optional label string can't be a static type.  Most call
-/// sites passed this by value; they now call `.clone()` (cheap: one `Rc`
-/// bump + a couple of ints).
+/// `Copy` dropped along with `DependencyRole::PreSeedLabel(Rc<str>)` —
+/// the label string can't be a static type.  Most call sites passed
+/// this by value; they now call `.clone()` (cheap: one `Rc` bump for
+/// the label case, just an enum copy for the others).
 #[derive(Debug, Clone)]
 pub struct NotificationContext {
     pub role: DependencyRole,
@@ -262,14 +262,6 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
         bail!("Not a marker verb")
     }
 
-    /// Labels referenced by this verb's layer-creation inputs (e.g. an
-    /// `ephemeral_instance(symbol="@foo", …)` inside a `layer { … }`
-    /// block exposes `["foo"]` here).  Used by
-    /// `build_dependency_graph` to add User edges from the labelled
-    /// statement to this verb's enclosing statement so the labelled
-    /// statement runs first.  Default empty.
-    fn layer_label_refs(&self) -> Vec<String> { Vec::new() }
-
     fn suppresses_default_type_filter(&self) -> bool {
         false
     }
@@ -342,10 +334,10 @@ impl SelectorState {
                 DependencyRole::User => {
                     self.constrain_by_owner(dependency);
                 }
-                // PreSeed edges carry no constraint data — pure ordering
-                // (with optional label-resolution as a side-effect at
-                // `compute_roots` time, not here).
-                DependencyRole::PreSeed { .. } => {}
+                // PreSeed* edges carry no constraint data — pure
+                // ordering (with optional label-resolution as a
+                // side-effect at `compute_roots` time, not here).
+                DependencyRole::PreSeedSibling | DependencyRole::PreSeedLabel(_) => {}
             }
         }
 
@@ -548,6 +540,20 @@ pub trait Selector: std::fmt::Debug + Verb {
         _resolved: &LabelResolutions,
     ) -> Result<Option<LayerSpec>> {
         Ok(None)
+    }
+
+    /// Labels referenced by this selector's layer-creation inputs
+    /// (e.g. an `ephemeral_instance(symbol="@foo", …)` inside a
+    /// `layer { … }` block exposes `["foo"]` here).  Used by
+    /// `build_dependency_graph` to add `PreSeedLabel` edges from the
+    /// labelled statement to this selector's enclosing statement so
+    /// the labelled statement runs first.
+    ///
+    /// Only meaningful for selectors whose `layer_spec` ever returns
+    /// `Some` and whose layer inputs can reference `@label`s.  Default
+    /// empty.
+    fn layer_label_refs(&self) -> Vec<String> {
+        Vec::new()
     }
 
     /// True iff `layer_spec` ever returns `Some`. Used by the statement
