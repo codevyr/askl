@@ -18,12 +18,21 @@ use std::time::Duration;
 /// can borrow from the `EphTransaction` across `await` points.
 pub type EphScopedFut<'b, R> = Pin<Box<dyn Future<Output = Result<R>> + 'b>>;
 
+/// PostgreSQL schema all the index tables live in.  Raw-SQL paths
+/// interpolate this through `format!`/`concat!` so a rename would
+/// be one-line; Diesel-DSL paths get the schema name automatically
+/// from `schema_diesel::*`.
+pub(super) const INDEX_SCHEMA: &str = "index";
+
 use super::mixins::{
     CompositeFilter, CurrentQuery,
     PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
     CONTAINER_INSTANCE_ALIAS, CONTAINER_SYMBOL_ALIAS, CONTAINER_TYPE_ALIAS,
-    CONTAINED_INSTANCE_ALIAS, CONTAINED_SYMBOL_ALIAS, CONTAINED_TYPE_ALIAS,
-    ParentsQuery, ChildrenQuery, HasParentsQuery, HasChildrenQuery,
+    ParentsQuery, ChildrenQuery, HasParentsQuery,
+};
+use super::cte::{
+    build_has_children_cte_body, build_has_children_query,
+    build_has_children_query_against_cte, CteHasChildren,
 };
 use super::selection::{ChildReference, EphContext, HasChildReference, HasParentReference, ParentReference, Selection, SelectionNode, is_eph_leak};
 use super::Connection;
@@ -369,212 +378,6 @@ fn build_has_parents_query(
         ))
         .into_boxed::<Pg>()
 }
-
-fn build_has_children_query(
-    source_ids: Vec<i64>,
-    eph_ids: &[i64],
-) -> HasChildrenQuery<'static> {
-    use crate::schema_diesel::*;
-
-    let contained_instance = CONTAINED_INSTANCE_ALIAS;
-    let contained_symbol = CONTAINED_SYMBOL_ALIAS;
-    let contained_type = CONTAINED_TYPE_ALIAS;
-
-    let eph_ids_owned = eph_ids.to_vec();
-
-    symbol_instances::dsl::symbol_instances
-        .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
-        .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
-        .filter(symbol_instances::dsl::id.eq_any(source_ids))
-        .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(symbol_instances::dsl::object_id)))
-        .inner_join(
-            contained_instance.on(
-                contained_instance.field(symbol_instances::dsl::object_id)
-                    .eq(symbol_instances::dsl::object_id)
-            ),
-        )
-        .inner_join(
-            contained_symbol.on(
-                contained_symbol.field(symbols::dsl::id)
-                    .eq(contained_instance.field(symbol_instances::dsl::symbol))
-            ),
-        )
-        .inner_join(
-            contained_type.on(
-                contained_type.field(symbol_types::dsl::id)
-                    .eq(contained_symbol.field(symbols::dsl::symbol_type))
-            ),
-        )
-        .filter(
-            diesel::dsl::sql::<diesel::sql_types::Bool>(
-                "symbol_instances.offset_range @> contained_instances.offset_range"
-            )
-        )
-        .filter(
-            symbol_types::dsl::level
-                .ge(contained_type.field(symbol_types::dsl::level))
-        )
-        .filter(
-            symbol_instances::dsl::id
-                .ne(contained_instance.field(symbol_instances::dsl::id))
-        )
-        // Ephemeral visibility — filter both source and aliased (contained) tables
-        .filter(symbols::eph_layer.is_null().or(symbols::eph_layer.eq_any(eph_ids_owned.clone())))
-        .filter(symbol_instances::eph_layer.is_null().or(symbol_instances::eph_layer.eq_any(eph_ids_owned.clone())))
-        .filter(contained_symbol.field(symbols::eph_layer).is_null()
-            .or(contained_symbol.field(symbols::eph_layer).eq_any(eph_ids_owned.clone())))
-        .filter(contained_instance.field(symbol_instances::eph_layer).is_null()
-            .or(contained_instance.field(symbol_instances::eph_layer).eq_any(eph_ids_owned)))
-        .select((
-            Symbol::as_select(),
-            SymbolInstance::as_select(),
-            contained_symbol.fields(crate::schema_diesel::symbols::all_columns),
-            contained_instance.fields(crate::schema_diesel::symbol_instances::all_columns),
-            Object::as_select(),
-        ))
-        .into_boxed::<Pg>()
-}
-
-/// Variant of `build_has_children_query` whose source-row filter is
-/// `symbol_instances.id IN (SELECT id FROM candidates)`, where
-/// `candidates` is a CTE supplied by an enclosing `CteHasChildren`
-/// wrapper.  All other joins / filters / projection are identical to
-/// `build_has_children_query`, so the result shape stays
-/// `HasChildrenQuery<'static>` and rows deserialize as the natural
-/// tuple `(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)`.
-fn build_has_children_query_against_cte(eph_ids: &[i64]) -> HasChildrenQuery<'static> {
-    use crate::schema_diesel::*;
-
-    let contained_instance = CONTAINED_INSTANCE_ALIAS;
-    let contained_symbol = CONTAINED_SYMBOL_ALIAS;
-    let contained_type = CONTAINED_TYPE_ALIAS;
-    let eph_ids_owned = eph_ids.to_vec();
-
-    symbol_instances::dsl::symbol_instances
-        .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
-        .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
-        // SOURCE-row filter: read IDs from the CTE supplied by CteHasChildren.
-        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
-            "symbol_instances.id IN (SELECT id FROM candidates)"
-        ))
-        .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(symbol_instances::dsl::object_id)))
-        .inner_join(
-            contained_instance.on(
-                contained_instance.field(symbol_instances::dsl::object_id)
-                    .eq(symbol_instances::dsl::object_id)
-            ),
-        )
-        .inner_join(
-            contained_symbol.on(
-                contained_symbol.field(symbols::dsl::id)
-                    .eq(contained_instance.field(symbol_instances::dsl::symbol))
-            ),
-        )
-        .inner_join(
-            contained_type.on(
-                contained_type.field(symbol_types::dsl::id)
-                    .eq(contained_symbol.field(symbols::dsl::symbol_type))
-            ),
-        )
-        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
-            "symbol_instances.offset_range @> contained_instances.offset_range"
-        ))
-        .filter(symbol_types::dsl::level.ge(contained_type.field(symbol_types::dsl::level)))
-        .filter(symbol_instances::dsl::id.ne(contained_instance.field(symbol_instances::dsl::id)))
-        .filter(symbols::eph_layer.is_null().or(symbols::eph_layer.eq_any(eph_ids_owned.clone())))
-        .filter(symbol_instances::eph_layer.is_null().or(symbol_instances::eph_layer.eq_any(eph_ids_owned.clone())))
-        .filter(contained_symbol.field(symbols::eph_layer).is_null()
-            .or(contained_symbol.field(symbols::eph_layer).eq_any(eph_ids_owned.clone())))
-        .filter(contained_instance.field(symbol_instances::eph_layer).is_null()
-            .or(contained_instance.field(symbol_instances::eph_layer).eq_any(eph_ids_owned)))
-        .select((
-            Symbol::as_select(),
-            SymbolInstance::as_select(),
-            contained_symbol.fields(crate::schema_diesel::symbols::all_columns),
-            contained_instance.fields(crate::schema_diesel::symbol_instances::all_columns),
-            Object::as_select(),
-        ))
-        .into_boxed::<Pg>()
-}
-
-/// Custom Diesel query that wraps the typed `HasChildrenQuery` with
-/// `WITH candidates AS MATERIALIZED (…)` so PG's planner sees the
-/// exact cardinality of the source `symbol_instances` set and picks
-/// a from-candidates-driven join order instead of GIST-scanning the
-/// 27M-row `symbol_instances`.
-///
-/// The pattern follows the suggestion in
-/// <https://github.com/diesel-rs/diesel/discussions/4817#discussioncomment-14676297>:
-/// `walk_ast` emits the CTE prelude as raw SQL and then walks two
-/// typed Diesel sub-queries (`cte_body` and `outer`), so the result
-/// row type, the JOINs, the projection and the eph_visibility filters
-/// all stay typed DSL — no flat `QueryableByName` row struct, no
-/// hand-written SELECT.
-///
-/// Used only when the caller's filter has no `compose_has_children()`
-/// expression (the common case).  When a filter is present, the
-/// caller falls back to `build_has_children_query`'s DSL form because
-/// the filter SQL fragments reference unaliased table names that the
-/// DSL emits.
-struct CteHasChildren<CteBody, Outer> {
-    cte_body: CteBody,
-    outer: Outer,
-}
-
-impl<CteBody, Outer> diesel::query_builder::QueryId for CteHasChildren<CteBody, Outer> {
-    type QueryId = ();
-    const HAS_STATIC_QUERY_ID: bool = false;
-}
-
-impl<CteBody, Outer> diesel::query_builder::Query for CteHasChildren<CteBody, Outer>
-where
-    Outer: diesel::query_builder::Query,
-{
-    type SqlType = Outer::SqlType;
-}
-
-impl<CteBody, Outer> diesel::query_builder::QueryFragment<Pg> for CteHasChildren<CteBody, Outer>
-where
-    CteBody: diesel::query_builder::QueryFragment<Pg>,
-    Outer: diesel::query_builder::QueryFragment<Pg>,
-{
-    fn walk_ast<'b>(
-        &'b self,
-        mut out: diesel::query_builder::AstPass<'_, 'b, Pg>,
-    ) -> diesel::QueryResult<()> {
-        out.push_sql("WITH candidates AS MATERIALIZED (");
-        self.cte_body.walk_ast(out.reborrow())?;
-        out.push_sql(") ");
-        self.outer.walk_ast(out.reborrow())?;
-        Ok(())
-    }
-}
-
-// diesel_async provides a blanket `impl<T, Conn> RunQueryDsl<Conn> for T`,
-// so no explicit impl needed here.
-
-/// Build the inner CTE body: the source-row filter, projected to just
-/// `id`.  Typed Diesel so the binds (`source_ids`, `eph_ids`) are
-/// emitted via the normal DSL mechanism.
-fn build_has_children_cte_body(
-    source_ids: Vec<i64>,
-    eph_ids: &[i64],
-) -> diesel::query_builder::BoxedSelectStatement<
-    'static,
-    diesel::sql_types::BigInt,
-    diesel::query_builder::FromClause<crate::schema_diesel::symbol_instances::table>,
-    Pg,
-> {
-    use crate::schema_diesel::symbol_instances;
-    let eph_ids_owned = eph_ids.to_vec();
-    symbol_instances::table
-        .filter(symbol_instances::id.eq_any(source_ids))
-        .filter(symbol_instances::eph_layer.is_null()
-            .or(symbol_instances::eph_layer.eq_any(eph_ids_owned)))
-        .select(symbol_instances::id)
-        .into_boxed::<Pg>()
-}
-
 
 #[derive(Clone)]
 pub struct Index {
@@ -1484,10 +1287,10 @@ impl Index {
         // empty-eph case while staying ~equivalent on the non-empty
         // case.  See the EXPLAIN-ANALYZE comparison documented in
         // the commit that added this.
-        let results = diesel::sql_query(
+        let sql = format!(
             "WITH candidates AS MATERIALIZED ( \
                  SELECT id, symbol, object_id, offset_range, eph_layer \
-                 FROM index.symbol_instances \
+                 FROM {schema}.symbol_instances \
                  WHERE id = ANY($1) \
                    AND (eph_layer IS NULL OR eph_layer = ANY($2)) \
              ) \
@@ -1499,15 +1302,17 @@ impl Index {
                     from_inst.eph_layer AS from_eph_layer, \
                     to_inst.eph_layer AS to_eph_layer \
              FROM candidates from_inst \
-             JOIN index.symbol_refs sr \
+             JOIN {schema}.symbol_refs sr \
                  ON sr.from_object = from_inst.object_id \
                  AND from_inst.offset_range @> sr.from_offset_range \
              JOIN candidates to_inst \
                  ON to_inst.symbol = sr.to_symbol \
              WHERE from_inst.id != to_inst.id \
                AND (sr.eph_layer IS NULL OR sr.eph_layer = ANY($2)) \
-             ORDER BY from_inst.id, sr.id, to_inst.id"
-        )
+             ORDER BY from_inst.id, sr.id, to_inst.id",
+            schema = INDEX_SCHEMA,
+        );
+        let results = diesel::sql_query(sql)
             .bind::<diesel::sql_types::Array<diesel::sql_types::BigInt>, _>(instance_ids)
             .bind::<diesel::sql_types::Array<diesel::sql_types::BigInt>, _>(eph_ids)
             .load::<ImplicitEdge>(&mut *connection)
@@ -1728,8 +1533,9 @@ impl Index {
         let connection = &mut self.pool.get().await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
         let sql = format!(
-            "SELECT COUNT(*) AS c FROM index.eph_layers WHERE {}",
-            not_canary_predicate(),
+            "SELECT COUNT(*) AS c FROM {schema}.eph_layers WHERE {pred}",
+            schema = INDEX_SCHEMA,
+            pred = not_canary_predicate(),
         );
         let row: CountRow = diesel::sql_query(sql)
             .get_result(&mut *connection)
