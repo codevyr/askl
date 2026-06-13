@@ -2,13 +2,13 @@ use crate::cfg::{ControlFlowGraph, EdgeList, HasEdge, HasEdgeList, NodeList, Sym
 use crate::command::{Command, ComputeResult, LabeledStatements};
 use crate::execution_context::ExecutionContext;
 use crate::execution_state::{
-    DependencyRole, ExecutionState, RelationshipType, StatementDependent,
+    DependencyRole, ExecutionState, RelationshipType, StatementDependency, StatementDependent,
 };
 use crate::hierarchy::Hierarchy;
 use crate::offset_range::range_bounds_to_offsets;
 use crate::parser::Rule;
 use crate::scope::{Scope, StatementIter};
-use crate::verb::NotificationContext;
+use crate::verb::{LabelResolutions, NotificationContext};
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::{ScopeContext, Selection};
@@ -189,13 +189,24 @@ impl Statement {
         !has_selector || has_any_selection
     }
 
-    /// Compute initial selections for all statements.
+    /// Compute initial selections for every statement.  Walks the
+    /// statement list (top-level + nested, pre-order) in source order;
+    /// for each statement, queues a `compute_selected` future and
+    /// joins them in batches via `join_all` to overlap DB round-trips.
     ///
-    /// Every statement creates a future and pushes it to the pending list.
-    /// Barrier selectors (ephemeral layers) trigger a drain after pushing,
-    /// which awaits all pending futures via `join_all` — ensuring they see
-    /// prior layers' `eph_ids`. Non-barrier selectors accumulate and run
-    /// concurrently at the next drain point, overlapping DB round-trips.
+    /// **Pre-drain ordering.**  Before queuing a statement that has
+    /// any [`DependencyRole::PreSeedSibling`] or
+    /// [`DependencyRole::PreSeedLabel`] dependency, drain pending so
+    /// the statement's `eph` capture and (if any) `LabelResolutions`
+    /// reflect prior applied state.  Sibling edges are installed by
+    /// [`Self::build_dependency_graph`] between top-level statements
+    /// where at least one creates an ephemeral layer; label-ref
+    /// pre-drains catch nested layer-using statements whose labelled
+    /// statement isn't a top-level sibling.
+    ///
+    /// Requires `build_dependency_graph` to have run already so the
+    /// Sibling edges exist.  The ordering is enforced in
+    /// [`Self::compute_nodes`].
     async fn compute_roots(
         &self,
         ctx: &mut ExecutionContext,
@@ -232,6 +243,63 @@ impl Statement {
         let mut pending: Vec<PendingCompute<'_>> = vec![];
 
         for statement in statements.iter() {
+            // Pre-drain when this statement has any PreSeed dependency.
+            // A PreSeed dep records "compute me after this dep's selection
+            // has applied" — used for sibling ordering between top-level
+            // layer-creating statements and for `@label` resolution by
+            // layer-creating verbs.  Both require the same scheduler
+            // action: drain pending so the dep's `compute_selected` has
+            // run, then (for label deps) read out the resolved IDs into
+            // `LabelResolutions` before pushing this statement's compute.
+            //
+            // Drain granularity is coarse: any PreSeed dep drains *all*
+            // pending, not just the listed deps.  Pending statements
+            // without a transitive relation are flushed too.  Acceptable
+            // because they would have been awaited at the next drain
+            // anyway; over-draining only sacrifices a little concurrency.
+            //
+            // Snapshot the PreSeed deps (cheap clones of the Rc<Statement>
+            // + Option<Rc<str>>) so we don't hold a borrow on `statement`
+            // across the await below.
+            let mut resolved = LabelResolutions::new();
+            let pre_seed_deps: Vec<(Rc<Statement>, Option<Rc<str>>)> = statement
+                .get_state()
+                .dependencies
+                .iter()
+                .filter_map(|d| match &d.dependency_role {
+                    DependencyRole::PreSeedSibling => Some((d.dependency.clone(), None)),
+                    DependencyRole::PreSeedLabel(label) => {
+                        Some((d.dependency.clone(), Some(label.clone())))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !pre_seed_deps.is_empty() {
+                drain_pending(&mut pending, ctx).await?;
+            }
+            for (dep_stmt, label) in pre_seed_deps {
+                let Some(label) = label else { continue };
+                if let Some(sel) = dep_stmt.get_selection(ctx) {
+                    let ids: Vec<i64> = sel.nodes.iter().map(|n| n.symbol.id).collect();
+                    if ids.is_empty() {
+                        tracing::warn!(
+                            label = %label,
+                            "ephemeral verb '@{}' resolved to 0 symbols; \
+                             layer will emit no rows",
+                            label,
+                        );
+                    }
+                    resolved.insert(label, ids);
+                } else {
+                    tracing::warn!(
+                        label = %label,
+                        "ephemeral verb '@{}' labelled statement has no \
+                         selection at resolution time; layer will emit no rows",
+                        label,
+                    );
+                }
+            }
+
             let eph = ctx.eph.clone();
             let parent_scope = build_parent_scope(statement, ctx, &eph);
             let children_scope = build_children_scope(statement, ctx, &eph);
@@ -241,14 +309,10 @@ impl Statement {
                 statement: stmt.clone(),
                 future: Box::pin(async move {
                     stmt.command()
-                        .compute_selected(cfg, parent_scope, children_scope, &eph)
+                        .compute_selected(cfg, parent_scope, children_scope, &eph, &resolved)
                         .await
                 }),
             });
-
-            if statement.command().has_layer_spec() {
-                drain_pending(&mut pending, ctx).await?;
-            }
         }
 
         drain_pending(&mut pending, ctx).await?;
@@ -267,6 +331,56 @@ impl Statement {
             build_dependency_graph(statement, &labeled_statements_map)?;
             Ok(true)
         })?;
+
+        // Top-level sibling-ordering edges.
+        //
+        // **Invariant we need to maintain.** When `compute_roots`
+        // pushes a top-level statement S into the pending list, the
+        // `eph` snapshot it captures must reflect every materialised
+        // ephemeral layer from preceding top-level statements.  A
+        // statement without a `PreSeed*` dependency does NOT pre-drain,
+        // so any time a preceding layer-creator's materialisation
+        // could affect a successor's `eph`, an edge is required.
+        //
+        // **Minimal-edge construction.** A statement T whose `eph`
+        // could be affected by a preceding layer is exactly: any
+        // statement T that follows the most recent layer-creating
+        // statement L in source order.  Linking T → L is enough: the
+        // pre-drain in `compute_roots` flushes ALL pending futures
+        // (not just L), so transitive predecessors that may still be
+        // in flight are awaited too.  Each statement therefore needs
+        // at most one such edge — to the most recent layer-creator
+        // before it.
+        //
+        // This emits O(N) edges (vs. the previous O(K·N) double-loop),
+        // and skips edges between layer-free statements entirely so
+        // they remain free to run concurrently.
+        //
+        // We only consider top-level statements (no parent); nested
+        // siblings still rely on Parent/Child edges, plus the
+        // label-refs pre-drain in `compute_roots` for the
+        // nested-layer-using-a-label case.  This is a deliberate
+        // scoping choice (per the design discussion); a nested
+        // `loc(...) ; loc(...)` pair does NOT get a Sibling edge.
+        let top_level: Vec<Rc<Statement>> = self.scope().statements().collect();
+        let mut last_layer_creator: Option<usize> = None;
+        for j in 0..top_level.len() {
+            if let Some(i) = last_layer_creator {
+                let s_i = &top_level[i];
+                let s_j = &top_level[j];
+                s_i.get_state_mut().dependents.push(StatementDependent::new(
+                    s_j.clone(),
+                    DependencyRole::PreSeedSibling,
+                ));
+                s_j.get_state_mut().dependencies.push(StatementDependency::new(
+                    s_i.clone(),
+                    DependencyRole::PreSeedSibling,
+                ));
+            }
+            if top_level[j].command().has_layer_spec() {
+                last_layer_creator = Some(j);
+            }
+        }
         Ok(())
     }
 
@@ -385,12 +499,22 @@ impl Statement {
             Ok(true)
         })?;
 
-        // Compute initial selections via phased readiness loop
-        self.compute_roots(ctx, cfg, &statements).await?;
-
+        // Build the dependency graph first — `compute_roots` consults
+        // `DependencyRole::PreSeed*` edges to decide when to pre-drain
+        // pending compute futures so each statement's `eph` capture
+        // reflects every prior layer-creating sibling's materialised
+        // layer.  See `Self::build_dependency_graph` (sibling edges)
+        // and `compute_roots` (pre-drain).
         self.build_dependency_graph(&labeled_statements)?;
 
         self.mark_weak_statements(&statements);
+
+        // Compute initial selections.  `compute_roots` consults the
+        // `PreSeed*` edges installed above to (a) pre-drain pending
+        // futures before any statement whose `eph` capture must
+        // reflect prior layer materialisation, and (b) resolve any
+        // `@label` references that come bundled with those edges.
+        self.compute_roots(ctx, cfg, &statements).await?;
 
         self.run_worklist(ctx, cfg, &statements).await?;
 
@@ -767,6 +891,16 @@ impl Statement {
         let _update_dependency: tracing::span::EnteredSpan =
             tracing::debug_span!("notify").entered();
 
+        // PreSeed edges carry no selection data — they exist only to
+        // express "compute me after this dep's selection has applied."
+        // The pre-drain happens in `compute_roots`; by the time
+        // `run_worklist` is calling `notify`, the receiver's
+        // `compute_selected` has already run with the right `eph` and
+        // resolved labels.  Nothing to propagate.
+        if dependent.dependency_role.is_pre_seed() {
+            return Ok(PropagationResult { changed: false });
+        }
+
         if dependent.dependency_role == DependencyRole::Parent {
             // Child notifying parent — defer until all children have selections.
             let all_children_resolved = dependent
@@ -829,12 +963,18 @@ impl Statement {
         // Original flow for Child and User roles.
         // Resolve rel_type at the single call site instead of duplicating
         // the role-based match in each accept_notification implementation.
-        let rel_type = match dependent.dependency_role {
+        let rel_type = match &dependent.dependency_role {
             DependencyRole::Child => dependent.statement.get_relationship_type(),
             DependencyRole::Parent | DependencyRole::User => self.get_relationship_type(),
+            // Unreachable: PreSeed* notifications are short-circuited at
+            // the top of `notify`.  Use the notifier's rel_type as a
+            // defensive default rather than panic.
+            DependencyRole::PreSeedSibling | DependencyRole::PreSeedLabel(_) => {
+                self.get_relationship_type()
+            }
         };
         let notif_ctx = NotificationContext {
-            role: dependent.dependency_role,
+            role: dependent.dependency_role.clone(),
             rel_type,
             unnest: dependent.statement.is_unnest(),
         };

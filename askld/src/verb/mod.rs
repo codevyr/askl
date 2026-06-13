@@ -52,7 +52,7 @@ mod labels;
 mod preamble;
 
 pub use self::generic::{DefaultTypeFilter, DirectOnlyFilter, GenericFilter, GenericSelector, NameSelector, UnitVerb};
-pub(crate) use self::generic::EphemeralOps;
+pub(crate) use self::generic::{EphemeralOps, LabelResolutions};
 
 use self::generic::{build_generic_verb, ForcedVerb};
 use self::labels::{LabelVerb, UserVerb};
@@ -178,7 +178,12 @@ pub enum VerbTag {
 /// Bundles the notification parameters that always travel together through
 /// the notification chain: dependency role, resolved relationship type, and
 /// whether the receiver uses unnest mode.
-#[derive(Debug, Clone, Copy)]
+///
+/// `Copy` dropped along with `DependencyRole::PreSeedLabel(Rc<str>)` —
+/// the label string can't be a static type.  Most call sites passed
+/// this by value; they now call `.clone()` (cheap: one `Rc` bump for
+/// the label case, just an enum copy for the others).
+#[derive(Debug, Clone)]
 pub struct NotificationContext {
     pub role: DependencyRole,
     pub rel_type: RelationshipType,
@@ -309,7 +314,7 @@ impl SelectorState {
     pub fn constrain_selection(
         &mut self,
         dependency: &Selection,
-        role: DependencyRole,
+        role: &DependencyRole,
         rel_type: RelationshipType,
     ) -> bool {
         if self.selection.is_none() {
@@ -329,6 +334,10 @@ impl SelectorState {
                 DependencyRole::User => {
                     self.constrain_by_owner(dependency);
                 }
+                // PreSeed* edges carry no constraint data — pure
+                // ordering (with optional label-resolution as a
+                // side-effect at `compute_roots` time, not here).
+                DependencyRole::PreSeedSibling | DependencyRole::PreSeedLabel(_) => {}
             }
         }
 
@@ -390,7 +399,7 @@ impl SelectorState {
     pub fn constrain_with_warning(
         &mut self,
         dependency: &Selection,
-        role: DependencyRole,
+        role: &DependencyRole,
         rel_type: RelationshipType,
         span: pest::Span<'_>,
         context: &str,
@@ -480,7 +489,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         &self,
         registry: &mut SelectorRegistry,
         dependency: &Selection,
-        notif_ctx: NotificationContext,
+        notif_ctx: &NotificationContext,
         notifier: &Statement,
     ) -> Result<ConstraintAction, pest::error::Error<Rule>> {
         // Weak statements do not constrain the selection of their dependencies.
@@ -495,7 +504,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         let span = self.span();
         let context = format!("{}", notifier.command().span());
         let (constrained, changed, warnings) = selector_state_with(registry, self, |state| {
-            state.constrain_with_warning(dependency, notif_ctx.role, notif_ctx.rel_type, span, &context)
+            state.constrain_with_warning(dependency, &notif_ctx.role, notif_ctx.rel_type, span, &context)
         });
 
         if constrained {
@@ -528,8 +537,23 @@ pub trait Selector: std::fmt::Debug + Verb {
         &self,
         _cfg: &ControlFlowGraph,
         _eph: &EphContext,
+        _resolved: &LabelResolutions,
     ) -> Result<Option<LayerSpec>> {
         Ok(None)
+    }
+
+    /// Labels referenced by this selector's layer-creation inputs
+    /// (e.g. an `ephemeral_instance(symbol="@foo", …)` inside a
+    /// `layer { … }` block exposes `["foo"]` here).  Used by
+    /// `build_dependency_graph` to add `PreSeedLabel` edges from the
+    /// labelled statement to this selector's enclosing statement so
+    /// the labelled statement runs first.
+    ///
+    /// Only meaningful for selectors whose `layer_spec` ever returns
+    /// `Some` and whose layer inputs can reference `@label`s.  Default
+    /// empty.
+    fn layer_label_refs(&self) -> Vec<String> {
+        Vec::new()
     }
 
     /// True iff `layer_spec` ever returns `Some`. Used by the statement
@@ -555,7 +579,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         index: &Index,
         selector_filters: &[&dyn Filter],
         parent: &Statement,
-        notif_ctx: NotificationContext,
+        notif_ctx: &NotificationContext,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {
@@ -591,7 +615,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         index: &Index,
         selector_filters: &[&dyn Filter],
         child: &Statement,
-        notif_ctx: NotificationContext,
+        notif_ctx: &NotificationContext,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
     ) -> Result<Option<Selection>> {

@@ -4,10 +4,11 @@ use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::Rule;
 use crate::span::Span;
 use crate::statement::Statement;
-use crate::verb::{add_verb, ConstraintAction, DeriveMethod, Filter, Labeler, NotificationContext, Selector, SelectorId, Verb, VerbTag, find_symbol_by_instance_id};
+use crate::verb::{add_verb, ConstraintAction, DeriveMethod, Filter, Labeler, LabelResolutions, LayerPopulate, LayerSpec, NotificationContext, Selector, SelectorId, Verb, VerbTag, find_symbol_by_instance_id};
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{CompositeFilter, EphContext, InnermostOnlyMixin, Index, ScopeContext, Selection, SymbolInstanceIdMixin};
+use index::db_diesel::{CompositeFilter, EphContext, EphLayerKind, InnermostOnlyMixin, Index, ScopeContext, Selection, SymbolInstanceIdMixin};
+use sha2::{Digest, Sha256};
 use index::symbols::SymbolInstanceId;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -166,6 +167,106 @@ impl Command {
         }
     }
 
+    /// Aggregate every layer-creating selector's `LayerSpec` into a single
+    /// per-statement `LayerSpec`.  Returns:
+    /// - `None` when no selector contributes a layer (statement inherits
+    ///   the prior `eph` chain unchanged).
+    /// - `Some(spec)` returned as-is when exactly one selector contributes
+    ///   (single-verb statements keep their original hash + kind so the
+    ///   cache stays warm across the refactor).
+    /// - `Some(composite)` for multi-verb statements: hash chains the
+    ///   per-verb hashes in source order, populate runs each verb's
+    ///   contribution in turn, `kind = Composite`, `parent_id` taken from
+    ///   the first spec (all specs were built from the same `eph`
+    ///   snapshot, so they agree).
+    /// Labels referenced by any layer-creating selector in this
+    /// command.  Used by `build_dependency_graph` to add
+    /// `PreSeedLabel` edges so the labelled statements run before
+    /// this command's layer materialises.
+    ///
+    /// Iterates selectors only — `layer_label_refs` lives on the
+    /// `Selector` trait next to `layer_spec`, so non-selector verbs
+    /// (filters, markers, labelers) don't carry the API.  The default
+    /// `Selector::layer_label_refs()` returns an empty `Vec`, so the
+    /// iteration cost is negligible for the common no-label case.
+    pub fn layer_label_refs(&self) -> Vec<String> {
+        self.selectors().flat_map(|s| s.layer_label_refs()).collect()
+    }
+
+    pub async fn aggregate_layer_spec(
+        &self,
+        cfg: &ControlFlowGraph,
+        eph: &EphContext,
+        resolved: &LabelResolutions,
+    ) -> Result<Option<LayerSpec>> {
+        let mut specs: Vec<LayerSpec> = Vec::new();
+        for selector in self.selectors() {
+            if let Some(spec) = selector.layer_spec(cfg, eph, resolved).await? {
+                specs.push(spec);
+            }
+        }
+        match specs.len() {
+            0 => Ok(None),
+            1 => Ok(Some(specs.into_iter().next().unwrap())),
+            _ => {
+                let parent_id = specs[0].parent_id;
+                // Invariant: every spec was built from the same `eph`
+                // snapshot inside `compute_selected`, so they all derive
+                // `parent_id = eph.last()`.  A mismatch means a selector
+                // is producing a `LayerSpec` from a different `eph` than
+                // the others — silent fall-through to `specs[0]` would
+                // misattribute the composite parent and poison the cache
+                // for every future query that hashes to the same key.
+                // Hard-error: this is data-corruption territory, worth a
+                // visible failure even in release builds.
+                if !specs.iter().all(|s| s.parent_id == parent_id) {
+                    anyhow::bail!(
+                        "internal error: layer-creating selectors disagree on parent_id \
+                         (composite cache key would be incorrect); \
+                         parent_ids = {:?}, kinds = {:?}",
+                        specs.iter().map(|s| s.parent_id).collect::<Vec<_>>(),
+                        specs.iter().map(|s| s.kind).collect::<Vec<_>>(),
+                    );
+                }
+                let mut h = Sha256::new();
+                h.update(EphLayerKind::Composite.as_str().as_bytes());
+                for spec in &specs {
+                    h.update(spec.hash);
+                }
+                let composite_hash: [u8; 32] = h.finalize().into();
+
+                // Diagnostic crumb: composite layers show up in
+                // `eph_layers.kind = 'composite'` without any structured
+                // record of which verbs contributed.  Log the contributing
+                // (kind, hash-prefix) pairs so an operator debugging a
+                // composite row can `grep` for it and find this line.
+                tracing::debug!(
+                    composite_hash = ?&composite_hash[..8],
+                    parts = ?specs
+                        .iter()
+                        .map(|s| (s.kind, &s.hash[..8]))
+                        .collect::<Vec<_>>(),
+                    "composite layer synthesised",
+                );
+
+                let populate: LayerPopulate = Box::new(move |txn| {
+                    Box::pin(async move {
+                        for spec in specs {
+                            (spec.populate)(txn).await?;
+                        }
+                        Ok(())
+                    })
+                });
+                Ok(Some(LayerSpec {
+                    hash: composite_hash,
+                    kind: EphLayerKind::Composite,
+                    parent_id,
+                    populate,
+                }))
+            }
+        }
+    }
+
     /// Notify all selectors using a pre-built merged selection (constraint + derivation).
     /// Used when a parent is notified by the union of all its children's selections.
     pub async fn notify_from_selection(
@@ -186,7 +287,7 @@ impl Command {
         for selector in self.selectors() {
             let span = selector.span();
             let (constrained, sel_changed, sel_warnings) = selector_state_with(&mut ctx.registry, selector, |state| {
-                state.constrain_with_warning(dependency, role, rel_type, span, "children")
+                state.constrain_with_warning(dependency, &role, rel_type, span, "children")
             });
             changed |= sel_changed;
             warnings.extend(sel_warnings);
@@ -285,7 +386,7 @@ impl Command {
                 }
             }
 
-            match selector.try_constrain_notification(&mut ctx.registry, &dependency, notif_ctx, notifier)? {
+            match selector.try_constrain_notification(&mut ctx.registry, &dependency, &notif_ctx, notifier)? {
                 ConstraintAction::Skip => continue,
                 ConstraintAction::Constrained(sel_changed, sel_warnings) => {
                     changed |= sel_changed;
@@ -298,17 +399,22 @@ impl Command {
             // Derive selection: dispatch based on dependency role
             let mut selection = match notif_ctx.role {
                 DependencyRole::Child => {
-                    selector.derive_from_parent(ctx, index, &selector_filters, notifier, notif_ctx, parent_scope.clone(), children_scope.clone())
+                    selector.derive_from_parent(ctx, index, &selector_filters, notifier, &notif_ctx, parent_scope.clone(), children_scope.clone())
                         .await
                 }
                 DependencyRole::Parent => {
-                    selector.derive_from_child(ctx, index, &selector_filters, notifier, notif_ctx, parent_scope.clone(), children_scope.clone())
+                    selector.derive_from_child(ctx, index, &selector_filters, notifier, &notif_ctx, parent_scope.clone(), children_scope.clone())
                         .await
                 }
                 DependencyRole::User => {
                     selector.derive_from_provider(ctx, index, &selector_filters, notifier)
                         .await
                 }
+                // PreSeed* notifications never reach this dispatch —
+                // they're short-circuited to a no-op in
+                // `Statement::notify`.  If they somehow do, treat as a
+                // no-op (no selection produced).
+                DependencyRole::PreSeedSibling | DependencyRole::PreSeedLabel(_) => Ok(None),
             }
             .map_err(|e| {
                 pest::error::Error::new_from_span(
@@ -346,6 +452,7 @@ impl Command {
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
         eph: &EphContext,
+        resolved: &LabelResolutions,
     ) -> Result<ComputeResult, pest::error::Error<Rule>> {
         let selectors: Vec<&dyn Selector> = self.selectors().collect();
 
@@ -379,42 +486,57 @@ impl Command {
             }
         }
 
-        // Local copy of eph that grows as we materialize layers within
-        // this command; selectors that run after a layer-creating selector
-        // see them in their visible eph chain.
-        let mut local_eph = eph.clone();
+        let to_pest = |e: anyhow::Error| pest::error::Error::new_from_span(
+            pest::error::ErrorVariant::CustomError { message: e.to_string() },
+            self.span().as_pest_span(),
+        );
 
+        // Phase 1: materialise this statement's single ephemeral layer (if
+        // any of its verbs contribute one).  Multi-verb statements get a
+        // `Composite` layer that combines every verb's contribution; the
+        // aggregation is in `Command::aggregate_layer_spec`.
+        let mut local_eph = eph.clone();
+        let materialised_layer_id: Option<i64> = if let Some(spec) =
+            self.aggregate_layer_spec(cfg, &local_eph, resolved).await.map_err(to_pest)?
+        {
+            let (layer_id, created, _) = cfg.index.with_eph_layer(
+                spec.parent_id, &spec.hash, spec.kind,
+                |txn| if txn.created() {
+                    (spec.populate)(txn)
+                } else {
+                    Box::pin(async { Ok(()) })
+                },
+            ).await.map_err(to_pest)?;
+
+            if !created {
+                let _ = cfg.index.touch_eph_layer(layer_id).await;
+            }
+            new_eph_ids.push(layer_id);
+            local_eph.push(layer_id);
+            Some(layer_id)
+        } else {
+            None
+        };
+
+        // Phase 2: build each selector's selection.  Layer-aware selectors
+        // (those whose `has_layer_spec()` was true) read from the
+        // freshly-materialised layer's contents.  All other selectors go
+        // through `select_from_all_impl` with the command's composite
+        // filter, as before.
         let filter_parts: Vec<CompositeFilter> = self.filters()
-            .filter_map(|f| f.get_composite_filter(eph))
+            .filter_map(|f| f.get_composite_filter(&local_eph))
             .collect();
 
         for selector in selectors.into_iter() {
-            let to_pest = |e: anyhow::Error| pest::error::Error::new_from_span(
-                pest::error::ErrorVariant::CustomError { message: e.to_string() },
-                self.span().as_pest_span(),
-            );
-
-            let mut current_selection = if let Some(spec) =
-                selector.layer_spec(cfg, &local_eph).await.map_err(to_pest)?
-            {
-                // Layer-creating selector: materialize the layer, then build
-                // its Selection from the layer's instances.  The selector
-                // itself does not own the transaction or the layer_id.
-                let (layer_id, created, _) = cfg.index.with_eph_layer(
-                    spec.parent_id, &spec.hash, spec.kind,
-                    |txn| if txn.created() {
-                        (spec.populate)(txn)
-                    } else {
-                        Box::pin(async { Ok(()) })
-                    },
-                ).await.map_err(to_pest)?;
-
-                if !created {
-                    let _ = cfg.index.touch_eph_layer(layer_id).await;
-                }
-                new_eph_ids.push(layer_id);
-                local_eph.push(layer_id);
-
+            let mut current_selection = if selector.has_layer_spec() {
+                // Layer-aware selector: return the union of all rows in this
+                // statement's materialised layer.  For single-verb statements
+                // this is exactly the selector's own contribution (today's
+                // behaviour).  For multi-verb statements every layer-aware
+                // selector returns the same combined view — the command-level
+                // OR across selectors dedupes the union into one selection.
+                let layer_id = materialised_layer_id
+                    .expect("has_layer_spec=true implies aggregate_layer_spec returned Some");
                 let instance_ids = cfg.index.get_eph_instance_ids_for_layer(layer_id)
                     .await.map_err(to_pest)?;
                 if instance_ids.is_empty() {
