@@ -434,6 +434,17 @@ fn compute_symbol_id(project_id: i32, local_id: i64) -> Result<i64, UploadError>
     Ok((project_id as i64) << 32 | local_id)
 }
 
+/// First global symbol ID allocated to `project_id` under the
+/// [`compute_symbol_id`] layout (`project_id << 32 | local_id`):
+/// it's the symbol ID with `local_id = 0`.
+///
+/// All of a project's symbols form a contiguous range
+/// `[project_symbol_id_base(p), project_symbol_id_base(p + 1))` in
+/// the B-tree — convenient for bulk delete / range-scan queries.
+pub(super) fn project_symbol_id_base(project_id: i32) -> i64 {
+    (project_id as i64) << 32
+}
+
 fn validate_type(value: i32, valid: &[i32], label: &str) -> Result<i32, UploadError> {
     if valid.contains(&value) {
         Ok(value)

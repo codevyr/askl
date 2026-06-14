@@ -123,6 +123,7 @@ diesel::table! {
         hash -> Binary,
         kind -> Text,
         last_used -> Timestamptz,
+        populated -> Bool,
     }
 }
 

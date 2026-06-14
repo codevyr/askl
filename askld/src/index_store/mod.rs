@@ -215,12 +215,6 @@ struct NewSymbolRef {
 }
 
 #[derive(Debug, QueryableByName)]
-pub(super) struct NameRow {
-    #[diesel(sql_type = diesel::sql_types::Text)]
-    pub(super) name: String,
-}
-
-#[derive(Debug, QueryableByName)]
 struct CompactableRow {
     #[diesel(sql_type = diesel::sql_types::Text)]
     parent_name: String,
