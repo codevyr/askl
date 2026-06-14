@@ -456,25 +456,6 @@ fn explain_eph_insert_err(default_prefix: &'static str, err: diesel::result::Err
     anyhow::anyhow!("{}: {}", default_prefix, err)
 }
 
-/// Helper row for the canary startup check in [`Index::connect`].
-#[derive(diesel::QueryableByName)]
-struct CountRow {
-    #[diesel(sql_type = diesel::sql_types::BigInt)]
-    c: i64,
-}
-
-/// SQL predicate matching every row in `index.eph_layers` **except** the
-/// canary.  Use this in any DELETE / UPDATE on the table that must leave
-/// the canary intact — running without the canary disarms the leak
-/// detection wired up in [`Index::validate_canary`] and
-/// [`super::selection::Checked`].
-///
-/// Built once from [`EphLayerKind::Canary`] so the string and the enum
-/// can never drift.
-fn not_canary_predicate() -> String {
-    format!("kind != '{}'", EphLayerKind::Canary.as_str())
-}
-
 /// Drop every non-canary ephemeral layer.  Run this on a connection that
 /// is already inside the write transaction that mutated the persistent
 /// index, so the cache purge and the mutation commit (or roll back)
@@ -491,9 +472,13 @@ fn not_canary_predicate() -> String {
 pub async fn purge_eph_cache(
     conn: &mut AsyncPgConnection,
 ) -> Result<usize, diesel::result::Error> {
+    use crate::schema_diesel::eph_layers;
     use diesel_async::RunQueryDsl;
-    let sql = format!("DELETE FROM index.eph_layers WHERE {}", not_canary_predicate());
-    RunQueryDsl::execute(diesel::sql_query(sql), conn).await
+    diesel::delete(
+        eph_layers::table.filter(eph_layers::kind.ne(EphLayerKind::Canary.as_str())),
+    )
+    .execute(conn)
+    .await
 }
 
 /// Batch of ephemeral rows to insert into a single layer.
@@ -609,20 +594,19 @@ impl Index {
     /// running, just have nothing to catch).  Call this after migrations
     /// have run and the pool is ready.
     pub async fn validate_canary(&self) -> Result<()> {
+        use crate::schema_diesel::eph_layers;
+        use diesel::dsl::count_star;
         use diesel_async::RunQueryDsl;
         let mut connection = self.pool.get().await
             .map_err(|e| anyhow::anyhow!("Failed to get connection for canary validation: {}", e))?;
-        let sql = format!(
-            "SELECT COUNT(*) AS c FROM index.eph_layers \
-             WHERE id = {} AND kind = '{}'",
-            super::selection::CANARY_LAYER_ID,
-            EphLayerKind::Canary.as_str(),
-        );
-        let row: CountRow = diesel::sql_query(sql)
+        let c: i64 = eph_layers::table
+            .filter(eph_layers::id.eq(super::selection::CANARY_LAYER_ID))
+            .filter(eph_layers::kind.eq(EphLayerKind::Canary.as_str()))
+            .select(count_star())
             .get_result(&mut *connection)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to validate canary row: {}", e))?;
-        if row.c != 1 {
+        if c != 1 {
             anyhow::bail!(
                 "canary row missing from index.eph_layers (kind='{}', id={}); \
                  leak detection is not armed. Re-apply the eph_layers migration.",
@@ -1529,34 +1513,39 @@ impl Index {
     /// cache should leave this count unchanged).  The canary is
     /// excluded so the count reflects only request-driven layers.
     pub async fn eph_layer_count(&self) -> Result<i64> {
+        use crate::schema_diesel::eph_layers;
+        use diesel::dsl::count_star;
         use diesel_async::RunQueryDsl;
         let connection = &mut self.pool.get().await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
-        let sql = format!(
-            "SELECT COUNT(*) AS c FROM {schema}.eph_layers WHERE {pred}",
-            schema = INDEX_SCHEMA,
-            pred = not_canary_predicate(),
-        );
-        let row: CountRow = diesel::sql_query(sql)
-            .get_result(&mut *connection)
+        eph_layers::table
+            .filter(eph_layers::kind.ne(EphLayerKind::Canary.as_str()))
+            .select(count_star())
+            .get_result::<i64>(&mut *connection)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to count eph layers: {}", e))?;
-        Ok(row.c)
+            .map_err(|e| anyhow::anyhow!("Failed to count eph layers: {}", e))
     }
 
     /// Delete ephemeral layers older than the given duration. CASCADE cleans up rows.
     pub async fn purge_old_eph_layers(&self, older_than: Duration) -> Result<u64> {
+        use crate::schema_diesel::eph_layers;
+        use diesel::sql_types::{BigInt, Bool};
         let connection = &mut self.pool.get().await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let interval_secs = older_than.as_secs() as i64;
-        let sql = format!(
-            "DELETE FROM index.eph_layers \
-             WHERE last_used < now() - make_interval(secs => $1) AND {}",
-            not_canary_predicate(),
-        );
-        let result = diesel::sql_query(sql)
-            .bind::<diesel::sql_types::BigInt, _>(interval_secs)
+        // The age-cutoff predicate is inlined as a typed SQL fragment
+        // because Diesel doesn't expose `make_interval`; the bind keeps
+        // the seconds value typed.  The canary exclusion uses the DSL.
+        let result = diesel::delete(
+            eph_layers::table
+                .filter(
+                    diesel::dsl::sql::<Bool>("last_used < now() - make_interval(secs => ")
+                        .bind::<BigInt, _>(interval_secs)
+                        .sql(")"),
+                )
+                .filter(eph_layers::kind.ne(EphLayerKind::Canary.as_str())),
+        )
             .execute(&mut *connection)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to purge old eph layers: {}", e))?;
@@ -1566,11 +1555,11 @@ impl Index {
 
     /// Delete a single ephemeral layer by ID. CASCADE cleans up symbol/instance/ref rows.
     pub async fn delete_eph_layer(&self, layer_id: i64) -> Result<()> {
+        use crate::schema_diesel::eph_layers;
         let connection = &mut self.pool.get().await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
-        diesel::sql_query("DELETE FROM index.eph_layers WHERE id = $1")
-            .bind::<diesel::sql_types::BigInt, _>(layer_id)
+        diesel::delete(eph_layers::table.filter(eph_layers::id.eq(layer_id)))
             .execute(&mut *connection)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to delete eph layer: {}", e))?;
@@ -1580,14 +1569,19 @@ impl Index {
 
     /// Touch the last_used timestamp of an ephemeral layer (batched: only if stale).
     pub async fn touch_eph_layer(&self, layer_id: i64) -> Result<()> {
+        use crate::schema_diesel::eph_layers;
+        use diesel::sql_types::Bool;
         let connection = &mut self.pool.get().await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
-        diesel::sql_query(
-            "UPDATE index.eph_layers SET last_used = now() \
-             WHERE id = $1 AND last_used < now() - interval '1 hour'"
+        diesel::update(
+            eph_layers::table
+                .filter(eph_layers::id.eq(layer_id))
+                .filter(diesel::dsl::sql::<Bool>(
+                    "last_used < now() - interval '1 hour'",
+                )),
         )
-            .bind::<diesel::sql_types::BigInt, _>(layer_id)
+            .set(eph_layers::last_used.eq(diesel::dsl::now))
             .execute(&mut *connection)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to touch eph layer: {}", e))?;
@@ -1841,8 +1835,9 @@ impl<'a> EphTransaction<'a> {
     /// has succeeded.  Must run inside the same transaction as the populate
     /// inserts so the flag and the rows commit atomically.
     pub async fn mark_populated(&mut self) -> Result<()> {
-        diesel::sql_query("UPDATE index.eph_layers SET populated = TRUE WHERE id = $1")
-            .bind::<diesel::sql_types::BigInt, _>(self.layer_id)
+        use crate::schema_diesel::eph_layers;
+        diesel::update(eph_layers::table.filter(eph_layers::id.eq(self.layer_id)))
+            .set(eph_layers::populated.eq(true))
             .execute(&mut *self.conn)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to mark eph layer populated: {}", e))?;

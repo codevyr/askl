@@ -137,20 +137,22 @@ impl IndexStore {
         // Global symbol IDs encode the project: symbol = project_id << 32 | local_id.
         // All symbols for a project form a contiguous range in the B-tree — one range
         // scan on symbol_refs_to_symbol_idx/symbol_instances_symbol_idx, no subquery.
-        let n = diesel::sql_query(
-            "DELETE FROM index.symbol_refs \
-             WHERE to_symbol >= $1::bigint << 32 AND to_symbol < ($1::bigint + 1) << 32",
+        let lower = super::upload::project_symbol_id_base(project_id);
+        let upper = super::upload::project_symbol_id_base(project_id + 1);
+        let n = diesel::delete(
+            index_schema::symbol_refs::table
+                .filter(index_schema::symbol_refs::to_symbol.ge(lower))
+                .filter(index_schema::symbol_refs::to_symbol.lt(upper)),
         )
-        .bind::<diesel::sql_types::Integer, _>(project_id)
         .execute(&mut conn)
         .await?;
         tracing::info!(project_id, rows = n, "delete_project: symbol_refs done");
 
-        let n = diesel::sql_query(
-            "DELETE FROM index.symbol_instances \
-             WHERE symbol >= $1::bigint << 32 AND symbol < ($1::bigint + 1) << 32",
+        let n = diesel::delete(
+            index_schema::symbol_instances::table
+                .filter(index_schema::symbol_instances::symbol.ge(lower))
+                .filter(index_schema::symbol_instances::symbol.lt(upper)),
         )
-        .bind::<diesel::sql_types::Integer, _>(project_id)
         .execute(&mut conn)
         .await?;
         tracing::info!(
@@ -218,22 +220,15 @@ impl IndexStore {
             .cloned()
             .collect();
         if !non_root.is_empty() {
-            let found: std::collections::HashSet<String> = diesel::sql_query(
-                r#"
-                SELECT name FROM index.symbols
-                WHERE project_id = $1
-                  AND symbol_type = $2
-                  AND name = ANY($3)
-                "#,
-            )
-            .bind::<diesel::sql_types::Integer, _>(project_id)
-            .bind::<diesel::sql_types::Integer, _>(SymbolType::Directory as i32)
-            .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(&non_root)
-            .load::<super::NameRow>(&mut conn)
-            .await?
-            .into_iter()
-            .map(|r| r.name)
-            .collect();
+            let found: std::collections::HashSet<String> = index_schema::symbols::table
+                .filter(index_schema::symbols::project_id.eq(project_id))
+                .filter(index_schema::symbols::symbol_type.eq(SymbolType::Directory as i32))
+                .filter(index_schema::symbols::name.eq_any(&non_root))
+                .select(index_schema::symbols::name)
+                .load::<String>(&mut conn)
+                .await?
+                .into_iter()
+                .collect();
 
             if let Some(invalid) = non_root.into_iter().find(|p| !found.contains(p)) {
                 return Ok(MultiTreeResult::NotDirectory(invalid));
