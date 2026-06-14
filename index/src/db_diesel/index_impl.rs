@@ -1349,18 +1349,32 @@ impl Index {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to BEGIN transaction: {}", e))?;
 
-        let row = match diesel::sql_query(
-            "INSERT INTO index.eph_layers (parent_id, hash, kind, populated) \
-             VALUES ($1, $2, $3, FALSE) \
-             ON CONFLICT (hash) DO UPDATE SET last_used = now() \
-             RETURNING id, (xmax = 0) AS created, populated"
-        )
-            .bind::<diesel::sql_types::Nullable<diesel::sql_types::BigInt>, _>(parent_id)
-            .bind::<diesel::sql_types::Bytea, _>(hash)
-            .bind::<diesel::sql_types::Text, _>(kind.as_str())
-            .get_result::<CreateLayerRow>(&mut *conn)
-            .await
-        {
+        // Diesel-DSL upsert: VALUES + ON CONFLICT (hash) DO UPDATE SET
+        // last_used = now() RETURNING (id, xmax = 0 AS created, populated).
+        // The `xmax = 0` projection is PG-specific (works because a
+        // freshly-inserted row has xmax = 0 while an ON CONFLICT DO
+        // UPDATE bumps xmax to the updating txid) — express it via a
+        // `sql::<Bool>` fragment.
+        use crate::schema_diesel::eph_layers;
+        use diesel::sql_types::Bool;
+        let upsert_result = diesel::insert_into(eph_layers::table)
+            .values((
+                eph_layers::parent_id.eq(parent_id),
+                eph_layers::hash.eq(hash),
+                eph_layers::kind.eq(kind.as_str()),
+                eph_layers::populated.eq(false),
+            ))
+            .on_conflict(eph_layers::hash)
+            .do_update()
+            .set(eph_layers::last_used.eq(diesel::dsl::now))
+            .returning((
+                eph_layers::id,
+                diesel::dsl::sql::<Bool>("xmax = 0"),
+                eph_layers::populated,
+            ))
+            .get_result::<(i64, bool, bool)>(&mut *conn)
+            .await;
+        let (id, created, populated) = match upsert_result {
             Ok(row) => row,
             Err(e) => {
                 let _ = diesel::sql_query("ROLLBACK").execute(&mut *conn).await;
@@ -1373,20 +1387,20 @@ impl Index {
         // committed the layer without running the populate batch — an
         // invariant violation we'd rather see than silently feed callers
         // half-built state.
-        if !row.created && !row.populated {
+        if !created && !populated {
             let _ = diesel::sql_query("ROLLBACK").execute(&mut *conn).await;
             anyhow::bail!(
                 "eph_layers row id={} found with populated=false on cache hit; \
                  a previous writer committed without running the populate batch \
                  (this would silently return wrong results — see Index::with_eph_layer)",
-                row.id,
+                id,
             );
         }
 
         Ok(EphTransaction {
             conn,
-            layer_id: row.id,
-            created: row.created,
+            layer_id: id,
+            created,
             finished: false,
         })
     }
@@ -1630,22 +1644,6 @@ struct IdRow {
     id: i64,
 }
 
-
-/// Helper for `create_eph_layer` RETURNING id + created flag.
-#[derive(diesel::QueryableByName)]
-struct CreateLayerRow {
-    #[diesel(sql_type = diesel::sql_types::BigInt)]
-    id: i64,
-    #[diesel(sql_type = diesel::sql_types::Bool)]
-    created: bool,
-    /// 2-phase commit flag.  Set to `FALSE` on initial insert; flipped to
-    /// `TRUE` by `with_eph_layer` just before COMMIT.  A `created=false`
-    /// cache hit with `populated=false` is an anomaly (a previous writer
-    /// committed the layer row without running the populate batch) and
-    /// surfaces as an error rather than silently using a half-built layer.
-    #[diesel(sql_type = diesel::sql_types::Bool)]
-    populated: bool,
-}
 
 /// Edge discovered between two selected instances via DB query.
 ///
