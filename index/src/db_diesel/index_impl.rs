@@ -18,12 +18,6 @@ use std::time::Duration;
 /// can borrow from the `EphTransaction` across `await` points.
 pub type EphScopedFut<'b, R> = Pin<Box<dyn Future<Output = Result<R>> + 'b>>;
 
-/// PostgreSQL schema all the index tables live in.  Raw-SQL paths
-/// interpolate this through `format!`/`concat!` so a rename would
-/// be one-line; Diesel-DSL paths get the schema name automatically
-/// from `schema_diesel::*`.
-pub(super) const INDEX_SCHEMA: &str = "index";
-
 use super::mixins::{
     CompositeFilter, CurrentQuery,
     PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
@@ -31,8 +25,8 @@ use super::mixins::{
     ParentsQuery, ChildrenQuery, HasParentsQuery,
 };
 use super::cte::{
-    build_has_children_cte_body, build_has_children_query,
-    build_has_children_query_against_cte, CteHasChildren,
+    build_find_edges_cte_body, build_has_children_cte_body, build_has_children_query,
+    build_has_children_query_against_cte, CteFindEdgesBetween, CteHasChildren,
 };
 use super::selection::{ChildReference, EphContext, HasChildReference, HasParentReference, ParentReference, Selection, SelectionNode, is_eph_leak};
 use super::Connection;
@@ -1271,34 +1265,17 @@ impl Index {
         // empty-eph case while staying ~equivalent on the non-empty
         // case.  See the EXPLAIN-ANALYZE comparison documented in
         // the commit that added this.
-        let sql = format!(
-            "WITH candidates AS MATERIALIZED ( \
-                 SELECT id, symbol, object_id, offset_range, eph_layer \
-                 FROM {schema}.symbol_instances \
-                 WHERE id = ANY($1) \
-                   AND (eph_layer IS NULL OR eph_layer = ANY($2)) \
-             ) \
-             SELECT DISTINCT ON (from_inst.id, sr.id) \
-                    sr.id AS ref_id, sr.to_symbol, sr.from_object, sr.from_offset_range, \
-                    to_inst.id AS to_instance_id, \
-                    from_inst.id AS from_instance_id, \
-                    sr.eph_layer AS sr_eph_layer, \
-                    from_inst.eph_layer AS from_eph_layer, \
-                    to_inst.eph_layer AS to_eph_layer \
-             FROM candidates from_inst \
-             JOIN {schema}.symbol_refs sr \
-                 ON sr.from_object = from_inst.object_id \
-                 AND from_inst.offset_range @> sr.from_offset_range \
-             JOIN candidates to_inst \
-                 ON to_inst.symbol = sr.to_symbol \
-             WHERE from_inst.id != to_inst.id \
-               AND (sr.eph_layer IS NULL OR sr.eph_layer = ANY($2)) \
-             ORDER BY from_inst.id, sr.id, to_inst.id",
-            schema = INDEX_SCHEMA,
-        );
-        let results = diesel::sql_query(sql)
-            .bind::<diesel::sql_types::Array<diesel::sql_types::BigInt>, _>(instance_ids)
-            .bind::<diesel::sql_types::Array<diesel::sql_types::BigInt>, _>(eph_ids)
+        //
+        // The CTE body is built via typed Diesel DSL so it tracks
+        // `symbol_instances` schema changes automatically.  The outer
+        // SELECT's projection is bespoke (DISTINCT ON + custom column
+        // aliases) and stays as raw SQL inside `CteFindEdgesBetween`;
+        // its single bind (eph_ids for `sr.eph_layer`) goes through
+        // `push_bind_param` so the final query has only typed binds.
+        let results = CteFindEdgesBetween {
+            cte_body: build_find_edges_cte_body(instance_ids.to_vec(), eph_ids.to_vec()),
+            eph_ids: eph_ids.to_vec(),
+        }
             .load::<ImplicitEdge>(&mut *connection)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to find edges between instances: {}", e))?;
@@ -1671,7 +1648,11 @@ struct CreateLayerRow {
 }
 
 /// Edge discovered between two selected instances via DB query.
-#[derive(diesel::QueryableByName, Debug, Clone)]
+///
+/// Derives both `QueryableByName` (for legacy raw `sql_query` callers)
+/// and `Queryable` (for the typed `CteFindEdgesBetween` wrapper that
+/// loads positionally from a tuple `SqlType`).
+#[derive(diesel::QueryableByName, diesel::Queryable, Debug, Clone)]
 pub struct ImplicitEdge {
     #[diesel(sql_type = diesel::sql_types::BigInt)]
     pub ref_id: i64,

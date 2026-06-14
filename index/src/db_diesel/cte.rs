@@ -198,3 +198,119 @@ where
 
 // `diesel_async` provides a blanket `impl<T, Conn> RunQueryDsl<Conn> for T`,
 // so no explicit `RunQueryDsl` impl is needed here.
+
+// ============================================================================
+// CteFindEdgesBetween — typed wrapper around `find_edges_between`'s CTE form
+// ============================================================================
+
+use diesel::sql_types::{BigInt, Int4range, Integer, Nullable};
+
+/// Build the inner CTE body for `find_edges_between`: select the full
+/// candidate `symbol_instances` row set (id + symbol + object_id +
+/// offset_range + eph_layer) for the given source IDs, with the
+/// ephemeral-visibility predicate applied.  All binds are typed
+/// Diesel.
+pub(super) fn build_find_edges_cte_body(
+    source_ids: Vec<i64>,
+    eph_ids: Vec<i64>,
+) -> diesel::query_builder::BoxedSelectStatement<
+    'static,
+    (
+        BigInt,
+        BigInt,
+        Integer,
+        Int4range,
+        Nullable<BigInt>,
+    ),
+    diesel::query_builder::FromClause<crate::schema_diesel::symbol_instances::table>,
+    Pg,
+> {
+    use crate::schema_diesel::symbol_instances;
+    symbol_instances::table
+        .filter(symbol_instances::id.eq_any(source_ids))
+        .filter(
+            symbol_instances::eph_layer
+                .is_null()
+                .or(symbol_instances::eph_layer.eq_any(eph_ids)),
+        )
+        .select((
+            symbol_instances::id,
+            symbol_instances::symbol,
+            symbol_instances::object_id,
+            symbol_instances::offset_range,
+            symbol_instances::eph_layer,
+        ))
+        .into_boxed::<Pg>()
+}
+
+/// Result-row `SqlType` for `CteFindEdgesBetween`'s outer SELECT.
+/// Matches the column order in `ImplicitEdge`.
+pub(super) type FindEdgesRowSqlType = (
+    BigInt,                  // ref_id
+    BigInt,                  // to_symbol
+    Integer,                 // from_object
+    Int4range,               // from_offset_range
+    BigInt,                  // to_instance_id
+    BigInt,                  // from_instance_id
+    Nullable<BigInt>,        // sr_eph_layer
+    Nullable<BigInt>,        // from_eph_layer
+    Nullable<BigInt>,        // to_eph_layer
+);
+
+/// Typed wrapper around `find_edges_between`'s CTE-form query.
+///
+/// Same pattern as [`CteHasChildren`]: emits a `WITH … AS
+/// MATERIALIZED` prelude, walks the typed `cte_body` Diesel
+/// query for the candidate set, then emits the bespoke outer
+/// SELECT as raw SQL (no Diesel model matches its projection, so
+/// the outer body stays a string).  The outer SQL's reference to
+/// the eph-IDs array is bound via `push_bind_param` so all binds
+/// in the final query are typed.
+///
+/// Result loads as `Vec<ImplicitEdge>` via the positional
+/// `Queryable` derive on `ImplicitEdge`; the `SqlType` is
+/// [`FindEdgesRowSqlType`].
+pub(super) struct CteFindEdgesBetween<CteBody> {
+    pub cte_body: CteBody,
+    pub eph_ids: Vec<i64>,
+}
+
+impl<CteBody> QueryId for CteFindEdgesBetween<CteBody> {
+    type QueryId = ();
+    const HAS_STATIC_QUERY_ID: bool = false;
+}
+
+impl<CteBody> Query for CteFindEdgesBetween<CteBody> {
+    type SqlType = FindEdgesRowSqlType;
+}
+
+impl<CteBody> QueryFragment<Pg> for CteFindEdgesBetween<CteBody>
+where
+    CteBody: QueryFragment<Pg>,
+{
+    fn walk_ast<'b>(&'b self, mut out: AstPass<'_, 'b, Pg>) -> diesel::QueryResult<()> {
+        use diesel::sql_types::Array;
+        out.push_sql("WITH candidates AS MATERIALIZED (");
+        self.cte_body.walk_ast(out.reborrow())?;
+        out.push_sql(
+            ") SELECT DISTINCT ON (from_inst.id, sr.id) \
+                  sr.id AS ref_id, sr.to_symbol, sr.from_object, sr.from_offset_range, \
+                  to_inst.id AS to_instance_id, \
+                  from_inst.id AS from_instance_id, \
+                  sr.eph_layer AS sr_eph_layer, \
+                  from_inst.eph_layer AS from_eph_layer, \
+                  to_inst.eph_layer AS to_eph_layer \
+              FROM candidates from_inst \
+              JOIN index.symbol_refs sr \
+                  ON sr.from_object = from_inst.object_id \
+                  AND from_inst.offset_range @> sr.from_offset_range \
+              JOIN candidates to_inst \
+                  ON to_inst.symbol = sr.to_symbol \
+              WHERE from_inst.id != to_inst.id \
+                AND (sr.eph_layer IS NULL OR sr.eph_layer = ANY(",
+        );
+        out.push_bind_param::<Array<BigInt>, _>(&self.eph_ids)?;
+        out.push_sql(")) ORDER BY from_inst.id, sr.id, to_inst.id");
+        Ok(())
+    }
+}
