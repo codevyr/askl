@@ -14,11 +14,27 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// One ephemeral-layer touch by a statement: either the layer was freshly
+/// created and populated in this call (`created = true`), or the statement
+/// hit an existing cache row (`created = false`).  `truncated` mirrors the
+/// persistent `eph_layers.truncated` flag as observed by this call.
+///
+/// Recorded on [`ExecutionContext::layer_activations`] so tests can assert
+/// cache behaviour (populate vs reuse) directly instead of inferring it
+/// from eph instance IDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerActivation {
+    pub layer_id: i64,
+    pub created: bool,
+    pub truncated: bool,
+}
+
 /// Result of computing initial selections for a statement's selectors.
 pub struct ComputeResult {
     pub selections: Vec<(SelectorId, Option<Selection>)>,
     pub warnings: Vec<pest::error::Error<Rule>>,
     pub new_eph_ids: Vec<i64>,
+    pub layer_activations: Vec<LayerActivation>,
 }
 
 impl ComputeResult {
@@ -28,6 +44,7 @@ impl ComputeResult {
         }
         statement.get_state_mut().warnings.extend(self.warnings);
         ctx.eph.extend(self.new_eph_ids);
+        ctx.layer_activations.extend(self.layer_activations);
     }
 }
 
@@ -197,11 +214,12 @@ impl Command {
         &self,
         cfg: &ControlFlowGraph,
         eph: &EphContext,
+        composite_filter: &CompositeFilter,
         resolved: &LabelResolutions,
     ) -> Result<Option<LayerSpec>> {
         let mut specs: Vec<LayerSpec> = Vec::new();
         for selector in self.selectors() {
-            if let Some(spec) = selector.layer_spec(cfg, eph, resolved).await? {
+            if let Some(spec) = selector.layer_spec(cfg, eph, composite_filter, resolved).await? {
                 specs.push(spec);
             }
         }
@@ -251,10 +269,17 @@ impl Command {
 
                 let populate: LayerPopulate = Box::new(move |txn| {
                     Box::pin(async move {
+                        // Composite truncation = OR across the contributing
+                        // specs.  If any single verb's populate hit its cap,
+                        // the whole composite layer is considered truncated
+                        // so the surfaced warning reflects the user-visible
+                        // outcome (some matches missing).
+                        let mut composite_truncated = false;
                         for spec in specs {
-                            (spec.populate)(txn).await?;
+                            let part_truncated = (spec.populate)(txn).await?;
+                            composite_truncated = composite_truncated || part_truncated;
                         }
-                        Ok(())
+                        Ok(composite_truncated)
                     })
                 });
                 Ok(Some(LayerSpec {
@@ -462,12 +487,14 @@ impl Command {
                 selections: Vec::new(),
                 warnings: Vec::new(),
                 new_eph_ids: Vec::new(),
+                layer_activations: Vec::new(),
             });
         }
 
         let mut warnings = vec![];
         let mut selections = vec![];
         let mut new_eph_ids = vec![];
+        let mut layer_activations = vec![];
 
         // Validate: each selector that requires a name constraint must have one
         // command-wide (any filter verb on the command counts).
@@ -495,22 +522,46 @@ impl Command {
         // any of its verbs contribute one).  Multi-verb statements get a
         // `Composite` layer that combines every verb's contribution; the
         // aggregation is in `Command::aggregate_layer_spec`.
+        //
+        // The CompositeFilter is built here (once per statement) so it can
+        // be passed both to `layer_spec` (filter-aware selectors mix it into
+        // their cache key and apply its `compose_objects` to scope their
+        // queries) and to the Phase 2 `select_from_all_impl` calls below.
         let mut local_eph = eph.clone();
+        let filter_parts_for_layer: Vec<CompositeFilter> = self.filters()
+            .filter_map(|f| f.get_composite_filter(&local_eph))
+            .collect();
+        let layer_composite_filter = CompositeFilter::and(filter_parts_for_layer);
+
         let materialised_layer_id: Option<i64> = if let Some(spec) =
-            self.aggregate_layer_spec(cfg, &local_eph, resolved).await.map_err(to_pest)?
+            self.aggregate_layer_spec(cfg, &local_eph, &layer_composite_filter, resolved).await.map_err(to_pest)?
         {
-            let (layer_id, created, _) = cfg.index.with_eph_layer(
-                spec.parent_id, &spec.hash, spec.kind,
-                |txn| if txn.created() {
-                    (spec.populate)(txn)
-                } else {
-                    Box::pin(async { Ok(()) })
-                },
+            let kind = spec.kind;
+            let populate = spec.populate;
+            let (layer_id, created, truncated) = cfg.index.with_eph_layer(
+                spec.parent_id, &spec.hash, kind,
+                move |txn| populate(txn),
             ).await.map_err(to_pest)?;
 
             if !created {
                 let _ = cfg.index.touch_eph_layer(layer_id).await;
             }
+
+            layer_activations.push(LayerActivation { layer_id, created, truncated });
+
+            // Surface truncation warnings.  Each layer-creating selector
+            // contributes a warning shaped by its own span; cache hits and
+            // misses both surface the warning since the persistent
+            // `eph_layers.truncated` flag is read on both paths.
+            if truncated {
+                for selector in self.selectors() {
+                    if !selector.has_layer_spec() { continue; }
+                    if let Some(w) = selector.make_truncation_warning() {
+                        warnings.push(w);
+                    }
+                }
+            }
+
             new_eph_ids.push(layer_id);
             local_eph.push(layer_id);
             Some(layer_id)
@@ -577,7 +628,7 @@ impl Command {
             }
             selections.push((selector.id(), current_selection));
         }
-        Ok(ComputeResult { selections, warnings, new_eph_ids })
+        Ok(ComputeResult { selections, warnings, new_eph_ids, layer_activations })
     }
 }
 

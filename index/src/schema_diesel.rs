@@ -124,6 +124,7 @@ diesel::table! {
         kind -> Text,
         last_used -> Timestamptz,
         populated -> Bool,
+        truncated -> Bool,
     }
 }
 

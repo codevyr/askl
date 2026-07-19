@@ -73,6 +73,10 @@ pub struct ExecutionContext {
     pub current_statement_span: Option<Span>,
     /// Ephemeral visibility chain for the current request.
     pub eph: EphContext,
+    /// Every eph-layer touch made while executing this request, in statement
+    /// order.  Lets callers (tests, diagnostics) observe whether each layer
+    /// was freshly populated or served from cache.
+    pub layer_activations: Vec<crate::command::LayerActivation>,
 }
 
 impl ExecutionContext {
@@ -81,6 +85,7 @@ impl ExecutionContext {
             registry: SelectorRegistry::new(),
             current_statement_span: None,
             eph: EphContext::new(),
+            layer_activations: Vec::new(),
         }
     }
 }

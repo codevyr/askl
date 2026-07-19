@@ -413,6 +413,9 @@ pub enum SymbolType {
     Data = 6,
     Macro = 7,
     Field = 8,
+    /// Content-anchored symbol (byte range in source content rather than a
+    /// real language-level symbol).  Emitted by `loc()` and `search()`.
+    Content = 9,
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Serialize, Deserialize)]
@@ -490,6 +493,7 @@ impl From<i64> for SymbolType {
             x if x == SymbolType::Data as i64 => SymbolType::Data,
             x if x == SymbolType::Macro as i64 => SymbolType::Macro,
             x if x == SymbolType::Field as i64 => SymbolType::Field,
+            x if x == SymbolType::Content as i64 => SymbolType::Content,
             _ => panic!("Invalid symbol type value {}", value),
         }
     }
@@ -506,6 +510,7 @@ impl From<i32> for SymbolType {
             x if x == SymbolType::Data as i32 => SymbolType::Data,
             x if x == SymbolType::Macro as i32 => SymbolType::Macro,
             x if x == SymbolType::Field as i32 => SymbolType::Field,
+            x if x == SymbolType::Content as i32 => SymbolType::Content,
             _ => panic!("Invalid symbol type value {}", value),
         }
     }

@@ -22,6 +22,7 @@ pub const TEST_INPUT_TREE_BROWSER: &'static str = index::db_diesel::Index::TEST_
 pub const TEST_INPUT_NESTED_FUNC: &'static str = index::db_diesel::Index::TEST_INPUT_NESTED_FUNC;
 pub const TEST_INPUT_TYPE_FILTER: &'static str = index::db_diesel::Index::TEST_INPUT_TYPE_FILTER;
 pub const VERB_TEST: &'static str = index::db_diesel::Index::VERB_TEST;
+pub const TEST_INPUT_SEARCH: &'static str = index::db_diesel::Index::TEST_INPUT_SEARCH;
 
 pub fn format_edges(edges: EdgeList) -> Vec<String> {
     edges
@@ -86,6 +87,7 @@ const ALL_FIXTURES: &[&str] = &[
     TEST_INPUT_NESTED_FUNC,
     TEST_INPUT_TYPE_FILTER,
     VERB_TEST,
+    TEST_INPUT_SEARCH,
 ];
 
 static FIXTURES: LazyLock<HashMap<&'static str, OnceLock<SharedFixture>>> = LazyLock::new(|| {
@@ -137,6 +139,17 @@ pub fn get_shared_db_url(fixture: &str) -> &'static str {
 }
 
 pub async fn run_query_async_err(askl_input: &str, askl_query: &str) -> Result<ExecutionResult> {
+    let (res, _activations) = run_query_traced_async_err(askl_input, askl_query).await?;
+    Ok(res)
+}
+
+/// Like [`run_query_async_err`] but also returns the eph-layer activations
+/// recorded during execution, so tests can assert cache behaviour (layer
+/// freshly populated vs served from cache) directly.
+pub async fn run_query_traced_async_err(
+    askl_input: &str,
+    askl_query: &str,
+) -> Result<(ExecutionResult, Vec<crate::command::LayerActivation>)> {
     let index = get_shared_index(askl_input).await;
     let cfg = ControlFlowGraph::from_symbols(index);
 
@@ -145,7 +158,7 @@ pub async fn run_query_async_err(askl_input: &str, askl_query: &str) -> Result<E
 
     let mut ctx = ExecutionContext::new();
     let res = ast.execute(&mut ctx, &cfg).await?;
-    Ok(res)
+    Ok((res, ctx.layer_activations))
 }
 
 pub async fn run_query_async(askl_input: &str, askl_query: &str) -> ExecutionResult {
@@ -157,6 +170,18 @@ pub fn run_query_err(askl_input: &str, askl_query: &str) -> Result<ExecutionResu
     let local = task::LocalSet::new();
     local.block_on(&mut rt, async {
         run_query_async_err(askl_input, askl_query).await
+    })
+}
+
+/// Sync wrapper around [`run_query_traced_async_err`]; panics on error.
+pub fn run_query_traced(
+    askl_input: &str,
+    askl_query: &str,
+) -> (ExecutionResult, Vec<crate::command::LayerActivation>) {
+    let mut rt = Runtime::new().unwrap();
+    let local = task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        run_query_traced_async_err(askl_input, askl_query).await.unwrap()
     })
 }
 

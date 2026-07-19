@@ -19,8 +19,15 @@ use index::db_diesel::{
 ///
 /// The closure borrows mutably from the `EphTransaction` across `.await`
 /// points; the boxed `Future` carries the inner borrow lifetime.
+///
+/// The returned `bool` is the `truncated` flag: `true` means the layer's
+/// contents were capped by a result limit and the caller should surface a
+/// truncation warning.  Layers that don't have a notion of truncation
+/// (e.g. `loc`, manual `layer { … }` blocks) always return `false`.  The
+/// flag is persisted to `eph_layers.truncated` so cache hits propagate it
+/// without re-running the populate batch.
 pub type LayerPopulate =
-    Box<dyn for<'b> FnOnce(&'b mut EphTransaction<'_>) -> EphScopedFut<'b, ()>>;
+    Box<dyn for<'b> FnOnce(&'b mut EphTransaction<'_>) -> EphScopedFut<'b, bool>>;
 
 /// Specification for an ephemeral layer that a [`Selector`] wants the
 /// statement-execution layer to materialize before its query runs.
@@ -533,13 +540,33 @@ pub trait Selector: std::fmt::Debug + Verb {
     /// the derive methods at their trait defaults.
     ///
     /// Default: `None`.
+    ///
+    /// `composite_filter` is the AND-fold of every filter on the surrounding
+    /// command (project, name, type, …).  Selectors whose ephemeral layer
+    /// depends on the filter set (currently only `search()`) mix
+    /// [`CompositeFilter::hash_into`] into their cache key and apply
+    /// [`CompositeFilter::compose_objects`] when scoping their query.
+    /// Selectors that do not need filter awareness ignore the parameter.
     async fn layer_spec(
         &self,
         _cfg: &ControlFlowGraph,
         _eph: &EphContext,
+        _composite_filter: &CompositeFilter,
         _resolved: &LabelResolutions,
     ) -> Result<Option<LayerSpec>> {
         Ok(None)
+    }
+
+    /// Build the truncation warning to surface when this selector's ephemeral
+    /// layer was capped by a result limit (i.e. `with_eph_layer` returned
+    /// `truncated = true`).  The verb owns the wording and reconstructs the
+    /// warning with its own span, so cache hits emit the same warning as the
+    /// original cache-miss call.
+    ///
+    /// Default: `None` — selectors that have no notion of truncation never
+    /// emit a warning.
+    fn make_truncation_warning(&self) -> Option<pest::error::Error<crate::parser::Rule>> {
+        None
     }
 
     /// Labels referenced by this selector's layer-creation inputs

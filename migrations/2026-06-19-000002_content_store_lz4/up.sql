@@ -1,0 +1,37 @@
+-- Switch content_store's TOASTed columns from pglz to lz4.
+--
+-- pglz is the historical default TOAST compression algorithm in PostgreSQL.
+-- Since PG 14 the alternative lz4 has been available as an opt-in per-column
+-- setting.  On text-heavy columns lz4 decompresses roughly 5-10x faster with
+-- equal or slightly better compression ratio.
+--
+-- The search() verb's per-query floor is dominated by the pg_trgm bitmap
+-- heap scan re-checking ~180 TOASTed content_text rows on every query.
+-- Cold-vs-hot cache benchmarks on production data (1120 ms vs 685 ms)
+-- attributed the majority of the hot-path cost to CPU work, of which pglz
+-- decompression is a significant fraction.  Moving to lz4 shaves that
+-- decompression cost with essentially zero storage growth.
+--
+-- Both content columns are affected:
+--   * content       — bytea, the original file bytes stored by the indexer
+--   * content_text  — text, a GENERATED STORED column derived from content;
+--                     this is what the pg_trgm GIN indexes and the search
+--                     recheck reads
+--
+-- SET COMPRESSION only affects future INSERT/UPDATE traffic.  Existing rows
+-- keep their pglz-compressed TOAST until they're rewritten.  We CAN'T force
+-- a rewrite from inside this transactional migration because:
+--   * ALTER COLUMN TYPE ... USING ... on `content` is blocked by the generated
+--     column dependency on content_text
+--   * VACUUM FULL / CLUSTER can't run in a transaction block
+--   * `UPDATE ... SET content = content` reuses the existing TOAST (PG's
+--     unchanged-column optimization) and doesn't re-compress
+--
+-- Rewriting existing data is an operational task.  Run either:
+--   VACUUM FULL index.content_store;
+-- during a maintenance window (ACCESS EXCLUSIVE lock, ~30-90 s on a 1.9 GB
+-- table), or use pg_repack for an online rewrite if that extension is
+-- installed.  Until then, new uploads use lz4 and old rows use pglz;
+-- reads work transparently either way.
+ALTER TABLE index.content_store ALTER COLUMN content      SET COMPRESSION lz4;
+ALTER TABLE index.content_store ALTER COLUMN content_text SET COMPRESSION lz4;

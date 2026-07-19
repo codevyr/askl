@@ -470,6 +470,7 @@ impl Selector for LayerVerb {
         &self,
         _cfg: &ControlFlowGraph,
         eph: &EphContext,
+        _composite_filter: &index::db_diesel::CompositeFilter,
         resolved: &LabelResolutions,
     ) -> Result<Option<crate::verb::LayerSpec>> {
         // Compute hash and collect batch synchronously, then release the lock
@@ -505,7 +506,8 @@ impl Selector for LayerVerb {
 
         let populate: crate::verb::LayerPopulate = Box::new(move |txn| Box::pin(async move {
             txn.insert_batch(&batch).await?;
-            Ok(())
+            // `layer { … }` blocks never truncate; truncated = false.
+            Ok(false)
         }));
 
         Ok(Some(crate::verb::LayerSpec {
