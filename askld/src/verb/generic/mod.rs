@@ -20,6 +20,7 @@ mod ephemeral;
 mod filters;
 mod loc;
 mod modifiers;
+mod search;
 mod selectors;
 
 pub use self::filters::{DefaultTypeFilter, DirectOnlyFilter, GenericFilter};
@@ -30,6 +31,7 @@ pub(crate) use self::ephemeral::{EphemeralOps, LabelResolutions};
 pub(super) use self::ephemeral::LayerVerb;
 use self::ephemeral::{EphemeralInstanceVerb, EphemeralRefVerb, EphemeralSymbolVerb};
 pub(super) use self::loc::LocSelector;
+pub(super) use self::search::SearchSelector;
 pub(super) use self::modifiers::{
     AnyModifier, DeriveModifier, HasModifier, IsolatedScope, RefsModifier, UnnestModifier,
 };
@@ -126,6 +128,7 @@ pub(crate) fn build_generic_verb(
             TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FIELD)
         }
         LocSelector::NAME => LocSelector::new(verb_span, &positional, &named),
+        SearchSelector::NAME => SearchSelector::new(verb_span, &positional, &named),
         LayerVerb::NAME => LayerVerb::new(verb_span, &positional, &named),
         EphemeralSymbolVerb::NAME | EphemeralInstanceVerb::NAME | EphemeralRefVerb::NAME => {
             ctx.get_eph_ops()

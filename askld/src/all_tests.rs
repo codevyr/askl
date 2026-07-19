@@ -1,5 +1,5 @@
 use crate::test_util::{
-    format_edges, get_shared_db_url, get_shared_index, run_query, run_query_err, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC, TEST_INPUT_TREE_BROWSER, VERB_TEST,
+    format_edges, get_shared_db_url, get_shared_index, run_query, run_query_err, run_query_traced, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC, TEST_INPUT_SEARCH, TEST_INPUT_TREE_BROWSER, VERB_TEST,
 };
 use index::symbols::{SymbolId, SymbolInstanceId};
 use sha2::Digest;
@@ -3203,7 +3203,11 @@ fn layer_block_groups_ops_into_single_layer() {
 #[test]
 fn layer_block_cache_hit() {
     // Run the same layer block query twice. Second run should hit cache
-    // and produce the same ephemeral IDs.
+    // and produce the same ephemeral IDs.  The layer-activation trace makes
+    // the cache path explicit: first run creates the layer, second reuses
+    // the same row without repopulating.  (The 55100..55200 instance range
+    // is unique to this test, so the first run is a guaranteed cache miss
+    // even with other tests sharing the fixture DB.)
     const QUERY: &str = concat!(
         r#"layer { "#,
         r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
@@ -3212,13 +3216,13 @@ fn layer_block_cache_hit() {
         r#""foo""#,
     );
 
-    let res1 = run_query(VERB_TEST, QUERY);
+    let (res1, acts1) = run_query_traced(VERB_TEST, QUERY);
     let eph_ids_1: Vec<_> = res1.nodes.as_vec().iter()
         .filter(|id| { let v: i64 = (**id).into(); v < 0 })
         .copied()
         .collect();
 
-    let res2 = run_query(VERB_TEST, QUERY);
+    let (res2, acts2) = run_query_traced(VERB_TEST, QUERY);
     let eph_ids_2: Vec<_> = res2.nodes.as_vec().iter()
         .filter(|id| { let v: i64 = (**id).into(); v < 0 })
         .copied()
@@ -3226,6 +3230,13 @@ fn layer_block_cache_hit() {
 
     assert_eq!(eph_ids_1, eph_ids_2,
         "same layer block should produce same ephemeral IDs (cache hit)");
+
+    assert_eq!(acts1.len(), 1, "one layer-bearing statement, got {:?}", acts1);
+    assert_eq!(acts2.len(), 1, "one layer-bearing statement, got {:?}", acts2);
+    assert!(acts1[0].created, "first run must create the layer, got {:?}", acts1[0]);
+    assert!(!acts2[0].created, "second run must hit the cache, got {:?}", acts2[0]);
+    assert_eq!(acts1[0].layer_id, acts2[0].layer_id,
+        "cache hit must reuse the same layer row");
 }
 
 #[test]
@@ -3772,5 +3783,580 @@ fn ephemeral_instance_label_hash_matches_equivalent_literal() {
          equivalent literal form (same layer hash means same eph_layers \
          row means same instance id).  literal_eph={:?}, label_eph={:?}",
         literal_eph, label_eph,
+    );
+}
+
+// ============================================================================
+// search() verb tests (Step 6: skeleton — defaults only)
+// ============================================================================
+
+#[test]
+fn search_skeleton_single_match() {
+    // search("foo") against TEST_INPUT_SEARCH finds at least the matches
+    // in `hello foo world` (object 1), `foo foo foo` (object 2), `foobar
+    // foo foo_bar foo.bar` (object 3), `Foo FOO foo` (object 4), and
+    // `doc-only content with foo here` (object 5).  Step 6's defaults are
+    // case=insensitive, whole_word=false, limit=500, so we expect many
+    // matches across all objects.  All instances should be ephemeral
+    // (negative ids).
+    const QUERY: &str = r#"search("foo")"#;
+    let res = run_query(TEST_INPUT_SEARCH, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(
+        !nodes.is_empty(),
+        "search(\"foo\") should match at least once across the fixture, got {} nodes",
+        nodes.len(),
+    );
+    assert!(
+        nodes.iter().all(|id| { let v: i64 = (*id).into(); v < 0 }),
+        "all search instances should be ephemeral (negative IDs), got {:?}",
+        nodes,
+    );
+}
+
+#[test]
+fn search_skeleton_no_match_returns_empty() {
+    // Nonexistent needle ≥ 3 chars: helper returns an empty match set, the
+    // verb should not bail.  Step 6 returns Ok(Some(LayerSpec)) regardless,
+    // so the eph_layer is created (empty); the caller's selection is then
+    // empty.  Critically: the query should succeed (no err), and produce a
+    // result with zero matched instances.
+    const QUERY: &str = r#"search("nonexistent_xyzzy")"#;
+    let res = run_query(TEST_INPUT_SEARCH, QUERY);
+
+    let eph_only: Vec<_> = res.nodes.as_vec().into_iter()
+        .filter(|id| { let v: i64 = (*id).into(); v < 0 })
+        .collect();
+    assert!(
+        eph_only.is_empty(),
+        "search of a nonexistent string should yield no ephemeral instances, got {:?}",
+        eph_only,
+    );
+}
+
+#[test]
+fn search_skeleton_min_query_length_rejects_short() {
+    // Step 6 enforces ≥ 3-character minimum at constructor time (pg_trgm
+    // needs one full trigram for index extraction).  A 2-char query
+    // should error out at parse time.
+    let res = run_query_err(TEST_INPUT_SEARCH, r#"search("ab")"#);
+    let err = match res {
+        Ok(_) => panic!("search(\"ab\") (< 3 chars) should error"),
+        Err(e) => e,
+    };
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("at least 3 characters"),
+        "error should explain the 3-character minimum, got: {}",
+        msg,
+    );
+}
+
+#[test]
+fn search_skeleton_empty_query_rejects() {
+    let res = run_query_err(TEST_INPUT_SEARCH, r#"search("")"#);
+    assert!(res.is_err(), "search(\"\") should error");
+}
+
+#[test]
+fn search_skeleton_missing_argument_rejects() {
+    let res = run_query_err(TEST_INPUT_SEARCH, r#"search()"#);
+    assert!(res.is_err(), "search() (no arg) should error");
+}
+
+// ============================================================================
+// search() verb tests (Step 7: argument parsing + smart case)
+// ============================================================================
+
+#[test]
+fn search_whole_word_excludes_foobar() {
+    // Fixture object 3 has "foobar foo foo_bar foo.bar".  With
+    // whole_word="true", `search("foo")` must NOT match the leading
+    // "foobar" or "foo_bar" but MUST match the freestanding "foo" and
+    // "foo.bar" instances.  The substring default (whole_word=false)
+    // would match all four occurrences.
+    let substring = run_query(TEST_INPUT_SEARCH, r#"search("foo")"#);
+    let whole_word = run_query(TEST_INPUT_SEARCH, r#"search("foo", whole_word="true")"#);
+
+    let n_substr = substring.nodes.as_vec().len();
+    let n_whole = whole_word.nodes.as_vec().len();
+    assert!(
+        n_substr > n_whole,
+        "whole_word=\"true\" must match strictly fewer ranges than substring; \
+         got substring={}, whole_word={}",
+        n_substr, n_whole,
+    );
+}
+
+#[test]
+fn search_case_smart_default_lowercase_is_insensitive() {
+    // Fixture object 4 has "Foo FOO foo".  An all-lowercase query under
+    // the default smart-case resolves to insensitive, so all three
+    // tokens match across the fixture (plus matches in other files).
+    let res = run_query(TEST_INPUT_SEARCH, r#"search("foo", whole_word="true")"#);
+    let n_smart_lower = res.nodes.as_vec().len();
+    assert!(
+        n_smart_lower >= 3,
+        "smart-case on lowercase query should match all 3 of Foo/FOO/foo in object 4 \
+         (plus matches elsewhere), got {} ranges",
+        n_smart_lower,
+    );
+}
+
+#[test]
+fn search_case_smart_default_uppercase_is_sensitive() {
+    // "Foo" under smart-case has uppercase → sensitive.  Object 4's
+    // "Foo FOO foo" has exactly one literal "Foo" (the others are FOO
+    // and foo).
+    let res = run_query(TEST_INPUT_SEARCH, r#"search("Foo", whole_word="true")"#);
+    let n = res.nodes.as_vec().len();
+    // Whole-word + case-sensitive across the fixture: object 4 contributes one
+    // match (the literal "Foo"); other objects contain "foo" but not "Foo".
+    assert_eq!(
+        n, 1,
+        "smart-case on \"Foo\" (has uppercase → sensitive) should match exactly the \
+         literal \"Foo\" in object 4, got {} ranges",
+        n,
+    );
+}
+
+#[test]
+fn search_case_explicit_insensitive_overrides_smart() {
+    // `search("Foo", case="insensitive")` matches all three tokens of
+    // "Foo FOO foo" in object 4 even though the query has uppercase.
+    let res = run_query(TEST_INPUT_SEARCH, r#"search("Foo", case="insensitive", whole_word="true")"#);
+    let n = res.nodes.as_vec().len();
+    assert!(
+        n >= 3,
+        "explicit case=insensitive should match Foo/FOO/foo (>=3), got {}",
+        n,
+    );
+}
+
+#[test]
+fn search_bad_case_value_rejects() {
+    let res = run_query_err(TEST_INPUT_SEARCH, r#"search("foo", case="maybe")"#);
+    assert!(res.is_err(), "search with case=maybe should error");
+}
+
+#[test]
+fn search_bad_whole_word_value_rejects() {
+    let res = run_query_err(TEST_INPUT_SEARCH, r#"search("foo", whole_word="yes")"#);
+    assert!(res.is_err(), "search with whole_word=yes should error");
+}
+
+#[test]
+fn search_bad_limit_value_rejects() {
+    let res = run_query_err(TEST_INPUT_SEARCH, r#"search("foo", limit="not_a_number")"#);
+    assert!(res.is_err(), "search with non-integer limit should error");
+}
+
+#[test]
+fn search_zero_limit_rejects() {
+    let res = run_query_err(TEST_INPUT_SEARCH, r#"search("foo", limit="0")"#);
+    assert!(res.is_err(), "search with limit=0 should error");
+}
+
+#[test]
+fn search_unknown_named_arg_rejects() {
+    let res = run_query_err(TEST_INPUT_SEARCH, r#"search("foo", scope="something")"#);
+    assert!(res.is_err(), "search with unknown named arg should error");
+}
+
+// ============================================================================
+// search() verb tests (Step 8: truncation warning end-to-end)
+// ============================================================================
+
+#[test]
+fn search_truncation_warning_surfaces_on_cache_miss() {
+    // Whole-word "foo" matches ~10 ranges across the fixture, so limit=3
+    // trips the truncation fence.  limit=3 is unique to this test (limit is
+    // part of the layer hash), which guarantees the run is a genuine cache
+    // MISS even though all tests share one fixture DB -- asserted via the
+    // activation trace, not assumed.
+    const QUERY: &str = r#"search("foo", whole_word="true", limit="3")"#;
+    let (res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
+
+    assert_eq!(acts.len(), 1, "one layer-bearing statement, got {:?}", acts);
+    assert!(acts[0].created, "unique limit must produce a cache miss, got {:?}", acts[0]);
+    assert!(acts[0].truncated, "limit=3 must truncate, got {:?}", acts[0]);
+
+    assert_eq!(
+        res.nodes.as_vec().len(), 3,
+        "limit=3 should return exactly 3 matches, got {}",
+        res.nodes.as_vec().len(),
+    );
+
+    let truncation_warns: Vec<_> = res.warnings.iter()
+        .filter(|w| format!("{}", w).contains("truncated"))
+        .collect();
+    assert_eq!(
+        truncation_warns.len(), 1,
+        "cache-miss should surface exactly one truncation warning, got {:?}",
+        res.warnings,
+    );
+}
+
+#[test]
+fn search_truncation_warning_surfaces_on_cache_hit() {
+    // Two back-to-back identical queries.  The first call's populate
+    // writes truncated=true to eph_layers; the second call hits the cache
+    // (no populate) and reads truncated=true back, reconstructing the
+    // warning from the verb's own span via make_truncation_warning.
+    //
+    // Verifies the "warning always visible" property -- silent loss on
+    // cache hit was an early footgun the design pins down.  limit=2 is
+    // unique to this test so the miss->hit sequence is guaranteed and
+    // asserted, not assumed.
+    const QUERY: &str = r#"search("foo", whole_word="true", limit="2")"#;
+    let (_first, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
+    let (second, acts2) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
+
+    assert!(acts1[0].created, "first call must be a cache miss, got {:?}", acts1);
+    assert!(!acts2[0].created, "second call must be a cache hit, got {:?}", acts2);
+    assert_eq!(acts1[0].layer_id, acts2[0].layer_id, "hit must reuse the same layer row");
+    assert!(acts2[0].truncated,
+        "cache hit must propagate the persisted truncated flag, got {:?}", acts2[0]);
+
+    let truncation_warns: Vec<_> = second.warnings.iter()
+        .filter(|w| format!("{}", w).contains("truncated"))
+        .collect();
+    assert_eq!(
+        truncation_warns.len(), 1,
+        "cache-hit should also surface the truncation warning, got {:?}",
+        second.warnings,
+    );
+}
+
+#[test]
+fn search_no_truncation_warning_when_under_cap() {
+    // Plenty of headroom: explicit large limit so no truncation occurs.
+    // The result set should not contain a truncation warning.
+    const QUERY: &str = r#"search("foo", limit="500")"#;
+    let res = run_query(TEST_INPUT_SEARCH, QUERY);
+
+    let truncation_warns: Vec<_> = res.warnings.iter()
+        .filter(|w| format!("{}", w).contains("truncated"))
+        .collect();
+    assert!(
+        truncation_warns.is_empty(),
+        "no truncation expected with ample limit, got {:?}",
+        truncation_warns,
+    );
+}
+
+// ============================================================================
+// search() verb tests (Step 9: composite filter + remaining coverage)
+// ============================================================================
+
+#[test]
+fn search_whole_word_underscore_negative() {
+    // `_` is in is_word_char's ASCII range so `search("foo", whole_word="true")`
+    // must NOT match "foo_bar".  Object 3's "foobar foo foo_bar foo.bar" lets
+    // us cross-check: the whole-word search picks up "foo" (freestanding) and
+    // "foo" inside "foo.bar" (`.` separates), but neither "foobar" (no left
+    // boundary) nor "foo_bar" (underscore is a word char).
+    let res = run_query(TEST_INPUT_SEARCH, r#"project("search_proj_1") search("foo", whole_word="true", case="sensitive")"#);
+    // Object 3 in proj 1: "foobar foo foo_bar foo.bar" -- whole-word "foo"
+    // matches the freestanding "foo" and the leading "foo" of "foo.bar".  We
+    // also pick up object 1 "hello foo world" (1 match) and object 2
+    // "foo foo foo" (3 matches).  Total: 1 + 3 + 2 = 6.
+    let n = res.nodes.as_vec().len();
+    assert_eq!(
+        n, 6,
+        "whole-word foo across proj 1 should match 6 ranges (1 in basic + 3 in multi + 2 in boundary), got {}",
+        n,
+    );
+}
+
+#[test]
+fn search_substring_includes_foobar() {
+    // Default whole_word=false matches "foobar" too.  Hard to assert an
+    // exact count without enumerating every file -- instead, show that
+    // substring strictly increases the count vs whole-word.
+    let substring = run_query(TEST_INPUT_SEARCH, r#"project("search_proj_1") search("foo")"#);
+    let whole = run_query(TEST_INPUT_SEARCH, r#"project("search_proj_1") search("foo", whole_word="true")"#);
+    assert!(
+        substring.nodes.as_vec().len() > whole.nodes.as_vec().len(),
+        "substring (matches foobar/foo_bar) should yield strictly more than whole-word",
+    );
+}
+
+#[test]
+fn search_project_filter_narrows_via_objects_expr() {
+    // Composite filter through ProjectFilterMixin's objects_expr scopes
+    // the candidate query to objects in project search_proj_1.  Object 4
+    // (case fixture) lives in proj 2 so its matches MUST NOT appear.
+    let p1 = run_query(TEST_INPUT_SEARCH, r#"project("search_proj_1") search("foo")"#);
+    let p2 = run_query(TEST_INPUT_SEARCH, r#"project("search_proj_2") search("foo")"#);
+    let no_filter = run_query(TEST_INPUT_SEARCH, r#"search("foo")"#);
+
+    let n_p1 = p1.nodes.as_vec().len();
+    let n_p2 = p2.nodes.as_vec().len();
+    let n_none = no_filter.nodes.as_vec().len();
+
+    assert!(n_p1 > 0 && n_p2 > 0, "each project should yield matches");
+    assert!(
+        n_p1 < n_none && n_p2 < n_none,
+        "project filter should narrow vs no filter; p1={}, p2={}, no_filter={}",
+        n_p1, n_p2, n_none,
+    );
+}
+
+#[test]
+fn search_cross_project_shared_content_scopes_to_filter() {
+    // Object 7 (proj 1) and object 8 (proj 2) both reference cs_shared,
+    // which contains "shared_token across projects".  A project-scoped
+    // search for "shared_token" must return ONLY the object belonging to
+    // the filtered project, not the other project's object that happens
+    // to point at the same deduplicated content row.  This is precisely
+    // what the (content_hash, project_id) JOIN in the search SQL guards
+    // against.
+    let p1 = run_query(
+        TEST_INPUT_SEARCH,
+        r#"project("search_proj_1") search("shared_token")"#,
+    );
+    let p2 = run_query(
+        TEST_INPUT_SEARCH,
+        r#"project("search_proj_2") search("shared_token")"#,
+    );
+
+    let p1_nodes: std::collections::HashSet<_> = p1.nodes.as_vec().into_iter().collect();
+    let p2_nodes: std::collections::HashSet<_> = p2.nodes.as_vec().into_iter().collect();
+    assert!(
+        !p1_nodes.is_empty(),
+        "proj 1 should match shared content via object 7",
+    );
+    assert!(
+        !p2_nodes.is_empty(),
+        "proj 2 should match shared content via object 8",
+    );
+    assert!(
+        p1_nodes.is_disjoint(&p2_nodes),
+        "cross-project shared content must produce disjoint output node sets; \
+         leakage means the (content_hash, project_id) JOIN didn't constrain. \
+         p1={:?}, p2={:?}",
+        p1_nodes, p2_nodes,
+    );
+}
+
+#[test]
+fn search_finds_symbol_less_file() {
+    // Object 5 (README.md) has no symbols/symbol_instances but its
+    // content includes "doc-only content with foo here\n".  The search
+    // query joins content_store ⋈ objects directly so the match should
+    // be reachable through a project("search_proj_2") scope.
+    let res = run_query(
+        TEST_INPUT_SEARCH,
+        r#"project("search_proj_2") search("doc-only")"#,
+    );
+    let n = res.nodes.as_vec().len();
+    assert!(
+        n > 0,
+        "search should match in the symbol-less README.md fixture file, got {} ranges",
+        n,
+    );
+}
+
+#[test]
+fn search_non_utf8_skipped() {
+    // Object 6's bytea blob contains the bytes for "foo" but the
+    // surrounding bytes are not valid UTF-8.  safe_convert_from yields
+    // NULL for that content_store row -> content_text NULL -> both GIN
+    // indexes skip it -> no match.  Scope to proj 2 only so the test
+    // exercises the project's contribution exclusively.
+    let res = run_query(
+        TEST_INPUT_SEARCH,
+        // Use a query that ONLY appears in cs_binary's would-be UTF-8 text:
+        // "foo" appears in many other files, so instead search for a
+        // unique-to-binary token that would only match if non-UTF-8 made
+        // it through.  The bytea contains \xff\xfe\xfa "foo" \x0b \xff,
+        // which would (if decoded) include "foo" -- so just asserting
+        // proj 2 has matches and they're all from valid-UTF-8 files is
+        // enough; if non-UTF-8 sneaked through we'd get an extra match
+        // attributable to object 6.  Easier: count via where filter.
+        r#"project("search_proj_2") search("foo")"#,
+    );
+    let n = res.nodes.as_vec().len();
+    // Expected matches in proj 2 valid-UTF-8 files only:
+    //   * object 4 "Foo FOO foo" -> 3 substring matches
+    //   * object 5 "doc-only content with foo here" -> 1 match
+    // Total = 4.  Object 6 (binary) MUST NOT contribute.
+    assert_eq!(
+        n, 4,
+        "search in proj 2 should match 3+1=4 ranges across valid-UTF-8 files; \
+         a count of 5 would mean object 6's binary blob leaked through, got {}",
+        n,
+    );
+}
+
+#[test]
+fn search_cache_hit_on_repeat_same_filter() {
+    // Two identical search()s with the same composite filter must hit the
+    // same eph_layer row.  The activation trace asserts the cache paths
+    // directly: first call creates+populates, second reuses the same layer
+    // id without repopulating.  limit=399 is unique to this test (limit is
+    // part of the layer hash) so the miss->hit sequence is guaranteed even
+    // with other tests sharing the fixture DB.
+    const QUERY: &str = r#"project("search_proj_1") search("foo", limit="399")"#;
+    let (first, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
+    let (second, acts2) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
+
+    assert!(acts1[0].created, "first call must create the layer, got {:?}", acts1);
+    assert!(!acts2[0].created, "second call must hit the cache, got {:?}", acts2);
+    assert_eq!(acts1[0].layer_id, acts2[0].layer_id, "hit must reuse the same layer row");
+
+    assert_eq!(
+        first.nodes.as_vec(),
+        second.nodes.as_vec(),
+        "identical search() under the same filter should yield identical nodes",
+    );
+}
+
+#[test]
+fn search_different_filter_different_cache() {
+    // The composite filter is mixed into the eph_layer hash via
+    // CompositeFilter::hash_into.  project("p1") and project("p2")
+    // therefore produce DIFFERENT hashes and different cache entries,
+    // each scoped to its own project's matches.  Asserted two ways: the
+    // activation trace shows two distinct freshly-created layer rows
+    // (limit=400 is unique to this test, so both runs are cache misses),
+    // and the node sets are disjoint (a shared layer would return
+    // identical nodes for both).
+    let (p1, acts1) = run_query_traced(TEST_INPUT_SEARCH, r#"project("search_proj_1") search("foo", limit="400")"#);
+    let (p2, acts2) = run_query_traced(TEST_INPUT_SEARCH, r#"project("search_proj_2") search("foo", limit="400")"#);
+
+    assert!(acts1[0].created && acts2[0].created,
+        "both filter variants must create their own layer, got {:?} / {:?}", acts1, acts2);
+    assert_ne!(acts1[0].layer_id, acts2[0].layer_id,
+        "different composite filters must map to different layer rows");
+
+    let p1_nodes: std::collections::HashSet<_> = p1.nodes.as_vec().into_iter().collect();
+    let p2_nodes: std::collections::HashSet<_> = p2.nodes.as_vec().into_iter().collect();
+    assert!(
+        p1_nodes.is_disjoint(&p2_nodes),
+        "project-scoped search layers must produce disjoint node sets; \
+         shared nodes would indicate the cache key is not filter-aware. \
+         p1={:?}, p2={:?}",
+        p1_nodes, p2_nodes,
+    );
+}
+
+// ============================================================================
+// search() verb tests: explicit cache-state observability
+// ============================================================================
+//
+// These tests assert cache behaviour DIRECTLY -- via the layer-activation
+// trace (created vs cache hit) and the eph_layers row state (populated /
+// truncated flags, per-layer row counts) -- rather than inferring it from
+// eph instance IDs.
+//
+// Isolation convention: all tests share one fixture DB per fixture file and
+// run in parallel, so cache entries leak across tests.  `limit` is part of
+// the search layer hash; every cache-sensitive test therefore uses a limit
+// value unique across this file (grep for `limit="` before picking a new
+// one) to guarantee its first run is a genuine cache miss.
+
+/// Read one eph layer's metadata row and its (symbols, instances) row counts.
+fn eph_layer_state(fixture: &str, layer_id: i64) -> (index::db_diesel::EphLayerMeta, (i64, i64)) {
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(fixture).await;
+        let meta = index.eph_layer_meta(layer_id).await.unwrap();
+        let counts = index.count_eph_rows_for_layer(layer_id).await.unwrap();
+        (meta, counts)
+    })
+}
+
+#[test]
+fn search_first_call_reports_created_and_populated() {
+    // A cold search() must report exactly one activation with created=true,
+    // and leave behind an eph_layers row with populated=true (2-phase
+    // commit completed) and truncated=false, whose instance rows match the
+    // returned nodes 1:1.
+    const QUERY: &str = r#"search("foo", limit="397")"#;
+    let (res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
+
+    assert_eq!(acts.len(), 1, "one layer-bearing statement, got {:?}", acts);
+    let act = acts[0];
+    assert!(act.created, "unique limit must produce a cache miss, got {:?}", act);
+    assert!(!act.truncated, "limit=397 leaves ample headroom, got {:?}", act);
+
+    let (meta, (symbols, instances)) = eph_layer_state(TEST_INPUT_SEARCH, act.layer_id);
+    assert_eq!(meta.kind, "search", "layer kind must be 'search', got {:?}", meta);
+    assert!(meta.populated, "populate must have been committed, got {:?}", meta);
+    assert!(!meta.truncated, "truncated flag must be false on the row, got {:?}", meta);
+
+    // One instance per byte-range match; the statement's selection is
+    // exactly the layer's instances.
+    assert_eq!(
+        instances,
+        res.nodes.as_vec().len() as i64,
+        "layer instance rows must match returned nodes 1:1",
+    );
+    // One eph symbol per matching project: substring "foo" matches objects
+    // in both fixture projects (proj 1: basic/multi/boundary; proj 2:
+    // mixedcase/docless).
+    assert_eq!(symbols, 2, "expected one 'search:foo' symbol per matching project");
+}
+
+#[test]
+fn search_repeat_call_hits_cache_without_repopulating() {
+    // Second identical call must reuse the SAME layer row (created=false)
+    // and must not insert any new rows into it -- the per-layer symbol and
+    // instance counts are identical before and after the repeat call.
+    const QUERY: &str = r#"search("foo", limit="398")"#;
+
+    let (first, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
+    assert!(acts1[0].created, "first call must create the layer, got {:?}", acts1);
+    let layer_id = acts1[0].layer_id;
+    let (_, counts_after_first) = eph_layer_state(TEST_INPUT_SEARCH, layer_id);
+
+    let (second, acts2) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
+    assert!(!acts2[0].created, "second call must hit the cache, got {:?}", acts2);
+    assert_eq!(acts2[0].layer_id, layer_id, "hit must reuse the same layer row");
+
+    let (meta, counts_after_second) = eph_layer_state(TEST_INPUT_SEARCH, layer_id);
+    assert!(meta.populated, "layer must remain populated, got {:?}", meta);
+    assert_eq!(
+        counts_after_first, counts_after_second,
+        "cache hit must not repopulate: per-layer row counts changed",
+    );
+
+    assert_eq!(
+        first.nodes.as_vec(),
+        second.nodes.as_vec(),
+        "cache hit must return the same nodes as the original populate",
+    );
+}
+
+#[test]
+fn search_truncated_flag_persists_on_layer_row() {
+    // Truncation state lives on the eph_layers row itself.  First call
+    // truncates (whole-word "foo" has ~10 matches, limit=1) and writes
+    // truncated=true in the same transaction as the populate; the repeat
+    // call reads it back on the cache-hit path and still surfaces the
+    // warning.
+    const QUERY: &str = r#"search("foo", whole_word="true", limit="1")"#;
+
+    let (_, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
+    assert!(acts1[0].created, "first call must be a cache miss, got {:?}", acts1);
+    assert!(acts1[0].truncated, "limit=1 must truncate, got {:?}", acts1);
+
+    let (meta, _) = eph_layer_state(TEST_INPUT_SEARCH, acts1[0].layer_id);
+    assert!(meta.populated, "truncated layer is still fully committed, got {:?}", meta);
+    assert!(meta.truncated, "truncated=true must be persisted on the row, got {:?}", meta);
+
+    let (second, acts2) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
+    assert!(!acts2[0].created, "second call must be a cache hit, got {:?}", acts2);
+    assert_eq!(acts2[0].layer_id, acts1[0].layer_id, "hit must reuse the same layer row");
+    assert!(acts2[0].truncated,
+        "cache hit must propagate the persisted truncated flag, got {:?}", acts2);
+    assert!(
+        second.warnings.iter().any(|w| format!("{}", w).contains("truncated")),
+        "cache hit must still surface the truncation warning, got {:?}",
+        second.warnings,
     );
 }

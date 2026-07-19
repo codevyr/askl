@@ -515,6 +515,11 @@ pub enum EphLayerKind {
     /// runs each verb's contribution in turn.  Single-verb statements
     /// keep their original `Layer`/`Loc` kind for cache continuity.
     Composite,
+    /// `search(query, ...)` cache rows.  The layer holds every byte-range
+    /// match across the upstream filters' visible objects, capped by the
+    /// caller's `limit`; truncation sets `eph_layers.truncated = true` so
+    /// the warning surfaces on both cache miss and cache hit.
+    Search,
 }
 
 impl EphLayerKind {
@@ -525,6 +530,7 @@ impl EphLayerKind {
             Self::Layer => "layer",
             Self::Loc => "loc",
             Self::Composite => "composite",
+            Self::Search => "search",
         }
     }
 }
@@ -533,6 +539,18 @@ impl std::fmt::Display for EphLayerKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// Metadata of one `eph_layers` row, as read by [`Index::eph_layer_meta`].
+/// Exposes the cache-state flags (`populated`, `truncated`) so tests can
+/// assert them directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EphLayerMeta {
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub kind: String,
+    pub populated: bool,
+    pub truncated: bool,
 }
 
 /// SQL the bb8 pool must run on every checkout.  `EphTransaction::Drop` is
@@ -649,6 +667,7 @@ impl Index {
     pub const TEST_INPUT_NESTED_FUNC: &'static str = "test_input_nested_func.sql";
     pub const TEST_INPUT_TYPE_FILTER: &'static str = "test_input_type_filter.sql";
     pub const VERB_TEST: &'static str = "verb_test.sql";
+    pub const TEST_INPUT_SEARCH: &'static str = "test_input_search.sql";
 
     /// Lookup table of test-fixture file name → embedded SQL.  Kept here so
     /// each new fixture only needs to land its file under `askl/sql/` and add
@@ -663,6 +682,7 @@ impl Index {
         ("test_input_tree_browser.sql",  include_str!("../../../sql/test_input_tree_browser.sql")),
         ("test_input_nested_func.sql",   include_str!("../../../sql/test_input_nested_func.sql")),
         ("test_input_type_filter.sql",   include_str!("../../../sql/test_input_type_filter.sql")),
+        ("test_input_search.sql",        include_str!("../../../sql/test_input_search.sql")),
     ];
 
     fn load_sql(connection: &mut PgConnection, input_path: &str) {
@@ -1350,11 +1370,16 @@ impl Index {
             .map_err(|e| anyhow::anyhow!("Failed to BEGIN transaction: {}", e))?;
 
         // Diesel-DSL upsert: VALUES + ON CONFLICT (hash) DO UPDATE SET
-        // last_used = now() RETURNING (id, xmax = 0 AS created, populated).
+        // last_used = now() RETURNING (id, xmax = 0 AS created, populated, truncated).
         // The `xmax = 0` projection is PG-specific (works because a
         // freshly-inserted row has xmax = 0 while an ON CONFLICT DO
         // UPDATE bumps xmax to the updating txid) — express it via a
         // `sql::<Bool>` fragment.
+        //
+        // `truncated` is reset to FALSE on insert (a fresh layer has not
+        // truncated anything yet); on cache hit we read the value previously
+        // written by the layer's original creator so the caller can re-emit
+        // the same warning.
         use crate::schema_diesel::eph_layers;
         use diesel::sql_types::Bool;
         let upsert_result = diesel::insert_into(eph_layers::table)
@@ -1363,6 +1388,7 @@ impl Index {
                 eph_layers::hash.eq(hash),
                 eph_layers::kind.eq(kind.as_str()),
                 eph_layers::populated.eq(false),
+                eph_layers::truncated.eq(false),
             ))
             .on_conflict(eph_layers::hash)
             .do_update()
@@ -1371,10 +1397,11 @@ impl Index {
                 eph_layers::id,
                 diesel::dsl::sql::<Bool>("xmax = 0"),
                 eph_layers::populated,
+                eph_layers::truncated,
             ))
-            .get_result::<(i64, bool, bool)>(&mut *conn)
+            .get_result::<(i64, bool, bool, bool)>(&mut *conn)
             .await;
-        let (id, created, populated) = match upsert_result {
+        let (id, created, populated, truncated_on_open) = match upsert_result {
             Ok(row) => row,
             Err(e) => {
                 let _ = diesel::sql_query("ROLLBACK").execute(&mut *conn).await;
@@ -1401,6 +1428,7 @@ impl Index {
             conn,
             layer_id: id,
             created,
+            truncated_on_open,
             finished: false,
         })
     }
@@ -1431,30 +1459,40 @@ impl Index {
     /// [`Index::connect`]).  In other words, the cancellation safety of
     /// this API depends on the pool recycling configuration; do not change
     /// `RecyclingMethod` without revisiting this contract.
-    pub async fn with_eph_layer<'s, R, F>(
+    pub async fn with_eph_layer<'s, F>(
         &'s self,
         parent_id: Option<i64>,
         hash: &[u8],
         kind: EphLayerKind,
         body: F,
-    ) -> Result<(i64, bool, R)>
+    ) -> Result<(i64, bool, bool)>
     where
-        F: for<'b> FnOnce(&'b mut EphTransaction<'s>) -> EphScopedFut<'b, R>,
+        F: for<'b> FnOnce(&'b mut EphTransaction<'s>) -> EphScopedFut<'b, bool>,
     {
         let mut txn = self.create_eph_layer(parent_id, hash, kind).await?;
         let layer_id = txn.layer_id();
         let created = txn.created();
+
+        // Cache hit: skip the populate callback entirely and propagate the
+        // `truncated` flag that the original creator already wrote.  Doing
+        // this here (rather than expecting every caller to check `created`)
+        // keeps the body closure single-shape and ensures cached truncation
+        // warnings always surface to the caller.
+        if !created {
+            let truncated = txn.truncated_on_open();
+            txn.commit().await?;
+            return Ok((layer_id, false, truncated));
+        }
+
         match body(&mut txn).await {
-            Ok(r) => {
-                // 2-PC: only mark populated=TRUE for layers we just inserted
-                // (created=true).  Cache-hit (created=false) rows were already
-                // marked populated by their original writer; create_eph_layer
-                // has already rejected any cache-hit with populated=false.
-                if created {
-                    txn.mark_populated().await?;
-                }
+            Ok(truncated) => {
+                // 2-PC: record `truncated` and `populated` in the same
+                // transaction as the populate batch so the flag and the rows
+                // commit atomically.
+                txn.mark_truncated(truncated).await?;
+                txn.mark_populated().await?;
                 txn.commit().await?;
-                Ok((layer_id, created, r))
+                Ok((layer_id, true, truncated))
             }
             Err(e) => {
                 let _ = txn.rollback().await;
@@ -1515,6 +1553,56 @@ impl Index {
             .get_result::<i64>(&mut *connection)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to count eph layers: {}", e))
+    }
+
+    /// Read the metadata row of a single ephemeral layer.  Used by tests to
+    /// assert cache state directly (populated / truncated flags, kind,
+    /// parent chaining) instead of inferring it from query results.
+    pub async fn eph_layer_meta(&self, layer_id: i64) -> Result<EphLayerMeta> {
+        use crate::schema_diesel::eph_layers;
+        let connection = &mut self.pool.get().await
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+
+        let (id, parent_id, kind, populated, truncated) = eph_layers::table
+            .filter(eph_layers::id.eq(layer_id))
+            .select((
+                eph_layers::id,
+                eph_layers::parent_id,
+                eph_layers::kind,
+                eph_layers::populated,
+                eph_layers::truncated,
+            ))
+            .get_result::<(i64, Option<i64>, String, bool, bool)>(&mut *connection)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to read eph layer meta: {}", e))?;
+
+        Ok(EphLayerMeta { id, parent_id, kind, populated, truncated })
+    }
+
+    /// Count the symbol and instance rows belonging to a given ephemeral
+    /// layer.  Used by tests to prove a cache hit did not re-populate the
+    /// layer (counts must be identical before and after the repeat call).
+    pub async fn count_eph_rows_for_layer(&self, layer_id: i64) -> Result<(i64, i64)> {
+        use crate::schema_diesel::{symbol_instances, symbols};
+        use diesel::dsl::count_star;
+        let connection = &mut self.pool.get().await
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+
+        let symbol_count = symbols::table
+            .filter(symbols::eph_layer.eq(layer_id))
+            .select(count_star())
+            .get_result::<i64>(&mut *connection)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to count eph symbols for layer: {}", e))?;
+
+        let instance_count = symbol_instances::table
+            .filter(symbol_instances::eph_layer.eq(layer_id))
+            .select(count_star())
+            .get_result::<i64>(&mut *connection)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to count eph instances for layer: {}", e))?;
+
+        Ok((symbol_count, instance_count))
     }
 
     /// Delete ephemeral layers older than the given duration. CASCADE cleans up rows.
@@ -1644,6 +1732,225 @@ struct IdRow {
     id: i64,
 }
 
+/// One byte-range match produced by [`Index::search_content_matches`].
+#[derive(diesel::QueryableByName, Debug, Clone, PartialEq, Eq)]
+pub struct SearchMatchRow {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    pub object_id: i32,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    pub project_id: i32,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    pub start_byte: i32,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    pub end_byte: i32,
+}
+
+/// LIKE-escape a raw user query and wrap with the surrounding wildcards.  The
+/// three LIKE metacharacters (`\`, `%`, `_`) are escaped with a backslash so
+/// they match literally in the pre-filter.  Without this, a query like
+/// `"mana_ib_reg_user_"` would have each `_` treated as a single-character
+/// wildcard, ballooning the pg_trgm recheck candidate set by an order of
+/// magnitude — see the EXPLAIN ANALYZE numbers in the plan.
+fn make_like_pattern(query: &str) -> String {
+    let escaped = query
+        .replace('\\', r"\\")
+        .replace('%',  r"\%")
+        .replace('_',  r"\_");
+    format!("%{}%", escaped)
+}
+
+/// Build one of the four search SQL variants.  Each variant uses the same
+/// `content_store ⋈ objects ⋈ LATERAL find_substr_byte_ranges(...)` skeleton
+/// and differs only in three places — what gets passed to the helper
+/// (lowercased haystack/needle vs raw), the pre-filter predicate the GIN
+/// indexes can hit, and whether a whole-word boundary check is appended.
+///
+/// Bind slots:
+///   $1 = needle (raw query, used by `find_substr_byte_ranges`'s `position()`)
+///   $2 = limit + 1
+///   $3 = either `make_like_pattern(query)` (variants 1, 2, 4) OR `visible_project_ids`
+///        (variant 3 with project filter) — depends on `uses_like_pattern`
+///   $4 = `visible_project_ids` (only when variant uses LIKE AND project filter is present)
+///
+/// When a project filter is present, the search query adds
+/// `AND o.project_id = ANY($N)` on the objects join.  Content shared
+/// across projects (same content_hash, different project_id on the
+/// referring objects) is naturally scoped: each project's object comes
+/// through the same objects JOIN and the ANY() filter keeps only the
+/// caller's project's entries.
+///
+/// PostgreSQL 16 rejects prepared statements with unreferenced parameters
+/// ("wrong number of parameters"), so the bind chain — and therefore the
+/// project-filter slot — must match exactly which params the SQL uses.
+fn build_search_sql(whole_word: bool, case_sensitive: bool, with_project_filter: bool) -> String {
+    let uses_like_pattern = !(whole_word && !case_sensitive);
+
+    // Haystack/needle passed to find_substr_byte_ranges.
+    let (haystack_expr, needle_expr) = if case_sensitive {
+        ("cs.content_text", "$1")
+    } else {
+        ("lower(cs.content_text)", "lower($1)")
+    };
+
+    // Index-hitting pre-filter.  Variants 1/2/4 reference the pre-escaped
+    // LIKE pattern bound as $3 (see make_like_pattern above).
+    let pre_filter = match (whole_word, case_sensitive) {
+        (false, false) => "cs.content_text ILIKE $3",
+        (false, true)  => "cs.content_text LIKE $3",
+        (true,  false) => "cs.content_tsv @@ phraseto_tsquery('simple', lower($1))",
+        (true,  true)  => "cs.content_text LIKE $3",
+    };
+
+    // Whole-word boundary check appended to WHERE (variants 3 and 4 only).
+    // Uses p.start_char against the *original* content_text — `is_word_char`
+    // only inspects ASCII ranges so original case is fine.
+    let boundary_clauses = if whole_word {
+        " AND (p.start_char = 1 \
+                OR NOT index.is_word_char(substring(cs.content_text from p.start_char - 1 for 1))) \
+           AND (p.start_char + char_length($1) > char_length(cs.content_text) \
+                OR NOT index.is_word_char(substring(cs.content_text from p.start_char + char_length($1) for 1)))"
+    } else {
+        ""
+    };
+
+    // Project-level scoping.  When the composite filter contributes an
+    // objects_expr (today: ProjectFilterMixin), the caller resolves it to
+    // a Vec<i32> of project_ids and we filter `o.project_id` directly.
+    // Content shared across projects is naturally scoped: for each cs row
+    // the JOIN produces one object per project that references it, and
+    // `o.project_id = ANY($N)` keeps only those in the caller's project
+    // set.  Slot shifts based on whether $3 holds the LIKE pattern.
+    let project_filter = match (with_project_filter, uses_like_pattern) {
+        (false, _)    => "",
+        (true, true)  => " AND o.project_id = ANY($4)",
+        (true, false) => " AND o.project_id = ANY($3)",
+    };
+
+    format!(
+        "SELECT \
+            o.id AS object_id, \
+            o.project_id, \
+            p.start_byte, \
+            p.end_byte \
+         FROM index.content_store cs \
+         JOIN index.objects o ON o.content_hash = cs.content_hash \
+         CROSS JOIN LATERAL index.find_substr_byte_ranges({haystack}, {needle}, $2) AS p \
+         WHERE {pre_filter}{project_filter}{boundary} \
+         ORDER BY o.project_id, o.id, p.start_byte \
+         LIMIT $2",
+        haystack = haystack_expr,
+        needle = needle_expr,
+        pre_filter = pre_filter,
+        project_filter = project_filter,
+        boundary = boundary_clauses,
+    )
+}
+
+impl Index {
+    /// Find every byte-range occurrence of `query` in the content of indexed
+    /// objects, subject to the surrounding command's `composite_filter`.
+    ///
+    /// The candidate query joins `content_store` to `objects` directly so
+    /// files without indexed symbols (docs, configs, headers) are reachable.
+    /// `composite_filter.compose_objects()` is materialised as a `Vec<i32>`
+    /// of visible object_ids and bound into the SQL; selectors that don't
+    /// constrain objects (most filters) yield no extra clause.
+    ///
+    /// Returns at most `limit` matches.  The fence is enforced via SQL
+    /// `LIMIT N+1`: if more than `limit` rows came back, the (limit+1)th is
+    /// dropped and `truncated = true` is returned so the caller can persist
+    /// the flag on the eph_layer and surface the warning.
+    pub async fn search_content_matches(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        whole_word: bool,
+        composite_filter: &CompositeFilter,
+        limit: usize,
+    ) -> Result<(Vec<SearchMatchRow>, bool)> {
+        use crate::schema_diesel::objects;
+        use diesel::sql_types::{Array, Integer, Text};
+
+        let limit_plus_one = (limit as i32).saturating_add(1);
+
+        let mut connection = self.pool.get().await
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+
+        // Two-step: resolve visible_project_ids via the typed objects_expr
+        // hop when the composite filter constrains objects; pass None
+        // otherwise so the SQL skips the project JOIN entirely.  No special-
+        // casing per filter type — any future FilterLeaf that implements
+        // objects_expr will be picked up automatically.
+        //
+        // We pick out the *distinct project_ids* from the matching objects so
+        // the SQL can JOIN content_store_projects on a tiny int[] (typically
+        // a single project) rather than the 99k-row visible_obj_ids list a
+        // wide project would otherwise emit.
+        let visible_project_ids: Option<Vec<i32>> = if let Some(expr) = composite_filter.compose_objects() {
+            let ids = objects::table
+                .filter(expr)
+                .select(objects::project_id)
+                .distinct()
+                .load::<i32>(&mut *connection)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to resolve visible project ids for search: {}", e))?;
+            Some(ids)
+        } else {
+            None
+        };
+
+        // Variant 3 (whole_word=true, case_sensitive=false) uses the tsvector
+        // pre-filter and does not reference $3; binding the LIKE pattern
+        // anyway makes PostgreSQL 16 reject the prepared statement
+        // ("wrong number of parameters").  Bind $3 only when the SQL
+        // actually uses it.
+        let uses_like_pattern = !(whole_word && !case_sensitive);
+        let like_pattern = if uses_like_pattern { Some(make_like_pattern(query)) } else { None };
+
+        let sql = build_search_sql(whole_word, case_sensitive, visible_project_ids.is_some());
+
+        let rows: Vec<SearchMatchRow> = match (like_pattern.as_ref(), visible_project_ids.as_ref()) {
+            (Some(pat), Some(ids)) => {
+                diesel::sql_query(&sql)
+                    .bind::<Text, _>(query)
+                    .bind::<Integer, _>(limit_plus_one)
+                    .bind::<Text, _>(pat)
+                    .bind::<Array<Integer>, _>(ids)
+                    .load::<SearchMatchRow>(&mut *connection)
+                    .await
+            }
+            (Some(pat), None) => {
+                diesel::sql_query(&sql)
+                    .bind::<Text, _>(query)
+                    .bind::<Integer, _>(limit_plus_one)
+                    .bind::<Text, _>(pat)
+                    .load::<SearchMatchRow>(&mut *connection)
+                    .await
+            }
+            (None, Some(ids)) => {
+                diesel::sql_query(&sql)
+                    .bind::<Text, _>(query)
+                    .bind::<Integer, _>(limit_plus_one)
+                    .bind::<Array<Integer>, _>(ids)
+                    .load::<SearchMatchRow>(&mut *connection)
+                    .await
+            }
+            (None, None) => {
+                diesel::sql_query(&sql)
+                    .bind::<Text, _>(query)
+                    .bind::<Integer, _>(limit_plus_one)
+                    .load::<SearchMatchRow>(&mut *connection)
+                    .await
+            }
+        }
+            .map_err(|e| anyhow::anyhow!("Failed to run search content query: {}", e))?;
+
+        let truncated = rows.len() > limit;
+        let matches: Vec<SearchMatchRow> = rows.into_iter().take(limit).collect();
+        Ok((matches, truncated))
+    }
+}
+
 
 /// Edge discovered between two selected instances via DB query.
 ///
@@ -1682,6 +1989,11 @@ pub struct EphTransaction<'a> {
     conn: bb8::PooledConnection<'a, AsyncPgConnection>,
     layer_id: i64,
     created: bool,
+    /// Value of `eph_layers.truncated` as observed when the layer was opened.
+    /// On a cache hit this is what the layer's original creator wrote.  On a
+    /// cache miss it is the freshly-inserted default (false); the populate
+    /// callback may flip it via [`mark_truncated`].
+    truncated_on_open: bool,
     finished: bool,
 }
 
@@ -1692,6 +2004,13 @@ impl<'a> EphTransaction<'a> {
 
     pub fn created(&self) -> bool {
         self.created
+    }
+
+    /// Whether this layer was already marked truncated when opened.  Used by
+    /// [`Index::with_eph_layer`] to return the right `truncated` value on a
+    /// cache hit (when the populate callback does not run).
+    pub fn truncated_on_open(&self) -> bool {
+        self.truncated_on_open
     }
 
     /// Insert a batch of rows into this layer within the open transaction.
@@ -1820,6 +2139,20 @@ impl<'a> EphTransaction<'a> {
             .execute(&mut *self.conn)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to mark eph layer populated: {}", e))?;
+        Ok(())
+    }
+
+    /// Record whether the populate batch was truncated by a result cap.  Called
+    /// by [`Index::with_eph_layer`] just before COMMIT on a freshly-inserted
+    /// layer (cache miss).  Cache hits do NOT call this — they inherit the
+    /// value already on the row (see `truncated_on_open`).
+    pub async fn mark_truncated(&mut self, truncated: bool) -> Result<()> {
+        use crate::schema_diesel::eph_layers;
+        diesel::update(eph_layers::table.filter(eph_layers::id.eq(self.layer_id)))
+            .set(eph_layers::truncated.eq(truncated))
+            .execute(&mut *self.conn)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to mark eph layer truncated: {}", e))?;
         Ok(())
     }
 

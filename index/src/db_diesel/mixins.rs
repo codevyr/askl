@@ -9,6 +9,7 @@ use diesel::prelude::*;
 use diesel::query_builder::{AstPass, QueryFragment, QueryId};
 use diesel::query_source::{Alias, AliasedField};
 use diesel::sql_types::{BigInt, Bool, Int4range, Integer, Nullable, Text};
+use sha2::{Digest, Sha256};
 
 use crate::db_diesel::selection::EphContext;
 use crate::ltree::Ltree;
@@ -459,6 +460,12 @@ pub type ParentsBoolExpr = Box<dyn BoxableExpression<ParentsQS, Pg, SqlType = Bo
 pub type ChildrenBoolExpr = Box<dyn BoxableExpression<ChildrenQS, Pg, SqlType = Bool>>;
 pub type HasParentsBoolExpr = Box<dyn BoxableExpression<HasParentsQS, Pg, SqlType = Bool>>;
 pub type HasChildrenBoolExpr = Box<dyn BoxableExpression<HasChildrenQS, Pg, SqlType = Bool>>;
+/// Object-level predicates (used by `search()` to scope its content scan).  Most
+/// filters do not constrain at the object layer (they only narrow symbols/instances)
+/// and so return `None`.  `ProjectFilterMixin` is the headline implementor today —
+/// it restricts to objects in a given project.
+pub type ObjectsBoolExpr =
+    Box<dyn BoxableExpression<index_schema::objects::table, Pg, SqlType = Bool>>;
 
 // ============================================================================
 // FilterLeaf trait and CompositeFilter
@@ -490,6 +497,21 @@ pub trait FilterLeaf: std::fmt::Debug + FilterLeafClone + Send + Sync {
     fn children_expr(&self) -> Option<ChildrenBoolExpr> { None }
     fn has_parents_expr(&self) -> Option<HasParentsBoolExpr> { None }
     fn has_children_expr(&self) -> Option<HasChildrenBoolExpr> { None }
+
+    /// Object-level predicate, used by `search()` to scope its content scan.
+    /// Returns `None` for filters that only constrain at the symbol/instance layer.
+    fn objects_expr(&self) -> Option<ObjectsBoolExpr> { None }
+
+    /// Canonical hash of this leaf's semantic state for cache-key composition.
+    ///
+    /// Used by verbs whose ephemeral layer is parameterised on the surrounding
+    /// command's filters (currently `search()`).  Each impl writes a discriminator
+    /// followed by length-prefixed bytes of its semantic fields, deterministically.
+    ///
+    /// The hash MUST NOT include ephemeral state such as the active `EphContext`
+    /// (those vary across calls and would fragment the cache without changing
+    /// the result).  Hash only fields that affect which rows are matched.
+    fn hash_into(&self, h: &mut Sha256);
 }
 
 /// Composable filter tree (AND, OR, NOT, Leaf) for building Diesel WHERE clauses.
@@ -605,6 +627,37 @@ impl CompositeFilter {
     compose_method!(compose_children, children_expr, ChildrenBoolExpr);
     compose_method!(compose_has_parents, has_parents_expr, HasParentsBoolExpr);
     compose_method!(compose_has_children, has_children_expr, HasChildrenBoolExpr);
+    compose_method!(compose_objects, objects_expr, ObjectsBoolExpr);
+
+    /// Canonical hash of the filter tree.  Verbs that build an ephemeral layer
+    /// whose contents depend on the surrounding command's filters (currently
+    /// `search()`) mix this into their eph_layer cache key so that different
+    /// filter compositions produce different layers.
+    ///
+    /// Recursion encodes the tree shape: a one-byte discriminator per variant,
+    /// a length prefix for And/Or, and `hash_into` of each child.
+    pub fn hash_into(&self, h: &mut Sha256) {
+        match self {
+            CompositeFilter::Leaf(leaf) => {
+                h.update([0u8]);
+                leaf.hash_into(h);
+            }
+            CompositeFilter::And(children) => {
+                h.update([1u8]);
+                h.update((children.len() as u32).to_le_bytes());
+                for c in children { c.hash_into(h); }
+            }
+            CompositeFilter::Or(children) => {
+                h.update([2u8]);
+                h.update((children.len() as u32).to_le_bytes());
+                for c in children { c.hash_into(h); }
+            }
+            CompositeFilter::Not(inner) => {
+                h.update([3u8]);
+                inner.hash_into(h);
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -666,6 +719,26 @@ impl FilterLeaf for CompoundNameMixin {
         }
         fold_and(parts)
     }
+
+    fn hash_into(&self, h: &mut Sha256) {
+        h.update(b"CompoundName");
+        match &self.lquery {
+            Some(s) => {
+                h.update([1u8]);
+                h.update((s.len() as u32).to_le_bytes());
+                h.update(s.as_bytes());
+            }
+            None => h.update([0u8]),
+        }
+        match &self.leaf_token {
+            Some(s) => {
+                h.update([1u8]);
+                h.update((s.len() as u32).to_le_bytes());
+                h.update(s.as_bytes());
+            }
+            None => h.update([0u8]),
+        }
+    }
 }
 
 /// LeafNameMixin - filters symbols by the last label of their symbol_path.
@@ -683,6 +756,12 @@ impl LeafNameMixin {
 impl FilterLeaf for LeafNameMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
         Some(Box::new(index_schema::symbols::dsl::leaf_name.eq(self.leaf_name.clone())))
+    }
+
+    fn hash_into(&self, h: &mut Sha256) {
+        h.update(b"LeafName");
+        h.update((self.leaf_name.len() as u32).to_le_bytes());
+        h.update(self.leaf_name.as_bytes());
     }
 }
 
@@ -703,6 +782,12 @@ impl ExactNameMixin {
 impl FilterLeaf for ExactNameMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
         Some(Box::new(index_schema::symbols::dsl::name.eq(self.name.clone())))
+    }
+
+    fn hash_into(&self, h: &mut Sha256) {
+        h.update(b"ExactName");
+        h.update((self.name.len() as u32).to_le_bytes());
+        h.update(self.name.as_bytes());
     }
 }
 
@@ -725,6 +810,14 @@ impl FilterLeaf for SymbolInstanceIdMixin {
             index_schema::symbol_instances::dsl::id.eq_any(self.instance_ids.clone())
         ))
     }
+
+    fn hash_into(&self, h: &mut Sha256) {
+        h.update(b"SymbolInstanceId");
+        h.update((self.instance_ids.len() as u32).to_le_bytes());
+        for id in &self.instance_ids {
+            h.update(id.to_le_bytes());
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -745,6 +838,27 @@ impl FilterLeaf for ProjectFilterMixin {
         Some(Box::new(
             index_schema::projects::dsl::project_name.eq(self.project_name.clone())
         ))
+    }
+
+    /// Object-level constraint: restrict to objects belonging to a project whose
+    /// `project_name` matches.  Encoded as `objects.project_id IN (SELECT id FROM
+    /// projects WHERE project_name = $name)` so the resulting expression lives
+    /// on the `objects` table alone and can be embedded in queries that don't
+    /// otherwise join `projects` (notably `search()`'s content scan).
+    fn objects_expr(&self) -> Option<ObjectsBoolExpr> {
+        Some(Box::new(
+            index_schema::objects::dsl::project_id.eq_any(
+                index_schema::projects::dsl::projects
+                    .select(index_schema::projects::dsl::id)
+                    .filter(index_schema::projects::dsl::project_name.eq(self.project_name.clone()))
+            )
+        ))
+    }
+
+    fn hash_into(&self, h: &mut Sha256) {
+        h.update(b"Project");
+        h.update((self.project_name.len() as u32).to_le_bytes());
+        h.update(self.project_name.as_bytes());
     }
 }
 
@@ -807,6 +921,11 @@ impl FilterLeaf for DirectOnlyMixin {
                 .build()
         ))
     }
+
+    fn hash_into(&self, h: &mut Sha256) {
+        // EphContext is ephemeral state, excluded by contract.
+        h.update(b"DirectOnly");
+    }
 }
 
 /// InnermostOnlyMixin — filters has_parents to innermost container only.
@@ -842,6 +961,11 @@ impl FilterLeaf for InnermostOnlyMixin {
                 .sql(")")
                 .build()
         ))
+    }
+
+    fn hash_into(&self, h: &mut Sha256) {
+        // EphContext is ephemeral state, excluded by contract.
+        h.update(b"InnermostOnly");
     }
 }
 
@@ -883,6 +1007,15 @@ impl FilterLeaf for OuterParentFilterMixin {
                 .build()
         ))
     }
+
+    fn hash_into(&self, h: &mut Sha256) {
+        // EphContext is ephemeral state, excluded by contract.
+        h.update(b"OuterParent");
+        h.update((self.parent_ids.len() as u32).to_le_bytes());
+        for id in &self.parent_ids {
+            h.update(id.to_le_bytes());
+        }
+    }
 }
 
 /// SymbolTypeMixin - filters symbols by type ID.
@@ -901,6 +1034,11 @@ impl FilterLeaf for SymbolTypeMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
         Some(Box::new(index_schema::symbols::dsl::symbol_type.eq(self.symbol_type_id)))
     }
+
+    fn hash_into(&self, h: &mut Sha256) {
+        h.update(b"SymbolType");
+        h.update(self.symbol_type_id.to_le_bytes());
+    }
 }
 
 /// DefaultSymbolTypeMixin - filters symbols by multiple type IDs (OR condition).
@@ -918,6 +1056,14 @@ impl DefaultSymbolTypeMixin {
 impl FilterLeaf for DefaultSymbolTypeMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
         Some(Box::new(index_schema::symbols::dsl::symbol_type.eq_any(self.symbol_type_ids.clone())))
+    }
+
+    fn hash_into(&self, h: &mut Sha256) {
+        h.update(b"DefaultSymbolType");
+        h.update((self.symbol_type_ids.len() as u32).to_le_bytes());
+        for id in &self.symbol_type_ids {
+            h.update(id.to_le_bytes());
+        }
     }
 }
 
@@ -947,6 +1093,12 @@ impl FilterLeaf for PackageDescendantLeaf {
             self.base_path, self.base_path
         ))))
     }
+
+    fn hash_into(&self, h: &mut Sha256) {
+        h.update(b"PackageDescendant");
+        h.update((self.base_path.len() as u32).to_le_bytes());
+        h.update(self.base_path.as_bytes());
+    }
 }
 
 /// Symbol type constants
@@ -958,6 +1110,9 @@ pub const SYMBOL_TYPE_TYPE: i32 = 5;
 pub const SYMBOL_TYPE_DATA: i32 = 6;
 pub const SYMBOL_TYPE_MACRO: i32 = 7;
 pub const SYMBOL_TYPE_FIELD: i32 = 8;
+/// Content-anchored symbol — emitted by verbs that materialise a byte range in
+/// source content rather than a real language-level symbol (loc, search).
+pub const SYMBOL_TYPE_CONTENT: i32 = 9;
 
 /// Instance type constants
 pub const INSTANCE_TYPE_DEFINITION: i32 = 1;

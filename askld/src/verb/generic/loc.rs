@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
     EphContext, EphInstanceRow, EphLayerKind, EphSymbolRow, LayerBatch,
-    INSTANCE_TYPE_DEFINITION, SYMBOL_TYPE_FUNCTION,
+    INSTANCE_TYPE_DEFINITION, SYMBOL_TYPE_CONTENT,
 };
 use index::symbols::symbol_path_and_leaf;
 use sha2::{Digest, Sha256};
@@ -107,6 +107,7 @@ impl Selector for LocSelector {
         &self,
         cfg: &ControlFlowGraph,
         eph: &EphContext,
+        _composite_filter: &index::db_diesel::CompositeFilter,
         _resolved: &crate::verb::LabelResolutions,
     ) -> Result<Option<LayerSpec>> {
         // 1. Compute content-addressed hash from inputs only.
@@ -182,7 +183,7 @@ impl Selector for LocSelector {
         //    insertion, so we insert symbols first, then build the instance
         //    batch from the returned IDs.
         let sym_name = format!("loc:{}:{}", self.file_path, self.line);
-        let (sym_path, sym_leaf) = symbol_path_and_leaf(&sym_name, SYMBOL_TYPE_FUNCTION);
+        let (sym_path, sym_leaf) = symbol_path_and_leaf(&sym_name, SYMBOL_TYPE_CONTENT);
 
         let populate: crate::verb::LayerPopulate = Box::new(move |txn| Box::pin(async move {
             let mut sym_batch = LayerBatch::new();
@@ -191,7 +192,7 @@ impl Selector for LocSelector {
                     name: sym_name.clone(),
                     path: sym_path.clone(),
                     project_id: fm.project_id,
-                    symbol_type: SYMBOL_TYPE_FUNCTION,
+                    symbol_type: SYMBOL_TYPE_CONTENT,
                     scope: None,
                     leaf_name: sym_leaf.clone(),
                 });
@@ -209,7 +210,8 @@ impl Selector for LocSelector {
                 });
             }
             txn.insert_batch(&inst_batch).await?;
-            Ok(())
+            // loc never truncates; truncated = false.
+            Ok(false)
         }));
 
         Ok(Some(LayerSpec {
