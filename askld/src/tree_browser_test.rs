@@ -300,3 +300,36 @@ async fn tree_browser_compact_mode_no_compact_path_when_not_compactable() {
         other => panic!("Expected Nodes, got {:?}", other),
     }
 }
+
+#[tokio::test]
+async fn list_projects_excludes_canary() {
+    // The __canary__ project (id -999999) is a leak-detection fixture created
+    // by the eph_layers migration; it must never appear in project listings.
+    let store = shared_test_store().await;
+    let projects = store.list_projects().await.unwrap();
+
+    assert!(!projects.is_empty(), "fixture should contain a real project");
+    for p in &projects {
+        assert!(p.id > 0, "non-persistent project leaked into listing: {:?}", p);
+        assert_ne!(p.project_name, "__canary__");
+    }
+}
+
+#[tokio::test]
+async fn get_project_details_excludes_canary() {
+    // Fetching the canary project by its id must 404 (Ok(None)), not expose it.
+    let store = shared_test_store().await;
+    let details = store.get_project_details(-999999).await.unwrap();
+    assert!(details.is_none(), "canary project must not be fetchable by id");
+}
+
+#[tokio::test]
+async fn delete_project_refuses_canary() {
+    // Deleting the canary project would cascade away the leak-detection fixture
+    // and make the server panic on next start. delete_project marks the row
+    // Deleting as its first step, guarded by id > 0; for the canary that update
+    // matches nothing, so it returns false before any destructive delete runs.
+    let store = shared_test_store().await;
+    let deleted = store.delete_project(-999999).await.unwrap();
+    assert!(!deleted, "canary project must not be deletable");
+}

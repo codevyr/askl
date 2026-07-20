@@ -3373,6 +3373,25 @@ fn canary_filtered_by_find_symbol() {
 }
 
 #[test]
+fn canary_source_not_fetchable() {
+    use index::symbols::FileId;
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(TEST_INPUT_A).await;
+
+        // The canary object is id -999999; get_file_contents must refuse
+        // non-positive ids so /source/{file_id} can't return fixture content.
+        let result = index.get_file_contents(FileId::new(-999999)).await;
+        assert!(
+            result.is_err(),
+            "canary object content must not be fetchable by id"
+        );
+    });
+}
+
+#[test]
 fn canary_leak_detected_by_has_eph_leak() {
     use index::db_diesel::{EphContext, Selection, SelectionNode, CANARY_LAYER_ID};
     use index::models_diesel::{Object, Project, Symbol, SymbolInstance};

@@ -17,7 +17,11 @@ use super::{
 impl IndexStore {
     pub async fn list_projects(&self) -> Result<Vec<ProjectInfo>, StoreError> {
         let mut conn = self.get_conn().await?;
+        // Persistent projects have positive SERIAL ids; non-positive ids are
+        // internal fixtures (the __canary__ leak-detection project at -999999)
+        // and must never surface in listings.
         let rows: Vec<(i32, String, String, UploadStatus)> = index_schema::projects::table
+            .filter(index_schema::projects::id.gt(0))
             .select((
                 index_schema::projects::id,
                 index_schema::projects::project_name,
@@ -44,9 +48,12 @@ impl IndexStore {
     ) -> Result<Option<ProjectDetails>, StoreError> {
         let mut conn = self.get_conn().await?;
 
+        // Non-positive ids are internal fixtures (the __canary__ project at
+        // -999999); they must never be exposed as real projects.
         let project_row: Option<(i32, String, String, UploadStatus, Option<i32>, Option<i32>)> =
             index_schema::projects::table
                 .filter(index_schema::projects::id.eq(project_id))
+                .filter(index_schema::projects::id.gt(0))
                 .select((
                     index_schema::projects::id,
                     index_schema::projects::project_name,
@@ -71,8 +78,11 @@ impl IndexStore {
             .get_result(&mut conn)
             .await?;
 
+        // Only persistent symbols count; ephemeral rows from active search()/loc()
+        // layers share the real project_id but carry a non-null eph_layer.
         let symbol_count: i64 = index_schema::symbols::table
             .filter(index_schema::symbols::project_id.eq(project_id))
+            .filter(index_schema::symbols::eph_layer.is_null())
             .count()
             .get_result(&mut conn)
             .await?;
@@ -123,8 +133,13 @@ impl IndexStore {
 
         // Mark as deleting first so the name is immediately reserved and any crash
         // leaves a zombie that the next re-upload of the same name will clean up.
+        // The id > 0 guard makes internal fixtures (the __canary__ project at
+        // -999999, whose cascade would destroy the leak-detection fixture)
+        // undeletable — they fall through to the marked == 0 / Ok(false) path.
         let marked = diesel::update(
-            index_schema::projects::table.filter(index_schema::projects::id.eq(project_id)),
+            index_schema::projects::table
+                .filter(index_schema::projects::id.eq(project_id))
+                .filter(index_schema::projects::id.gt(0)),
         )
         .set(index_schema::projects::upload_status.eq(UploadStatus::Deleting))
         .execute(&mut conn)
@@ -222,6 +237,7 @@ impl IndexStore {
         if !non_root.is_empty() {
             let found: std::collections::HashSet<String> = index_schema::symbols::table
                 .filter(index_schema::symbols::project_id.eq(project_id))
+                .filter(index_schema::symbols::eph_layer.is_null())
                 .filter(index_schema::symbols::symbol_type.eq(SymbolType::Directory as i32))
                 .filter(index_schema::symbols::name.eq_any(&non_root))
                 .select(index_schema::symbols::name)
@@ -373,6 +389,7 @@ async fn query_compactable_dirs(
                 END AS parent_name
             FROM index.symbols s
             WHERE s.project_id = $1
+              AND s.eph_layer IS NULL
               AND (s.symbol_type = $2 OR s.symbol_type = $3)
               AND s.name != '/'
         ) children
@@ -458,6 +475,7 @@ async fn load_tree_children_multi(
             SELECT s.name AS path, p.prefix AS parent_prefix
             FROM prefixes p
             JOIN index.symbols s ON s.project_id = $1
+              AND s.eph_layer IS NULL
               AND s.symbol_type = $3
               AND nlevel(s.symbol_path) = p.children_nlevel
               AND starts_with(s.name, p.prefix)
@@ -468,6 +486,7 @@ async fn load_tree_children_multi(
                 left(c.name, length(c.name) - position('/' IN reverse(c.name))) AS parent_name
             FROM prefixes p
             JOIN index.symbols c ON c.project_id = $1
+              AND c.eph_layer IS NULL
               AND c.symbol_type = $3
               AND nlevel(c.symbol_path) = p.children_nlevel + 1
               AND starts_with(c.name, p.prefix)
@@ -477,6 +496,7 @@ async fn load_tree_children_multi(
                 left(c.name, length(c.name) - position('/' IN reverse(c.name))) AS parent_name
             FROM prefixes p
             JOIN index.symbols c ON c.project_id = $1
+              AND c.eph_layer IS NULL
               AND c.symbol_type = $4
               AND nlevel(c.symbol_path) = p.children_nlevel + 1
               AND starts_with(c.name, p.prefix)
@@ -527,10 +547,12 @@ async fn load_tree_children_multi(
         SELECT DISTINCT o.id, fs.name AS path, o.filetype, p.prefix AS parent_prefix
         FROM prefixes p
         JOIN index.symbols fs ON fs.project_id = $1
+          AND fs.eph_layer IS NULL
           AND fs.symbol_type = $3
           AND nlevel(fs.symbol_path) = p.file_nlevel
           AND starts_with(fs.name, p.prefix)
         JOIN index.symbol_instances si ON si.symbol = fs.id
+          AND si.eph_layer IS NULL
         JOIN index.objects o ON o.id = si.object_id
         ORDER BY p.prefix, fs.name
         "#,
