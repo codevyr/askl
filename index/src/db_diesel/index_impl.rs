@@ -736,6 +736,7 @@ impl Index {
             LEFT JOIN index.object_contents oc ON oc.object_id = o.id
             LEFT JOIN index.content_store cs ON cs.content_hash = o.content_hash
             WHERE o.id = $1
+              AND o.id > 0
             "#,
         )
         .bind::<diesel::sql_types::Integer, _>(object_id)
