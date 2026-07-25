@@ -18,8 +18,10 @@ RUN cargo build --locked --release -p askld
 # ---- Runtime stage ----
 FROM debian:trixie-slim AS runtime
 
-# Minimal runtime deps (certs, tzdata, sqlite runtime/cli)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Minimal runtime deps (certs, tzdata, sqlite runtime/cli).
+# apt-get upgrade force-patches base packages (e.g. openssl/libssl3) to the
+# latest trixie security releases even if the base image lags between rebuilds.
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     ca-certificates tzdata sqlite3 libsqlite3-0 libpq5 netcat-openbsd \
  && rm -rf /var/lib/apt/lists/*
 
