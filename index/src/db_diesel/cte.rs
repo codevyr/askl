@@ -31,13 +31,15 @@
 
 use diesel::pg::Pg;
 use diesel::prelude::*;
-use diesel::query_builder::{AstPass, BoxedSelectStatement, FromClause, Query, QueryFragment, QueryId};
-
-use crate::models_diesel::{Object, Symbol, SymbolInstance};
-use super::mixins::{
-    HasChildrenBoolExpr, HasChildrenQuery,
-    CONTAINED_INSTANCE_ALIAS, CONTAINED_SYMBOL_ALIAS, CONTAINED_TYPE_ALIAS,
+use diesel::query_builder::{
+    AstPass, BoxedSelectStatement, FromClause, Query, QueryFragment, QueryId,
 };
+
+use super::mixins::{
+    HasChildrenBoolExpr, HasChildrenQuery, CONTAINED_INSTANCE_ALIAS, CONTAINED_SYMBOL_ALIAS,
+    CONTAINED_TYPE_ALIAS,
+};
+use crate::models_diesel::{Object, Symbol, SymbolInstance};
 
 /// Build the `has_children` query with `source_filter` as the
 /// predicate that selects which source `symbol_instances` rows
@@ -70,39 +72,58 @@ fn build_has_children_inner(
 
     symbol_instances::dsl::symbol_instances
         .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
-        .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
+        .inner_join(
+            symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)),
+        )
         .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(symbol_instances::dsl::object_id)))
         .inner_join(
-            contained_instance.on(
-                contained_instance.field(symbol_instances::dsl::object_id)
-                    .eq(symbol_instances::dsl::object_id)
-            ),
+            contained_instance.on(contained_instance
+                .field(symbol_instances::dsl::object_id)
+                .eq(symbol_instances::dsl::object_id)),
         )
         .inner_join(
-            contained_symbol.on(
-                contained_symbol.field(symbols::dsl::id)
-                    .eq(contained_instance.field(symbol_instances::dsl::symbol))
-            ),
+            contained_symbol.on(contained_symbol
+                .field(symbols::dsl::id)
+                .eq(contained_instance.field(symbol_instances::dsl::symbol))),
         )
         .inner_join(
-            contained_type.on(
-                contained_type.field(symbol_types::dsl::id)
-                    .eq(contained_symbol.field(symbols::dsl::symbol_type))
-            ),
+            contained_type.on(contained_type
+                .field(symbol_types::dsl::id)
+                .eq(contained_symbol.field(symbols::dsl::symbol_type))),
         )
         .filter(source_filter)
         .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
-            "symbol_instances.offset_range @> contained_instances.offset_range"
+            "symbol_instances.offset_range @> contained_instances.offset_range",
         ))
         .filter(symbol_types::dsl::level.ge(contained_type.field(symbol_types::dsl::level)))
         .filter(symbol_instances::dsl::id.ne(contained_instance.field(symbol_instances::dsl::id)))
         // Ephemeral visibility — filter both source and aliased (contained) tables
-        .filter(symbols::eph_layer.is_null().or(symbols::eph_layer.eq_any(eph_ids_owned.clone())))
-        .filter(symbol_instances::eph_layer.is_null().or(symbol_instances::eph_layer.eq_any(eph_ids_owned.clone())))
-        .filter(contained_symbol.field(symbols::eph_layer).is_null()
-            .or(contained_symbol.field(symbols::eph_layer).eq_any(eph_ids_owned.clone())))
-        .filter(contained_instance.field(symbol_instances::eph_layer).is_null()
-            .or(contained_instance.field(symbol_instances::eph_layer).eq_any(eph_ids_owned)))
+        .filter(
+            symbols::eph_layer
+                .is_null()
+                .or(symbols::eph_layer.eq_any(eph_ids_owned.clone())),
+        )
+        .filter(
+            symbol_instances::eph_layer
+                .is_null()
+                .or(symbol_instances::eph_layer.eq_any(eph_ids_owned.clone())),
+        )
+        .filter(
+            contained_symbol
+                .field(symbols::eph_layer)
+                .is_null()
+                .or(contained_symbol
+                    .field(symbols::eph_layer)
+                    .eq_any(eph_ids_owned.clone())),
+        )
+        .filter(
+            contained_instance
+                .field(symbol_instances::eph_layer)
+                .is_null()
+                .or(contained_instance
+                    .field(symbol_instances::eph_layer)
+                    .eq_any(eph_ids_owned)),
+        )
         .select((
             Symbol::as_select(),
             SymbolInstance::as_select(),
@@ -120,8 +141,7 @@ pub(super) fn build_has_children_query(
     eph_ids: &[i64],
 ) -> HasChildrenQuery<'static> {
     use crate::schema_diesel::symbol_instances;
-    let source_filter: HasChildrenBoolExpr =
-        Box::new(symbol_instances::dsl::id.eq_any(source_ids));
+    let source_filter: HasChildrenBoolExpr = Box::new(symbol_instances::dsl::id.eq_any(source_ids));
     build_has_children_inner(eph_ids, source_filter)
 }
 
@@ -132,11 +152,9 @@ pub(super) fn build_has_children_query(
 /// `build_has_children_query`; rows still deserialise as the natural
 /// tuple `(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)`.
 pub(super) fn build_has_children_query_against_cte(eph_ids: &[i64]) -> HasChildrenQuery<'static> {
-    let source_filter: HasChildrenBoolExpr = Box::new(
-        diesel::dsl::sql::<diesel::sql_types::Bool>(
-            "symbol_instances.id IN (SELECT id FROM candidates)"
-        )
-    );
+    let source_filter: HasChildrenBoolExpr = Box::new(diesel::dsl::sql::<diesel::sql_types::Bool>(
+        "symbol_instances.id IN (SELECT id FROM candidates)",
+    ));
     build_has_children_inner(eph_ids, source_filter)
 }
 
@@ -156,8 +174,11 @@ pub(super) fn build_has_children_cte_body(
     let eph_ids_owned = eph_ids.to_vec();
     symbol_instances::table
         .filter(symbol_instances::id.eq_any(source_ids))
-        .filter(symbol_instances::eph_layer.is_null()
-            .or(symbol_instances::eph_layer.eq_any(eph_ids_owned)))
+        .filter(
+            symbol_instances::eph_layer
+                .is_null()
+                .or(symbol_instances::eph_layer.eq_any(eph_ids_owned)),
+        )
         .select(symbol_instances::id)
         .into_boxed::<Pg>()
 }
@@ -215,13 +236,7 @@ pub(super) fn build_find_edges_cte_body(
     eph_ids: Vec<i64>,
 ) -> diesel::query_builder::BoxedSelectStatement<
     'static,
-    (
-        BigInt,
-        BigInt,
-        Integer,
-        Int4range,
-        Nullable<BigInt>,
-    ),
+    (BigInt, BigInt, Integer, Int4range, Nullable<BigInt>),
     diesel::query_builder::FromClause<crate::schema_diesel::symbol_instances::table>,
     Pg,
 > {
@@ -246,15 +261,15 @@ pub(super) fn build_find_edges_cte_body(
 /// Result-row `SqlType` for `CteFindEdgesBetween`'s outer SELECT.
 /// Matches the column order in `ImplicitEdge`.
 pub(super) type FindEdgesRowSqlType = (
-    BigInt,                  // ref_id
-    BigInt,                  // to_symbol
-    Integer,                 // from_object
-    Int4range,               // from_offset_range
-    BigInt,                  // to_instance_id
-    BigInt,                  // from_instance_id
-    Nullable<BigInt>,        // sr_eph_layer
-    Nullable<BigInt>,        // from_eph_layer
-    Nullable<BigInt>,        // to_eph_layer
+    BigInt,           // ref_id
+    BigInt,           // to_symbol
+    Integer,          // from_object
+    Int4range,        // from_offset_range
+    BigInt,           // to_instance_id
+    BigInt,           // from_instance_id
+    Nullable<BigInt>, // sr_eph_layer
+    Nullable<BigInt>, // from_eph_layer
+    Nullable<BigInt>, // to_eph_layer
 );
 
 /// Typed wrapper around `find_edges_between`'s CTE-form query.

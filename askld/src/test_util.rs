@@ -71,7 +71,9 @@ fn register_container(id: String) {
         extern "C" {
             fn atexit(f: extern "C" fn()) -> std::os::raw::c_int;
         }
-        unsafe { atexit(cleanup_containers); }
+        unsafe {
+            atexit(cleanup_containers);
+        }
     });
     CONTAINER_IDS.lock().unwrap().push(id);
 }
@@ -91,7 +93,10 @@ const ALL_FIXTURES: &[&str] = &[
 ];
 
 static FIXTURES: LazyLock<HashMap<&'static str, OnceLock<SharedFixture>>> = LazyLock::new(|| {
-    ALL_FIXTURES.iter().map(|&name| (name, OnceLock::new())).collect()
+    ALL_FIXTURES
+        .iter()
+        .map(|&name| (name, OnceLock::new()))
+        .collect()
 });
 
 fn create_fixture(fixture: &str) -> SharedFixture {
@@ -110,7 +115,9 @@ fn create_fixture(fixture: &str) -> SharedFixture {
             wait_for_postgres(&url).await.unwrap();
             // Use connect_with_test_input to load DDL + data via sync connection.
             // The pool created here will be discarded; each test creates its own.
-            Index::connect_with_test_input(&url, &fixture).await.unwrap();
+            Index::connect_with_test_input(&url, &fixture)
+                .await
+                .unwrap();
         });
 
         SharedFixture {
@@ -181,7 +188,9 @@ pub fn run_query_traced(
     let mut rt = Runtime::new().unwrap();
     let local = task::LocalSet::new();
     local.block_on(&mut rt, async {
-        run_query_traced_async_err(askl_input, askl_query).await.unwrap()
+        run_query_traced_async_err(askl_input, askl_query)
+            .await
+            .unwrap()
     })
 }
 

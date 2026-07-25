@@ -9,8 +9,8 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
     CompositeFilter, DirectOnlyMixin, EphContext, EphLayerKind, EphScopedFut, EphTransaction,
-    InnermostOnlyMixin, OuterParentFilterMixin, ScopeContext, SymbolInstanceIdMixin, Index,
-    Selection,
+    Index, InnermostOnlyMixin, OuterParentFilterMixin, ScopeContext, Selection,
+    SymbolInstanceIdMixin,
 };
 
 /// Populate-callback type used by [`LayerSpec`].  Called by the statement-
@@ -58,7 +58,9 @@ mod generic;
 mod labels;
 mod preamble;
 
-pub use self::generic::{DefaultTypeFilter, DirectOnlyFilter, GenericFilter, GenericSelector, NameSelector, UnitVerb};
+pub use self::generic::{
+    DefaultTypeFilter, DirectOnlyFilter, GenericFilter, GenericSelector, NameSelector, UnitVerb,
+};
 pub(crate) use self::generic::{EphemeralOps, LabelResolutions};
 
 use self::generic::{build_generic_verb, ForcedVerb};
@@ -280,7 +282,6 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
     fn has_name_constraint(&self) -> bool {
         false
     }
-
 }
 
 /// Filter trait for verbs that constrain symbol selection.
@@ -357,16 +358,19 @@ impl SelectorState {
         let check_has = rel_type.contains(RelationshipType::HAS);
         let parent_symbol_ids: std::collections::HashSet<_> = if check_refs {
             parent.nodes.iter().map(|n| n.symbol.id).collect()
-        } else { Default::default() };
+        } else {
+            Default::default()
+        };
         let parent_instance_ids: std::collections::HashSet<_> = if check_has {
             parent.nodes.iter().map(|n| n.symbol_instance.id).collect()
-        } else { Default::default() };
+        } else {
+            Default::default()
+        };
         let selection = self.selection.as_mut().unwrap();
         selection.nodes.retain(|s| {
             (check_refs
                 && parent.children.iter().any(|r| {
-                    r.symbol.id == s.symbol.id
-                        && parent_symbol_ids.contains(&r.parent_symbol.id)
+                    r.symbol.id == s.symbol.id && parent_symbol_ids.contains(&r.parent_symbol.id)
                 }))
                 || (check_has
                     && parent.has_children.iter().any(|r| {
@@ -381,10 +385,14 @@ impl SelectorState {
         let check_has = rel_type.contains(RelationshipType::HAS);
         let child_symbol_ids: std::collections::HashSet<_> = if check_refs {
             child.nodes.iter().map(|n| n.symbol.id).collect()
-        } else { Default::default() };
+        } else {
+            Default::default()
+        };
         let child_instance_ids: std::collections::HashSet<_> = if check_has {
             child.nodes.iter().map(|n| n.symbol_instance.id).collect()
-        } else { Default::default() };
+        } else {
+            Default::default()
+        };
         let selection = self.selection.as_mut().unwrap();
         selection.nodes.retain(|s| {
             (check_refs
@@ -439,7 +447,6 @@ impl SelectorState {
                 .any(|o| o.symbol_instance.id == u.symbol_instance.id)
         });
     }
-
 }
 
 pub type SelectorId = usize;
@@ -468,7 +475,11 @@ pub trait Selector: std::fmt::Debug + Verb {
     /// Used by scope builders to construct ScopeContext for parent/children scoping.
     /// Default: `None` (no scope filter — scope is unscoped). Override in selectors
     /// that should contribute to scope narrowing.
-    fn build_composite_filter(&self, _command: &crate::command::Command, _eph: &EphContext) -> Option<CompositeFilter> {
+    fn build_composite_filter(
+        &self,
+        _command: &crate::command::Command,
+        _eph: &EphContext,
+    ) -> Option<CompositeFilter> {
         None
     }
 
@@ -511,7 +522,13 @@ pub trait Selector: std::fmt::Debug + Verb {
         let span = self.span();
         let context = format!("{}", notifier.command().span());
         let (constrained, changed, warnings) = selector_state_with(registry, self, |state| {
-            state.constrain_with_warning(dependency, &notif_ctx.role, notif_ctx.rel_type, span, &context)
+            state.constrain_with_warning(
+                dependency,
+                &notif_ctx.role,
+                notif_ctx.rel_type,
+                span,
+                &context,
+            )
         });
 
         if constrained {
@@ -586,7 +603,9 @@ pub trait Selector: std::fmt::Debug + Verb {
     /// True iff `layer_spec` ever returns `Some`. Used by the statement
     /// executor as a sync check to decide whether to drain pending futures
     /// before this command.
-    fn has_layer_spec(&self) -> bool { false }
+    fn has_layer_spec(&self) -> bool {
+        false
+    }
 
     async fn select_from_all_impl(
         &self,
@@ -596,7 +615,10 @@ pub trait Selector: std::fmt::Debug + Verb {
         children_scope: ScopeContext,
         eph: &EphContext,
     ) -> Result<Option<Selection>> {
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, eph).await?;
+        let selection = cfg
+            .index
+            .find_symbol(&filter, parent_scope, children_scope, eph)
+            .await?;
         Ok(Some(selection.into_inner()))
     }
 
@@ -618,20 +640,33 @@ pub trait Selector: std::fmt::Debug + Verb {
         let mut find_parts: Vec<CompositeFilter> = vec![];
         if !notif_ctx.unnest {
             find_parts.push(CompositeFilter::leaf(DirectOnlyMixin::new(&ctx.eph)));
-            find_parts.push(CompositeFilter::leaf(OuterParentFilterMixin::new(&parent_ids, &ctx.eph)));
+            find_parts.push(CompositeFilter::leaf(OuterParentFilterMixin::new(
+                &parent_ids,
+                &ctx.eph,
+            )));
         }
         let find_filter = CompositeFilter::and(find_parts);
         let eph = &ctx.eph;
-        let decl_ids = index.find_child_instance_ids(
-            &parent_ids,
-            notif_ctx.rel_type.contains(RelationshipType::REFS),
-            notif_ctx.rel_type.contains(RelationshipType::HAS),
-            &find_filter,
-            eph,
-        ).await.map_err(|e| anyhow::anyhow!("Failed to find child instance IDs: {}", e))?;
+        let decl_ids = index
+            .find_child_instance_ids(
+                &parent_ids,
+                notif_ctx.rel_type.contains(RelationshipType::REFS),
+                notif_ctx.rel_type.contains(RelationshipType::HAS),
+                &find_filter,
+                eph,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to find child instance IDs: {}", e))?;
 
-        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope, eph)
-            .await?;
+        let selection = find_symbol_by_instance_id(
+            index,
+            selector_filters,
+            &decl_ids,
+            parent_scope,
+            children_scope,
+            eph,
+        )
+        .await?;
 
         Ok(Some(selection))
     }
@@ -657,16 +692,26 @@ pub trait Selector: std::fmt::Debug + Verb {
         }
         let find_filter = CompositeFilter::and(find_parts);
         let eph = &ctx.eph;
-        let decl_ids = index.find_parent_instance_ids(
-            &child_ids,
-            notif_ctx.rel_type.contains(RelationshipType::REFS),
-            notif_ctx.rel_type.contains(RelationshipType::HAS),
-            &find_filter,
-            eph,
-        ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
+        let decl_ids = index
+            .find_parent_instance_ids(
+                &child_ids,
+                notif_ctx.rel_type.contains(RelationshipType::REFS),
+                notif_ctx.rel_type.contains(RelationshipType::HAS),
+                &find_filter,
+                eph,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
 
-        let selection = find_symbol_by_instance_id(index, selector_filters, &decl_ids, parent_scope, children_scope, eph)
-            .await?;
+        let selection = find_symbol_by_instance_id(
+            index,
+            selector_filters,
+            &decl_ids,
+            parent_scope,
+            children_scope,
+            eph,
+        )
+        .await?;
 
         Ok(Some(selection))
     }
@@ -684,7 +729,6 @@ pub trait Selector: std::fmt::Debug + Verb {
         };
         Ok(Some(provider.clone()))
     }
-
 }
 
 pub(crate) async fn find_symbol_by_instance_id(
@@ -701,7 +745,10 @@ pub(crate) async fn find_symbol_by_instance_id(
         .collect();
     parts.push(CompositeFilter::leaf(SymbolInstanceIdMixin::new(instances)));
     let filter = CompositeFilter::and(parts);
-    Ok(index.find_symbol(&filter, parent_scope, children_scope, eph).await?.into_inner())
+    Ok(index
+        .find_symbol(&filter, parent_scope, children_scope, eph)
+        .await?
+        .into_inner())
 }
 
 pub trait Labeler: std::fmt::Debug {

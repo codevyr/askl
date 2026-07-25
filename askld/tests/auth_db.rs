@@ -60,10 +60,7 @@ async fn auth_store_round_trip_with_postgres() {
     assert_eq!(keys.len(), 1);
     assert!(keys[0].last_used_at.is_some());
 
-    let revoked = store
-        .revoke_api_key(key_id)
-        .await
-        .expect("revoke key");
+    let revoked = store.revoke_api_key(key_id).await.expect("revoke key");
     assert!(revoked);
 
     let keys = store

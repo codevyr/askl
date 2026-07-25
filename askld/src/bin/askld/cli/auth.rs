@@ -1,8 +1,8 @@
 use crate::args::AuthCommand;
 use anyhow::{anyhow, Result};
 use askld::auth::{
-    ApiKeyInfo, CreateApiKeyRequest, CreateApiKeyResponse, ListApiKeysRequest,
-    ListApiKeysResponse, RevokeApiKeyRequest, RevokeApiKeyResponse,
+    ApiKeyInfo, CreateApiKeyRequest, CreateApiKeyResponse, ListApiKeysRequest, ListApiKeysResponse,
+    RevokeApiKeyRequest, RevokeApiKeyResponse,
 };
 
 fn print_key(key: &ApiKeyInfo) {

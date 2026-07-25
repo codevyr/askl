@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::symbols::{
-    SymbolInstanceId, FileId, ModuleId, Occurrence, ProjectId, SymbolId, SymbolScope, SymbolType,
+    FileId, ModuleId, Occurrence, ProjectId, SymbolId, SymbolInstanceId, SymbolScope, SymbolType,
 };
 
 #[derive(Debug, PartialEq, Eq)]

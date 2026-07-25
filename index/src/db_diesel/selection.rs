@@ -1,7 +1,5 @@
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
-use crate::symbols::{
-    SymbolInstanceId, FileId, Occurrence, SymbolId, SymbolScope, SymbolType,
-};
+use crate::symbols::{FileId, Occurrence, SymbolId, SymbolInstanceId, SymbolScope, SymbolType};
 use std::hash::{Hash, Hasher};
 
 /// Well-known ephemeral layer ID used as a canary.  If any row with this
@@ -28,12 +26,20 @@ pub const CANARY_LAYER_ID: i64 = -999999;
 pub struct EphContext(Vec<i64>);
 
 impl EphContext {
-    pub fn new() -> Self { Self::default() }
-    pub fn from_slice(ids: &[i64]) -> Self { Self(ids.to_vec()) }
-    pub fn from_vec(ids: Vec<i64>) -> Self { Self(ids) }
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn from_slice(ids: &[i64]) -> Self {
+        Self(ids.to_vec())
+    }
+    pub fn from_vec(ids: Vec<i64>) -> Self {
+        Self(ids)
+    }
 
     /// Append a freshly materialised layer to the visibility chain.
-    pub fn push(&mut self, layer_id: i64) { self.0.push(layer_id); }
+    pub fn push(&mut self, layer_id: i64) {
+        self.0.push(layer_id);
+    }
 
     /// Append a batch of freshly materialised layers (in order).
     pub fn extend<I: IntoIterator<Item = i64>>(&mut self, ids: I) {
@@ -41,15 +47,27 @@ impl EphContext {
     }
 
     /// Most recently materialised layer (the parent for the next one).
-    pub fn last(&self) -> Option<i64> { self.0.last().copied() }
+    pub fn last(&self) -> Option<i64> {
+        self.0.last().copied()
+    }
 
-    pub fn contains(&self, id: i64) -> bool { self.0.contains(&id) }
-    pub fn is_empty(&self) -> bool { self.0.is_empty() }
-    pub fn len(&self) -> usize { self.0.len() }
-    pub fn iter(&self) -> std::slice::Iter<'_, i64> { self.0.iter() }
+    pub fn contains(&self, id: i64) -> bool {
+        self.0.contains(&id)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn iter(&self) -> std::slice::Iter<'_, i64> {
+        self.0.iter()
+    }
 
     /// Boundary into the diesel binding layer.
-    pub fn as_slice(&self) -> &[i64] { &self.0 }
+    pub fn as_slice(&self) -> &[i64] {
+        &self.0
+    }
 }
 
 /// Returns `true` if a single eph_layer value represents a leak relative to `eph_ids`.
@@ -92,7 +110,9 @@ impl<T: HasEphLeak> Checked<T> {
 
 impl<T> Checked<T> {
     /// Unwrap, taking ownership of the inner value.
-    pub fn into_inner(self) -> T { self.0 }
+    pub fn into_inner(self) -> T {
+        self.0
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -239,7 +259,10 @@ impl Selection {
     }
 
     pub fn get_instance_ids(&self) -> Vec<i64> {
-        self.nodes.iter().map(|node| node.symbol_instance.id).collect()
+        self.nodes
+            .iter()
+            .map(|node| node.symbol_instance.id)
+            .collect()
     }
 }
 
@@ -250,7 +273,6 @@ impl HasEphLeak for Selection {
 }
 
 impl Selection {
-
     /// Returns `true` if any row in this selection has an `eph_layer` that is
     /// not in `eph`.  A `true` return means the eph_layer filter was
     /// bypassed and foreign ephemeral data leaked into the result.

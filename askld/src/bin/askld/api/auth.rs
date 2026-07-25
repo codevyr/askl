@@ -1,9 +1,9 @@
 use actix_web::{post, web, HttpRequest, HttpResponse, Responder};
-use askld::auth::{
-    AuthStore, CreateApiKeyRequest, CreateApiKeyResponse, ListApiKeysRequest,
-    ListApiKeysResponse, RevokeApiKeyRequest, RevokeApiKeyResponse,
-};
 use askld::auth;
+use askld::auth::{
+    AuthStore, CreateApiKeyRequest, CreateApiKeyResponse, ListApiKeysRequest, ListApiKeysResponse,
+    RevokeApiKeyRequest, RevokeApiKeyResponse,
+};
 use log::error;
 
 #[post("/auth/local/create-api-key")]

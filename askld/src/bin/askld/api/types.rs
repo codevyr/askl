@@ -111,7 +111,10 @@ impl HasEdge {
         child_instance: SymbolInstanceId,
     ) -> Self {
         Self {
-            id: format!("has-{}-{}-{}-{}", parent, child, parent_instance, child_instance),
+            id: format!(
+                "has-{}-{}-{}-{}",
+                parent, child, parent_instance, child_instance
+            ),
             parent,
             child,
             parent_instance: parent_instance.to_string(),

@@ -161,7 +161,8 @@ fn preamble_alone_is_noop() {
 
 #[test]
 fn preamble_scope_with_semicolons() {
-    let ast = parse("preamble { ignore(package=\"foo\"); ignore(package=\"bar\") }\n\"baz\"").unwrap();
+    let ast =
+        parse("preamble { ignore(package=\"foo\"); ignore(package=\"bar\") }\n\"baz\"").unwrap();
     assert_eq!(ast.scope().statements().count(), 2);
 }
 

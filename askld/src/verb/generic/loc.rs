@@ -4,8 +4,8 @@ use crate::verb::LayerSpec;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    EphContext, EphInstanceRow, EphLayerKind, EphSymbolRow, LayerBatch,
-    INSTANCE_TYPE_DEFINITION, SYMBOL_TYPE_CONTENT,
+    EphContext, EphInstanceRow, EphLayerKind, EphSymbolRow, LayerBatch, INSTANCE_TYPE_DEFINITION,
+    SYMBOL_TYPE_CONTENT,
 };
 use index::symbols::symbol_path_and_leaf;
 use sha2::{Digest, Sha256};
@@ -16,8 +16,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 /// File ids for which we have already emitted the CRLF warning in this
 /// process.  Without this, the same Windows-origin file logged a warn
 /// on every `loc(...)` call, which drowned operator logs.
-static CRLF_WARNED: LazyLock<Mutex<HashSet<i32>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
+static CRLF_WARNED: LazyLock<Mutex<HashSet<i32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 use super::super::{DeriveMethod, Selector, Verb};
 
@@ -51,7 +50,8 @@ impl LocSelector {
             bail!("loc requires two positional arguments: file path and line number");
         }
         let file_path = positional[0].clone();
-        let line: usize = positional[1].parse()
+        let line: usize = positional[1]
+            .parse()
             .map_err(|_| anyhow::anyhow!("loc line number must be an integer"))?;
         if line == 0 {
             bail!("loc line number must be >= 1");
@@ -65,7 +65,6 @@ impl LocSelector {
             project,
         }))
     }
-
 }
 
 impl Verb for LocSelector {
@@ -88,7 +87,9 @@ impl Verb for LocSelector {
 
 #[async_trait(?Send)]
 impl Selector for LocSelector {
-    fn has_layer_spec(&self) -> bool { true }
+    fn has_layer_spec(&self) -> bool {
+        true
+    }
 
     /// The layer hash is over the request *inputs only* (file_path, line,
     /// project, parent layer id).  It deliberately does **not** depend on
@@ -118,18 +119,23 @@ impl Selector for LocSelector {
         hasher.update(self.file_path.as_bytes());
         hasher.update((self.line as u64).to_le_bytes());
         match &self.project {
-            Some(p) => { hasher.update([1u8]); hasher.update(p.as_bytes()); }
-            None    => { hasher.update([0u8]); }
+            Some(p) => {
+                hasher.update([1u8]);
+                hasher.update(p.as_bytes());
+            }
+            None => {
+                hasher.update([0u8]);
+            }
         }
         let hash: [u8; 32] = hasher.finalize().into();
 
         // 2. Resolve file paths and compute byte offsets.  These read from
         //    `objects`/`object_contents`, which have no `eph_layer` column,
         //    so results are deterministic regardless of in-flight transactions.
-        let matches = cfg.index.find_objects_by_path(
-            &self.file_path,
-            self.project.as_deref(),
-        ).await?;
+        let matches = cfg
+            .index
+            .find_objects_by_path(&self.file_path, self.project.as_deref())
+            .await?;
 
         if matches.is_empty() {
             bail!("loc: no file matching '{}' found in index", self.file_path);
@@ -176,7 +182,11 @@ impl Selector for LocSelector {
         }
 
         if file_matches.is_empty() {
-            bail!("loc: line {} out of range for all files matching '{}'", self.line, self.file_path);
+            bail!(
+                "loc: line {} out of range for all files matching '{}'",
+                self.line,
+                self.file_path
+            );
         }
 
         // 3. Build the populate closure.  Symbol IDs are only known after
@@ -185,34 +195,36 @@ impl Selector for LocSelector {
         let sym_name = format!("loc:{}:{}", self.file_path, self.line);
         let (sym_path, sym_leaf) = symbol_path_and_leaf(&sym_name, SYMBOL_TYPE_CONTENT);
 
-        let populate: crate::verb::LayerPopulate = Box::new(move |txn| Box::pin(async move {
-            let mut sym_batch = LayerBatch::new();
-            for fm in &file_matches {
-                sym_batch.symbols.push(EphSymbolRow {
-                    name: sym_name.clone(),
-                    path: sym_path.clone(),
-                    project_id: fm.project_id,
-                    symbol_type: SYMBOL_TYPE_CONTENT,
-                    scope: None,
-                    leaf_name: sym_leaf.clone(),
-                });
-            }
-            let symbol_ids = txn.insert_batch(&sym_batch).await?;
+        let populate: crate::verb::LayerPopulate = Box::new(move |txn| {
+            Box::pin(async move {
+                let mut sym_batch = LayerBatch::new();
+                for fm in &file_matches {
+                    sym_batch.symbols.push(EphSymbolRow {
+                        name: sym_name.clone(),
+                        path: sym_path.clone(),
+                        project_id: fm.project_id,
+                        symbol_type: SYMBOL_TYPE_CONTENT,
+                        scope: None,
+                        leaf_name: sym_leaf.clone(),
+                    });
+                }
+                let symbol_ids = txn.insert_batch(&sym_batch).await?;
 
-            let mut inst_batch = LayerBatch::new();
-            for (fm, symbol_id) in file_matches.iter().zip(symbol_ids.iter()) {
-                inst_batch.instances.push(EphInstanceRow {
-                    symbol_id: *symbol_id,
-                    object_id: fm.file_id,
-                    start: fm.line_start,
-                    end: fm.line_end,
-                    instance_type: INSTANCE_TYPE_DEFINITION,
-                });
-            }
-            txn.insert_batch(&inst_batch).await?;
-            // loc never truncates; truncated = false.
-            Ok(false)
-        }));
+                let mut inst_batch = LayerBatch::new();
+                for (fm, symbol_id) in file_matches.iter().zip(symbol_ids.iter()) {
+                    inst_batch.instances.push(EphInstanceRow {
+                        symbol_id: *symbol_id,
+                        object_id: fm.file_id,
+                        start: fm.line_start,
+                        end: fm.line_end,
+                        instance_type: INSTANCE_TYPE_DEFINITION,
+                    });
+                }
+                txn.insert_batch(&inst_batch).await?;
+                // loc never truncates; truncated = false.
+                Ok(false)
+            })
+        });
 
         Ok(Some(LayerSpec {
             hash,
@@ -225,7 +237,11 @@ impl Selector for LocSelector {
 
 impl Display for LocSelector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "LocSelector(file={}, line={})", self.file_path, self.line)
+        write!(
+            f,
+            "LocSelector(file={}, line={})",
+            self.file_path, self.line
+        )
     }
 }
 

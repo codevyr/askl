@@ -2,21 +2,22 @@ use actix_web::{get, post, web, HttpResponse, Responder};
 use askld::execution_context::ExecutionContext;
 use askld::offset_range::range_bounds_to_offsets;
 use askld::parser::parse;
-use index::symbols::{InstanceType, SymbolInstanceId, FileId, SymbolId, SymbolType};
+use index::symbols::{FileId, InstanceType, SymbolId, SymbolInstanceId, SymbolType};
 use log::{debug, info, warn};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use tokio::time::timeout;
 
-use super::types::{AsklData, Edge, ErrorResponse, Graph, GraphObjectEntry, HasEdge, Node, NodeSymbolInstance, QueryStatement};
+use super::types::{
+    AsklData, Edge, ErrorResponse, Graph, GraphObjectEntry, HasEdge, Node, NodeSymbolInstance,
+    QueryStatement,
+};
 
 const MAX_RESPONSE_BYTES: usize = 1_024 * 1_024; // 1 MB
 
 fn is_statement_timeout(err: &pest::error::Error<askld::parser::Rule>) -> bool {
     match &err.variant {
-        pest::error::ErrorVariant::CustomError { message } => {
-            message.contains("statement timeout")
-        }
+        pest::error::ErrorVariant::CustomError { message } => message.contains("statement timeout"),
         _ => false,
     }
 }
@@ -52,11 +53,17 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
             }
             Ok(Ok(res)) => res,
             Err(_) => {
-                warn!("Query timed out (tokio timeout after {:?})", data.query_timeout);
+                warn!(
+                    "Query timed out (tokio timeout after {:?})",
+                    data.query_timeout
+                );
                 if let Some(span) = &ctx.current_statement_span {
                     let err = pest::error::Error::<askld::parser::Rule>::new_from_span(
                         pest::error::ErrorVariant::CustomError {
-                            message: format!("Query exceeded the {:?} time limit while executing this statement", data.query_timeout),
+                            message: format!(
+                                "Query exceeded the {:?} time limit while executing this statement",
+                                data.query_timeout
+                            ),
                         },
                         span.as_pest_span(),
                     );
@@ -92,9 +99,11 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
     }
 
     for (from, to, loc) in res.edges.0 {
-        let from_project_id = loc
-            .as_ref()
-            .and_then(|occurrence| object_projects.get(&occurrence.file).map(|id| id.to_string()));
+        let from_project_id = loc.as_ref().and_then(|occurrence| {
+            object_projects
+                .get(&occurrence.file)
+                .map(|id| id.to_string())
+        });
         result_graph.add_edge(Edge::new(
             from.symbol_id,
             to.symbol_id,
@@ -117,7 +126,12 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
         let mut query_stmts = Vec::new();
         let mut symbol_instances = Vec::new();
 
-        for n in res.nodes.0.iter().filter(|n| n.symbol_instance.symbol == symbol.id) {
+        for n in res
+            .nodes
+            .0
+            .iter()
+            .filter(|n| n.symbol_instance.symbol == symbol.id)
+        {
             for stmt in &n.query_statements {
                 if seen_stmts.insert((stmt.start, stmt.end)) {
                     query_stmts.push(QueryStatement {
@@ -141,7 +155,10 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
             });
         }
 
-        debug!("Symbol instances for symbol {}: {:?}", symbol.id, symbol_instances);
+        debug!(
+            "Symbol instances for symbol {}: {:?}",
+            symbol.id, symbol_instances
+        );
         result_graph.add_node(Node::new(
             SymbolId(symbol.id),
             symbol.name.clone(),
@@ -150,10 +167,7 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
         ));
     }
 
-    result_graph.objects = result_objects
-        .into_iter()
-        .map(|(_, value)| value)
-        .collect();
+    result_graph.objects = result_objects.into_iter().map(|(_, value)| value).collect();
     result_graph.add_warnings(res.warnings);
 
     let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();

@@ -1,6 +1,6 @@
 pub mod db;
-pub mod symbols;
 pub mod ltree;
+pub mod symbols;
 
 // Diesel modules
 pub mod db_diesel;

@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use diesel::dsl::Eq;
-use diesel::expression::{BoxableExpression, ValidGrouping, is_aggregate};
+use diesel::expression::{is_aggregate, BoxableExpression, ValidGrouping};
 use diesel::helper_types::{AsSelect, InnerJoinQuerySource};
 use diesel::internal::table_macro::{BoxedSelectStatement, FromClause};
 use diesel::pg::Pg;
@@ -15,7 +15,9 @@ use crate::db_diesel::selection::EphContext;
 use crate::ltree::Ltree;
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::schema_diesel as index_schema;
-use crate::symbols::{symbol_name_to_path, build_lquery, normalize_symbol_tokens, SymbolInstanceId};
+use crate::symbols::{
+    build_lquery, normalize_symbol_tokens, symbol_name_to_path, SymbolInstanceId,
+};
 
 diesel::alias! {
     pub const PARENT_SYMBOLS_ALIAS: Alias<ParentSymbolsAlias> =
@@ -62,16 +64,28 @@ type SelectionTuple = (
     AsSelect<Project, Pg>,
 );
 
-pub type CurrentQuery<'a> = BoxedSelectStatement<
-    'a,
-    SelectionTuple,
-    FromClause<SymbolInstanceProjectObjectJoin>,
-    Pg,
->;
+pub type CurrentQuery<'a> =
+    BoxedSelectStatement<'a, SelectionTuple, FromClause<SymbolInstanceProjectObjectJoin>, Pg>;
 
-type SymbolInstanceColumnsSqlType = (BigInt, BigInt, Integer, Int4range, Integer, Nullable<BigInt>);
+type SymbolInstanceColumnsSqlType = (
+    BigInt,
+    BigInt,
+    Integer,
+    Int4range,
+    Integer,
+    Nullable<BigInt>,
+);
 
-type SymbolColumnsSqlType = (BigInt, Text, Ltree, Integer, Integer, Nullable<Integer>, Text, Nullable<BigInt>);  // (id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name, eph_layer)
+type SymbolColumnsSqlType = (
+    BigInt,
+    Text,
+    Ltree,
+    Integer,
+    Integer,
+    Nullable<Integer>,
+    Text,
+    Nullable<BigInt>,
+); // (id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name, eph_layer)
 
 type ParentSelectionTuple = (
     AsSelect<SymbolRef, Pg>,
@@ -152,10 +166,10 @@ pub type ChildrenQuery<'a> = BoxedSelectStatement<
 // has_parents: find containers of current symbols
 // Query structure: symbol_instances -> symbols -> symbol_types -> container_instances -> container_symbols -> container_types
 type HasParentsSelectionTuple = (
-    AsSelect<Symbol, Pg>,           // child_symbol (current)
-    AsSelect<SymbolInstance, Pg>,   // child_instance (current)
-    SymbolColumnsSqlType,           // parent_symbol (container)
-    SymbolInstanceColumnsSqlType,   // parent_instance (container)
+    AsSelect<Symbol, Pg>,         // child_symbol (current)
+    AsSelect<SymbolInstance, Pg>, // child_instance (current)
+    SymbolColumnsSqlType,         // parent_symbol (container)
+    SymbolInstanceColumnsSqlType, // parent_instance (container)
 );
 
 // Join type for symbol_instances -> symbols
@@ -208,21 +222,17 @@ type HasParentsJoinSource = InnerJoinQuerySource<
     ContainerTypeOn,
 >;
 
-pub type HasParentsQuery<'a> = BoxedSelectStatement<
-    'a,
-    HasParentsSelectionTuple,
-    FromClause<HasParentsJoinSource>,
-    Pg,
->;
+pub type HasParentsQuery<'a> =
+    BoxedSelectStatement<'a, HasParentsSelectionTuple, FromClause<HasParentsJoinSource>, Pg>;
 
 // has_children: find symbols contained by current symbols
 // Query structure: symbol_instances -> symbols -> symbol_types -> objects -> contained_instances -> contained_symbols -> contained_types
 type HasChildrenSelectionTuple = (
-    AsSelect<Symbol, Pg>,           // parent_symbol (current)
-    AsSelect<SymbolInstance, Pg>,   // parent_instance (current)
-    SymbolColumnsSqlType,           // child_symbol (contained)
-    SymbolInstanceColumnsSqlType,   // child_instance (contained)
-    AsSelect<Object, Pg>,           // parent_object
+    AsSelect<Symbol, Pg>,         // parent_symbol (current)
+    AsSelect<SymbolInstance, Pg>, // parent_instance (current)
+    SymbolColumnsSqlType,         // child_symbol (contained)
+    SymbolInstanceColumnsSqlType, // child_instance (contained)
+    AsSelect<Object, Pg>,         // parent_object
 );
 
 // Join type for ... -> objects
@@ -268,12 +278,8 @@ type HasChildrenJoinSource = InnerJoinQuerySource<
     ContainedTypeOn,
 >;
 
-pub type HasChildrenQuery<'a> = BoxedSelectStatement<
-    'a,
-    HasChildrenSelectionTuple,
-    FromClause<HasChildrenJoinSource>,
-    Pg,
->;
+pub type HasChildrenQuery<'a> =
+    BoxedSelectStatement<'a, HasChildrenSelectionTuple, FromClause<HasChildrenJoinSource>, Pg>;
 
 fn ltree_filter_sql(column: &str, lquery: &str) -> String {
     format!("{} ~ '{}'::lquery", column, lquery)
@@ -294,7 +300,10 @@ pub(crate) struct OwnedSql<ST> {
 
 impl<ST> OwnedSql<ST> {
     pub(crate) fn new(sql: String) -> Self {
-        Self { sql, _marker: PhantomData }
+        Self {
+            sql,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -309,7 +318,10 @@ impl<ST: 'static + Send> QueryFragment<Pg> for OwnedSql<ST> {
     }
 }
 
-impl<ST: 'static + Send + diesel::sql_types::SingleValue, QS> SelectableExpression<QS> for OwnedSql<ST> {}
+impl<ST: 'static + Send + diesel::sql_types::SingleValue, QS> SelectableExpression<QS>
+    for OwnedSql<ST>
+{
+}
 impl<ST: 'static + Send + diesel::sql_types::SingleValue, QS> AppearsOnTable<QS> for OwnedSql<ST> {}
 
 impl<ST> QueryId for OwnedSql<ST> {
@@ -366,7 +378,10 @@ pub(crate) struct EphSqlBuilder<ST> {
 
 impl<ST> EphSqlFragment<ST> {
     pub(crate) fn builder() -> EphSqlBuilder<ST> {
-        EphSqlBuilder { parts: Vec::new(), _marker: PhantomData }
+        EphSqlBuilder {
+            parts: Vec::new(),
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -397,13 +412,17 @@ impl<ST> EphSqlBuilder<ST> {
             Some(EphSqlPart::Sql(buf)) => buf.push_str(&sql),
             _ => self.parts.push(EphSqlPart::Sql(sql)),
         }
-        self.parts.push(EphSqlPart::BindI64Array(eph.as_slice().to_vec()));
+        self.parts
+            .push(EphSqlPart::BindI64Array(eph.as_slice().to_vec()));
         self.parts.push(EphSqlPart::Sql("))".to_string()));
         self
     }
 
     pub(crate) fn build(self) -> EphSqlFragment<ST> {
-        EphSqlFragment { parts: self.parts, _marker: PhantomData }
+        EphSqlFragment {
+            parts: self.parts,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -492,15 +511,27 @@ impl Clone for Box<dyn FilterLeaf> {
 /// A leaf filter that produces Diesel boolean expressions for each query context.
 /// Each method returns `None` if this leaf does not constrain that query context.
 pub trait FilterLeaf: std::fmt::Debug + FilterLeafClone + Send + Sync {
-    fn current_expr(&self) -> Option<CurrentBoolExpr> { None }
-    fn parents_expr(&self) -> Option<ParentsBoolExpr> { None }
-    fn children_expr(&self) -> Option<ChildrenBoolExpr> { None }
-    fn has_parents_expr(&self) -> Option<HasParentsBoolExpr> { None }
-    fn has_children_expr(&self) -> Option<HasChildrenBoolExpr> { None }
+    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+        None
+    }
+    fn parents_expr(&self) -> Option<ParentsBoolExpr> {
+        None
+    }
+    fn children_expr(&self) -> Option<ChildrenBoolExpr> {
+        None
+    }
+    fn has_parents_expr(&self) -> Option<HasParentsBoolExpr> {
+        None
+    }
+    fn has_children_expr(&self) -> Option<HasChildrenBoolExpr> {
+        None
+    }
 
     /// Object-level predicate, used by `search()` to scope its content scan.
     /// Returns `None` for filters that only constrain at the symbol/instance layer.
-    fn objects_expr(&self) -> Option<ObjectsBoolExpr> { None }
+    fn objects_expr(&self) -> Option<ObjectsBoolExpr> {
+        None
+    }
 
     /// Canonical hash of this leaf's semantic state for cache-key composition.
     ///
@@ -558,7 +589,7 @@ impl CompositeFilter {
 
 // Fold helpers — compose N boxed bool expressions with AND or OR.
 fn fold_and<QS: 'static>(
-    exprs: Vec<Box<dyn BoxableExpression<QS, Pg, SqlType = Bool>>>
+    exprs: Vec<Box<dyn BoxableExpression<QS, Pg, SqlType = Bool>>>,
 ) -> Option<Box<dyn BoxableExpression<QS, Pg, SqlType = Bool>>> {
     let mut iter = exprs.into_iter();
     let first = iter.next()?;
@@ -568,7 +599,7 @@ fn fold_and<QS: 'static>(
 }
 
 fn fold_or<QS: 'static>(
-    exprs: Vec<Box<dyn BoxableExpression<QS, Pg, SqlType = Bool>>>
+    exprs: Vec<Box<dyn BoxableExpression<QS, Pg, SqlType = Bool>>>,
 ) -> Option<Box<dyn BoxableExpression<QS, Pg, SqlType = Bool>>> {
     let mut iter = exprs.into_iter();
     let first = iter.next()?;
@@ -613,12 +644,12 @@ macro_rules! compose_method {
                     }
                     fold_or(exprs)
                 }
-                CompositeFilter::Not(inner) => {
-                    inner.$method().map(|e| Box::new(diesel::dsl::not(e)) as $expr_type)
-                }
+                CompositeFilter::Not(inner) => inner
+                    .$method()
+                    .map(|e| Box::new(diesel::dsl::not(e)) as $expr_type),
             }
         }
-    }
+    };
 }
 
 impl CompositeFilter {
@@ -645,12 +676,16 @@ impl CompositeFilter {
             CompositeFilter::And(children) => {
                 h.update([1u8]);
                 h.update((children.len() as u32).to_le_bytes());
-                for c in children { c.hash_into(h); }
+                for c in children {
+                    c.hash_into(h);
+                }
             }
             CompositeFilter::Or(children) => {
                 h.update([2u8]);
                 h.update((children.len() as u32).to_le_bytes());
-                for c in children { c.hash_into(h); }
+                for c in children {
+                    c.hash_into(h);
+                }
             }
             CompositeFilter::Not(inner) => {
                 h.update([3u8]);
@@ -674,7 +709,8 @@ fn extract_leaf_token(name: &str, dot_is_separator: bool) -> String {
     } else {
         Cow::Owned(name.replace('.', "_"))
     };
-    normalize_symbol_tokens(&normalized).pop()
+    normalize_symbol_tokens(&normalized)
+        .pop()
         .unwrap_or_else(|| "unknown".to_string())
 }
 
@@ -710,12 +746,15 @@ impl FilterLeaf for CompoundNameMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
         let mut parts: Vec<CurrentBoolExpr> = vec![];
         if let Some(ref leaf) = self.leaf_token {
-            parts.push(Box::new(index_schema::symbols::dsl::leaf_name.eq(leaf.clone())));
+            parts.push(Box::new(
+                index_schema::symbols::dsl::leaf_name.eq(leaf.clone()),
+            ));
         }
         if let Some(ref lquery) = self.lquery {
-            parts.push(Box::new(OwnedSql::<Bool>::new(
-                ltree_filter_sql("symbols.symbol_path", lquery)
-            )));
+            parts.push(Box::new(OwnedSql::<Bool>::new(ltree_filter_sql(
+                "symbols.symbol_path",
+                lquery,
+            ))));
         }
         fold_and(parts)
     }
@@ -749,13 +788,17 @@ pub struct LeafNameMixin {
 
 impl LeafNameMixin {
     pub fn new(name: &str, dot_is_separator: bool) -> Self {
-        Self { leaf_name: extract_leaf_token(name, dot_is_separator) }
+        Self {
+            leaf_name: extract_leaf_token(name, dot_is_separator),
+        }
     }
 }
 
 impl FilterLeaf for LeafNameMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
-        Some(Box::new(index_schema::symbols::dsl::leaf_name.eq(self.leaf_name.clone())))
+        Some(Box::new(
+            index_schema::symbols::dsl::leaf_name.eq(self.leaf_name.clone()),
+        ))
     }
 
     fn hash_into(&self, h: &mut Sha256) {
@@ -781,7 +824,9 @@ impl ExactNameMixin {
 
 impl FilterLeaf for ExactNameMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
-        Some(Box::new(index_schema::symbols::dsl::name.eq(self.name.clone())))
+        Some(Box::new(
+            index_schema::symbols::dsl::name.eq(self.name.clone()),
+        ))
     }
 
     fn hash_into(&self, h: &mut Sha256) {
@@ -807,7 +852,7 @@ impl SymbolInstanceIdMixin {
 impl FilterLeaf for SymbolInstanceIdMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
         Some(Box::new(
-            index_schema::symbol_instances::dsl::id.eq_any(self.instance_ids.clone())
+            index_schema::symbol_instances::dsl::id.eq_any(self.instance_ids.clone()),
         ))
     }
 
@@ -836,7 +881,7 @@ impl ProjectFilterMixin {
 impl FilterLeaf for ProjectFilterMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
         Some(Box::new(
-            index_schema::projects::dsl::project_name.eq(self.project_name.clone())
+            index_schema::projects::dsl::project_name.eq(self.project_name.clone()),
         ))
     }
 
@@ -850,8 +895,10 @@ impl FilterLeaf for ProjectFilterMixin {
             index_schema::objects::dsl::project_id.eq_any(
                 index_schema::projects::dsl::projects
                     .select(index_schema::projects::dsl::id)
-                    .filter(index_schema::projects::dsl::project_name.eq(self.project_name.clone()))
-            )
+                    .filter(
+                        index_schema::projects::dsl::project_name.eq(self.project_name.clone()),
+                    ),
+            ),
         ))
     }
 
@@ -878,7 +925,8 @@ impl FilterLeaf for DirectOnlyMixin {
     fn has_children_expr(&self) -> Option<HasChildrenBoolExpr> {
         Some(Box::new(
             EphSqlFragment::<Bool>::builder()
-                .sql("NOT EXISTS (\
+                .sql(
+                    "NOT EXISTS (\
                         SELECT 1 FROM index.symbol_instances mid \
                         JOIN index.symbols mid_sym ON mid.symbol = mid_sym.id \
                         JOIN index.symbol_types mid_type ON mid_sym.symbol_type = mid_type.id \
@@ -890,12 +938,13 @@ impl FilterLeaf for DirectOnlyMixin {
                           AND mid.id != symbol_instances.id \
                           AND mid.id != contained_instances.id \
                           AND symbol_types.level >= mid_type.level \
-                          AND ")
+                          AND ",
+                )
                 .eph_visibility("mid.eph_layer", &self.eph)
                 .sql(" AND ")
                 .eph_visibility("mid_sym.eph_layer", &self.eph)
                 .sql(")")
-                .build()
+                .build(),
         ))
     }
 
@@ -944,7 +993,8 @@ impl FilterLeaf for InnermostOnlyMixin {
     fn has_parents_expr(&self) -> Option<HasParentsBoolExpr> {
         Some(Box::new(
             EphSqlFragment::<Bool>::builder()
-                .sql("NOT EXISTS (\
+                .sql(
+                    "NOT EXISTS (\
                         SELECT 1 FROM index.symbol_instances mid \
                         JOIN index.symbols mid_sym ON mid_sym.id = mid.symbol \
                         WHERE mid.object_id = container_instances.object_id \
@@ -954,12 +1004,13 @@ impl FilterLeaf for InnermostOnlyMixin {
                           AND mid.offset_range != symbol_instances.offset_range \
                           AND mid.id != container_instances.id \
                           AND mid.id != symbol_instances.id \
-                          AND ")
+                          AND ",
+                )
                 .eph_visibility("mid.eph_layer", &self.eph)
                 .sql(" AND ")
                 .eph_visibility("mid_sym.eph_layer", &self.eph)
                 .sql(")")
-                .build()
+                .build(),
         ))
     }
 
@@ -992,19 +1043,23 @@ impl FilterLeaf for OuterParentFilterMixin {
         }
         Some(Box::new(
             EphSqlFragment::<Bool>::builder()
-                .sql("NOT EXISTS (\
+                .sql(
+                    "NOT EXISTS (\
                         SELECT 1 FROM index.symbol_instances op \
-                        WHERE op.id = ANY(")
+                        WHERE op.id = ANY(",
+                )
                 .bind(self.parent_ids.clone())
-                .sql(") \
+                .sql(
+                    ") \
                           AND op.id != parent_decls.id \
                           AND op.object_id = parent_decls.object_id \
                           AND op.offset_range @> parent_decls.offset_range \
                           AND op.offset_range != parent_decls.offset_range \
-                          AND ")
+                          AND ",
+                )
                 .eph_visibility("op.eph_layer", &self.eph)
                 .sql(")")
-                .build()
+                .build(),
         ))
     }
 
@@ -1032,7 +1087,9 @@ impl SymbolTypeMixin {
 
 impl FilterLeaf for SymbolTypeMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
-        Some(Box::new(index_schema::symbols::dsl::symbol_type.eq(self.symbol_type_id)))
+        Some(Box::new(
+            index_schema::symbols::dsl::symbol_type.eq(self.symbol_type_id),
+        ))
     }
 
     fn hash_into(&self, h: &mut Sha256) {
@@ -1055,7 +1112,9 @@ impl DefaultSymbolTypeMixin {
 
 impl FilterLeaf for DefaultSymbolTypeMixin {
     fn current_expr(&self) -> Option<CurrentBoolExpr> {
-        Some(Box::new(index_schema::symbols::dsl::symbol_type.eq_any(self.symbol_type_ids.clone())))
+        Some(Box::new(
+            index_schema::symbols::dsl::symbol_type.eq_any(self.symbol_type_ids.clone()),
+        ))
     }
 
     fn hash_into(&self, h: &mut Sha256) {
@@ -1125,4 +1184,3 @@ pub const INSTANCE_TYPE_HEADER: i32 = 7;
 pub const INSTANCE_TYPE_BUILD: i32 = 8;
 pub const INSTANCE_TYPE_FILE: i32 = 9;
 pub const INSTANCE_TYPE_DOCUMENTATION: i32 = 10;
-

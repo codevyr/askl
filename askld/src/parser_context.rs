@@ -15,8 +15,11 @@ use std::{
 
 // Re-export symbol type constants from the index crate (single source of truth)
 pub use index::db_diesel::{
-    SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FILE, SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE, SYMBOL_TYPE_DATA, SYMBOL_TYPE_MACRO, SYMBOL_TYPE_FIELD,
-    INSTANCE_TYPE_DEFINITION, INSTANCE_TYPE_DECLARATION, INSTANCE_TYPE_EXPANSION, INSTANCE_TYPE_SENTINEL, INSTANCE_TYPE_CONTAINMENT, INSTANCE_TYPE_SOURCE, INSTANCE_TYPE_HEADER, INSTANCE_TYPE_BUILD,
+    INSTANCE_TYPE_BUILD, INSTANCE_TYPE_CONTAINMENT, INSTANCE_TYPE_DECLARATION,
+    INSTANCE_TYPE_DEFINITION, INSTANCE_TYPE_EXPANSION, INSTANCE_TYPE_HEADER,
+    INSTANCE_TYPE_SENTINEL, INSTANCE_TYPE_SOURCE, SYMBOL_TYPE_DATA, SYMBOL_TYPE_DIRECTORY,
+    SYMBOL_TYPE_FIELD, SYMBOL_TYPE_FILE, SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MACRO,
+    SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
 };
 
 #[derive(Debug)]
@@ -94,7 +97,9 @@ impl ParserContext {
             // Don't inherit - each context tracks its own modifiers
             // UNLESS inherit_relationship_modifier is set, in which case propagate both flags
             has_relationship_modifier: RefCell::new(*from.inherit_relationship_modifier.borrow()),
-            inherit_relationship_modifier: RefCell::new(*from.inherit_relationship_modifier.borrow()),
+            inherit_relationship_modifier: RefCell::new(
+                *from.inherit_relationship_modifier.borrow(),
+            ),
             eph_ops: RefCell::new(from.get_eph_ops()),
         })
     }
@@ -224,5 +229,4 @@ impl ParserContext {
     pub(crate) fn get_eph_ops(&self) -> Option<EphemeralOps> {
         self.eph_ops.borrow().clone()
     }
-
 }

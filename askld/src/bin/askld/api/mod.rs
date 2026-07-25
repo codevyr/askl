@@ -27,8 +27,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route(web::post().to(index::upload_contents)),
         )
         .service(
-            web::resource("/v1/index/contents/check")
-                .route(web::post().to(index::check_contents)),
+            web::resource("/v1/index/contents/check").route(web::post().to(index::check_contents)),
         )
         .service(
             web::resource("/v1/index/projects/{project_id}/symbols")

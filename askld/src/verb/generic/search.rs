@@ -76,7 +76,7 @@ impl SearchSelector {
         // that resolve to the same bool share the cache.
         let case_sensitive = match named.get("case").map(String::as_str) {
             None | Some("smart") => query.chars().any(|c| c.is_uppercase()),
-            Some("sensitive")   => true,
+            Some("sensitive") => true,
             Some("insensitive") => false,
             Some(other) => bail!(
                 "search: case must be \"smart\", \"sensitive\", or \"insensitive\", got: {:?}",
@@ -86,7 +86,7 @@ impl SearchSelector {
 
         let whole_word = match named.get("whole_word").map(String::as_str) {
             None | Some("false") => false,
-            Some("true")         => true,
+            Some("true") => true,
             Some(other) => bail!(
                 "search: whole_word must be \"true\" or \"false\", got: {:?}",
                 other,
@@ -96,9 +96,9 @@ impl SearchSelector {
         let limit = match named.get("limit") {
             None => DEFAULT_LIMIT,
             Some(s) => {
-                let n: usize = s.parse().map_err(|_| anyhow::anyhow!(
-                    "search: limit must be a positive integer, got: {:?}", s,
-                ))?;
+                let n: usize = s.parse().map_err(|_| {
+                    anyhow::anyhow!("search: limit must be a positive integer, got: {:?}", s,)
+                })?;
                 if n == 0 {
                     bail!("search: limit must be >= 1");
                 }
@@ -111,10 +111,7 @@ impl SearchSelector {
         const ALLOWED: &[&str] = &["case", "whole_word", "limit"];
         for key in named.keys() {
             if !ALLOWED.contains(&key.as_str()) {
-                bail!(
-                    "search: unknown argument {:?}; allowed: {:?}",
-                    key, ALLOWED,
-                );
+                bail!("search: unknown argument {:?}; allowed: {:?}", key, ALLOWED,);
             }
         }
 
@@ -158,7 +155,9 @@ impl Verb for SearchSelector {
 
 #[async_trait(?Send)]
 impl Selector for SearchSelector {
-    fn has_layer_spec(&self) -> bool { true }
+    fn has_layer_spec(&self) -> bool {
+        true
+    }
 
     /// The layer hash mixes the user-visible inputs (query, case,
     /// whole_word, limit) with the canonical hash of the surrounding
@@ -188,7 +187,8 @@ impl Selector for SearchSelector {
         // 2. Run the SQL.  All filtering, matching, and byte-range
         //    extraction happens inside one of four straight-line SQL
         //    variants picked from (whole_word, case_sensitive).
-        let (matches, truncated) = cfg.index
+        let (matches, truncated) = cfg
+            .index
             .search_content_matches(
                 &self.query,
                 self.case_sensitive,
@@ -204,11 +204,19 @@ impl Selector for SearchSelector {
         //    only sees `Send` data so it stays cheap to .await past.
         struct GroupedMatches {
             project_id: i32,
-            ranges: Vec<(i32 /* object_id */, i32 /* start_byte */, i32 /* end_byte */)>,
+            ranges: Vec<(
+                i32, /* object_id */
+                i32, /* start_byte */
+                i32, /* end_byte */
+            )>,
         }
         let mut by_project: HashMap<i32, Vec<(i32, i32, i32)>> = HashMap::new();
         for m in matches {
-            by_project.entry(m.project_id).or_default().push((m.object_id, m.start_byte, m.end_byte));
+            by_project.entry(m.project_id).or_default().push((
+                m.object_id,
+                m.start_byte,
+                m.end_byte,
+            ));
         }
         let mut groups: Vec<GroupedMatches> = by_project
             .into_iter()
@@ -221,38 +229,40 @@ impl Selector for SearchSelector {
         let sym_name = format!("search:{}", Self::sanitise_for_symbol_name(&self.query));
         let (sym_path, sym_leaf) = symbol_path_and_leaf(&sym_name, SYMBOL_TYPE_CONTENT);
 
-        let populate: crate::verb::LayerPopulate = Box::new(move |txn| Box::pin(async move {
-            // 3a. One ephemeral symbol per project_id.
-            let mut sym_batch = LayerBatch::new();
-            for g in &groups {
-                sym_batch.symbols.push(EphSymbolRow {
-                    name: sym_name.clone(),
-                    path: sym_path.clone(),
-                    project_id: g.project_id,
-                    symbol_type: SYMBOL_TYPE_CONTENT,
-                    scope: None,
-                    leaf_name: sym_leaf.clone(),
-                });
-            }
-            let symbol_ids = txn.insert_batch(&sym_batch).await?;
-
-            // 3b. One ephemeral instance per byte-range match.
-            let mut inst_batch = LayerBatch::new();
-            for (g, symbol_id) in groups.iter().zip(symbol_ids.iter()) {
-                for (object_id, start, end) in &g.ranges {
-                    inst_batch.instances.push(EphInstanceRow {
-                        symbol_id: *symbol_id,
-                        object_id: *object_id,
-                        start: *start as i64,
-                        end: *end as i64,
-                        instance_type: INSTANCE_TYPE_DEFINITION,
+        let populate: crate::verb::LayerPopulate = Box::new(move |txn| {
+            Box::pin(async move {
+                // 3a. One ephemeral symbol per project_id.
+                let mut sym_batch = LayerBatch::new();
+                for g in &groups {
+                    sym_batch.symbols.push(EphSymbolRow {
+                        name: sym_name.clone(),
+                        path: sym_path.clone(),
+                        project_id: g.project_id,
+                        symbol_type: SYMBOL_TYPE_CONTENT,
+                        scope: None,
+                        leaf_name: sym_leaf.clone(),
                     });
                 }
-            }
-            txn.insert_batch(&inst_batch).await?;
+                let symbol_ids = txn.insert_batch(&sym_batch).await?;
 
-            Ok(truncated)
-        }));
+                // 3b. One ephemeral instance per byte-range match.
+                let mut inst_batch = LayerBatch::new();
+                for (g, symbol_id) in groups.iter().zip(symbol_ids.iter()) {
+                    for (object_id, start, end) in &g.ranges {
+                        inst_batch.instances.push(EphInstanceRow {
+                            symbol_id: *symbol_id,
+                            object_id: *object_id,
+                            start: *start as i64,
+                            end: *end as i64,
+                            instance_type: INSTANCE_TYPE_DEFINITION,
+                        });
+                    }
+                }
+                txn.insert_batch(&inst_batch).await?;
+
+                Ok(truncated)
+            })
+        });
 
         Ok(Some(LayerSpec {
             hash,

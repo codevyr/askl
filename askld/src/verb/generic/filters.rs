@@ -5,15 +5,15 @@ use crate::parser_context::{
 use crate::span::Span;
 use anyhow::{anyhow, bail, Result};
 use index::db_diesel::{
-    CompoundNameMixin, CompositeFilter, DefaultSymbolTypeMixin, ExactNameMixin,
+    CompositeFilter, CompoundNameMixin, DefaultSymbolTypeMixin, ExactNameMixin,
     PackageDescendantLeaf, ProjectFilterMixin, SymbolTypeMixin,
 };
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use super::selectors::TypeSelector;
 use super::super::{DeriveMethod, Filter, Verb, VerbTag};
+use super::selectors::TypeSelector;
 
 #[derive(Debug)]
 pub(in crate::verb) struct IgnoreVerb {
@@ -156,7 +156,9 @@ impl Verb for ProjectFilter {
 
 impl Filter for ProjectFilter {
     fn get_composite_filter(&self, _eph: &index::db_diesel::EphContext) -> Option<CompositeFilter> {
-        Some(CompositeFilter::leaf(ProjectFilterMixin::new(&self.project)))
+        Some(CompositeFilter::leaf(ProjectFilterMixin::new(
+            &self.project,
+        )))
     }
 }
 
@@ -201,7 +203,9 @@ impl Verb for DirectOnlyFilter {
 
 impl Filter for DirectOnlyFilter {
     fn get_composite_filter(&self, eph: &index::db_diesel::EphContext) -> Option<CompositeFilter> {
-        Some(CompositeFilter::leaf(index::db_diesel::DirectOnlyMixin::new(eph)))
+        Some(CompositeFilter::leaf(
+            index::db_diesel::DirectOnlyMixin::new(eph),
+        ))
     }
 }
 
@@ -336,7 +340,9 @@ impl FilterKind {
         match self {
             FilterKind::Type { symbol_type_ids } => {
                 if symbol_type_ids.len() == 1 {
-                    Some(CompositeFilter::leaf(SymbolTypeMixin::new(symbol_type_ids[0])))
+                    Some(CompositeFilter::leaf(SymbolTypeMixin::new(
+                        symbol_type_ids[0],
+                    )))
                 } else {
                     Some(CompositeFilter::leaf(DefaultSymbolTypeMixin::new(
                         symbol_type_ids.clone(),

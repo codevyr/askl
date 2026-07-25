@@ -1,4 +1,4 @@
-use diesel::connection::{InstrumentationEvent, Instrumentation};
+use diesel::connection::{Instrumentation, InstrumentationEvent};
 
 pub struct TracingInstrumentation {
     query_span: Option<tracing::Span>,
