@@ -53,6 +53,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -62,7 +63,24 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Attach a CycloneDX SBOM attestation and SLSA provenance to the image.
+          # The compliance packet (compliance/qualcomm-sw-request) pulls & verifies these.
+          sbom: true
+          provenance: mode=max
 
+      # Also publish a plain SPDX SBOM as a workflow artifact (some reviewers
+      # want a downloadable file, not just the in-image attestation).
+      - name: Generate SPDX SBOM artifact
+        if: github.event_name != 'pull_request'
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          artifact-name: askld.spdx.json
+
+      # NOTE: keep `delete-only-untagged-versions: true` — but be aware SBOM /
+      # provenance attestations are stored as untagged referrer manifests. If a
+      # future release's attestations go missing, exclude their digests here.
       - name: Delete old GHCR container versions
         if: github.event_name != 'pull_request'
         uses: actions/delete-package-versions@v5
