@@ -53,8 +53,14 @@ fn nested_macro_not_in_children() {
     println!("nested_macro_not_in_children nodes: {:?}", nodes);
 
     assert!(nodes.contains(&SymbolInstanceId::new(103)), "func_a");
-    assert!(nodes.contains(&SymbolInstanceId::new(105)), "macro_m (direct child)");
-    assert!(nodes.contains(&SymbolInstanceId::new(106)), "data_d (direct child)");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(105)),
+        "macro_m (direct child)"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(106)),
+        "data_d (direct child)"
+    );
     assert!(
         !nodes.contains(&SymbolInstanceId::new(107)),
         "data_macro_only should NOT be a direct child of func_a"
@@ -78,7 +84,10 @@ fn multi_hop_constrains_correctly() {
 
     assert!(nodes.contains(&SymbolInstanceId::new(103)), "func_a");
     assert!(nodes.contains(&SymbolInstanceId::new(105)), "macro_m");
-    assert!(nodes.contains(&SymbolInstanceId::new(107)), "data_macro_only");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(107)),
+        "data_macro_only"
+    );
     assert!(
         !nodes.contains(&SymbolInstanceId::new(106)),
         "data_d should be constrained away (not a parent of data_macro_only)"
@@ -104,9 +113,18 @@ fn upward_derivation_skips_intermediate() {
     let nodes = res.nodes.as_vec();
     println!("upward_derivation_skips_intermediate nodes: {:?}", nodes);
 
-    assert!(nodes.contains(&SymbolInstanceId::new(107)), "data_macro_only");
-    assert!(nodes.contains(&SymbolInstanceId::new(105)), "macro_m (one hop up)");
-    assert!(nodes.contains(&SymbolInstanceId::new(103)), "func_a (two hops up)");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(107)),
+        "data_macro_only"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(105)),
+        "macro_m (one hop up)"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(103)),
+        "func_a (two hops up)"
+    );
     assert!(
         nodes.contains(&SymbolInstanceId::new(102)),
         "file_x appears via REFS parents with all-types default"
@@ -151,8 +169,14 @@ fn unnest_downward_does_not_affect_child() {
     println!("unnest_downward_does_not_affect_child nodes: {:?}", nodes);
 
     assert!(nodes.contains(&SymbolInstanceId::new(103)), "func_a");
-    assert!(nodes.contains(&SymbolInstanceId::new(105)), "macro_m (direct child)");
-    assert!(nodes.contains(&SymbolInstanceId::new(106)), "data_d (direct child)");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(105)),
+        "macro_m (direct child)"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(106)),
+        "data_d (direct child)"
+    );
     assert!(
         !nodes.contains(&SymbolInstanceId::new(107)),
         "data_macro_only should NOT appear (unnest on parent doesn't affect child derivation)"
@@ -179,9 +203,18 @@ fn three_hop_upward() {
     let nodes = res.nodes.as_vec();
     println!("three_hop_upward nodes: {:?}", nodes);
 
-    assert!(nodes.contains(&SymbolInstanceId::new(107)), "data_macro_only");
-    assert!(nodes.contains(&SymbolInstanceId::new(105)), "macro_m (one hop)");
-    assert!(nodes.contains(&SymbolInstanceId::new(103)), "func_a (two hops)");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(107)),
+        "data_macro_only"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(105)),
+        "macro_m (one hop)"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(103)),
+        "func_a (two hops)"
+    );
     assert!(
         nodes.contains(&SymbolInstanceId::new(102)),
         "file_x appears via REFS parents at intermediate level"

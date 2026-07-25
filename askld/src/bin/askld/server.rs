@@ -5,7 +5,9 @@ use askld::cfg::ControlFlowGraph;
 use askld::index_store::IndexStore;
 use diesel::pg::PgConnection;
 use diesel_async::pooled_connection::bb8::Pool as AsyncPool;
-use diesel_async::pooled_connection::{AsyncDieselConnectionManager, ManagerConfig, RecyclingMethod};
+use diesel_async::pooled_connection::{
+    AsyncDieselConnectionManager, ManagerConfig, RecyclingMethod,
+};
 use diesel_async::{AsyncConnection, AsyncPgConnection};
 use diesel_migrations::MigrationHarness;
 use futures::FutureExt;
@@ -70,8 +72,11 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
             .init();
 
         diesel::connection::set_default_instrumentation(|| {
-            Some(Box::new(askld::tracing_instrumentation::TracingInstrumentation::new()))
-        }).expect("Failed to set diesel instrumentation");
+            Some(Box::new(
+                askld::tracing_instrumentation::TracingInstrumentation::new(),
+            ))
+        })
+        .expect("Failed to set diesel instrumentation");
 
         info!("Tracing enabled, writing to {}", trace_dir);
         Some(_guard)
@@ -95,7 +100,8 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
     // Recycling query is load-bearing for ephemeral-layer cancellation
     // safety — see EPH_POOL_RECYCLING_QUERY rustdoc.
     let mut auth_pool_config = ManagerConfig::<AsyncPgConnection>::default();
-    auth_pool_config.recycling_method = RecyclingMethod::CustomQuery(EPH_POOL_RECYCLING_QUERY.into());
+    auth_pool_config.recycling_method =
+        RecyclingMethod::CustomQuery(EPH_POOL_RECYCLING_QUERY.into());
     let async_config =
         AsyncDieselConnectionManager::new_with_config(&serve_args.database_url, auth_pool_config);
     let async_pool: AsyncPool<AsyncPgConnection> = AsyncPool::builder()
@@ -108,7 +114,8 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
     let query_timeout_secs = serve_args.query_timeout;
     let query_timeout_ms = query_timeout_secs * 1000;
     let mut index_pool_config = ManagerConfig::<AsyncPgConnection>::default();
-    index_pool_config.recycling_method = RecyclingMethod::CustomQuery(EPH_POOL_RECYCLING_QUERY.into());
+    index_pool_config.recycling_method =
+        RecyclingMethod::CustomQuery(EPH_POOL_RECYCLING_QUERY.into());
     index_pool_config.custom_setup = Box::new(move |url| {
         async move {
             let mut conn = AsyncPgConnection::establish(url).await?;
@@ -153,8 +160,8 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
     // size, but not so often that the DB sees idle DELETEs.  TTL chosen so a
     // single user query session can re-use a cached layer across iterations
     // without the layer being evicted between requests.
-    const EPH_GC_INTERVAL_SECS: u64 = 600;   // 10 min: how often we scan
-    const EPH_GC_TTL_SECS: u64 = 3600;       // 1 h: minimum idle age to delete
+    const EPH_GC_INTERVAL_SECS: u64 = 600; // 10 min: how often we scan
+    const EPH_GC_TTL_SECS: u64 = 3600; // 1 h: minimum idle age to delete
     let gc_index = askl_data.cfg.index.clone();
     tokio::spawn(async move {
         let interval = std::time::Duration::from_secs(EPH_GC_INTERVAL_SECS);
@@ -187,7 +194,10 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
                             "GC: ephemeral layer purge persistently failing"
                         );
                     } else {
-                        warn!("GC: ephemeral layer purge failed (attempt {}): {}", consecutive_failures, e);
+                        warn!(
+                            "GC: ephemeral layer purge failed (attempt {}): {}",
+                            consecutive_failures, e
+                        );
                     }
                 }
             }

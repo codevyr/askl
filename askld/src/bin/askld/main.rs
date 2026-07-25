@@ -3,8 +3,8 @@ mod args;
 mod cli;
 mod server;
 
-use clap::Parser;
 use anyhow::Error;
+use clap::Parser;
 
 use args::{Args, Command};
 

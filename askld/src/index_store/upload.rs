@@ -3,18 +3,19 @@ use std::collections::{HashMap, HashSet};
 use diesel::prelude::*;
 use diesel::result::{DatabaseErrorKind, Error as DieselError};
 use diesel::OptionalExtension;
-use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use tracing::Instrument;
 
-use crate::proto::askl::index::{ContentBatch, Object as UploadObject, Project as UploadProject, Symbol as UploadSymbol};
-use index::symbols::symbol_path_and_leaf;
+use crate::proto::askl::index::{
+    ContentBatch, Object as UploadObject, Project as UploadProject, Symbol as UploadSymbol,
+};
 use index::schema_diesel as index_schema;
+use index::symbols::symbol_path_and_leaf;
 
 use super::{
-    hash_bytes, normalize_full_path, IndexStore, NewContentStoreRow, NewObject,
-    NewProject, NewProjectObjectChunk, NewProjectSymbolChunk, NewSymbol, NewSymbolInstance,
-    NewSymbolRef, UploadError, UploadStatus, MAX_INSERT_ROWS, MAX_SYMBOL_INSERT_ROWS,
+    hash_bytes, normalize_full_path, IndexStore, NewContentStoreRow, NewObject, NewProject,
+    NewProjectObjectChunk, NewProjectSymbolChunk, NewSymbol, NewSymbolInstance, NewSymbolRef,
+    UploadError, UploadStatus, MAX_INSERT_ROWS, MAX_SYMBOL_INSERT_ROWS,
 };
 
 struct ObjectInsert {
@@ -62,9 +63,15 @@ impl IndexStore {
         }
 
         let mut conn = self.get_upload_conn().await?;
-        conn.transaction::<_, UploadError, _>(move |conn| {
-            create_project(conn, project_name, root_path, symbol_chunks_total, object_chunks_total)
-                .scope_boxed()
+        conn.transaction::<_, UploadError, _>(async move |conn| {
+            create_project(
+                conn,
+                project_name,
+                root_path,
+                symbol_chunks_total,
+                object_chunks_total,
+            )
+            .await
         })
         .await
     }
@@ -80,32 +87,29 @@ impl IndexStore {
         symbols: Vec<UploadSymbol>,
     ) -> Result<(), UploadError> {
         let mut conn = self.get_upload_conn().await?;
-        conn.transaction::<_, UploadError, _>(|conn| {
-            async move {
-                // Claim this chunk slot.
-                let inserted = diesel::insert_into(index_schema::project_symbol_chunks::table)
-                    .values(NewProjectSymbolChunk { project_id, seq })
-                    .on_conflict_do_nothing()
-                    .execute(conn)
-                    .await?;
+        conn.transaction::<_, UploadError, _>(async move |conn| {
+            // Claim this chunk slot.
+            let inserted = diesel::insert_into(index_schema::project_symbol_chunks::table)
+                .values(NewProjectSymbolChunk { project_id, seq })
+                .on_conflict_do_nothing()
+                .execute(conn)
+                .await?;
 
-                if inserted == 0 {
-                    // Already committed — idempotent success.
-                    return Ok(());
-                }
-
-                let symbol_rows = build_symbols(project_id, &symbols)?;
-                for chunk in symbol_rows.chunks(MAX_SYMBOL_INSERT_ROWS) {
-                    let chunk_vec: Vec<NewSymbol> = chunk.to_vec();
-                    diesel::insert_into(index_schema::symbols::table)
-                        .values(chunk_vec)
-                        .execute(conn)
-                        .await
-                        .map_err(|e| UploadError::Storage(e.to_string()))?;
-                }
-                Ok(())
+            if inserted == 0 {
+                // Already committed — idempotent success.
+                return Ok(());
             }
-            .scope_boxed()
+
+            let symbol_rows = build_symbols(project_id, &symbols)?;
+            for chunk in symbol_rows.chunks(MAX_SYMBOL_INSERT_ROWS) {
+                let chunk_vec: Vec<NewSymbol> = chunk.to_vec();
+                diesel::insert_into(index_schema::symbols::table)
+                    .values(chunk_vec)
+                    .execute(conn)
+                    .await
+                    .map_err(|e| UploadError::Storage(e.to_string()))?;
+            }
+            Ok(())
         })
         .await
     }
@@ -128,21 +132,18 @@ impl IndexStore {
 
         let mut conn = self.get_upload_conn().await?;
         let upload_span = tracing::info_span!("index_upload_object_chunk", seq);
-        conn.transaction::<_, UploadError, _>(|conn| {
-            async move {
-                let inserted = diesel::insert_into(index_schema::project_object_chunks::table)
-                    .values(NewProjectObjectChunk { project_id, seq })
-                    .on_conflict_do_nothing()
-                    .execute(conn)
-                    .await?;
+        conn.transaction::<_, UploadError, _>(async move |conn| {
+            let inserted = diesel::insert_into(index_schema::project_object_chunks::table)
+                .values(NewProjectObjectChunk { project_id, seq })
+                .on_conflict_do_nothing()
+                .execute(conn)
+                .await?;
 
-                if inserted == 0 {
-                    return Ok(());
-                }
-
-                do_upload_objects(conn, project_id, upload).await
+            if inserted == 0 {
+                return Ok(());
             }
-            .scope_boxed()
+
+            do_upload_objects(conn, project_id, upload).await
         })
         .instrument(upload_span)
         .await
@@ -150,83 +151,80 @@ impl IndexStore {
 
     pub async fn finalize_project(&self, project_id: i32) -> Result<bool, UploadError> {
         let mut conn = self.get_upload_conn().await?;
-        conn.transaction::<_, UploadError, _>(|conn| {
-            async move {
-                let row: Option<(UploadStatus, Option<i32>, Option<i32>)> =
-                    index_schema::projects::table
-                        .filter(index_schema::projects::id.eq(project_id))
-                        .select((
-                            index_schema::projects::upload_status,
-                            index_schema::projects::symbol_chunks_total,
-                            index_schema::projects::object_chunks_total,
-                        ))
-                        .for_update()
-                        .first(conn)
-                        .await
-                        .optional()?;
+        conn.transaction::<_, UploadError, _>(async move |conn| {
+            let row: Option<(UploadStatus, Option<i32>, Option<i32>)> =
+                index_schema::projects::table
+                    .filter(index_schema::projects::id.eq(project_id))
+                    .select((
+                        index_schema::projects::upload_status,
+                        index_schema::projects::symbol_chunks_total,
+                        index_schema::projects::object_chunks_total,
+                    ))
+                    .for_update()
+                    .first(conn)
+                    .await
+                    .optional()?;
 
-                match row {
-                    None => Ok(false),
-                    Some((UploadStatus::Complete, _, _)) => Ok(true), // idempotent
-                    Some((UploadStatus::Uploading, sym_total, obj_total)) => {
-                        // Null-safe: only validate if totals were recorded (new protocol).
-                        if let Some(total) = sym_total {
-                            let committed: i64 = index_schema::project_symbol_chunks::table
-                                .filter(index_schema::project_symbol_chunks::project_id.eq(project_id))
-                                .count()
-                                .get_result(conn)
-                                .await?;
-                            if committed != total as i64 {
-                                return Err(UploadError::Invalid(format!(
-                                    "{}/{} symbol chunks committed — upload incomplete",
-                                    committed, total
-                                )));
-                            }
+            match row {
+                None => Ok(false),
+                Some((UploadStatus::Complete, _, _)) => Ok(true), // idempotent
+                Some((UploadStatus::Uploading, sym_total, obj_total)) => {
+                    // Null-safe: only validate if totals were recorded (new protocol).
+                    if let Some(total) = sym_total {
+                        let committed: i64 = index_schema::project_symbol_chunks::table
+                            .filter(index_schema::project_symbol_chunks::project_id.eq(project_id))
+                            .count()
+                            .get_result(conn)
+                            .await?;
+                        if committed != total as i64 {
+                            return Err(UploadError::Invalid(format!(
+                                "{}/{} symbol chunks committed — upload incomplete",
+                                committed, total
+                            )));
                         }
-                        if let Some(total) = obj_total {
-                            let committed: i64 = index_schema::project_object_chunks::table
-                                .filter(index_schema::project_object_chunks::project_id.eq(project_id))
-                                .count()
-                                .get_result(conn)
-                                .await?;
-                            if committed != total as i64 {
-                                return Err(UploadError::Invalid(format!(
-                                    "{}/{} object chunks committed — upload incomplete",
-                                    committed, total
-                                )));
-                            }
-                        }
-                        diesel::update(
-                            index_schema::projects::table
-                                .filter(index_schema::projects::id.eq(project_id)),
-                        )
-                        .set(index_schema::projects::upload_status.eq(UploadStatus::Complete))
-                        .execute(conn)
-                        .await?;
-
-                        // Persistent data has changed; drop the ephemeral layer
-                        // cache atomically with the upload commit.  See
-                        // `index::db_diesel::purge_eph_cache` for the rationale.
-                        //
-                        // **Invariant for future authors**: any *other* code
-                        // path that mutates the persistent index (delete
-                        // project, content-overwrite, schema-migrating data
-                        // moves, …) must also call `purge_eph_cache` in the
-                        // same transaction.  Stale `loc(...)` / `layer {…}`
-                        // results would otherwise re-surface against the
-                        // pre-mutation state.
-                        let purged = index::db_diesel::purge_eph_cache(conn).await?;
-                        tracing::info!(
-                            project_id,
-                            purged_layers = purged,
-                            "purged ephemeral layer cache after project finalize"
-                        );
-                        Ok(true)
                     }
-                    Some((_, _, _)) => Err(UploadError::Conflict),
+                    if let Some(total) = obj_total {
+                        let committed: i64 = index_schema::project_object_chunks::table
+                            .filter(index_schema::project_object_chunks::project_id.eq(project_id))
+                            .count()
+                            .get_result(conn)
+                            .await?;
+                        if committed != total as i64 {
+                            return Err(UploadError::Invalid(format!(
+                                "{}/{} object chunks committed — upload incomplete",
+                                committed, total
+                            )));
+                        }
+                    }
+                    diesel::update(
+                        index_schema::projects::table
+                            .filter(index_schema::projects::id.eq(project_id)),
+                    )
+                    .set(index_schema::projects::upload_status.eq(UploadStatus::Complete))
+                    .execute(conn)
+                    .await?;
+
+                    // Persistent data has changed; drop the ephemeral layer
+                    // cache atomically with the upload commit.  See
+                    // `index::db_diesel::purge_eph_cache` for the rationale.
+                    //
+                    // **Invariant for future authors**: any *other* code
+                    // path that mutates the persistent index (delete
+                    // project, content-overwrite, schema-migrating data
+                    // moves, …) must also call `purge_eph_cache` in the
+                    // same transaction.  Stale `loc(...)` / `layer {…}`
+                    // results would otherwise re-surface against the
+                    // pre-mutation state.
+                    let purged = index::db_diesel::purge_eph_cache(conn).await?;
+                    tracing::info!(
+                        project_id,
+                        purged_layers = purged,
+                        "purged ephemeral layer cache after project finalize"
+                    );
+                    Ok(true)
                 }
+                Some((_, _, _)) => Err(UploadError::Conflict),
             }
-            .scope_boxed()
         })
         .await
     }
@@ -307,7 +305,10 @@ async fn create_project(
                         project_name, stored_sym_total, symbol_chunks_total
                     )));
                 }
-                tracing::info!(project_id = existing_id, "upload_index: resuming uploading project");
+                tracing::info!(
+                    project_id = existing_id,
+                    "upload_index: resuming uploading project"
+                );
                 return Ok((existing_id, true));
             }
             UploadStatus::Failed | UploadStatus::Deleting => {
@@ -358,7 +359,10 @@ async fn do_upload_objects(
     upload: UploadProject,
 ) -> Result<(), UploadError> {
     let mut object_inserts = build_objects(project_id, &upload.objects)?;
-    tracing::info!(objects = object_inserts.len(), "upload_objects: built inserts");
+    tracing::info!(
+        objects = object_inserts.len(),
+        "upload_objects: built inserts"
+    );
 
     let hash_only_hashes: Vec<String> = object_inserts
         .iter()
@@ -394,7 +398,10 @@ async fn do_upload_objects(
     tracing::info!(inserted = object_map.len(), "upload_objects: objects done");
 
     let instance_rows = build_symbol_instances(project_id, &upload.objects, &object_map)?;
-    tracing::info!(count = instance_rows.len(), "upload_objects: inserting instances");
+    tracing::info!(
+        count = instance_rows.len(),
+        "upload_objects: inserting instances"
+    );
     insert_symbol_instances(conn, &instance_rows).await?;
     tracing::info!("upload_objects: instances done");
 
@@ -422,7 +429,8 @@ fn resolve_object_id(map: &HashMap<i64, i32>, local_id: i64) -> Result<i32, Uplo
 fn compute_symbol_id(project_id: i32, local_id: i64) -> Result<i64, UploadError> {
     if project_id <= 0 {
         return Err(UploadError::Invalid(format!(
-            "project_id {} must be positive", project_id
+            "project_id {} must be positive",
+            project_id
         )));
     }
     if local_id < 0 || local_id >= (1i64 << 32) {
@@ -511,18 +519,19 @@ fn build_objects(
         }
         let filesystem_path = normalize_full_path(filesystem_path_raw);
 
-        let (content, content_hash) = if !object.content_hash.is_empty() && object.content.is_empty() {
-            (None, object.content_hash.clone())
-        } else {
-            let computed = hash_bytes(&object.content);
-            if !object.content_hash.is_empty() && object.content_hash != computed {
-                return Err(UploadError::Invalid(format!(
-                    "content_hash mismatch for object {}: client sent {} but computed {}",
-                    object.local_id, object.content_hash, computed
-                )));
-            }
-            (Some(object.content.clone()), computed)
-        };
+        let (content, content_hash) =
+            if !object.content_hash.is_empty() && object.content.is_empty() {
+                (None, object.content_hash.clone())
+            } else {
+                let computed = hash_bytes(&object.content);
+                if !object.content_hash.is_empty() && object.content_hash != computed {
+                    return Err(UploadError::Invalid(format!(
+                        "content_hash mismatch for object {}: client sent {} but computed {}",
+                        object.local_id, object.content_hash, computed
+                    )));
+                }
+                (Some(object.content.clone()), computed)
+            };
         inserts.push(ObjectInsert {
             local_id: object.local_id,
             content,
@@ -557,8 +566,9 @@ async fn insert_objects(
             ))
             .do_update()
             .set((
-                index_schema::objects::content_hash
-                    .eq(diesel::upsert::excluded(index_schema::objects::content_hash)),
+                index_schema::objects::content_hash.eq(diesel::upsert::excluded(
+                    index_schema::objects::content_hash,
+                )),
                 index_schema::objects::filetype
                     .eq(diesel::upsert::excluded(index_schema::objects::filetype)),
                 index_schema::objects::module_path
@@ -592,10 +602,7 @@ async fn insert_objects(
     Ok(object_map)
 }
 
-fn build_symbols(
-    project_id: i32,
-    symbols: &[UploadSymbol],
-) -> Result<Vec<NewSymbol>, UploadError> {
+fn build_symbols(project_id: i32, symbols: &[UploadSymbol]) -> Result<Vec<NewSymbol>, UploadError> {
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
     for symbol in symbols {
@@ -719,9 +726,8 @@ mod tests {
     };
 
     use super::{
-        build_objects, build_symbol_instances, build_symbol_refs, build_symbols,
-        compute_symbol_id, resolve_object_id, validate_instance_type, validate_symbol_type,
-        validate_type,
+        build_objects, build_symbol_instances, build_symbol_refs, build_symbols, compute_symbol_id,
+        resolve_object_id, validate_instance_type, validate_symbol_type, validate_type,
     };
 
     // --- validate_type ---
@@ -748,7 +754,11 @@ mod tests {
     #[test]
     fn validate_symbol_type_all_valid() {
         for t in 1..=8 {
-            assert!(validate_symbol_type(t).is_ok(), "type {} should be valid", t);
+            assert!(
+                validate_symbol_type(t).is_ok(),
+                "type {} should be valid",
+                t
+            );
         }
     }
 
@@ -767,7 +777,11 @@ mod tests {
     #[test]
     fn validate_instance_type_all_valid() {
         for t in 1..=10 {
-            assert!(validate_instance_type(t).is_ok(), "instance type {} should be valid", t);
+            assert!(
+                validate_instance_type(t).is_ok(),
+                "instance type {} should be valid",
+                t
+            );
         }
     }
 
@@ -814,7 +828,12 @@ mod tests {
     // --- build_symbols ---
 
     fn sym(local_id: i64, name: &str, r#type: i32, scope: i32) -> UploadSymbol {
-        UploadSymbol { local_id, name: name.to_string(), r#type, scope }
+        UploadSymbol {
+            local_id,
+            name: name.to_string(),
+            r#type,
+            scope,
+        }
     }
 
     #[test]
@@ -909,7 +928,12 @@ mod tests {
     // --- build_symbol_instances ---
 
     fn inst(symbol_local_id: i64, instance_type: i32, start: i32, end: i32) -> SymbolInstance {
-        SymbolInstance { symbol_local_id, instance_type, start_offset: start, end_offset: end }
+        SymbolInstance {
+            symbol_local_id,
+            instance_type,
+            start_offset: start,
+            end_offset: end,
+        }
     }
 
     #[test]
@@ -937,7 +961,10 @@ mod tests {
         };
         let obj_map = HashMap::from([(1i64, 1i32)]);
         let rows = build_symbol_instances(1, &[object], &obj_map).unwrap();
-        assert_eq!(rows[0].instance_type, index::db_diesel::INSTANCE_TYPE_DEFINITION);
+        assert_eq!(
+            rows[0].instance_type,
+            index::db_diesel::INSTANCE_TYPE_DEFINITION
+        );
     }
 
     #[test]
@@ -964,7 +991,11 @@ mod tests {
     // --- build_symbol_refs ---
 
     fn sref(to_symbol_local_id: i64, from_start: i32, from_end: i32) -> SymbolRef {
-        SymbolRef { to_symbol_local_id, from_offset_start: from_start, from_offset_end: from_end }
+        SymbolRef {
+            to_symbol_local_id,
+            from_offset_start: from_start,
+            from_offset_end: from_end,
+        }
     }
 
     #[test]

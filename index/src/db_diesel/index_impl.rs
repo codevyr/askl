@@ -4,7 +4,9 @@ use diesel::pg::{Pg, PgConnection};
 use diesel::prelude::*;
 use diesel::PgRangeExpressionMethods;
 use diesel_async::pooled_connection::bb8;
-use diesel_async::pooled_connection::{AsyncDieselConnectionManager, ManagerConfig, RecyclingMethod};
+use diesel_async::pooled_connection::{
+    AsyncDieselConnectionManager, ManagerConfig, RecyclingMethod,
+};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use diesel_migrations::MigrationHarness;
 
@@ -18,17 +20,19 @@ use std::time::Duration;
 /// can borrow from the `EphTransaction` across `await` points.
 pub type EphScopedFut<'b, R> = Pin<Box<dyn Future<Output = Result<R>> + 'b>>;
 
-use super::mixins::{
-    CompositeFilter, CurrentQuery,
-    PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
-    CONTAINER_INSTANCE_ALIAS, CONTAINER_SYMBOL_ALIAS, CONTAINER_TYPE_ALIAS,
-    ParentsQuery, ChildrenQuery, HasParentsQuery,
-};
 use super::cte::{
     build_find_edges_cte_body, build_has_children_cte_body, build_has_children_query,
     build_has_children_query_against_cte, CteFindEdgesBetween, CteHasChildren,
 };
-use super::selection::{ChildReference, EphContext, HasChildReference, HasParentReference, ParentReference, Selection, SelectionNode, is_eph_leak};
+use super::mixins::{
+    ChildrenQuery, CompositeFilter, CurrentQuery, HasParentsQuery, ParentsQuery,
+    CONTAINER_INSTANCE_ALIAS, CONTAINER_SYMBOL_ALIAS, CONTAINER_TYPE_ALIAS, PARENT_DECLS_ALIAS,
+    PARENT_SYMBOLS_ALIAS,
+};
+use super::selection::{
+    is_eph_leak, ChildReference, EphContext, HasChildReference, HasParentReference,
+    ParentReference, Selection, SelectionNode,
+};
 use super::Connection;
 
 // ============================================================================
@@ -70,9 +74,7 @@ fn build_current_query(eph_ids: &[i64]) -> CurrentQuery<'static> {
             symbol_instances::dsl::symbol_instances
                 .on(symbols::dsl::id.eq(symbol_instances::dsl::symbol)),
         )
-        .inner_join(
-            projects::dsl::projects.on(symbols::dsl::project_id.eq(projects::dsl::id)),
-        )
+        .inner_join(projects::dsl::projects.on(symbols::dsl::project_id.eq(projects::dsl::id)))
         .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(symbol_instances::dsl::object_id)))
         .select((
             Symbol::as_select(),
@@ -85,12 +87,14 @@ fn build_current_query(eph_ids: &[i64]) -> CurrentQuery<'static> {
     // Ephemeral visibility: persistent rows + rows from active layers
     let eph_ids_owned = eph_ids.to_vec();
     query = query.filter(
-        symbols::eph_layer.is_null()
-            .or(symbols::eph_layer.eq_any(eph_ids_owned.clone()))
+        symbols::eph_layer
+            .is_null()
+            .or(symbols::eph_layer.eq_any(eph_ids_owned.clone())),
     );
     query = query.filter(
-        symbol_instances::eph_layer.is_null()
-            .or(symbol_instances::eph_layer.eq_any(eph_ids_owned))
+        symbol_instances::eph_layer
+            .is_null()
+            .or(symbol_instances::eph_layer.eq_any(eph_ids_owned)),
     );
 
     query
@@ -121,12 +125,14 @@ async fn resolve_filter_to_ids(
         Some(ScopeRole::Children(parent_ids)) if !parent_ids.is_empty() => {
             query = query.filter(
                 EphSqlFragment::<Bool>::builder()
-                    .sql("symbol_instances.id IN (\
+                    .sql(
+                        "symbol_instances.id IN (\
                             SELECT si.id FROM index.symbol_refs sr \
                             JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
                             JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
                               AND pd.offset_range @> sr.from_offset_range \
-                            WHERE ")
+                            WHERE ",
+                    )
                     .eph_visibility("sr.eph_layer", &eph)
                     .sql(" AND ")
                     .eph_visibility("si.eph_layer", &eph)
@@ -135,18 +141,20 @@ async fn resolve_filter_to_ids(
                     .sql(" AND pd.id = ANY(")
                     .bind(parent_ids.clone())
                     .sql("))")
-                    .build()
+                    .build(),
             );
         }
         Some(ScopeRole::Parents(child_ids)) if !child_ids.is_empty() => {
             query = query.filter(
                 EphSqlFragment::<Bool>::builder()
-                    .sql("symbol_instances.id IN (\
+                    .sql(
+                        "symbol_instances.id IN (\
                             SELECT pd.id FROM index.symbol_refs sr \
                             JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
                               AND pd.offset_range @> sr.from_offset_range \
                             JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
-                            WHERE ")
+                            WHERE ",
+                    )
                     .eph_visibility("sr.eph_layer", &eph)
                     .sql(" AND ")
                     .eph_visibility("si.eph_layer", &eph)
@@ -155,7 +163,7 @@ async fn resolve_filter_to_ids(
                     .sql(" AND si.id = ANY(")
                     .bind(child_ids.clone())
                     .sql("))")
-                    .build()
+                    .build(),
             );
         }
         _ => {}
@@ -197,10 +205,7 @@ async fn resolve_scope_ids(
 // Shared query builders — used by both find_symbol and find_*_instance_ids
 // ============================================================================
 
-fn build_parents_query(
-    source_ids: Vec<i64>,
-    eph_ids: &[i64],
-) -> ParentsQuery<'static> {
+fn build_parents_query(source_ids: Vec<i64>, eph_ids: &[i64]) -> ParentsQuery<'static> {
     use crate::schema_diesel::*;
 
     let parent_decls = PARENT_DECLS_ALIAS;
@@ -209,9 +214,7 @@ fn build_parents_query(
     let eph_ids_owned = eph_ids.to_vec();
 
     symbol_refs::dsl::symbol_refs
-        .inner_join(
-            symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::dsl::id)),
-        )
+        .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::dsl::id)))
         .inner_join(
             symbol_instances::dsl::symbol_instances
                 .on(symbols::dsl::id.eq(symbol_instances::dsl::symbol)),
@@ -231,17 +234,39 @@ fn build_parents_query(
                 .field(symbol_instances::dsl::offset_range)
                 .contains_range(symbol_refs::dsl::from_offset_range),
         )
-        .filter(
-            symbol_instances::dsl::id.eq_any(source_ids),
-        )
+        .filter(symbol_instances::dsl::id.eq_any(source_ids))
         // Ephemeral visibility — filter canonical and aliased tables
-        .filter(symbol_refs::eph_layer.is_null().or(symbol_refs::eph_layer.eq_any(eph_ids_owned.clone())))
-        .filter(symbols::eph_layer.is_null().or(symbols::eph_layer.eq_any(eph_ids_owned.clone())))
-        .filter(symbol_instances::eph_layer.is_null().or(symbol_instances::eph_layer.eq_any(eph_ids_owned.clone())))
-        .filter(parent_decls.field(symbol_instances::eph_layer).is_null()
-            .or(parent_decls.field(symbol_instances::eph_layer).eq_any(eph_ids_owned.clone())))
-        .filter(parent_symbols.field(symbols::eph_layer).is_null()
-            .or(parent_symbols.field(symbols::eph_layer).eq_any(eph_ids_owned)))
+        .filter(
+            symbol_refs::eph_layer
+                .is_null()
+                .or(symbol_refs::eph_layer.eq_any(eph_ids_owned.clone())),
+        )
+        .filter(
+            symbols::eph_layer
+                .is_null()
+                .or(symbols::eph_layer.eq_any(eph_ids_owned.clone())),
+        )
+        .filter(
+            symbol_instances::eph_layer
+                .is_null()
+                .or(symbol_instances::eph_layer.eq_any(eph_ids_owned.clone())),
+        )
+        .filter(
+            parent_decls
+                .field(symbol_instances::eph_layer)
+                .is_null()
+                .or(parent_decls
+                    .field(symbol_instances::eph_layer)
+                    .eq_any(eph_ids_owned.clone())),
+        )
+        .filter(
+            parent_symbols
+                .field(symbols::eph_layer)
+                .is_null()
+                .or(parent_symbols
+                    .field(symbols::eph_layer)
+                    .eq_any(eph_ids_owned)),
+        )
         .select((
             SymbolRef::as_select(),
             Symbol::as_select(),
@@ -251,10 +276,7 @@ fn build_parents_query(
         .into_boxed::<Pg>()
 }
 
-fn build_children_query(
-    source_ids: Vec<i64>,
-    eph_ids: &[i64],
-) -> ChildrenQuery<'static> {
+fn build_children_query(source_ids: Vec<i64>, eph_ids: &[i64]) -> ChildrenQuery<'static> {
     use crate::schema_diesel::*;
 
     let parent_decls = PARENT_DECLS_ALIAS;
@@ -265,7 +287,8 @@ fn build_children_query(
     symbol_refs::dsl::symbol_refs
         .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::id)))
         .inner_join(
-            symbol_instances::dsl::symbol_instances.on(symbols::dsl::id.eq(symbol_instances::symbol)),
+            symbol_instances::dsl::symbol_instances
+                .on(symbols::dsl::id.eq(symbol_instances::symbol)),
         )
         .inner_join(
             parent_decls.on(parent_decls
@@ -292,13 +315,37 @@ fn build_children_query(
                 .on(objects::dsl::id.eq(parent_decls.field(symbol_instances::dsl::object_id))),
         )
         // Ephemeral visibility — filter canonical and aliased tables
-        .filter(symbol_refs::eph_layer.is_null().or(symbol_refs::eph_layer.eq_any(eph_ids_owned.clone())))
-        .filter(symbols::eph_layer.is_null().or(symbols::eph_layer.eq_any(eph_ids_owned.clone())))
-        .filter(symbol_instances::eph_layer.is_null().or(symbol_instances::eph_layer.eq_any(eph_ids_owned.clone())))
-        .filter(parent_decls.field(symbol_instances::eph_layer).is_null()
-            .or(parent_decls.field(symbol_instances::eph_layer).eq_any(eph_ids_owned.clone())))
-        .filter(parent_symbols.field(symbols::eph_layer).is_null()
-            .or(parent_symbols.field(symbols::eph_layer).eq_any(eph_ids_owned)))
+        .filter(
+            symbol_refs::eph_layer
+                .is_null()
+                .or(symbol_refs::eph_layer.eq_any(eph_ids_owned.clone())),
+        )
+        .filter(
+            symbols::eph_layer
+                .is_null()
+                .or(symbols::eph_layer.eq_any(eph_ids_owned.clone())),
+        )
+        .filter(
+            symbol_instances::eph_layer
+                .is_null()
+                .or(symbol_instances::eph_layer.eq_any(eph_ids_owned.clone())),
+        )
+        .filter(
+            parent_decls
+                .field(symbol_instances::eph_layer)
+                .is_null()
+                .or(parent_decls
+                    .field(symbol_instances::eph_layer)
+                    .eq_any(eph_ids_owned.clone())),
+        )
+        .filter(
+            parent_symbols
+                .field(symbols::eph_layer)
+                .is_null()
+                .or(parent_symbols
+                    .field(symbols::eph_layer)
+                    .eq_any(eph_ids_owned)),
+        )
         .select((
             parent_symbols.fields(crate::schema_diesel::symbols::all_columns),
             Symbol::as_select(),
@@ -310,10 +357,7 @@ fn build_children_query(
         .into_boxed::<Pg>()
 }
 
-fn build_has_parents_query(
-    source_ids: Vec<i64>,
-    eph_ids: &[i64],
-) -> HasParentsQuery<'static> {
+fn build_has_parents_query(source_ids: Vec<i64>, eph_ids: &[i64]) -> HasParentsQuery<'static> {
     use crate::schema_diesel::*;
 
     let container_instance = CONTAINER_INSTANCE_ALIAS;
@@ -324,46 +368,65 @@ fn build_has_parents_query(
 
     symbol_instances::dsl::symbol_instances
         .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
-        .inner_join(symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)))
+        .inner_join(
+            symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)),
+        )
         .filter(symbol_instances::dsl::id.eq_any(source_ids))
         .inner_join(
-            container_instance.on(
-                container_instance.field(symbol_instances::dsl::object_id)
-                    .eq(symbol_instances::dsl::object_id)
-            ),
+            container_instance.on(container_instance
+                .field(symbol_instances::dsl::object_id)
+                .eq(symbol_instances::dsl::object_id)),
         )
         .inner_join(
-            container_symbol.on(
-                container_symbol.field(symbols::dsl::id)
-                    .eq(container_instance.field(symbol_instances::dsl::symbol))
-            ),
+            container_symbol.on(container_symbol
+                .field(symbols::dsl::id)
+                .eq(container_instance.field(symbol_instances::dsl::symbol))),
         )
         .inner_join(
-            container_type.on(
-                container_type.field(symbol_types::dsl::id)
-                    .eq(container_symbol.field(symbols::dsl::symbol_type))
-            ),
+            container_type.on(container_type
+                .field(symbol_types::dsl::id)
+                .eq(container_symbol.field(symbols::dsl::symbol_type))),
+        )
+        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
+            "container_instances.offset_range @> symbol_instances.offset_range",
+        ))
+        .filter(
+            container_type
+                .field(symbol_types::dsl::level)
+                .ge(symbol_types::dsl::level),
         )
         .filter(
-            diesel::dsl::sql::<diesel::sql_types::Bool>(
-                "container_instances.offset_range @> symbol_instances.offset_range"
-            )
-        )
-        .filter(
-            container_type.field(symbol_types::dsl::level)
-                .ge(symbol_types::dsl::level)
-        )
-        .filter(
-            container_instance.field(symbol_instances::dsl::id)
-                .ne(symbol_instances::dsl::id)
+            container_instance
+                .field(symbol_instances::dsl::id)
+                .ne(symbol_instances::dsl::id),
         )
         // Ephemeral visibility — filter both source and aliased (container) tables
-        .filter(symbols::eph_layer.is_null().or(symbols::eph_layer.eq_any(eph_ids_owned.clone())))
-        .filter(symbol_instances::eph_layer.is_null().or(symbol_instances::eph_layer.eq_any(eph_ids_owned.clone())))
-        .filter(container_symbol.field(symbols::eph_layer).is_null()
-            .or(container_symbol.field(symbols::eph_layer).eq_any(eph_ids_owned.clone())))
-        .filter(container_instance.field(symbol_instances::eph_layer).is_null()
-            .or(container_instance.field(symbol_instances::eph_layer).eq_any(eph_ids_owned)))
+        .filter(
+            symbols::eph_layer
+                .is_null()
+                .or(symbols::eph_layer.eq_any(eph_ids_owned.clone())),
+        )
+        .filter(
+            symbol_instances::eph_layer
+                .is_null()
+                .or(symbol_instances::eph_layer.eq_any(eph_ids_owned.clone())),
+        )
+        .filter(
+            container_symbol
+                .field(symbols::eph_layer)
+                .is_null()
+                .or(container_symbol
+                    .field(symbols::eph_layer)
+                    .eq_any(eph_ids_owned.clone())),
+        )
+        .filter(
+            container_instance
+                .field(symbol_instances::eph_layer)
+                .is_null()
+                .or(container_instance
+                    .field(symbol_instances::eph_layer)
+                    .eq_any(eph_ids_owned)),
+        )
         .select((
             Symbol::as_select(),
             SymbolInstance::as_select(),
@@ -413,7 +476,8 @@ pub struct EphRefRow {
 fn try_offsets<I: Iterator<Item = i64>>(iter: I, kind: &'static str) -> Result<Vec<i32>> {
     iter.map(|off| {
         i32::try_from(off).map_err(|_| anyhow::anyhow!("{} offset {} exceeds i32 range", kind, off))
-    }).collect()
+    })
+    .collect()
 }
 
 /// Rewrite a Diesel error from a batch insert into a user-facing message when
@@ -425,17 +489,20 @@ fn try_offsets<I: Iterator<Item = i64>>(iter: I, kind: &'static str) -> Result<V
 /// `default_prefix` is used both as the fallback message prefix and (lower-
 /// cased without "Failed to batch insert eph " noise) to label the verb that
 /// triggered the insert.
-fn explain_eph_insert_err(default_prefix: &'static str, err: diesel::result::Error) -> anyhow::Error {
+fn explain_eph_insert_err(
+    default_prefix: &'static str,
+    err: diesel::result::Error,
+) -> anyhow::Error {
     use diesel::result::{DatabaseErrorKind, Error as E};
     if let E::DatabaseError(DatabaseErrorKind::ForeignKeyViolation, info) = &err {
         let constraint = info.constraint_name().unwrap_or("");
         let field = match constraint {
-            "symbol_instances_symbol_fkey"      => Some(("ephemeral_instance", "symbol_id")),
-            "symbol_instances_object_id_fkey"   => Some(("ephemeral_instance", "object_id")),
-            "symbol_instances_eph_layer_fkey"   => Some(("ephemeral_instance", "eph_layer")),
-            "symbol_refs_to_symbol_fkey"        => Some(("ephemeral_ref",      "to_symbol")),
-            "symbol_refs_eph_layer_fkey"        => Some(("ephemeral_ref",      "eph_layer")),
-            "symbols_eph_layer_fkey"            => Some(("ephemeral_symbol",   "eph_layer")),
+            "symbol_instances_symbol_fkey" => Some(("ephemeral_instance", "symbol_id")),
+            "symbol_instances_object_id_fkey" => Some(("ephemeral_instance", "object_id")),
+            "symbol_instances_eph_layer_fkey" => Some(("ephemeral_instance", "eph_layer")),
+            "symbol_refs_to_symbol_fkey" => Some(("ephemeral_ref", "to_symbol")),
+            "symbol_refs_eph_layer_fkey" => Some(("ephemeral_ref", "eph_layer")),
+            "symbols_eph_layer_fkey" => Some(("ephemeral_symbol", "eph_layer")),
             _ => None,
         };
         if let Some((verb, fname)) = field {
@@ -443,7 +510,9 @@ fn explain_eph_insert_err(default_prefix: &'static str, err: diesel::result::Err
                 "{}: '{}' refers to a row that does not exist \
                  (or is in a different layer than this insert can see). \
                  Postgres constraint: {}",
-                verb, fname, constraint
+                verb,
+                fname,
+                constraint
             );
         }
     }
@@ -463,16 +532,12 @@ fn explain_eph_insert_err(default_prefix: &'static str, err: diesel::result::Err
 /// input-only-keyed lookups (`loc(path, line)`, `layer { … }`) will
 /// keep returning rows derived from the pre-mutation state of the
 /// index.
-pub async fn purge_eph_cache(
-    conn: &mut AsyncPgConnection,
-) -> Result<usize, diesel::result::Error> {
+pub async fn purge_eph_cache(conn: &mut AsyncPgConnection) -> Result<usize, diesel::result::Error> {
     use crate::schema_diesel::eph_layers;
     use diesel_async::RunQueryDsl;
-    diesel::delete(
-        eph_layers::table.filter(eph_layers::kind.ne(EphLayerKind::Canary.as_str())),
-    )
-    .execute(conn)
-    .await
+    diesel::delete(eph_layers::table.filter(eph_layers::kind.ne(EphLayerKind::Canary.as_str())))
+        .execute(conn)
+        .await
 }
 
 /// Batch of ephemeral rows to insert into a single layer.
@@ -570,7 +635,10 @@ pub const EPH_POOL_RECYCLING_QUERY: &str = "ROLLBACK";
 
 impl Index {
     pub fn from_pool(pool: bb8::Pool<AsyncPgConnection>) -> Self {
-        Self { pool, database_url: None }
+        Self {
+            pool,
+            database_url: None,
+        }
     }
 
     fn build_async_manager(database_url: &str) -> AsyncDieselConnectionManager<AsyncPgConnection> {
@@ -595,7 +663,10 @@ impl Index {
             .build(manager)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create connection pool: {}", e))?;
-        let index = Self { pool, database_url: Some(database_url.to_string()) };
+        let index = Self {
+            pool,
+            database_url: Some(database_url.to_string()),
+        };
         index.validate_canary().await?;
         Ok(index)
     }
@@ -609,8 +680,9 @@ impl Index {
         use crate::schema_diesel::eph_layers;
         use diesel::dsl::count_star;
         use diesel_async::RunQueryDsl;
-        let mut connection = self.pool.get().await
-            .map_err(|e| anyhow::anyhow!("Failed to get connection for canary validation: {}", e))?;
+        let mut connection = self.pool.get().await.map_err(|e| {
+            anyhow::anyhow!("Failed to get connection for canary validation: {}", e)
+        })?;
         let c: i64 = eph_layers::table
             .filter(eph_layers::id.eq(super::selection::CANARY_LAYER_ID))
             .filter(eph_layers::kind.eq(EphLayerKind::Canary.as_str()))
@@ -655,7 +727,10 @@ impl Index {
             .build(manager)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create connection pool: {}", e))?;
-        Ok(Self { pool, database_url: Some(database_url.to_string()) })
+        Ok(Self {
+            pool,
+            database_url: Some(database_url.to_string()),
+        })
     }
 
     pub const TEST_INPUT_A: &'static str = "test_input_a.sql";
@@ -673,16 +748,43 @@ impl Index {
     /// each new fixture only needs to land its file under `askl/sql/` and add
     /// one line to this list (vs. an `include_str!` arm per fixture).
     const TEST_FIXTURES: &'static [(&'static str, &'static str)] = &[
-        ("test_input_a.sql",             include_str!("../../../sql/test_input_a.sql")),
-        ("test_input_b.sql",             include_str!("../../../sql/test_input_b.sql")),
-        ("test_input_modules.sql",       include_str!("../../../sql/test_input_modules.sql")),
-        ("test_input_symbol_tokens.sql", include_str!("../../../sql/test_input_symbol_tokens.sql")),
-        ("verb_test.sql",                include_str!("../../../sql/verb_test.sql")),
-        ("test_input_containment.sql",   include_str!("../../../sql/test_input_containment.sql")),
-        ("test_input_tree_browser.sql",  include_str!("../../../sql/test_input_tree_browser.sql")),
-        ("test_input_nested_func.sql",   include_str!("../../../sql/test_input_nested_func.sql")),
-        ("test_input_type_filter.sql",   include_str!("../../../sql/test_input_type_filter.sql")),
-        ("test_input_search.sql",        include_str!("../../../sql/test_input_search.sql")),
+        (
+            "test_input_a.sql",
+            include_str!("../../../sql/test_input_a.sql"),
+        ),
+        (
+            "test_input_b.sql",
+            include_str!("../../../sql/test_input_b.sql"),
+        ),
+        (
+            "test_input_modules.sql",
+            include_str!("../../../sql/test_input_modules.sql"),
+        ),
+        (
+            "test_input_symbol_tokens.sql",
+            include_str!("../../../sql/test_input_symbol_tokens.sql"),
+        ),
+        ("verb_test.sql", include_str!("../../../sql/verb_test.sql")),
+        (
+            "test_input_containment.sql",
+            include_str!("../../../sql/test_input_containment.sql"),
+        ),
+        (
+            "test_input_tree_browser.sql",
+            include_str!("../../../sql/test_input_tree_browser.sql"),
+        ),
+        (
+            "test_input_nested_func.sql",
+            include_str!("../../../sql/test_input_nested_func.sql"),
+        ),
+        (
+            "test_input_type_filter.sql",
+            include_str!("../../../sql/test_input_type_filter.sql"),
+        ),
+        (
+            "test_input_search.sql",
+            include_str!("../../../sql/test_input_search.sql"),
+        ),
     ];
 
     fn load_sql(connection: &mut PgConnection, input_path: &str) {
@@ -697,7 +799,9 @@ impl Index {
     }
 
     pub async fn load_test_input(&mut self, input_path: &str) -> Result<()> {
-        let database_url = self.database_url.as_ref()
+        let database_url = self
+            .database_url
+            .as_ref()
             .expect("load_test_input requires Index created via connect/connect_with_test_input");
         let connection = &mut <PgConnection as diesel::Connection>::establish(database_url)
             .map_err(|e| anyhow::anyhow!("Failed to establish connection: {}", e))?;
@@ -803,12 +907,13 @@ impl Index {
         let parents = match parent_scope {
             ScopeContext::Skip => vec![],
             ScopeContext::Unscoped => {
-                let _parents_span: tracing::span::EnteredSpan =
-                    tracing::info_span!("select_parents",
-                        scope = "unscoped",
-                        source_count = current_instance_ids.len(),
-                        eph_count = eph_ids.len(),
-                    ).entered();
+                let _parents_span: tracing::span::EnteredSpan = tracing::info_span!(
+                    "select_parents",
+                    scope = "unscoped",
+                    source_count = current_instance_ids.len(),
+                    eph_count = eph_ids.len(),
+                )
+                .entered();
                 let t0 = std::time::Instant::now();
                 let mut parents_query = build_parents_query(current_instance_ids.clone(), eph_ids);
                 if let Some(expr) = filter.compose_parents() {
@@ -825,17 +930,22 @@ impl Index {
                 );
                 rows
             }
-            ScopeContext::Scope { ref ids, filter: ref scope_filter } => {
-                let _parents_span: tracing::span::EnteredSpan =
-                    tracing::info_span!("select_parents",
-                        scope = "scoped",
-                        source_count = current_instance_ids.len(),
-                        eph_count = eph_ids.len(),
-                    ).entered();
+            ScopeContext::Scope {
+                ref ids,
+                filter: ref scope_filter,
+            } => {
+                let _parents_span: tracing::span::EnteredSpan = tracing::info_span!(
+                    "select_parents",
+                    scope = "scoped",
+                    source_count = current_instance_ids.len(),
+                    eph_count = eph_ids.len(),
+                )
+                .entered();
                 let t0 = std::time::Instant::now();
 
                 let role = ScopeRole::Parents(current_instance_ids.clone());
-                let scope_ids = resolve_scope_ids(ids, scope_filter, Some(&role), eph_ids, connection).await?;
+                let scope_ids =
+                    resolve_scope_ids(ids, scope_filter, Some(&role), eph_ids, connection).await?;
 
                 let mut parents_query = build_parents_query(current_instance_ids.clone(), eph_ids);
                 if let Some(expr) = filter.compose_parents() {
@@ -846,7 +956,9 @@ impl Index {
                 // correctly returns zero rows (scope specified but matched nothing).
                 let parent_decls = PARENT_DECLS_ALIAS;
                 parents_query = parents_query.filter(
-                    parent_decls.field(symbol_instances::dsl::id).eq_any(scope_ids)
+                    parent_decls
+                        .field(symbol_instances::dsl::id)
+                        .eq_any(scope_ids),
                 );
 
                 let rows = parents_query
@@ -865,19 +977,28 @@ impl Index {
         let children = match children_scope {
             ScopeContext::Skip => vec![],
             ScopeContext::Unscoped => {
-                let _select_children: tracing::span::EnteredSpan =
-                    tracing::info_span!("select_children",
-                        scope = "unscoped",
-                        source_count = current_instance_ids.len(),
-                        eph_count = eph_ids.len(),
-                    ).entered();
+                let _select_children: tracing::span::EnteredSpan = tracing::info_span!(
+                    "select_children",
+                    scope = "unscoped",
+                    source_count = current_instance_ids.len(),
+                    eph_count = eph_ids.len(),
+                )
+                .entered();
                 let t0 = std::time::Instant::now();
-                let mut children_query = build_children_query(current_instance_ids.clone(), eph_ids);
+                let mut children_query =
+                    build_children_query(current_instance_ids.clone(), eph_ids);
                 if let Some(expr) = filter.compose_children() {
                     children_query = children_query.filter(expr);
                 }
                 let rows = children_query
-                    .load::<(Symbol, Symbol, SymbolInstance, SymbolInstance, SymbolRef, Object)>(connection)
+                    .load::<(
+                        Symbol,
+                        Symbol,
+                        SymbolInstance,
+                        SymbolInstance,
+                        SymbolRef,
+                        Object,
+                    )>(connection)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
                 tracing::info!(
@@ -887,30 +1008,41 @@ impl Index {
                 );
                 rows
             }
-            ScopeContext::Scope { ref ids, filter: ref scope_filter } => {
-                let _select_children: tracing::span::EnteredSpan =
-                    tracing::info_span!("select_children",
-                        scope = "scoped",
-                        source_count = current_instance_ids.len(),
-                        eph_count = eph_ids.len(),
-                    ).entered();
+            ScopeContext::Scope {
+                ref ids,
+                filter: ref scope_filter,
+            } => {
+                let _select_children: tracing::span::EnteredSpan = tracing::info_span!(
+                    "select_children",
+                    scope = "scoped",
+                    source_count = current_instance_ids.len(),
+                    eph_count = eph_ids.len(),
+                )
+                .entered();
                 let t0 = std::time::Instant::now();
 
                 let role = ScopeRole::Children(current_instance_ids.clone());
-                let scope_ids = resolve_scope_ids(ids, scope_filter, Some(&role), eph_ids, connection).await?;
+                let scope_ids =
+                    resolve_scope_ids(ids, scope_filter, Some(&role), eph_ids, connection).await?;
 
-                let mut children_query = build_children_query(current_instance_ids.clone(), eph_ids);
+                let mut children_query =
+                    build_children_query(current_instance_ids.clone(), eph_ids);
                 if let Some(expr) = filter.compose_children() {
                     children_query = children_query.filter(expr);
                 }
 
                 // Always apply scope filter.
-                children_query = children_query.filter(
-                    symbol_instances::dsl::id.eq_any(scope_ids)
-                );
+                children_query = children_query.filter(symbol_instances::dsl::id.eq_any(scope_ids));
 
                 let rows = children_query
-                    .load::<(Symbol, Symbol, SymbolInstance, SymbolInstance, SymbolRef, Object)>(connection)
+                    .load::<(
+                        Symbol,
+                        Symbol,
+                        SymbolInstance,
+                        SymbolInstance,
+                        SymbolRef,
+                        Object,
+                    )>(connection)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
                 tracing::info!(
@@ -923,14 +1055,16 @@ impl Index {
         };
 
         let has_parents = {
-            let _has_parents_span: tracing::span::EnteredSpan =
-                tracing::info_span!("select_has_parents",
-                    source_count = current_instance_ids.len(),
-                    eph_count = eph_ids.len(),
-                ).entered();
+            let _has_parents_span: tracing::span::EnteredSpan = tracing::info_span!(
+                "select_has_parents",
+                source_count = current_instance_ids.len(),
+                eph_count = eph_ids.len(),
+            )
+            .entered();
             let t0 = std::time::Instant::now();
 
-            let mut has_parents_query = build_has_parents_query(current_instance_ids.clone(), eph_ids);
+            let mut has_parents_query =
+                build_has_parents_query(current_instance_ids.clone(), eph_ids);
             if let Some(expr) = filter.compose_has_parents() {
                 has_parents_query = has_parents_query.filter(expr);
             }
@@ -949,11 +1083,12 @@ impl Index {
 
         let has_children = {
             let source_count = current_instance_ids.len();
-            let _has_children_span: tracing::span::EnteredSpan =
-                tracing::info_span!("select_has_children",
-                    source_count = source_count,
-                    eph_count = eph_ids.len(),
-                ).entered();
+            let _has_children_span: tracing::span::EnteredSpan = tracing::info_span!(
+                "select_has_children",
+                source_count = source_count,
+                eph_count = eph_ids.len(),
+            )
+            .entered();
             let t0 = std::time::Instant::now();
 
             let maybe_filter = filter.compose_has_children();
@@ -1028,27 +1163,37 @@ impl Index {
 
             let has_parents: Vec<_> = has_parents
                 .into_iter()
-                .map(|(child_symbol, child_instance, parent_symbol, parent_instance)| {
-                    HasParentReference {
-                        child_symbol,
-                        child_instance,
-                        parent_symbol,
-                        parent_instance,
-                    }
-                })
+                .map(
+                    |(child_symbol, child_instance, parent_symbol, parent_instance)| {
+                        HasParentReference {
+                            child_symbol,
+                            child_instance,
+                            parent_symbol,
+                            parent_instance,
+                        }
+                    },
+                )
                 .collect();
 
             let mut has_children: Vec<_> = has_children
                 .into_iter()
-                .map(|(parent_symbol, parent_instance, child_symbol, child_instance, parent_object)| {
-                    HasChildReference {
+                .map(
+                    |(
                         parent_symbol,
                         parent_instance,
                         child_symbol,
                         child_instance,
                         parent_object,
-                    }
-                })
+                    )| {
+                        HasChildReference {
+                            parent_symbol,
+                            parent_instance,
+                            child_symbol,
+                            child_instance,
+                            parent_object,
+                        }
+                    },
+                )
                 .collect();
 
             has_children.sort_by_key(|child| (child.parent_instance.id, child.child_instance.id));
@@ -1085,16 +1230,20 @@ impl Index {
         let mut all_ids: Vec<i64> = Vec::new();
 
         if include_has {
-            let _span = tracing::info_span!("find_child_instance_ids_has",
+            let _span = tracing::info_span!(
+                "find_child_instance_ids_has",
                 source_count = parent_ids.len(),
                 eph_count = eph_ids.len(),
-            ).entered();
+            )
+            .entered();
             let t0 = std::time::Instant::now();
             let maybe_filter = filter.compose_has_children();
             let results = if let Some(expr) = maybe_filter {
                 build_has_children_query(parent_ids.to_vec(), eph_ids)
                     .filter(expr)
-                    .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(&mut *connection)
+                    .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(
+                        &mut *connection,
+                    )
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to find has-child instance IDs: {}", e))?
             } else {
@@ -1126,19 +1275,26 @@ impl Index {
         }
 
         if include_refs {
-            let _span = tracing::info_span!("find_child_instance_ids_refs",
+            let _span = tracing::info_span!(
+                "find_child_instance_ids_refs",
                 source_count = parent_ids.len(),
                 eph_count = eph_ids.len(),
-            ).entered();
+            )
+            .entered();
             let t0 = std::time::Instant::now();
             let mut query = build_children_query(parent_ids.to_vec(), eph_ids);
             if let Some(expr) = filter.compose_children() {
                 query = query.filter(expr);
             }
             let results = query
-                .load::<(Symbol, Symbol, SymbolInstance, SymbolInstance, SymbolRef, Object)>(
-                    &mut *connection,
-                )
+                .load::<(
+                    Symbol,
+                    Symbol,
+                    SymbolInstance,
+                    SymbolInstance,
+                    SymbolRef,
+                    Object,
+                )>(&mut *connection)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to find ref-child instance IDs: {}", e))?;
             tracing::info!(
@@ -1157,12 +1313,19 @@ impl Index {
                     anyhow::bail!("internal error: ephemeral layer isolation violation");
                 }
             }
-            all_ids.extend(results.iter().map(|(_, _, callee_inst, _, _, _)| callee_inst.id));
+            all_ids.extend(
+                results
+                    .iter()
+                    .map(|(_, _, callee_inst, _, _, _)| callee_inst.id),
+            );
         }
 
         all_ids.sort_unstable();
         all_ids.dedup();
-        Ok(all_ids.into_iter().map(crate::symbols::SymbolInstanceId::new).collect())
+        Ok(all_ids
+            .into_iter()
+            .map(crate::symbols::SymbolInstanceId::new)
+            .collect())
     }
 
     /// Query parent instance IDs directly from DB given child instance IDs.
@@ -1184,10 +1347,12 @@ impl Index {
         let mut all_ids: Vec<i64> = Vec::new();
 
         if include_refs {
-            let _span = tracing::info_span!("find_parent_instance_ids_refs",
+            let _span = tracing::info_span!(
+                "find_parent_instance_ids_refs",
                 source_count = child_ids.len(),
                 eph_count = eph_ids.len(),
-            ).entered();
+            )
+            .entered();
             let t0 = std::time::Instant::now();
             let mut query = build_parents_query(child_ids.to_vec(), eph_ids);
             if let Some(expr) = filter.compose_parents() {
@@ -1208,7 +1373,10 @@ impl Index {
                     || is_eph_leak(ci.eph_layer, eph_ids)
                     || is_eph_leak(pi.eph_layer, eph_ids)
                 {
-                    tracing::error!(?eph_ids, "eph_layer leak in find_parent_instance_ids (refs)");
+                    tracing::error!(
+                        ?eph_ids,
+                        "eph_layer leak in find_parent_instance_ids (refs)"
+                    );
                     anyhow::bail!("internal error: ephemeral layer isolation violation");
                 }
             }
@@ -1216,10 +1384,12 @@ impl Index {
         }
 
         if include_has {
-            let _span = tracing::info_span!("find_parent_instance_ids_has",
+            let _span = tracing::info_span!(
+                "find_parent_instance_ids_has",
                 source_count = child_ids.len(),
                 eph_count = eph_ids.len(),
-            ).entered();
+            )
+            .entered();
             let t0 = std::time::Instant::now();
             let mut query = build_has_parents_query(child_ids.to_vec(), eph_ids);
             if let Some(expr) = filter.compose_has_parents() {
@@ -1244,12 +1414,19 @@ impl Index {
                     anyhow::bail!("internal error: ephemeral layer isolation violation");
                 }
             }
-            all_ids.extend(results.iter().map(|(_, _, _, container_inst)| container_inst.id));
+            all_ids.extend(
+                results
+                    .iter()
+                    .map(|(_, _, _, container_inst)| container_inst.id),
+            );
         }
 
         all_ids.sort_unstable();
         all_ids.dedup();
-        Ok(all_ids.into_iter().map(crate::symbols::SymbolInstanceId::new).collect())
+        Ok(all_ids
+            .into_iter()
+            .map(crate::symbols::SymbolInstanceId::new)
+            .collect())
     }
 
     /// Discover all reference edges between a set of selected instances.
@@ -1273,7 +1450,8 @@ impl Index {
             "find_edges_between",
             count = instance_ids.len(),
             eph_count = eph_ids.len(),
-        ).entered();
+        )
+        .entered();
         let t0 = std::time::Instant::now();
 
         // CTE-materialised candidate set: PG's planner picks a much
@@ -1297,9 +1475,9 @@ impl Index {
             cte_body: build_find_edges_cte_body(instance_ids.to_vec(), eph_ids.to_vec()),
             eph_ids: eph_ids.to_vec(),
         }
-            .load::<ImplicitEdge>(&mut *connection)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to find edges between instances: {}", e))?;
+        .load::<ImplicitEdge>(&mut *connection)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to find edges between instances: {}", e))?;
 
         tracing::info!(
             elapsed_ms = t0.elapsed().as_millis() as u64,
@@ -1362,7 +1540,10 @@ impl Index {
         hash: &[u8],
         kind: EphLayerKind,
     ) -> Result<EphTransaction<'_>> {
-        let mut conn = self.pool.get().await
+        let mut conn = self
+            .pool
+            .get()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         diesel::sql_query("BEGIN")
@@ -1506,7 +1687,10 @@ impl Index {
     pub async fn get_eph_instance_ids_for_layer(&self, layer_id: i64) -> Result<Vec<i64>> {
         use crate::schema_diesel::symbol_instances;
 
-        let connection = &mut self.pool.get().await
+        let connection = &mut self
+            .pool
+            .get()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let ids = symbol_instances::table
@@ -1523,7 +1707,10 @@ impl Index {
     pub async fn get_eph_layer_for_instance(&self, instance_id: i64) -> Result<Vec<i64>> {
         use crate::schema_diesel::symbol_instances;
 
-        let connection = &mut self.pool.get().await
+        let connection = &mut self
+            .pool
+            .get()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let layers = symbol_instances::table
@@ -1537,7 +1724,6 @@ impl Index {
         Ok(layers)
     }
 
-
     /// Count the non-canary ephemeral layers currently in the table.
     /// Used by tests that verify cache reuse (a query that hits the
     /// cache should leave this count unchanged).  The canary is
@@ -1546,7 +1732,10 @@ impl Index {
         use crate::schema_diesel::eph_layers;
         use diesel::dsl::count_star;
         use diesel_async::RunQueryDsl;
-        let connection = &mut self.pool.get().await
+        let connection = &mut self
+            .pool
+            .get()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
         eph_layers::table
             .filter(eph_layers::kind.ne(EphLayerKind::Canary.as_str()))
@@ -1561,7 +1750,10 @@ impl Index {
     /// parent chaining) instead of inferring it from query results.
     pub async fn eph_layer_meta(&self, layer_id: i64) -> Result<EphLayerMeta> {
         use crate::schema_diesel::eph_layers;
-        let connection = &mut self.pool.get().await
+        let connection = &mut self
+            .pool
+            .get()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let (id, parent_id, kind, populated, truncated) = eph_layers::table
@@ -1577,7 +1769,13 @@ impl Index {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to read eph layer meta: {}", e))?;
 
-        Ok(EphLayerMeta { id, parent_id, kind, populated, truncated })
+        Ok(EphLayerMeta {
+            id,
+            parent_id,
+            kind,
+            populated,
+            truncated,
+        })
     }
 
     /// Count the symbol and instance rows belonging to a given ephemeral
@@ -1586,7 +1784,10 @@ impl Index {
     pub async fn count_eph_rows_for_layer(&self, layer_id: i64) -> Result<(i64, i64)> {
         use crate::schema_diesel::{symbol_instances, symbols};
         use diesel::dsl::count_star;
-        let connection = &mut self.pool.get().await
+        let connection = &mut self
+            .pool
+            .get()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let symbol_count = symbols::table
@@ -1610,7 +1811,10 @@ impl Index {
     pub async fn purge_old_eph_layers(&self, older_than: Duration) -> Result<u64> {
         use crate::schema_diesel::eph_layers;
         use diesel::sql_types::{BigInt, Bool};
-        let connection = &mut self.pool.get().await
+        let connection = &mut self
+            .pool
+            .get()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let interval_secs = older_than.as_secs() as i64;
@@ -1626,9 +1830,9 @@ impl Index {
                 )
                 .filter(eph_layers::kind.ne(EphLayerKind::Canary.as_str())),
         )
-            .execute(&mut *connection)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to purge old eph layers: {}", e))?;
+        .execute(&mut *connection)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to purge old eph layers: {}", e))?;
 
         Ok(result as u64)
     }
@@ -1636,7 +1840,10 @@ impl Index {
     /// Delete a single ephemeral layer by ID. CASCADE cleans up symbol/instance/ref rows.
     pub async fn delete_eph_layer(&self, layer_id: i64) -> Result<()> {
         use crate::schema_diesel::eph_layers;
-        let connection = &mut self.pool.get().await
+        let connection = &mut self
+            .pool
+            .get()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         diesel::delete(eph_layers::table.filter(eph_layers::id.eq(layer_id)))
@@ -1651,7 +1858,10 @@ impl Index {
     pub async fn touch_eph_layer(&self, layer_id: i64) -> Result<()> {
         use crate::schema_diesel::eph_layers;
         use diesel::sql_types::Bool;
-        let connection = &mut self.pool.get().await
+        let connection = &mut self
+            .pool
+            .get()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         diesel::update(
@@ -1661,10 +1871,10 @@ impl Index {
                     "last_used < now() - interval '1 hour'",
                 )),
         )
-            .set(eph_layers::last_used.eq(diesel::dsl::now))
-            .execute(&mut *connection)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to touch eph layer: {}", e))?;
+        .set(eph_layers::last_used.eq(diesel::dsl::now))
+        .execute(&mut *connection)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to touch eph layer: {}", e))?;
 
         Ok(())
     }
@@ -1673,15 +1883,19 @@ impl Index {
     pub async fn symbol_exists(&self, symbol_id: i64, eph: &EphContext) -> Result<bool> {
         use crate::schema_diesel::symbols;
 
-        let connection = &mut self.pool.get().await
+        let connection = &mut self
+            .pool
+            .get()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let eph_ids_owned = eph.as_slice().to_vec();
         let exists = symbols::table
             .filter(symbols::id.eq(symbol_id))
             .filter(
-                symbols::eph_layer.is_null()
-                    .or(symbols::eph_layer.eq_any(eph_ids_owned))
+                symbols::eph_layer
+                    .is_null()
+                    .or(symbols::eph_layer.eq_any(eph_ids_owned)),
             )
             .select(symbols::id)
             .first::<i64>(&mut *connection)
@@ -1700,10 +1914,16 @@ impl Index {
     ) -> Result<Vec<(FileId, crate::symbols::ProjectId)>> {
         use crate::schema_diesel::*;
 
-        let connection = &mut self.pool.get().await
+        let connection = &mut self
+            .pool
+            .get()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
-        let escaped = path.replace('\\', r"\\").replace('%', r"\%").replace('_', r"\_");
+        let escaped = path
+            .replace('\\', r"\\")
+            .replace('%', r"\%")
+            .replace('_', r"\_");
         let mut query = objects::table
             .inner_join(projects::table.on(projects::id.eq(objects::project_id)))
             .filter(objects::filesystem_path.like(format!("%{}", escaped)))
@@ -1755,8 +1975,8 @@ pub struct SearchMatchRow {
 fn make_like_pattern(query: &str) -> String {
     let escaped = query
         .replace('\\', r"\\")
-        .replace('%',  r"\%")
-        .replace('_',  r"\_");
+        .replace('%', r"\%")
+        .replace('_', r"\_");
     format!("%{}%", escaped)
 }
 
@@ -1797,9 +2017,9 @@ fn build_search_sql(whole_word: bool, case_sensitive: bool, with_project_filter:
     // LIKE pattern bound as $3 (see make_like_pattern above).
     let pre_filter = match (whole_word, case_sensitive) {
         (false, false) => "cs.content_text ILIKE $3",
-        (false, true)  => "cs.content_text LIKE $3",
-        (true,  false) => "cs.content_tsv @@ phraseto_tsquery('simple', lower($1))",
-        (true,  true)  => "cs.content_text LIKE $3",
+        (false, true) => "cs.content_text LIKE $3",
+        (true, false) => "cs.content_tsv @@ phraseto_tsquery('simple', lower($1))",
+        (true, true) => "cs.content_text LIKE $3",
     };
 
     // Whole-word boundary check appended to WHERE (variants 3 and 4 only).
@@ -1822,8 +2042,8 @@ fn build_search_sql(whole_word: bool, case_sensitive: bool, with_project_filter:
     // `o.project_id = ANY($N)` keeps only those in the caller's project
     // set.  Slot shifts based on whether $3 holds the LIKE pattern.
     let project_filter = match (with_project_filter, uses_like_pattern) {
-        (false, _)    => "",
-        (true, true)  => " AND o.project_id = ANY($4)",
+        (false, _) => "",
+        (true, true) => " AND o.project_id = ANY($4)",
         (true, false) => " AND o.project_id = ANY($3)",
     };
 
@@ -1874,7 +2094,10 @@ impl Index {
 
         let limit_plus_one = (limit as i32).saturating_add(1);
 
-        let mut connection = self.pool.get().await
+        let mut connection = self
+            .pool
+            .get()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         // Two-step: resolve visible_project_ids via the typed objects_expr
@@ -1887,18 +2110,21 @@ impl Index {
         // the SQL can JOIN content_store_projects on a tiny int[] (typically
         // a single project) rather than the 99k-row visible_obj_ids list a
         // wide project would otherwise emit.
-        let visible_project_ids: Option<Vec<i32>> = if let Some(expr) = composite_filter.compose_objects() {
-            let ids = objects::table
-                .filter(expr)
-                .select(objects::project_id)
-                .distinct()
-                .load::<i32>(&mut *connection)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to resolve visible project ids for search: {}", e))?;
-            Some(ids)
-        } else {
-            None
-        };
+        let visible_project_ids: Option<Vec<i32>> =
+            if let Some(expr) = composite_filter.compose_objects() {
+                let ids = objects::table
+                    .filter(expr)
+                    .select(objects::project_id)
+                    .distinct()
+                    .load::<i32>(&mut *connection)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to resolve visible project ids for search: {}", e)
+                    })?;
+                Some(ids)
+            } else {
+                None
+            };
 
         // Variant 3 (whole_word=true, case_sensitive=false) uses the tsvector
         // pre-filter and does not reference $3; binding the LIKE pattern
@@ -1906,11 +2132,16 @@ impl Index {
         // ("wrong number of parameters").  Bind $3 only when the SQL
         // actually uses it.
         let uses_like_pattern = !(whole_word && !case_sensitive);
-        let like_pattern = if uses_like_pattern { Some(make_like_pattern(query)) } else { None };
+        let like_pattern = if uses_like_pattern {
+            Some(make_like_pattern(query))
+        } else {
+            None
+        };
 
         let sql = build_search_sql(whole_word, case_sensitive, visible_project_ids.is_some());
 
-        let rows: Vec<SearchMatchRow> = match (like_pattern.as_ref(), visible_project_ids.as_ref()) {
+        let rows: Vec<SearchMatchRow> = match (like_pattern.as_ref(), visible_project_ids.as_ref())
+        {
             (Some(pat), Some(ids)) => {
                 diesel::sql_query(&sql)
                     .bind::<Text, _>(query)
@@ -1944,14 +2175,13 @@ impl Index {
                     .await
             }
         }
-            .map_err(|e| anyhow::anyhow!("Failed to run search content query: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to run search content query: {}", e))?;
 
         let truncated = rows.len() > limit;
         let matches: Vec<SearchMatchRow> = rows.into_iter().take(limit).collect();
         Ok((matches, truncated))
     }
 }
-
 
 /// Edge discovered between two selected instances via DB query.
 ///
@@ -2032,12 +2262,12 @@ impl<'a> EphTransaction<'a> {
         let layer_id = self.layer_id;
         let conn = &mut *self.conn;
 
-        let names:        Vec<&str>        = rows.iter().map(|r| r.name.as_str()).collect();
-        let paths:        Vec<&str>        = rows.iter().map(|r| r.path.as_str()).collect();
-        let project_ids:  Vec<i32>         = rows.iter().map(|r| r.project_id).collect();
-        let symbol_types: Vec<i32>         = rows.iter().map(|r| r.symbol_type).collect();
-        let scopes:       Vec<Option<i32>> = rows.iter().map(|r| r.scope).collect();
-        let leaf_names:   Vec<&str>        = rows.iter().map(|r| r.leaf_name.as_str()).collect();
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+        let project_ids: Vec<i32> = rows.iter().map(|r| r.project_id).collect();
+        let symbol_types: Vec<i32> = rows.iter().map(|r| r.symbol_type).collect();
+        let scopes: Vec<Option<i32>> = rows.iter().map(|r| r.scope).collect();
+        let leaf_names: Vec<&str> = rows.iter().map(|r| r.leaf_name.as_str()).collect();
 
         let inserted: Vec<IdRow> = diesel::sql_query(
             "INSERT INTO index.symbols (id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name, eph_layer) \
@@ -2070,10 +2300,10 @@ impl<'a> EphTransaction<'a> {
         let layer_id = self.layer_id;
         let conn = &mut *self.conn;
 
-        let sym_ids:        Vec<i64> = rows.iter().map(|r| r.symbol_id).collect();
-        let object_ids:     Vec<i32> = rows.iter().map(|r| r.object_id).collect();
-        let starts:         Vec<i32> = try_offsets(rows.iter().map(|r| r.start), "start")?;
-        let ends:           Vec<i32> = try_offsets(rows.iter().map(|r| r.end),   "end")?;
+        let sym_ids: Vec<i64> = rows.iter().map(|r| r.symbol_id).collect();
+        let object_ids: Vec<i32> = rows.iter().map(|r| r.object_id).collect();
+        let starts: Vec<i32> = try_offsets(rows.iter().map(|r| r.start), "start")?;
+        let ends: Vec<i32> = try_offsets(rows.iter().map(|r| r.end), "end")?;
         let instance_types: Vec<i32> = rows.iter().map(|r| r.instance_type).collect();
 
         diesel::sql_query(
@@ -2105,10 +2335,10 @@ impl<'a> EphTransaction<'a> {
         let layer_id = self.layer_id;
         let conn = &mut *self.conn;
 
-        let to_symbols:   Vec<i64> = rows.iter().map(|r| r.to_symbol).collect();
+        let to_symbols: Vec<i64> = rows.iter().map(|r| r.to_symbol).collect();
         let from_objects: Vec<i32> = rows.iter().map(|r| r.from_object).collect();
-        let starts:       Vec<i32> = try_offsets(rows.iter().map(|r| r.start), "start")?;
-        let ends:         Vec<i32> = try_offsets(rows.iter().map(|r| r.end),   "end")?;
+        let starts: Vec<i32> = try_offsets(rows.iter().map(|r| r.start), "start")?;
+        let ends: Vec<i32> = try_offsets(rows.iter().map(|r| r.end), "end")?;
 
         diesel::sql_query(
             "INSERT INTO index.symbol_refs (id, to_symbol, from_object, from_offset_range, eph_layer) \
@@ -2169,9 +2399,7 @@ impl<'a> EphTransaction<'a> {
 
     /// ROLLBACK the transaction. Consumes self.
     pub async fn rollback(mut self) -> Result<()> {
-        let _ = diesel::sql_query("ROLLBACK")
-            .execute(&mut *self.conn)
-            .await;
+        let _ = diesel::sql_query("ROLLBACK").execute(&mut *self.conn).await;
         self.finished = true;
         Ok(())
     }

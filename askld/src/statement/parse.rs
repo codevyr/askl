@@ -1,5 +1,7 @@
 use crate::command::LabeledStatements;
-use crate::execution_state::{DependencyKind, DependencyRole, RelationshipType, StatementDependency, StatementDependent};
+use crate::execution_state::{
+    DependencyKind, DependencyRole, RelationshipType, StatementDependency, StatementDependent,
+};
 use crate::hierarchy::Hierarchy;
 use crate::parser::Rule;
 use crate::parser_context::ParserContext;
@@ -39,7 +41,9 @@ pub fn build_statement<'a>(
                 if !sub_ctx.has_relationship_modifier() {
                     // No explicit has/refs — default to both so parent-child
                     // works regardless of whether the edge is containment or reference.
-                    sub_ctx.set_relationship_type_default(RelationshipType::REFS | RelationshipType::HAS);
+                    sub_ctx.set_relationship_type_default(
+                        RelationshipType::REFS | RelationshipType::HAS,
+                    );
                 }
 
                 // Allow all symbol types for children — empty vec means no type filtering.
@@ -83,7 +87,10 @@ pub fn build_statement<'a>(
     if !sub_ctx.has_type_selector() {
         let default_types = inherited_default_types.unwrap_or_default();
         if !default_types.is_empty() {
-            sub_ctx.extend_verb(DefaultTypeFilter::new(statement_span.clone(), default_types));
+            sub_ctx.extend_verb(DefaultTypeFilter::new(
+                statement_span.clone(),
+                default_types,
+            ));
         }
     }
 
@@ -215,21 +222,20 @@ pub fn build_dependency_graph(
     // fire pointless notifications.  `PreSeedLabel` is the right
     // semantic name for "drain before me, and bring this label's IDs."
     for label in statement.command().layer_label_refs() {
-        let labeled_statements = if let Some(labeled_statements) =
-            labeled_statements_map.get_statements(&label)
-        {
-            labeled_statements
-        } else {
-            return Err(Error::new_from_span(
-                pest::error::ErrorVariant::CustomError {
-                    message: format!(
-                        "Label '{}' not found for layer-creating verb argument",
-                        label
-                    ),
-                },
-                statement.command().span().as_pest_span(),
-            ));
-        };
+        let labeled_statements =
+            if let Some(labeled_statements) = labeled_statements_map.get_statements(&label) {
+                labeled_statements
+            } else {
+                return Err(Error::new_from_span(
+                    pest::error::ErrorVariant::CustomError {
+                        message: format!(
+                            "Label '{}' not found for layer-creating verb argument",
+                            label
+                        ),
+                    },
+                    statement.command().span().as_pest_span(),
+                ));
+            };
 
         let label_rc: Rc<str> = Rc::from(label.as_str());
         for labeled_statement in labeled_statements {
@@ -249,10 +255,7 @@ pub fn build_dependency_graph(
             labeled_statement
                 .get_state_mut()
                 .dependents
-                .push(StatementDependent::new(
-                    statement.clone(),
-                    role.clone(),
-                ));
+                .push(StatementDependent::new(statement.clone(), role.clone()));
             state.dependencies.push(StatementDependency::new_with_kind(
                 labeled_statement.clone(),
                 role,

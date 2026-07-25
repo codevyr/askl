@@ -1,5 +1,7 @@
 use crate::test_util::{
-    format_edges, get_shared_db_url, get_shared_index, run_query, run_query_err, run_query_traced, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC, TEST_INPUT_SEARCH, TEST_INPUT_TREE_BROWSER, VERB_TEST,
+    format_edges, get_shared_db_url, get_shared_index, run_query, run_query_err, run_query_traced,
+    TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC,
+    TEST_INPUT_SEARCH, TEST_INPUT_TREE_BROWSER, VERB_TEST,
 };
 use index::symbols::{SymbolId, SymbolInstanceId};
 use sha2::Digest;
@@ -73,11 +75,13 @@ fn double_parent_query() {
         ]
     );
     let edges = format_edges(res.edges);
-    assert_eq!(edges, vec![
-        "91-92", "91-92", "942-91", "942-92",
-        "1001-91", "1001-92", "1001-92", "1001-92",
-        "1003-91", "1003-92", "1003-92", "1003-92",
-    ]);
+    assert_eq!(
+        edges,
+        vec![
+            "91-92", "91-92", "942-91", "942-92", "1001-91", "1001-92", "1001-92", "1001-92",
+            "1003-91", "1003-92", "1003-92", "1003-92",
+        ]
+    );
 }
 
 // This test is ignored for now because current behavior considers children of
@@ -408,7 +412,10 @@ fn ignore_node_parent_no_result_2() {
         ]
     );
     let edges = format_edges(res.edges);
-    assert_eq!(edges, vec!["96-97", "1001-96", "1001-97", "1003-96", "1003-97"]);
+    assert_eq!(
+        edges,
+        vec!["96-97", "1001-96", "1001-97", "1003-96", "1003-97"]
+    );
     println!("{:#?}", res.warnings);
     assert_eq!(res.warnings.len(), 1);
 }
@@ -446,7 +453,10 @@ fn ignore_node_parent_no_result_4() {
         ]
     );
     let edges = format_edges(res.edges);
-    assert_eq!(edges, vec!["96-97", "1001-96", "1001-97", "1003-96", "1003-97"]);
+    assert_eq!(
+        edges,
+        vec!["96-97", "1001-96", "1001-97", "1003-96", "1003-97"]
+    );
 }
 
 #[test]
@@ -619,7 +629,8 @@ fn module_filter_excludes_other_modules() {
         ]
     );
 
-    const PREAMBLE_FILTERED_QUERY: &str = r#"preamble mod("test", filter="true", inherit="true"); "a""#;
+    const PREAMBLE_FILTERED_QUERY: &str =
+        r#"preamble mod("test", filter="true", inherit="true"); "a""#;
     let preamble_filtered = run_query(TEST_INPUT_MODULES, PREAMBLE_FILTERED_QUERY);
     let preamble_filtered_nodes = preamble_filtered.nodes.as_vec();
 
@@ -876,7 +887,11 @@ fn edge_dedup_different_offsets_preserved() {
     let edges = format_edges(res.edges);
     // Two edges from a(91) to b(92), each with different offset - both preserved
     assert_eq!(edges, vec!["91-92", "91-92"]);
-    assert_eq!(edges.len(), 2, "Both edges with different offsets should be preserved");
+    assert_eq!(
+        edges.len(),
+        2,
+        "Both edges with different offsets should be preserved"
+    );
 }
 
 #[test]
@@ -891,7 +906,11 @@ fn edge_dedup_same_offset_deduplicated() {
     let edges = format_edges(res.edges);
     // Only one edge from d to f, despite f having two instances
     assert_eq!(edges, vec!["94-86"]);
-    assert_eq!(edges.len(), 1, "Duplicate edges with same offset should be deduplicated");
+    assert_eq!(
+        edges.len(),
+        1,
+        "Duplicate edges with same offset should be deduplicated"
+    );
 }
 
 #[test]
@@ -1352,7 +1371,10 @@ fn default_type_inheritance_module_refs_children() {
     println!("Nodes: {:?}", nodes);
 
     // The module should be included
-    assert!(nodes.contains(&SymbolInstanceId::new(10)), "Should include module");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(10)),
+        "Should include module"
+    );
 
     // Functions referenced by refs within module's range should be included
     // (bar at 30, baz at 40)
@@ -1380,9 +1402,18 @@ fn default_type_inheritance_explicit_function_only() {
     // Should include module (10) as the parent + functions (30, 40)
     // This is the same as the default case since there are no module-to-module refs
     // The difference would be visible if module referenced other modules
-    assert!(nodes.contains(&SymbolInstanceId::new(10)), "Should include parent module");
-    assert!(nodes.contains(&SymbolInstanceId::new(30)), "Should include bar");
-    assert!(nodes.contains(&SymbolInstanceId::new(40)), "Should include baz");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(10)),
+        "Should include parent module"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(30)),
+        "Should include bar"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(40)),
+        "Should include baz"
+    );
 }
 
 #[test]
@@ -1402,8 +1433,14 @@ fn default_type_inheritance_function_refs_children() {
     println!("Nodes: {:?}", nodes);
 
     // Should have foo (20) and bar (30) - foo calls bar
-    assert!(nodes.contains(&SymbolInstanceId::new(20)), "Should include foo");
-    assert!(nodes.contains(&SymbolInstanceId::new(30)), "Should include bar");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(20)),
+        "Should include foo"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(30)),
+        "Should include bar"
+    );
 
     // Should NOT include module since func sets default to function only
     assert!(
@@ -1731,8 +1768,14 @@ fn directory_refs_children() {
     println!("directory_refs_children names: {:?}", names);
 
     assert!(names.contains(&"/src"), "Should contain parent /src");
-    assert!(names.contains(&"/src/util"), "Should contain child /src/util");
-    assert!(names.contains(&"/src/config"), "Should contain child /src/config");
+    assert!(
+        names.contains(&"/src/util"),
+        "Should contain child /src/util"
+    );
+    assert!(
+        names.contains(&"/src/config"),
+        "Should contain child /src/config"
+    );
 }
 
 // ============================================================================
@@ -1779,20 +1822,34 @@ fn generic_filter_compound_name_inherit() {
     // test.a (91), test.c (93), test.main (942). Inherited "test" filter excludes other.*.
     assert_eq!(nodes.len(), 4);
     assert!(nodes.contains(&SymbolInstanceId::new(92)), "test.b");
-    assert!(nodes.contains(&SymbolInstanceId::new(91)), "test.a (caller of test.b)");
-    assert!(nodes.contains(&SymbolInstanceId::new(93)), "test.c (caller of test.b)");
-    assert!(nodes.contains(&SymbolInstanceId::new(942)), "test.main (caller of test.b)");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(91)),
+        "test.a (caller of test.b)"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(93)),
+        "test.c (caller of test.b)"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(942)),
+        "test.main (caller of test.b)"
+    );
     // Verify the filter actually excluded other.* symbols
-    assert!(!nodes.contains(&SymbolInstanceId::new(201)), "other.a should be excluded");
-    assert!(!nodes.contains(&SymbolInstanceId::new(202)), "other.b should be excluded");
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(201)),
+        "other.a should be excluded"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(202)),
+        "other.b should be excluded"
+    );
 }
 
 #[test]
 fn generic_filter_type_replacement() {
     // filter("type", "func") filter("type", "mod") — second replaces first (same kind tag)
     // The final type filter should be "mod" only.
-    const QUERY: &str =
-        r#"filter("type", "func") filter("type", "mod") filter("compound_name", "testmodule") select"#;
+    const QUERY: &str = r#"filter("type", "func") filter("type", "mod") filter("compound_name", "testmodule") select"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1804,7 +1861,8 @@ fn generic_filter_type_replacement() {
 #[test]
 fn generic_filter_type_comma_separated() {
     // filter("type", "func,mod") — OR semantics for multiple types
-    const QUERY: &str = r#"filter("type", "func,mod") filter("compound_name", "testmodule") select"#;
+    const QUERY: &str =
+        r#"filter("type", "func,mod") filter("compound_name", "testmodule") select"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1890,11 +1948,17 @@ fn generic_select_queries_all_types_without_type_filter() {
 
     // Both should find the module since there's no type filter at root level
     assert!(
-        res_generic.nodes.as_vec().contains(&SymbolInstanceId::new(10)),
+        res_generic
+            .nodes
+            .as_vec()
+            .contains(&SymbolInstanceId::new(10)),
         "GenericSelector should find module (queries all types)"
     );
     assert!(
-        res_plain.nodes.as_vec().contains(&SymbolInstanceId::new(10)),
+        res_plain
+            .nodes
+            .as_vec()
+            .contains(&SymbolInstanceId::new(10)),
         "NameSelector should also find module (root-level default type filter is empty)"
     );
 }
@@ -1910,8 +1974,14 @@ fn generic_select_is_idempotent() {
 
     println!("{:#?}", res.nodes);
     let nodes = res.nodes.as_vec();
-    assert!(nodes.contains(&SymbolInstanceId::new(30)), "Should include bar");
-    assert!(!nodes.contains(&SymbolInstanceId::new(20)), "Should NOT include foo (replaced by bar)");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(30)),
+        "Should include bar"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(20)),
+        "Should NOT include foo (replaced by bar)"
+    );
 }
 
 // ============================================================================
@@ -2007,7 +2077,8 @@ fn derive_explicit_no_inherit_resets_to_refs() {
     // With explicit inherit="false", grandchild resets to refs
     // file derive(type="has", inherit="false") { "foo" { "bar" } }
     // file has→ foo refs→ bar (grandchild resets to refs)
-    const QUERY: &str = r#"file("/main.go") derive(type="has", inherit="false") { "foo" { "bar" } }"#;
+    const QUERY: &str =
+        r#"file("/main.go") derive(type="has", inherit="false") { "foo" { "bar" } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("derive explicit no inherit result: {:#?}", res.nodes);
@@ -2035,8 +2106,14 @@ fn dir_implicit_has_shows_files() {
 
     // /src/util contains util.go and helper.go
     assert!(names.contains(&"/src/util"), "Should contain directory");
-    assert!(names.contains(&"/src/util/util.go"), "Should contain util.go");
-    assert!(names.contains(&"/src/util/helper.go"), "Should contain helper.go");
+    assert!(
+        names.contains(&"/src/util/util.go"),
+        "Should contain util.go"
+    );
+    assert!(
+        names.contains(&"/src/util/helper.go"),
+        "Should contain helper.go"
+    );
 }
 
 #[test]
@@ -2051,9 +2128,18 @@ fn dir_empty_scope_shows_dirs_and_files() {
 
     // /src references /src/util and /src/config (refs), contains main.go (has)
     assert!(names.contains(&"/src"), "Should contain /src itself");
-    assert!(names.contains(&"/src/util"), "Should contain child dir /src/util");
-    assert!(names.contains(&"/src/config"), "Should contain child dir /src/config");
-    assert!(names.contains(&"/src/main.go"), "Should contain child file /src/main.go");
+    assert!(
+        names.contains(&"/src/util"),
+        "Should contain child dir /src/util"
+    );
+    assert!(
+        names.contains(&"/src/config"),
+        "Should contain child dir /src/config"
+    );
+    assert!(
+        names.contains(&"/src/main.go"),
+        "Should contain child file /src/main.go"
+    );
 }
 
 #[test]
@@ -2083,8 +2169,14 @@ fn dir_func_overrides_inherited_refs_has() {
     println!("dir func override nodes: {:?}", nodes);
 
     // dir (500 or 501) + foo (20) + bar (30) = at least 3 nodes
-    assert!(nodes.contains(&SymbolInstanceId::new(20)), "Should include foo");
-    assert!(nodes.contains(&SymbolInstanceId::new(30)), "Should include bar");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(20)),
+        "Should include foo"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(30)),
+        "Should include bar"
+    );
     assert!(nodes.len() >= 3, "Should have dir + foo + bar");
 }
 
@@ -2099,7 +2191,10 @@ fn func_overrides_has_in_nested_scope() {
     let nodes = res.nodes.as_vec();
     assert_eq!(nodes.len(), 3);
     assert!(nodes.contains(&SymbolInstanceId::new(510)), "file");
-    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo (calls bar)");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(20)),
+        "foo (calls bar)"
+    );
     assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar");
 }
 
@@ -2171,7 +2266,11 @@ fn nested_func_has_children() {
     // foo (20) and its two nested functions (25, 26)
     assert_eq!(
         res.nodes.as_vec(),
-        vec![SymbolInstanceId::new(20), SymbolInstanceId::new(25), SymbolInstanceId::new(26)]
+        vec![
+            SymbolInstanceId::new(20),
+            SymbolInstanceId::new(25),
+            SymbolInstanceId::new(26)
+        ]
     );
 }
 
@@ -2186,7 +2285,11 @@ fn nested_func_has_func_children() {
     // foo (20) and its two nested functions (25, 26)
     assert_eq!(
         res.nodes.as_vec(),
-        vec![SymbolInstanceId::new(20), SymbolInstanceId::new(25), SymbolInstanceId::new(26)]
+        vec![
+            SymbolInstanceId::new(20),
+            SymbolInstanceId::new(25),
+            SymbolInstanceId::new(26)
+        ]
     );
 }
 
@@ -2220,9 +2323,18 @@ fn non_constraining_bare_func_does_not_narrow_caller_chain() {
     println!("{:#?}", res.nodes);
     let nodes = res.nodes.as_vec();
     // foo (grandparent caller), bar (parent caller), baz
-    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz should be in results");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(20)),
+        "foo should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(30)),
+        "bar should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(40)),
+        "baz should be in results"
+    );
 }
 
 #[test]
@@ -2235,9 +2347,18 @@ fn non_constraining_wrapped_bare_func_same_as_unwrapped() {
 
     println!("{:#?}", res.nodes);
     let nodes = res.nodes.as_vec();
-    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz should be in results");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(20)),
+        "foo should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(30)),
+        "bar should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(40)),
+        "baz should be in results"
+    );
 }
 
 #[test]
@@ -2252,7 +2373,11 @@ fn non_constraining_bare_mod_does_not_narrow_caller_chain() {
 
     println!("{:#?}", res.nodes);
     let nodes = res.nodes.as_vec();
-    assert_eq!(nodes.len(), 0, "inherited MODULE type filter blocks FUNCTION baz");
+    assert_eq!(
+        nodes.len(),
+        0,
+        "inherited MODULE type filter blocks FUNCTION baz"
+    );
 }
 
 #[test]
@@ -2265,8 +2390,14 @@ fn non_constraining_does_not_affect_selector_with_name() {
     println!("{:#?}", res.nodes);
     let nodes = res.nodes.as_vec();
     // foo calls bar → both should be present
-    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar should be in results");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(20)),
+        "foo should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(30)),
+        "bar should be in results"
+    );
 }
 
 #[test]
@@ -2279,9 +2410,18 @@ fn non_constraining_inside_selector_scope() {
     println!("non_constraining_inside_selector_scope: {:#?}", res.nodes);
     let nodes = res.nodes.as_vec();
     // foo (root selector), bar (intermediate func), baz (leaf selector)
-    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz should be in results");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(20)),
+        "foo should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(30)),
+        "bar should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(40)),
+        "baz should be in results"
+    );
 }
 
 #[test]
@@ -2291,8 +2431,15 @@ fn non_constraining_inside_selector_scope_extra_depth_is_empty() {
     const QUERY: &str = r#""foo" { func {{ "baz" }} }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
-    println!("non_constraining_inside_selector_scope_extra_depth: {:#?}", res.nodes);
-    assert_eq!(res.nodes.as_vec().len(), 0, "extra depth should yield no results");
+    println!(
+        "non_constraining_inside_selector_scope_extra_depth: {:#?}",
+        res.nodes
+    );
+    assert_eq!(
+        res.nodes.as_vec().len(),
+        0,
+        "extra depth should yield no results"
+    );
 }
 
 #[test]
@@ -2307,9 +2454,18 @@ fn non_constraining_containment_still_works() {
     println!("{:#?}", res.nodes);
     let nodes = res.nodes.as_vec();
     // Directory + functions (foo, bar, baz)
-    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz should be in results");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(20)),
+        "foo should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(30)),
+        "bar should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(40)),
+        "baz should be in results"
+    );
 }
 
 // ============================================================================
@@ -2338,9 +2494,18 @@ fn data_inherit_with_name_prunes_to_target_path() {
     assert!(nodes.contains(&SymbolInstanceId::new(240)), "config_a");
     assert!(nodes.contains(&SymbolInstanceId::new(260)), "channels_a");
 
-    assert!(!nodes.contains(&SymbolInstanceId::new(230)), "info_b should be pruned");
-    assert!(!nodes.contains(&SymbolInstanceId::new(250)), "config_b should be pruned");
-    assert!(!nodes.contains(&SymbolInstanceId::new(270)), "channels_b should be pruned");
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(230)),
+        "info_b should be pruned"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(250)),
+        "config_b should be pruned"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(270)),
+        "channels_b should be pruned"
+    );
 }
 
 #[test]
@@ -2357,9 +2522,18 @@ fn data_inherit_without_name_prunes_to_target_path() {
     assert!(nodes.contains(&SymbolInstanceId::new(260)), "channels_a");
 
     // Should NOT contain the info_b/config_b/channels_b branch
-    assert!(!nodes.contains(&SymbolInstanceId::new(230)), "info_b should be pruned");
-    assert!(!nodes.contains(&SymbolInstanceId::new(250)), "config_b should be pruned");
-    assert!(!nodes.contains(&SymbolInstanceId::new(270)), "channels_b should be pruned");
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(230)),
+        "info_b should be pruned"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(250)),
+        "config_b should be pruned"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(270)),
+        "channels_b should be pruned"
+    );
 }
 
 #[test]
@@ -2374,14 +2548,26 @@ fn data_inherit_weak_parent_derives_full_chain() {
     println!("{:#?}", res.nodes);
     let nodes = res.nodes.as_vec();
 
-    assert!(nodes.contains(&SymbolInstanceId::new(210)), "id_table must be derived");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(210)),
+        "id_table must be derived"
+    );
     assert!(nodes.contains(&SymbolInstanceId::new(220)), "info_a");
     assert!(nodes.contains(&SymbolInstanceId::new(240)), "config_a");
     assert!(nodes.contains(&SymbolInstanceId::new(260)), "channels_a");
 
-    assert!(!nodes.contains(&SymbolInstanceId::new(230)), "info_b should be pruned");
-    assert!(!nodes.contains(&SymbolInstanceId::new(250)), "config_b should be pruned");
-    assert!(!nodes.contains(&SymbolInstanceId::new(270)), "channels_b should be pruned");
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(230)),
+        "info_b should be pruned"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(250)),
+        "config_b should be pruned"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(270)),
+        "channels_b should be pruned"
+    );
 }
 
 // ============================================================================
@@ -2407,8 +2593,14 @@ fn direct_only_has_file_shows_only_direct_children() {
     assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
     assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar");
     assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz");
-    assert!(!nodes.contains(&SymbolInstanceId::new(25)), "anon150 should be filtered");
-    assert!(!nodes.contains(&SymbolInstanceId::new(26)), "anon350 should be filtered");
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(25)),
+        "anon150 should be filtered"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(26)),
+        "anon350 should be filtered"
+    );
 }
 
 #[test]
@@ -2438,7 +2630,10 @@ fn direct_only_refs_hides_nested_refs() {
     println!("direct refs from foo: {:?}", nodes);
     // Only foo itself — the ref to bar is inside anon150, not direct from foo
     assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
-    assert!(!nodes.contains(&SymbolInstanceId::new(30)), "bar should be filtered (inside anon150)");
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(30)),
+        "bar should be filtered (inside anon150)"
+    );
 }
 
 #[test]
@@ -2450,7 +2645,10 @@ fn unnest_refs_shows_all_refs() {
     let nodes = res.nodes.as_vec();
     println!("unnest refs from foo: {:?}", nodes);
     assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
-    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar (via anon150 ref)");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(30)),
+        "bar (via anon150 ref)"
+    );
 }
 
 #[test]
@@ -2479,8 +2677,14 @@ fn direct_only_nested_scope_no_children_of_hidden() {
     let nodes = res.nodes.as_vec();
     println!("nested scope refs-only from foo: {:?}", nodes);
     assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
-    assert!(!nodes.contains(&SymbolInstanceId::new(30)), "bar hidden at level 1");
-    assert!(!nodes.contains(&SymbolInstanceId::new(40)), "baz must not leak from hidden bar");
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(30)),
+        "bar hidden at level 1"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(40)),
+        "baz must not leak from hidden bar"
+    );
 }
 
 #[test]
@@ -2493,8 +2697,14 @@ fn unnest_nested_scope_shows_transitive_children() {
     let nodes = res.nodes.as_vec();
     println!("unnest nested scope from foo: {:?}", nodes);
     assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
-    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar (via unnested ref)");
-    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz (direct ref from bar)");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(30)),
+        "bar (via unnested ref)"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(40)),
+        "baz (direct ref from bar)"
+    );
 }
 
 #[test]
@@ -2534,11 +2744,26 @@ fn scoped_children_e_m() {
     println!("{:#?}", res.edges);
 
     let nodes = res.nodes.as_vec();
-    assert!(nodes.contains(&SymbolInstanceId::new(95)), "e should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(200)), "M inside e should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(210)), "x should be in results (child of M in e)");
-    assert!(!nodes.contains(&SymbolInstanceId::new(201)), "M inside g should NOT be in results");
-    assert!(!nodes.contains(&SymbolInstanceId::new(211)), "y should NOT be in results (child of M in g)");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(95)),
+        "e should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(200)),
+        "M inside e should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(210)),
+        "x should be in results (child of M in e)"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(201)),
+        "M inside g should NOT be in results"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(211)),
+        "y should NOT be in results (child of M in g)"
+    );
 }
 
 #[test]
@@ -2551,11 +2776,26 @@ fn scoped_children_g_m() {
     println!("{:#?}", res.edges);
 
     let nodes = res.nodes.as_vec();
-    assert!(nodes.contains(&SymbolInstanceId::new(97)), "g should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(201)), "M inside g should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(211)), "y should be in results (child of M in g)");
-    assert!(!nodes.contains(&SymbolInstanceId::new(200)), "M inside e should NOT be in results");
-    assert!(!nodes.contains(&SymbolInstanceId::new(210)), "x should NOT be in results (child of M in e)");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(97)),
+        "g should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(201)),
+        "M inside g should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(211)),
+        "y should be in results (child of M in g)"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(200)),
+        "M inside e should NOT be in results"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(210)),
+        "x should NOT be in results (child of M in e)"
+    );
 }
 
 // ============================================================================
@@ -2576,9 +2816,18 @@ fn label_scoped_children_e_m() {
     let nodes = res.nodes.as_vec();
     assert!(nodes.contains(&SymbolInstanceId::new(95)), "e");
     assert!(nodes.contains(&SymbolInstanceId::new(200)), "M inside e");
-    assert!(nodes.contains(&SymbolInstanceId::new(210)), "x (child of M in e)");
-    assert!(!nodes.contains(&SymbolInstanceId::new(201)), "M inside g should NOT appear");
-    assert!(!nodes.contains(&SymbolInstanceId::new(211)), "y should NOT appear (child of M in g)");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(210)),
+        "x (child of M in e)"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(201)),
+        "M inside g should NOT appear"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(211)),
+        "y should NOT appear (child of M in g)"
+    );
 }
 
 #[test]
@@ -2590,9 +2839,18 @@ fn label_scoped_children_g_m() {
     let nodes = res.nodes.as_vec();
     assert!(nodes.contains(&SymbolInstanceId::new(97)), "g");
     assert!(nodes.contains(&SymbolInstanceId::new(201)), "M inside g");
-    assert!(nodes.contains(&SymbolInstanceId::new(211)), "y (child of M in g)");
-    assert!(!nodes.contains(&SymbolInstanceId::new(200)), "M inside e should NOT appear");
-    assert!(!nodes.contains(&SymbolInstanceId::new(210)), "x should NOT appear (child of M in e)");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(211)),
+        "y (child of M in g)"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(200)),
+        "M inside e should NOT appear"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(210)),
+        "x should NOT appear (child of M in e)"
+    );
 }
 
 #[test]
@@ -2610,9 +2868,18 @@ fn label_refs_scoped_to_parent() {
     assert!(nodes.contains(&SymbolInstanceId::new(96)), "f (child of d)");
     // The label #children should expose e and f
     // but NOT a, b, c, g, or main
-    assert!(!nodes.contains(&SymbolInstanceId::new(91)), "a should NOT appear");
-    assert!(!nodes.contains(&SymbolInstanceId::new(92)), "b should NOT appear");
-    assert!(!nodes.contains(&SymbolInstanceId::new(97)), "g should NOT appear");
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(91)),
+        "a should NOT appear"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(92)),
+        "b should NOT appear"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(97)),
+        "g should NOT appear"
+    );
 }
 
 #[test]
@@ -2670,11 +2937,26 @@ fn label_with_unnest_has_derivation() {
 
     let nodes = res.nodes.as_vec();
     // unnest HAS from dir: finds module, file, foo, bar, baz
-    assert!(nodes.contains(&SymbolInstanceId::new(10)), "testmodule via unnest HAS");
-    assert!(nodes.contains(&SymbolInstanceId::new(510)), "file via unnest HAS");
-    assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo via unnest HAS");
-    assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar via unnest HAS");
-    assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz via unnest HAS");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(10)),
+        "testmodule via unnest HAS"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(510)),
+        "file via unnest HAS"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(20)),
+        "foo via unnest HAS"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(30)),
+        "bar via unnest HAS"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(40)),
+        "baz via unnest HAS"
+    );
 }
 
 #[test]
@@ -2686,9 +2968,18 @@ fn scoped_children_unnest_m() {
     let nodes = res.nodes.as_vec();
     assert!(nodes.contains(&SymbolInstanceId::new(95)), "e");
     assert!(nodes.contains(&SymbolInstanceId::new(200)), "M inside e");
-    assert!(nodes.contains(&SymbolInstanceId::new(210)), "x (child of M in e)");
-    assert!(!nodes.contains(&SymbolInstanceId::new(201)), "M inside g should NOT appear");
-    assert!(!nodes.contains(&SymbolInstanceId::new(211)), "y should NOT appear");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(210)),
+        "x (child of M in e)"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(201)),
+        "M inside g should NOT appear"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(211)),
+        "y should NOT appear"
+    );
 }
 
 #[test]
@@ -2701,7 +2992,10 @@ fn scoped_parent_derivation_from_child() {
     let nodes = res.nodes.as_vec();
     assert!(nodes.contains(&SymbolInstanceId::new(95)), "e");
     assert!(nodes.contains(&SymbolInstanceId::new(200)), "M inside e");
-    assert!(!nodes.contains(&SymbolInstanceId::new(201)), "M inside g should NOT appear");
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(201)),
+        "M inside g should NOT appear"
+    );
 }
 
 #[test]
@@ -2715,9 +3009,15 @@ fn scoped_children_refs_only() {
     let nodes = res.nodes.as_vec();
     assert!(nodes.contains(&SymbolInstanceId::new(95)), "e");
     // e refs f (via ref at [951,952)), so f should appear
-    assert!(nodes.contains(&SymbolInstanceId::new(96)), "f (ref child of e)");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(96)),
+        "f (ref child of e)"
+    );
     // M is not reachable via refs-only
-    assert!(!nodes.contains(&SymbolInstanceId::new(200)), "M should NOT appear via refs");
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(200)),
+        "M should NOT appear via refs"
+    );
 }
 
 #[test]
@@ -2729,8 +3029,14 @@ fn scoped_has_children_only() {
 
     let nodes = res.nodes.as_vec();
     assert!(nodes.contains(&SymbolInstanceId::new(95)), "e");
-    assert!(nodes.contains(&SymbolInstanceId::new(200)), "M inside e via HAS");
-    assert!(!nodes.contains(&SymbolInstanceId::new(201)), "M inside g should NOT appear");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(200)),
+        "M inside e via HAS"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(201)),
+        "M inside g should NOT appear"
+    );
 }
 
 #[test]
@@ -2776,7 +3082,10 @@ fn label_forced_with_scoped_derivation() {
     assert!(nodes.contains(&SymbolInstanceId::new(97)), "g");
     // e's scoped M children (x) should appear
     assert!(nodes.contains(&SymbolInstanceId::new(200)), "M inside e");
-    assert!(nodes.contains(&SymbolInstanceId::new(210)), "x (child of M in e)");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(210)),
+        "x (child of M in e)"
+    );
 }
 
 // ============================================================================
@@ -2801,10 +3110,22 @@ fn multi_instance_nested_retains_both() {
     println!("{:#?}", res.edges);
 
     let nodes = res.nodes.as_vec();
-    assert!(nodes.contains(&SymbolInstanceId::new(94)), "d should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(86)), "f (bar.c) should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(96)), "f (main.c) should be retained by symbol-level matching");
-    assert!(nodes.contains(&SymbolInstanceId::new(88)), "h should be in results");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(94)),
+        "d should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(86)),
+        "f (bar.c) should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(96)),
+        "f (main.c) should be retained by symbol-level matching"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(88)),
+        "h should be in results"
+    );
     assert!(res.warnings.is_empty(), "no warnings expected");
 }
 
@@ -2842,9 +3163,15 @@ fn ephemeral_instance_is_queryable() {
 
     let nodes = res.nodes.as_vec();
     // Must contain the original persistent instance
-    assert!(nodes.contains(&SymbolInstanceId::new(91)), "persistent foo instance should be in results");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(91)),
+        "persistent foo instance should be in results"
+    );
     // Must also contain the ephemeral instance (negative ID)
-    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
+    let has_eph = nodes.iter().any(|id| {
+        let v: i64 = (*id).into();
+        v < 0
+    });
     assert!(has_eph, "ephemeral instance should appear with negative ID");
 }
 
@@ -2863,8 +3190,14 @@ fn ephemeral_ref_creates_edge() {
     let res = run_query(VERB_TEST, QUERY);
 
     let nodes = res.nodes.as_vec();
-    assert!(nodes.contains(&SymbolInstanceId::new(91)), "foo should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(94)), "tar should be reachable via ephemeral ref");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(91)),
+        "foo should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(94)),
+        "tar should be reachable via ephemeral ref"
+    );
 }
 
 #[test]
@@ -2886,11 +3219,29 @@ fn ephemeral_layers_are_isolated_between_queries() {
     let nodes1 = res1.nodes.as_vec();
     let nodes2 = res2.nodes.as_vec();
 
-    let eph_count_1 = nodes1.iter().filter(|id| { let v: i64 = (**id).into(); v < 0 }).count();
-    let eph_count_2 = nodes2.iter().filter(|id| { let v: i64 = (**id).into(); v < 0 }).count();
+    let eph_count_1 = nodes1
+        .iter()
+        .filter(|id| {
+            let v: i64 = (**id).into();
+            v < 0
+        })
+        .count();
+    let eph_count_2 = nodes2
+        .iter()
+        .filter(|id| {
+            let v: i64 = (**id).into();
+            v < 0
+        })
+        .count();
 
-    assert!(eph_count_1 > 0, "query with ephemeral_instance should have negative IDs");
-    assert_eq!(eph_count_2, 0, "query without ephemeral verbs should have no negative IDs");
+    assert!(
+        eph_count_1 > 0,
+        "query with ephemeral_instance should have negative IDs"
+    );
+    assert_eq!(
+        eph_count_2, 0,
+        "query without ephemeral verbs should have no negative IDs"
+    );
 }
 
 #[test]
@@ -2908,8 +3259,18 @@ fn multiple_ephemeral_instances_same_symbol() {
     let res = run_query(VERB_TEST, QUERY);
 
     let nodes = res.nodes.as_vec();
-    let eph_count = nodes.iter().filter(|id| { let v: i64 = (**id).into(); v < 0 }).count();
-    assert!(eph_count >= 2, "both ephemeral instances should appear, got {}", eph_count);
+    let eph_count = nodes
+        .iter()
+        .filter(|id| {
+            let v: i64 = (**id).into();
+            v < 0
+        })
+        .count();
+    assert!(
+        eph_count >= 2,
+        "both ephemeral instances should appear, got {}",
+        eph_count
+    );
 }
 
 // --- A. Visibility filtering in relationship queries ---
@@ -2930,9 +3291,14 @@ fn eph_ref_parent_traversal() {
     let res = run_query(VERB_TEST, QUERY);
 
     let nodes = res.nodes.as_vec();
-    assert!(nodes.contains(&SymbolInstanceId::new(91)), "foo should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(95)),
-        "sort.IsSorted should be reachable via ephemeral ref");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(91)),
+        "foo should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(95)),
+        "sort.IsSorted should be reachable via ephemeral ref"
+    );
 }
 
 #[test]
@@ -2951,11 +3317,19 @@ fn eph_instance_in_containment() {
     let res = run_query(VERB_TEST, QUERY);
 
     let nodes = res.nodes.as_vec();
-    assert!(nodes.contains(&SymbolInstanceId::new(91)), "foo should be in results");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(91)),
+        "foo should be in results"
+    );
     // The ephemeral instance of tar at [911,912) should appear as child
-    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
-    assert!(has_eph,
-        "ephemeral tar instance inside foo's range should appear in HAS query");
+    let has_eph = nodes.iter().any(|id| {
+        let v: i64 = (*id).into();
+        v < 0
+    });
+    assert!(
+        has_eph,
+        "ephemeral tar instance inside foo's range should appear in HAS query"
+    );
 }
 
 // --- B. Edge discovery with ephemeral rows ---
@@ -2976,8 +3350,11 @@ fn eph_ref_produces_edge() {
     let res = run_query(VERB_TEST, QUERY);
 
     let edges = format_edges(res.edges);
-    assert!(edges.contains(&"91-95".to_string()),
-        "edge from foo(91) to sort.IsSorted(95) should exist via ephemeral ref, got {:?}", edges);
+    assert!(
+        edges.contains(&"91-95".to_string()),
+        "edge from foo(91) to sort.IsSorted(95) should exist via ephemeral ref, got {:?}",
+        edges
+    );
 }
 
 #[test]
@@ -2994,11 +3371,22 @@ fn eph_instance_produces_edge() {
     let res = run_query(VERB_TEST, QUERY);
 
     let nodes = res.nodes.as_vec();
-    assert!(nodes.contains(&SymbolInstanceId::new(91)), "foo should be in results");
-    assert!(nodes.contains(&SymbolInstanceId::new(92)), "persistent foo.bar instance");
-    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
-    assert!(has_eph,
-        "ephemeral foo.bar instance should also appear with negative ID");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(91)),
+        "foo should be in results"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(92)),
+        "persistent foo.bar instance"
+    );
+    let has_eph = nodes.iter().any(|id| {
+        let v: i64 = (*id).into();
+        v < 0
+    });
+    assert!(
+        has_eph,
+        "ephemeral foo.bar instance should also appear with negative ID"
+    );
 }
 
 // --- C. Phase 1 chaining — multiple ephemeral producers ---
@@ -3020,9 +3408,14 @@ fn layer_block_symbol_then_instance() {
 
     let nodes = res.nodes.as_vec();
     assert!(nodes.contains(&SymbolInstanceId::new(91)), "persistent foo");
-    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
-    assert!(has_eph,
-        "ephemeral instance from second producer should appear");
+    let has_eph = nodes.iter().any(|id| {
+        let v: i64 = (*id).into();
+        v < 0
+    });
+    assert!(
+        has_eph,
+        "ephemeral instance from second producer should appear"
+    );
 }
 
 #[test]
@@ -3044,11 +3437,18 @@ fn layer_block_instance_and_ref_enables_traversal() {
 
     let nodes = res.nodes.as_vec();
     assert!(nodes.contains(&SymbolInstanceId::new(91)), "foo");
-    assert!(nodes.contains(&SymbolInstanceId::new(95)),
-        "persistent sort.IsSorted instance");
-    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
-    assert!(has_eph,
-        "ephemeral sort.IsSorted instance should also appear");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(95)),
+        "persistent sort.IsSorted instance"
+    );
+    let has_eph = nodes.iter().any(|id| {
+        let v: i64 = (*id).into();
+        v < 0
+    });
+    assert!(
+        has_eph,
+        "ephemeral sort.IsSorted instance should also appear"
+    );
 }
 
 // --- D. Content-addressed caching ---
@@ -3073,10 +3473,25 @@ fn eph_instance_same_params_is_idempotent() {
     assert!(nodes1.contains(&SymbolInstanceId::new(91)));
     assert!(nodes2.contains(&SymbolInstanceId::new(91)));
 
-    let eph1 = nodes1.iter().filter(|id| { let v: i64 = (**id).into(); v < 0 }).count();
-    let eph2 = nodes2.iter().filter(|id| { let v: i64 = (**id).into(); v < 0 }).count();
+    let eph1 = nodes1
+        .iter()
+        .filter(|id| {
+            let v: i64 = (**id).into();
+            v < 0
+        })
+        .count();
+    let eph2 = nodes2
+        .iter()
+        .filter(|id| {
+            let v: i64 = (**id).into();
+            v < 0
+        })
+        .count();
     assert!(eph1 > 0, "first run should have ephemeral instance");
-    assert!(eph2 > 0, "second run should reuse cached ephemeral instance");
+    assert!(
+        eph2 > 0,
+        "second run should reuse cached ephemeral instance"
+    );
 }
 
 // --- E. Baseline regression guard ---
@@ -3090,9 +3505,15 @@ fn query_without_eph_verbs_returns_only_persistent() {
 
     let nodes = res.nodes.as_vec();
     assert!(!nodes.is_empty(), "should return results");
-    let all_positive = nodes.iter().all(|id| { let v: i64 = (*id).into(); v > 0 });
-    assert!(all_positive,
-        "all IDs should be positive (no ephemeral leakage), got {:?}", nodes);
+    let all_positive = nodes.iter().all(|id| {
+        let v: i64 = (*id).into();
+        v > 0
+    });
+    assert!(
+        all_positive,
+        "all IDs should be positive (no ephemeral leakage), got {:?}",
+        nodes
+    );
 }
 
 // --- F. Ephemeral coexistence with persistent data ---
@@ -3114,11 +3535,18 @@ fn eph_instance_at_persistent_offset_coexists() {
     let res = run_query(VERB_TEST, QUERY);
 
     let nodes = res.nodes.as_vec();
-    assert!(nodes.contains(&SymbolInstanceId::new(91)),
-        "persistent foo instance should still be present");
-    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
-    assert!(has_eph,
-        "ephemeral foo instance at same offset should coexist");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(91)),
+        "persistent foo instance should still be present"
+    );
+    let has_eph = nodes.iter().any(|id| {
+        let v: i64 = (*id).into();
+        v < 0
+    });
+    assert!(
+        has_eph,
+        "ephemeral foo instance at same offset should coexist"
+    );
 }
 
 // --- G. Garbage collection ---
@@ -3141,8 +3569,14 @@ fn eph_gc_purges_old_layers() {
 
     // Run 1: create ephemeral layers.
     let res1 = run_query(VERB_TEST, QUERY);
-    let eph_ids_1: Vec<_> = res1.nodes.as_vec().iter()
-        .filter(|id| { let v: i64 = (**id).into(); v < 0 })
+    let eph_ids_1: Vec<_> = res1
+        .nodes
+        .as_vec()
+        .iter()
+        .filter(|id| {
+            let v: i64 = (**id).into();
+            v < 0
+        })
         .copied()
         .collect();
     assert!(!eph_ids_1.is_empty(), "should have ephemeral instances");
@@ -3155,11 +3589,20 @@ fn eph_gc_purges_old_layers() {
 
         // Verify layer has instances before deletion.
         for &inst_id in &eph_ids_1 {
-            let layer_ids = index.get_eph_layer_for_instance(inst_id.into()).await.unwrap();
+            let layer_ids = index
+                .get_eph_layer_for_instance(inst_id.into())
+                .await
+                .unwrap();
             for layer_id in layer_ids {
-                let ids = index.get_eph_instance_ids_for_layer(layer_id).await.unwrap();
-                assert!(!ids.is_empty(),
-                    "layer {} should have instances before deletion", layer_id);
+                let ids = index
+                    .get_eph_instance_ids_for_layer(layer_id)
+                    .await
+                    .unwrap();
+                assert!(
+                    !ids.is_empty(),
+                    "layer {} should have instances before deletion",
+                    layer_id
+                );
                 index.delete_eph_layer(layer_id).await.unwrap();
             }
         }
@@ -3167,14 +3610,25 @@ fn eph_gc_purges_old_layers() {
 
     // Run 2: same query should create fresh layers (not cache hits).
     let res2 = run_query(VERB_TEST, QUERY);
-    let eph_ids_2: Vec<_> = res2.nodes.as_vec().iter()
-        .filter(|id| { let v: i64 = (**id).into(); v < 0 })
+    let eph_ids_2: Vec<_> = res2
+        .nodes
+        .as_vec()
+        .iter()
+        .filter(|id| {
+            let v: i64 = (**id).into();
+            v < 0
+        })
         .copied()
         .collect();
-    assert!(!eph_ids_2.is_empty(), "should still produce ephemeral instances");
+    assert!(
+        !eph_ids_2.is_empty(),
+        "should still produce ephemeral instances"
+    );
     // Fresh layers get new negative IDs from the sequence, so they differ.
-    assert_ne!(eph_ids_1, eph_ids_2,
-        "after deletion, re-running should produce different ephemeral IDs");
+    assert_ne!(
+        eph_ids_1, eph_ids_2,
+        "after deletion, re-running should produce different ephemeral IDs"
+    );
 }
 
 // --- Layer block tests ---
@@ -3195,8 +3649,14 @@ fn layer_block_groups_ops_into_single_layer() {
     let res = run_query(VERB_TEST, QUERY);
 
     let nodes = res.nodes.as_vec();
-    assert!(nodes.contains(&SymbolInstanceId::new(91)), "persistent foo should be in results");
-    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(91)),
+        "persistent foo should be in results"
+    );
+    let has_eph = nodes.iter().any(|id| {
+        let v: i64 = (*id).into();
+        v < 0
+    });
     assert!(has_eph, "ephemeral instance from layer block should appear");
 }
 
@@ -3217,26 +3677,60 @@ fn layer_block_cache_hit() {
     );
 
     let (res1, acts1) = run_query_traced(VERB_TEST, QUERY);
-    let eph_ids_1: Vec<_> = res1.nodes.as_vec().iter()
-        .filter(|id| { let v: i64 = (**id).into(); v < 0 })
+    let eph_ids_1: Vec<_> = res1
+        .nodes
+        .as_vec()
+        .iter()
+        .filter(|id| {
+            let v: i64 = (**id).into();
+            v < 0
+        })
         .copied()
         .collect();
 
     let (res2, acts2) = run_query_traced(VERB_TEST, QUERY);
-    let eph_ids_2: Vec<_> = res2.nodes.as_vec().iter()
-        .filter(|id| { let v: i64 = (**id).into(); v < 0 })
+    let eph_ids_2: Vec<_> = res2
+        .nodes
+        .as_vec()
+        .iter()
+        .filter(|id| {
+            let v: i64 = (**id).into();
+            v < 0
+        })
         .copied()
         .collect();
 
-    assert_eq!(eph_ids_1, eph_ids_2,
-        "same layer block should produce same ephemeral IDs (cache hit)");
+    assert_eq!(
+        eph_ids_1, eph_ids_2,
+        "same layer block should produce same ephemeral IDs (cache hit)"
+    );
 
-    assert_eq!(acts1.len(), 1, "one layer-bearing statement, got {:?}", acts1);
-    assert_eq!(acts2.len(), 1, "one layer-bearing statement, got {:?}", acts2);
-    assert!(acts1[0].created, "first run must create the layer, got {:?}", acts1[0]);
-    assert!(!acts2[0].created, "second run must hit the cache, got {:?}", acts2[0]);
-    assert_eq!(acts1[0].layer_id, acts2[0].layer_id,
-        "cache hit must reuse the same layer row");
+    assert_eq!(
+        acts1.len(),
+        1,
+        "one layer-bearing statement, got {:?}",
+        acts1
+    );
+    assert_eq!(
+        acts2.len(),
+        1,
+        "one layer-bearing statement, got {:?}",
+        acts2
+    );
+    assert!(
+        acts1[0].created,
+        "first run must create the layer, got {:?}",
+        acts1[0]
+    );
+    assert!(
+        !acts2[0].created,
+        "second run must hit the cache, got {:?}",
+        acts2[0]
+    );
+    assert_eq!(
+        acts1[0].layer_id, acts2[0].layer_id,
+        "cache hit must reuse the same layer row"
+    );
 }
 
 #[test]
@@ -3258,8 +3752,14 @@ fn layer_block_includes_parent_context_in_hash() {
     let res = run_query(VERB_TEST, QUERY);
 
     let nodes = res.nodes.as_vec();
-    assert!(nodes.contains(&SymbolInstanceId::new(94)), "persistent tar should be in results");
-    let has_eph = nodes.iter().any(|id| { let v: i64 = (*id).into(); v < 0 });
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(94)),
+        "persistent tar should be in results"
+    );
+    let has_eph = nodes.iter().any(|id| {
+        let v: i64 = (*id).into();
+        v < 0
+    });
     assert!(has_eph, "ephemeral instance from layer block should appear");
 }
 
@@ -3279,10 +3779,18 @@ fn loc_matches_multiple_files() {
 
     let nodes = res.nodes.as_vec();
     // All instances should be ephemeral (negative IDs).
-    assert!(nodes.len() >= 2, "loc should match at least 2 files, got {}", nodes.len());
     assert!(
-        nodes.iter().all(|id| { let v: i64 = (*id).into(); v < 0 }),
-        "all loc instances should be ephemeral (negative IDs), got {:?}", nodes
+        nodes.len() >= 2,
+        "loc should match at least 2 files, got {}",
+        nodes.len()
+    );
+    assert!(
+        nodes.iter().all(|id| {
+            let v: i64 = (*id).into();
+            v < 0
+        }),
+        "all loc instances should be ephemeral (negative IDs), got {:?}",
+        nodes
     );
 }
 
@@ -3294,9 +3802,17 @@ fn loc_single_file_with_project_filter() {
     let res = run_query(VERB_TEST, QUERY);
 
     let nodes = res.nodes.as_vec();
-    assert_eq!(nodes.len(), 1, "loc with project filter should match exactly 1 file, got {:?}", nodes);
+    assert_eq!(
+        nodes.len(),
+        1,
+        "loc with project filter should match exactly 1 file, got {:?}",
+        nodes
+    );
     assert!(
-        { let v: i64 = nodes[0].into(); v < 0 },
+        {
+            let v: i64 = nodes[0].into();
+            v < 0
+        },
         "loc instance should be ephemeral (negative ID)"
     );
 }
@@ -3315,7 +3831,9 @@ fn eph_layer_rollback_prevents_poisoned_cache() {
         // Attempt 1: create layer, then rollback (simulate failure).
         {
             let txn = index
-                .create_eph_layer(None, &hash, index::db_diesel::EphLayerKind::Layer).await.unwrap();
+                .create_eph_layer(None, &hash, index::db_diesel::EphLayerKind::Layer)
+                .await
+                .unwrap();
             assert!(txn.created(), "first create should return created=true");
             txn.rollback().await.unwrap();
         }
@@ -3323,7 +3841,9 @@ fn eph_layer_rollback_prevents_poisoned_cache() {
         // Attempt 2: same hash — must get created=true (layer was rolled back).
         {
             let txn = index
-                .create_eph_layer(None, &hash, index::db_diesel::EphLayerKind::Layer).await.unwrap();
+                .create_eph_layer(None, &hash, index::db_diesel::EphLayerKind::Layer)
+                .await
+                .unwrap();
             assert!(txn.created(), "after rollback, retry must get created=true");
             txn.rollback().await.unwrap();
         }
@@ -3346,7 +3866,12 @@ fn canary_filtered_by_find_symbol() {
 
         // Call find_symbol with no ephemeral layers visible.
         let result = index
-            .find_symbol(&filter, ScopeContext::Skip, ScopeContext::Skip, &EphContext::new())
+            .find_symbol(
+                &filter,
+                ScopeContext::Skip,
+                ScopeContext::Skip,
+                &EphContext::new(),
+            )
             .await
             .expect("find_symbol should succeed (canary must be filtered out)")
             .into_inner();
@@ -3360,7 +3885,12 @@ fn canary_filtered_by_find_symbol() {
 
         // Even with canary layer in eph_ids, the canary should be findable.
         let result = index
-            .find_symbol(&filter, ScopeContext::Skip, ScopeContext::Skip, &EphContext::from_slice(&[CANARY_LAYER_ID]))
+            .find_symbol(
+                &filter,
+                ScopeContext::Skip,
+                ScopeContext::Skip,
+                &EphContext::from_slice(&[CANARY_LAYER_ID]),
+            )
             .await
             .expect("find_symbol with canary in eph_ids should succeed")
             .into_inner();
@@ -3593,21 +4123,33 @@ fn canary_leak_in_each_relationship_field_detected() {
 fn loc_bad_file_path_errors() {
     let res = run_query_err(VERB_TEST, r#"loc("nonexistent_file.c", "1")"#);
     let msg = res.err().expect("should be an error").to_string();
-    assert!(msg.contains("no file matching"), "expected 'no file matching' error, got: {}", msg);
+    assert!(
+        msg.contains("no file matching"),
+        "expected 'no file matching' error, got: {}",
+        msg
+    );
 }
 
 #[test]
 fn loc_bad_line_number_errors() {
     let res = run_query_err(VERB_TEST, r#"loc("main.c", "999")"#);
     let msg = res.err().expect("should be an error").to_string();
-    assert!(msg.contains("out of range"), "expected 'out of range' error, got: {}", msg);
+    assert!(
+        msg.contains("out of range"),
+        "expected 'out of range' error, got: {}",
+        msg
+    );
 }
 
 #[test]
 fn loc_missing_args_errors() {
     let res = run_query_err(VERB_TEST, r#"loc("main.c")"#);
     let msg = res.err().expect("should be an error").to_string();
-    assert!(msg.contains("requires two positional"), "expected 'requires two positional' error, got: {}", msg);
+    assert!(
+        msg.contains("requires two positional"),
+        "expected 'requires two positional' error, got: {}",
+        msg
+    );
 }
 
 #[test]
@@ -3678,7 +4220,11 @@ fn wrap_loc_yields_single_instance_and_parent_has_edge() {
     );
 
     let loc_inst_id = loc_nodes[0].symbol_instance.id;
-    assert!(loc_inst_id < 0, "loc instance must be ephemeral, got id {}", loc_inst_id);
+    assert!(
+        loc_inst_id < 0,
+        "loc instance must be ephemeral, got id {}",
+        loc_inst_id
+    );
 
     let wrap_to_loc = res.has_edges.0.iter().any(|e| {
         e.parent == SymbolId::new(9) && e.child_instance == SymbolInstanceId::new(loc_inst_id)
@@ -3801,7 +4347,8 @@ fn ephemeral_instance_label_hash_matches_equivalent_literal() {
          must share at least one materialised instance row with the \
          equivalent literal form (same layer hash means same eph_layers \
          row means same instance id).  literal_eph={:?}, label_eph={:?}",
-        literal_eph, label_eph,
+        literal_eph,
+        label_eph,
     );
 }
 
@@ -3828,7 +4375,10 @@ fn search_skeleton_single_match() {
         nodes.len(),
     );
     assert!(
-        nodes.iter().all(|id| { let v: i64 = (*id).into(); v < 0 }),
+        nodes.iter().all(|id| {
+            let v: i64 = (*id).into();
+            v < 0
+        }),
         "all search instances should be ephemeral (negative IDs), got {:?}",
         nodes,
     );
@@ -3844,8 +4394,14 @@ fn search_skeleton_no_match_returns_empty() {
     const QUERY: &str = r#"search("nonexistent_xyzzy")"#;
     let res = run_query(TEST_INPUT_SEARCH, QUERY);
 
-    let eph_only: Vec<_> = res.nodes.as_vec().into_iter()
-        .filter(|id| { let v: i64 = (*id).into(); v < 0 })
+    let eph_only: Vec<_> = res
+        .nodes
+        .as_vec()
+        .into_iter()
+        .filter(|id| {
+            let v: i64 = (*id).into();
+            v < 0
+        })
         .collect();
     assert!(
         eph_only.is_empty(),
@@ -3904,7 +4460,8 @@ fn search_whole_word_excludes_foobar() {
         n_substr > n_whole,
         "whole_word=\"true\" must match strictly fewer ranges than substring; \
          got substring={}, whole_word={}",
-        n_substr, n_whole,
+        n_substr,
+        n_whole,
     );
 }
 
@@ -3944,7 +4501,10 @@ fn search_case_smart_default_uppercase_is_sensitive() {
 fn search_case_explicit_insensitive_overrides_smart() {
     // `search("Foo", case="insensitive")` matches all three tokens of
     // "Foo FOO foo" in object 4 even though the query has uppercase.
-    let res = run_query(TEST_INPUT_SEARCH, r#"search("Foo", case="insensitive", whole_word="true")"#);
+    let res = run_query(
+        TEST_INPUT_SEARCH,
+        r#"search("Foo", case="insensitive", whole_word="true")"#,
+    );
     let n = res.nodes.as_vec().len();
     assert!(
         n >= 3,
@@ -3998,20 +4558,32 @@ fn search_truncation_warning_surfaces_on_cache_miss() {
     let (res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
 
     assert_eq!(acts.len(), 1, "one layer-bearing statement, got {:?}", acts);
-    assert!(acts[0].created, "unique limit must produce a cache miss, got {:?}", acts[0]);
-    assert!(acts[0].truncated, "limit=3 must truncate, got {:?}", acts[0]);
+    assert!(
+        acts[0].created,
+        "unique limit must produce a cache miss, got {:?}",
+        acts[0]
+    );
+    assert!(
+        acts[0].truncated,
+        "limit=3 must truncate, got {:?}",
+        acts[0]
+    );
 
     assert_eq!(
-        res.nodes.as_vec().len(), 3,
+        res.nodes.as_vec().len(),
+        3,
         "limit=3 should return exactly 3 matches, got {}",
         res.nodes.as_vec().len(),
     );
 
-    let truncation_warns: Vec<_> = res.warnings.iter()
+    let truncation_warns: Vec<_> = res
+        .warnings
+        .iter()
         .filter(|w| format!("{}", w).contains("truncated"))
         .collect();
     assert_eq!(
-        truncation_warns.len(), 1,
+        truncation_warns.len(),
+        1,
         "cache-miss should surface exactly one truncation warning, got {:?}",
         res.warnings,
     );
@@ -4032,17 +4604,34 @@ fn search_truncation_warning_surfaces_on_cache_hit() {
     let (_first, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
     let (second, acts2) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
 
-    assert!(acts1[0].created, "first call must be a cache miss, got {:?}", acts1);
-    assert!(!acts2[0].created, "second call must be a cache hit, got {:?}", acts2);
-    assert_eq!(acts1[0].layer_id, acts2[0].layer_id, "hit must reuse the same layer row");
-    assert!(acts2[0].truncated,
-        "cache hit must propagate the persisted truncated flag, got {:?}", acts2[0]);
+    assert!(
+        acts1[0].created,
+        "first call must be a cache miss, got {:?}",
+        acts1
+    );
+    assert!(
+        !acts2[0].created,
+        "second call must be a cache hit, got {:?}",
+        acts2
+    );
+    assert_eq!(
+        acts1[0].layer_id, acts2[0].layer_id,
+        "hit must reuse the same layer row"
+    );
+    assert!(
+        acts2[0].truncated,
+        "cache hit must propagate the persisted truncated flag, got {:?}",
+        acts2[0]
+    );
 
-    let truncation_warns: Vec<_> = second.warnings.iter()
+    let truncation_warns: Vec<_> = second
+        .warnings
+        .iter()
         .filter(|w| format!("{}", w).contains("truncated"))
         .collect();
     assert_eq!(
-        truncation_warns.len(), 1,
+        truncation_warns.len(),
+        1,
         "cache-hit should also surface the truncation warning, got {:?}",
         second.warnings,
     );
@@ -4055,7 +4644,9 @@ fn search_no_truncation_warning_when_under_cap() {
     const QUERY: &str = r#"search("foo", limit="500")"#;
     let res = run_query(TEST_INPUT_SEARCH, QUERY);
 
-    let truncation_warns: Vec<_> = res.warnings.iter()
+    let truncation_warns: Vec<_> = res
+        .warnings
+        .iter()
         .filter(|w| format!("{}", w).contains("truncated"))
         .collect();
     assert!(
@@ -4076,7 +4667,10 @@ fn search_whole_word_underscore_negative() {
     // us cross-check: the whole-word search picks up "foo" (freestanding) and
     // "foo" inside "foo.bar" (`.` separates), but neither "foobar" (no left
     // boundary) nor "foo_bar" (underscore is a word char).
-    let res = run_query(TEST_INPUT_SEARCH, r#"project("search_proj_1") search("foo", whole_word="true", case="sensitive")"#);
+    let res = run_query(
+        TEST_INPUT_SEARCH,
+        r#"project("search_proj_1") search("foo", whole_word="true", case="sensitive")"#,
+    );
     // Object 3 in proj 1: "foobar foo foo_bar foo.bar" -- whole-word "foo"
     // matches the freestanding "foo" and the leading "foo" of "foo.bar".  We
     // also pick up object 1 "hello foo world" (1 match) and object 2
@@ -4094,8 +4688,14 @@ fn search_substring_includes_foobar() {
     // Default whole_word=false matches "foobar" too.  Hard to assert an
     // exact count without enumerating every file -- instead, show that
     // substring strictly increases the count vs whole-word.
-    let substring = run_query(TEST_INPUT_SEARCH, r#"project("search_proj_1") search("foo")"#);
-    let whole = run_query(TEST_INPUT_SEARCH, r#"project("search_proj_1") search("foo", whole_word="true")"#);
+    let substring = run_query(
+        TEST_INPUT_SEARCH,
+        r#"project("search_proj_1") search("foo")"#,
+    );
+    let whole = run_query(
+        TEST_INPUT_SEARCH,
+        r#"project("search_proj_1") search("foo", whole_word="true")"#,
+    );
     assert!(
         substring.nodes.as_vec().len() > whole.nodes.as_vec().len(),
         "substring (matches foobar/foo_bar) should yield strictly more than whole-word",
@@ -4107,8 +4707,14 @@ fn search_project_filter_narrows_via_objects_expr() {
     // Composite filter through ProjectFilterMixin's objects_expr scopes
     // the candidate query to objects in project search_proj_1.  Object 4
     // (case fixture) lives in proj 2 so its matches MUST NOT appear.
-    let p1 = run_query(TEST_INPUT_SEARCH, r#"project("search_proj_1") search("foo")"#);
-    let p2 = run_query(TEST_INPUT_SEARCH, r#"project("search_proj_2") search("foo")"#);
+    let p1 = run_query(
+        TEST_INPUT_SEARCH,
+        r#"project("search_proj_1") search("foo")"#,
+    );
+    let p2 = run_query(
+        TEST_INPUT_SEARCH,
+        r#"project("search_proj_2") search("foo")"#,
+    );
     let no_filter = run_query(TEST_INPUT_SEARCH, r#"search("foo")"#);
 
     let n_p1 = p1.nodes.as_vec().len();
@@ -4119,7 +4725,9 @@ fn search_project_filter_narrows_via_objects_expr() {
     assert!(
         n_p1 < n_none && n_p2 < n_none,
         "project filter should narrow vs no filter; p1={}, p2={}, no_filter={}",
-        n_p1, n_p2, n_none,
+        n_p1,
+        n_p2,
+        n_none,
     );
 }
 
@@ -4156,7 +4764,8 @@ fn search_cross_project_shared_content_scopes_to_filter() {
         "cross-project shared content must produce disjoint output node sets; \
          leakage means the (content_hash, project_id) JOIN didn't constrain. \
          p1={:?}, p2={:?}",
-        p1_nodes, p2_nodes,
+        p1_nodes,
+        p2_nodes,
     );
 }
 
@@ -4222,9 +4831,20 @@ fn search_cache_hit_on_repeat_same_filter() {
     let (first, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
     let (second, acts2) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
 
-    assert!(acts1[0].created, "first call must create the layer, got {:?}", acts1);
-    assert!(!acts2[0].created, "second call must hit the cache, got {:?}", acts2);
-    assert_eq!(acts1[0].layer_id, acts2[0].layer_id, "hit must reuse the same layer row");
+    assert!(
+        acts1[0].created,
+        "first call must create the layer, got {:?}",
+        acts1
+    );
+    assert!(
+        !acts2[0].created,
+        "second call must hit the cache, got {:?}",
+        acts2
+    );
+    assert_eq!(
+        acts1[0].layer_id, acts2[0].layer_id,
+        "hit must reuse the same layer row"
+    );
 
     assert_eq!(
         first.nodes.as_vec(),
@@ -4243,13 +4863,25 @@ fn search_different_filter_different_cache() {
     // (limit=400 is unique to this test, so both runs are cache misses),
     // and the node sets are disjoint (a shared layer would return
     // identical nodes for both).
-    let (p1, acts1) = run_query_traced(TEST_INPUT_SEARCH, r#"project("search_proj_1") search("foo", limit="400")"#);
-    let (p2, acts2) = run_query_traced(TEST_INPUT_SEARCH, r#"project("search_proj_2") search("foo", limit="400")"#);
+    let (p1, acts1) = run_query_traced(
+        TEST_INPUT_SEARCH,
+        r#"project("search_proj_1") search("foo", limit="400")"#,
+    );
+    let (p2, acts2) = run_query_traced(
+        TEST_INPUT_SEARCH,
+        r#"project("search_proj_2") search("foo", limit="400")"#,
+    );
 
-    assert!(acts1[0].created && acts2[0].created,
-        "both filter variants must create their own layer, got {:?} / {:?}", acts1, acts2);
-    assert_ne!(acts1[0].layer_id, acts2[0].layer_id,
-        "different composite filters must map to different layer rows");
+    assert!(
+        acts1[0].created && acts2[0].created,
+        "both filter variants must create their own layer, got {:?} / {:?}",
+        acts1,
+        acts2
+    );
+    assert_ne!(
+        acts1[0].layer_id, acts2[0].layer_id,
+        "different composite filters must map to different layer rows"
+    );
 
     let p1_nodes: std::collections::HashSet<_> = p1.nodes.as_vec().into_iter().collect();
     let p2_nodes: std::collections::HashSet<_> = p2.nodes.as_vec().into_iter().collect();
@@ -4258,7 +4890,8 @@ fn search_different_filter_different_cache() {
         "project-scoped search layers must produce disjoint node sets; \
          shared nodes would indicate the cache key is not filter-aware. \
          p1={:?}, p2={:?}",
-        p1_nodes, p2_nodes,
+        p1_nodes,
+        p2_nodes,
     );
 }
 
@@ -4300,13 +4933,33 @@ fn search_first_call_reports_created_and_populated() {
 
     assert_eq!(acts.len(), 1, "one layer-bearing statement, got {:?}", acts);
     let act = acts[0];
-    assert!(act.created, "unique limit must produce a cache miss, got {:?}", act);
-    assert!(!act.truncated, "limit=397 leaves ample headroom, got {:?}", act);
+    assert!(
+        act.created,
+        "unique limit must produce a cache miss, got {:?}",
+        act
+    );
+    assert!(
+        !act.truncated,
+        "limit=397 leaves ample headroom, got {:?}",
+        act
+    );
 
     let (meta, (symbols, instances)) = eph_layer_state(TEST_INPUT_SEARCH, act.layer_id);
-    assert_eq!(meta.kind, "search", "layer kind must be 'search', got {:?}", meta);
-    assert!(meta.populated, "populate must have been committed, got {:?}", meta);
-    assert!(!meta.truncated, "truncated flag must be false on the row, got {:?}", meta);
+    assert_eq!(
+        meta.kind, "search",
+        "layer kind must be 'search', got {:?}",
+        meta
+    );
+    assert!(
+        meta.populated,
+        "populate must have been committed, got {:?}",
+        meta
+    );
+    assert!(
+        !meta.truncated,
+        "truncated flag must be false on the row, got {:?}",
+        meta
+    );
 
     // One instance per byte-range match; the statement's selection is
     // exactly the layer's instances.
@@ -4318,7 +4971,10 @@ fn search_first_call_reports_created_and_populated() {
     // One eph symbol per matching project: substring "foo" matches objects
     // in both fixture projects (proj 1: basic/multi/boundary; proj 2:
     // mixedcase/docless).
-    assert_eq!(symbols, 2, "expected one 'search:foo' symbol per matching project");
+    assert_eq!(
+        symbols, 2,
+        "expected one 'search:foo' symbol per matching project"
+    );
 }
 
 #[test]
@@ -4329,16 +4985,31 @@ fn search_repeat_call_hits_cache_without_repopulating() {
     const QUERY: &str = r#"search("foo", limit="398")"#;
 
     let (first, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
-    assert!(acts1[0].created, "first call must create the layer, got {:?}", acts1);
+    assert!(
+        acts1[0].created,
+        "first call must create the layer, got {:?}",
+        acts1
+    );
     let layer_id = acts1[0].layer_id;
     let (_, counts_after_first) = eph_layer_state(TEST_INPUT_SEARCH, layer_id);
 
     let (second, acts2) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
-    assert!(!acts2[0].created, "second call must hit the cache, got {:?}", acts2);
-    assert_eq!(acts2[0].layer_id, layer_id, "hit must reuse the same layer row");
+    assert!(
+        !acts2[0].created,
+        "second call must hit the cache, got {:?}",
+        acts2
+    );
+    assert_eq!(
+        acts2[0].layer_id, layer_id,
+        "hit must reuse the same layer row"
+    );
 
     let (meta, counts_after_second) = eph_layer_state(TEST_INPUT_SEARCH, layer_id);
-    assert!(meta.populated, "layer must remain populated, got {:?}", meta);
+    assert!(
+        meta.populated,
+        "layer must remain populated, got {:?}",
+        meta
+    );
     assert_eq!(
         counts_after_first, counts_after_second,
         "cache hit must not repopulate: per-layer row counts changed",
@@ -4361,20 +5032,45 @@ fn search_truncated_flag_persists_on_layer_row() {
     const QUERY: &str = r#"search("foo", whole_word="true", limit="1")"#;
 
     let (_, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
-    assert!(acts1[0].created, "first call must be a cache miss, got {:?}", acts1);
+    assert!(
+        acts1[0].created,
+        "first call must be a cache miss, got {:?}",
+        acts1
+    );
     assert!(acts1[0].truncated, "limit=1 must truncate, got {:?}", acts1);
 
     let (meta, _) = eph_layer_state(TEST_INPUT_SEARCH, acts1[0].layer_id);
-    assert!(meta.populated, "truncated layer is still fully committed, got {:?}", meta);
-    assert!(meta.truncated, "truncated=true must be persisted on the row, got {:?}", meta);
+    assert!(
+        meta.populated,
+        "truncated layer is still fully committed, got {:?}",
+        meta
+    );
+    assert!(
+        meta.truncated,
+        "truncated=true must be persisted on the row, got {:?}",
+        meta
+    );
 
     let (second, acts2) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
-    assert!(!acts2[0].created, "second call must be a cache hit, got {:?}", acts2);
-    assert_eq!(acts2[0].layer_id, acts1[0].layer_id, "hit must reuse the same layer row");
-    assert!(acts2[0].truncated,
-        "cache hit must propagate the persisted truncated flag, got {:?}", acts2);
     assert!(
-        second.warnings.iter().any(|w| format!("{}", w).contains("truncated")),
+        !acts2[0].created,
+        "second call must be a cache hit, got {:?}",
+        acts2
+    );
+    assert_eq!(
+        acts2[0].layer_id, acts1[0].layer_id,
+        "hit must reuse the same layer row"
+    );
+    assert!(
+        acts2[0].truncated,
+        "cache hit must propagate the persisted truncated flag, got {:?}",
+        acts2
+    );
+    assert!(
+        second
+            .warnings
+            .iter()
+            .any(|w| format!("{}", w).contains("truncated")),
         "cache hit must still surface the truncation warning, got {:?}",
         second.warnings,
     );

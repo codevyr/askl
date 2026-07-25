@@ -1,7 +1,8 @@
 use index::symbols::SymbolInstanceId;
 
 use crate::{
-    cfg::ControlFlowGraph, span::Span,
+    cfg::ControlFlowGraph,
+    span::Span,
     test_util::{get_shared_index, run_query, VERB_TEST},
     verb::*,
 };
@@ -31,7 +32,13 @@ async fn test_select_matching_name() {
         let result = selector
             .as_selector()
             .unwrap()
-            .select_from_all_impl(&cfg, index::db_diesel::CompositeFilter::And(vec![]), index::db_diesel::ScopeContext::Skip, index::db_diesel::ScopeContext::Skip, &index::db_diesel::EphContext::new())
+            .select_from_all_impl(
+                &cfg,
+                index::db_diesel::CompositeFilter::And(vec![]),
+                index::db_diesel::ScopeContext::Skip,
+                index::db_diesel::ScopeContext::Skip,
+                &index::db_diesel::EphContext::new(),
+            )
             .await
             .unwrap();
 
@@ -82,19 +89,13 @@ fn test_ignore_package_filter() {
 #[test]
 fn test_data_verb() {
     let res = run_query("verb_test.sql", r#"data "Debug";"#);
-    assert_eq!(
-        res.nodes.as_vec(),
-        vec![SymbolInstanceId::new(97)]
-    );
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(97)]);
 }
 
 #[test]
 fn test_data_verb_full_name() {
     let res = run_query("verb_test.sql", r#"data "config.Debug";"#);
-    assert_eq!(
-        res.nodes.as_vec(),
-        vec![SymbolInstanceId::new(97)]
-    );
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(97)]);
 }
 
 #[test]

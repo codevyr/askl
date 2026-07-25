@@ -12,13 +12,13 @@ use crate::verb::{LabelResolutions, NotificationContext};
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::{ScopeContext, Selection};
-use index::symbols::{SymbolInstanceId, FileId, Occurrence, SymbolId};
-use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
+use index::symbols::{FileId, Occurrence, SymbolId, SymbolInstanceId};
 use pest::error::Error;
 use std::cell::{Ref, RefCell, RefMut};
+use std::collections::HashMap;
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::{Rc, Weak};
 
 mod parse;
@@ -173,7 +173,9 @@ impl Statement {
 
     /// Check if this statement's selectors have been computed (added to registry).
     fn is_computed(&self, ctx: &ExecutionContext) -> bool {
-        self.command().selectors().all(|s| ctx.registry.contains(&s.id()))
+        self.command()
+            .selectors()
+            .all(|s| ctx.registry.contains(&s.id()))
     }
 
     fn is_selection_some(&self, ctx: &ExecutionContext) -> bool {
@@ -217,21 +219,25 @@ impl Statement {
 
         struct PendingCompute<'a> {
             statement: Rc<Statement>,
-            future: Pin<Box<dyn Future<Output = Result<ComputeResult, pest::error::Error<Rule>>> + 'a>>,
+            future:
+                Pin<Box<dyn Future<Output = Result<ComputeResult, pest::error::Error<Rule>>> + 'a>>,
         }
 
         async fn drain_pending(
             pending: &mut Vec<PendingCompute<'_>>,
             ctx: &mut ExecutionContext,
         ) -> Result<(), pest::error::Error<Rule>> {
-            if pending.is_empty() { return Ok(()); }
+            if pending.is_empty() {
+                return Ok(());
+            }
             let entries: Vec<_> = pending.drain(..).collect();
-            let (stmts, futs): (Vec<_>, Vec<_>) = entries.into_iter()
-                .map(|p| (p.statement, p.future))
-                .unzip();
+            let (stmts, futs): (Vec<_>, Vec<_>) =
+                entries.into_iter().map(|p| (p.statement, p.future)).unzip();
             let results = futures::future::join_all(futs).await;
             // Check all results before applying any — avoid partial ctx mutation on error.
-            let computed: Result<Vec<_>, _> = stmts.into_iter().zip(results)
+            let computed: Result<Vec<_>, _> = stmts
+                .into_iter()
+                .zip(results)
                 .map(|(stmt, r)| r.map(|cr| (stmt, cr)))
                 .collect();
             for (stmt, cr) in computed? {
@@ -372,10 +378,12 @@ impl Statement {
                     s_j.clone(),
                     DependencyRole::PreSeedSibling,
                 ));
-                s_j.get_state_mut().dependencies.push(StatementDependency::new(
-                    s_i.clone(),
-                    DependencyRole::PreSeedSibling,
-                ));
+                s_j.get_state_mut()
+                    .dependencies
+                    .push(StatementDependency::new(
+                        s_i.clone(),
+                        DependencyRole::PreSeedSibling,
+                    ));
             }
             if top_level[j].command().has_layer_spec() {
                 last_layer_creator = Some(j);
@@ -462,7 +470,9 @@ impl Statement {
                 continue;
             }
 
-            let stmt_label: String = current_statement.command().selectors()
+            let stmt_label: String = current_statement
+                .command()
+                .selectors()
                 .map(|s| s.name().to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -580,7 +590,8 @@ impl Statement {
         // source instances of the same symbol. Symbol-level on to side deduplicates
         // when the target symbol has multiple selected instances (e.g., definition
         // + declaration of f), since a single reference should produce one edge.
-        let mut seen_edges: HashSet<(SymbolInstanceId, SymbolId, Option<Occurrence>)> = HashSet::new();
+        let mut seen_edges: HashSet<(SymbolInstanceId, SymbolId, Option<Occurrence>)> =
+            HashSet::new();
 
         // 1. Collect forced edges (symbol_ref.id == 0) from Selection.parents
         for statement in statements {
@@ -728,11 +739,12 @@ impl Statement {
             for edge in implicit_edges {
                 let from_node = instance_to_node.get(&edge.from_instance_id);
                 let to_node = instance_to_node.get(&edge.to_instance_id);
-                if let (Some((from_sym, from_inst)), Some((_to_sym, to_inst))) = (from_node, to_node) {
+                if let (Some((from_sym, from_inst)), Some((_to_sym, to_inst))) =
+                    (from_node, to_node)
+                {
                     let occurrence = Occurrence {
                         file: FileId::new(edge.from_object),
-                        offset_range: range_bounds_to_offsets(&edge.from_offset_range)
-                            .unwrap(),
+                        offset_range: range_bounds_to_offsets(&edge.from_offset_range).unwrap(),
                     };
 
                     let to_symbol = SymbolId::new(edge.to_symbol);
@@ -781,13 +793,25 @@ impl Statement {
             // Unify them into a single iterator of (parent_instance, child_instance,
             // parent_symbol_id, child_symbol_id).
             let from_children = current.has_children.iter().map(|h| {
-                (&h.parent_instance, &h.child_instance, h.parent_symbol.id, h.child_symbol.id)
+                (
+                    &h.parent_instance,
+                    &h.child_instance,
+                    h.parent_symbol.id,
+                    h.child_symbol.id,
+                )
             });
             let from_parents = current.has_parents.iter().map(|h| {
-                (&h.parent_instance, &h.child_instance, h.parent_symbol.id, h.child_symbol.id)
+                (
+                    &h.parent_instance,
+                    &h.child_instance,
+                    h.parent_symbol.id,
+                    h.child_symbol.id,
+                )
             });
 
-            for (parent_inst, child_inst, parent_sym, child_sym) in from_children.chain(from_parents) {
+            for (parent_inst, child_inst, parent_sym, child_sym) in
+                from_children.chain(from_parents)
+            {
                 let parent_id = SymbolInstanceId::new(parent_inst.id);
                 let child_id = SymbolInstanceId::new(child_inst.id);
 
@@ -956,7 +980,11 @@ impl Statement {
                 .await?;
 
             let changed = res.changed;
-            dependent.statement.get_state_mut().warnings.extend(res.warnings);
+            dependent
+                .statement
+                .get_state_mut()
+                .warnings
+                .extend(res.warnings);
             return Ok(PropagationResult { changed });
         }
 
@@ -983,11 +1011,22 @@ impl Statement {
         let res = dependent
             .statement
             .command()
-            .accept_notification(ctx, &cfg.index, self, notif_ctx, parent_scope, children_scope)
+            .accept_notification(
+                ctx,
+                &cfg.index,
+                self,
+                notif_ctx,
+                parent_scope,
+                children_scope,
+            )
             .await?;
 
         let changed = res.changed;
-        dependent.statement.get_state_mut().warnings.extend(res.warnings);
+        dependent
+            .statement
+            .get_state_mut()
+            .warnings
+            .extend(res.warnings);
         Ok(PropagationResult { changed })
     }
 }
@@ -1011,7 +1050,8 @@ impl Worklist {
         if self.0.is_empty() {
             return None;
         }
-        let idx = self.0
+        let idx = self
+            .0
             .iter()
             .enumerate()
             .min_by_key(|(_, s)| s.propagation_priority(ctx))

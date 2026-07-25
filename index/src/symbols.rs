@@ -626,8 +626,8 @@ pub fn normalize_symbol_tokens(input: &str) -> Vec<String> {
 /// The DB trigger regex for stripping is `E'[\\*\\[\\]\\{\\},@\\- \\(\\)]'` — verify that
 /// any future changes to `chars_to_remove` in [`clean_and_split_string`] are reflected there.
 pub fn symbol_path_and_leaf(name: &str, symbol_type: i32) -> (String, String) {
-    let dot_is_sep = symbol_type != SymbolType::File as i32
-        && symbol_type != SymbolType::Directory as i32;
+    let dot_is_sep =
+        symbol_type != SymbolType::File as i32 && symbol_type != SymbolType::Directory as i32;
     let path = if dot_is_sep {
         symbol_name_to_path(name)
     } else {
@@ -871,15 +871,26 @@ mod tests {
     fn path_and_leaf_file_dots_become_underscores() {
         // For files dots must NOT split labels — "stdio.h" should produce "stdio_h" not "stdio.h"
         let (path, leaf) = symbol_path_and_leaf("/usr/include/stdio.h", SymbolType::File as i32);
-        assert!(path.contains("stdio_h"), "expected stdio_h in path, got {}", path);
-        assert!(!path.contains("stdio.h"), "dot must not remain in path for file type");
+        assert!(
+            path.contains("stdio_h"),
+            "expected stdio_h in path, got {}",
+            path
+        );
+        assert!(
+            !path.contains("stdio.h"),
+            "dot must not remain in path for file type"
+        );
         assert_eq!(leaf, path.rsplit('.').next().unwrap());
     }
 
     #[test]
     fn path_and_leaf_directory_dots_become_underscores() {
         let (path, leaf) = symbol_path_and_leaf("/home/user/my.dir", SymbolType::Directory as i32);
-        assert!(path.contains("my_dir"), "expected my_dir in path, got {}", path);
+        assert!(
+            path.contains("my_dir"),
+            "expected my_dir in path, got {}",
+            path
+        );
         assert_eq!(leaf, path.rsplit('.').next().unwrap());
     }
 

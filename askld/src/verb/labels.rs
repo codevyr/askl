@@ -1,11 +1,16 @@
 use crate::{
     execution_context::{selector_state_with, SelectorRegistry},
-    execution_state::{DependencyKind, DependencyRole, RelationshipType}, parser::Rule, span::Span,
+    execution_state::{DependencyKind, DependencyRole, RelationshipType},
+    parser::Rule,
+    span::Span,
 };
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::{
-    db_diesel::{CompositeFilter, EphContext, InnermostOnlyMixin, Index, ParentReference, ScopeContext, Selection},
+    db_diesel::{
+        CompositeFilter, EphContext, Index, InnermostOnlyMixin, ParentReference, ScopeContext,
+        Selection,
+    },
     models_diesel::SymbolRef,
 };
 use pest::error::ErrorVariant::CustomError;
@@ -15,7 +20,9 @@ use std::{collections::HashMap, sync::OnceLock};
 
 use crate::{cfg::ControlFlowGraph, execution_context::ExecutionContext, statement::Statement};
 
-use super::{ConstraintAction, DeriveMethod, Labeler, NotificationContext, Selector, SelectorState, Verb};
+use super::{
+    ConstraintAction, DeriveMethod, Labeler, NotificationContext, Selector, SelectorState, Verb,
+};
 use crate::verb::Filter;
 
 #[derive(Debug)]
@@ -296,19 +303,22 @@ impl Selector for UserVerb {
             find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new(&ctx.eph)));
         }
         let find_filter = CompositeFilter::and(find_parts);
-        let parent_ids = index.find_parent_instance_ids(
-            &child_ids,
-            notif_ctx.rel_type.contains(RelationshipType::REFS),
-            notif_ctx.rel_type.contains(RelationshipType::HAS),
-            &find_filter,
-            &ctx.eph,
-        ).await.map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
+        let parent_ids = index
+            .find_parent_instance_ids(
+                &child_ids,
+                notif_ctx.rel_type.contains(RelationshipType::REFS),
+                notif_ctx.rel_type.contains(RelationshipType::HAS),
+                &find_filter,
+                &ctx.eph,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
         let parent_id_set: std::collections::HashSet<i64> =
             parent_ids.into_iter().map(Into::<i64>::into).collect();
 
-        cached_selection.nodes.retain(|s|
-            parent_id_set.contains(&s.symbol_instance.id)
-        );
+        cached_selection
+            .nodes
+            .retain(|s| parent_id_set.contains(&s.symbol_instance.id));
 
         Ok(Some(cached_selection))
     }
@@ -328,7 +338,8 @@ impl Selector for UserVerb {
             let mut changed = false;
             let constrained = selector_state_with(registry, self, |state| {
                 if state.selection.is_some() {
-                    changed = state.constrain_selection(dependency, &notif_ctx.role, notif_ctx.rel_type);
+                    changed =
+                        state.constrain_selection(dependency, &notif_ctx.role, notif_ctx.rel_type);
                     true
                 } else {
                     false

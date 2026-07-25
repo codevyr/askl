@@ -39,12 +39,19 @@ fn all_descendants_weak(stmt: &Statement) -> bool {
 /// If the parent already has a selection, use its instance IDs.
 /// If no parent exists, return Skip.
 /// If the parent hasn't been selected yet, fall back to mixin-based scoping.
-pub(super) fn build_parent_scope(statement: &Statement, ctx: &ExecutionContext, eph: &EphContext) -> ScopeContext {
+pub(super) fn build_parent_scope(
+    statement: &Statement,
+    ctx: &ExecutionContext,
+    eph: &EphContext,
+) -> ScopeContext {
     match statement.parent().and_then(|p| p.upgrade()) {
         Some(parent) => {
             if parent.is_computed(ctx) {
                 match parent.get_selection(ctx) {
-                    Some(sel) => ScopeContext::Scope { ids: sel.get_instance_ids(), filter: None },
+                    Some(sel) => ScopeContext::Scope {
+                        ids: sel.get_instance_ids(),
+                        filter: None,
+                    },
                     // None = parent has no opinion (filter-only, unit, or no selectors).
                     // Run unscoped — the parent is transparent.
                     None => ScopeContext::Unscoped,
@@ -52,11 +59,14 @@ pub(super) fn build_parent_scope(statement: &Statement, ctx: &ExecutionContext, 
             } else {
                 // Parent not yet computed — fall back to filter-based scoping
                 match parent.command().get_selector_composite_filter(eph) {
-                    Some(f) => ScopeContext::Scope { ids: vec![], filter: Some(f) },
+                    Some(f) => ScopeContext::Scope {
+                        ids: vec![],
+                        filter: Some(f),
+                    },
                     None => ScopeContext::Unscoped,
                 }
             }
-        },
+        }
         None => ScopeContext::Unscoped, // Root-level: run parents unscoped
     }
 }
@@ -64,7 +74,11 @@ pub(super) fn build_parent_scope(statement: &Statement, ctx: &ExecutionContext, 
 /// Build scope context for the children side of a statement's children query.
 /// Collects instance IDs from already-selected children + filters from unselected children.
 /// If no children exist, return Skip.
-pub(super) fn build_children_scope(statement: &Statement, ctx: &ExecutionContext, eph: &EphContext) -> ScopeContext {
+pub(super) fn build_children_scope(
+    statement: &Statement,
+    ctx: &ExecutionContext,
+    eph: &EphContext,
+) -> ScopeContext {
     let mut has_children = false;
     let mut any_uncomputed = false;
     let mut any_transparent = false;
@@ -103,6 +117,9 @@ pub(super) fn build_children_scope(statement: &Statement, ctx: &ExecutionContext
             ScopeContext::Skip
         }
     } else {
-        ScopeContext::Scope { ids: selected_ids, filter: combined_filter }
+        ScopeContext::Scope {
+            ids: selected_ids,
+            filter: combined_filter,
+        }
     }
 }

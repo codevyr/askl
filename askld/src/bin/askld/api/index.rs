@@ -1,11 +1,13 @@
 use actix_web::{delete, get, http::header, web, HttpRequest, HttpResponse, Responder};
-use tracing::Instrument;
 use askld::auth::AuthIdentity;
-use askld::index_store::{normalize_full_path, IndexStore, MultiTreeResult, StoreError, UploadError};
+use askld::index_store::{
+    normalize_full_path, IndexStore, MultiTreeResult, StoreError, UploadError,
+};
 use askld::proto::askl::index::{ContentBatch, Project};
 use log::{error, warn};
 use prost::Message;
 use serde::{Deserialize, Serialize};
+use tracing::Instrument;
 
 use super::types::{IndexDeleteResponse, IndexUploadResponse};
 
@@ -97,14 +99,23 @@ pub async fn upload_index(
         .await
     {
         Ok((project_id, resumed)) => {
-            let body = IndexUploadResponse { project_id, resumed };
+            let body = IndexUploadResponse {
+                project_id,
+                resumed,
+            };
             if resumed {
                 HttpResponse::Ok()
-                    .append_header((header::LOCATION, format!("/v1/index/projects/{}", project_id)))
+                    .append_header((
+                        header::LOCATION,
+                        format!("/v1/index/projects/{}", project_id),
+                    ))
                     .json(body)
             } else {
                 HttpResponse::Created()
-                    .append_header((header::LOCATION, format!("/v1/index/projects/{}", project_id)))
+                    .append_header((
+                        header::LOCATION,
+                        format!("/v1/index/projects/{}", project_id),
+                    ))
                     .json(body)
             }
         }
@@ -147,7 +158,10 @@ pub async fn upload_symbol_chunk(
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "seq": seq })),
         Err(UploadError::Invalid(msg)) => HttpResponse::BadRequest().body(msg),
         Err(UploadError::Storage(msg)) => {
-            error!("Symbol chunk upload failed (project={} seq={}): {}", project_id, seq, msg);
+            error!(
+                "Symbol chunk upload failed (project={} seq={}): {}",
+                project_id, seq, msg
+            );
             HttpResponse::InternalServerError().body("Failed to upload symbol chunk")
         }
         Err(UploadError::Conflict) => HttpResponse::Conflict().finish(),
@@ -170,7 +184,10 @@ pub async fn finalize_project(
             HttpResponse::InternalServerError().body("Failed to finalize project")
         }
         Err(e) => {
-            error!("Unexpected error finalizing project {}: {:?}", project_id, e);
+            error!(
+                "Unexpected error finalizing project {}: {:?}",
+                project_id, e
+            );
             HttpResponse::InternalServerError().body("Unexpected error")
         }
     }
@@ -199,7 +216,10 @@ pub async fn append_project_objects(
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "seq": seq })),
         Err(UploadError::Invalid(msg)) => HttpResponse::BadRequest().body(msg),
         Err(UploadError::Storage(msg)) => {
-            error!("Object chunk upload failed (project={} seq={}): {}", project_id, seq, msg);
+            error!(
+                "Object chunk upload failed (project={} seq={}): {}",
+                project_id, seq, msg
+            );
             HttpResponse::InternalServerError().body("Failed to upload objects")
         }
         Err(UploadError::Conflict) => HttpResponse::Conflict().finish(),
@@ -251,9 +271,7 @@ pub async fn check_contents(
     }
 }
 
-pub async fn list_index_projects(
-    store: web::Data<IndexStore>,
-) -> impl Responder {
+pub async fn list_index_projects(store: web::Data<IndexStore>) -> impl Responder {
     match store.list_projects().await {
         Ok(projects) => HttpResponse::Ok().json(projects),
         Err(StoreError::Storage(message)) => {
@@ -346,7 +364,11 @@ pub async fn get_project_tree(
 
     // Normalize all paths so that HashMap keys match what the store returns.
     let path = normalize_full_path(&raw_path);
-    let expand_normalized: Vec<String> = query.expand.iter().map(|p| normalize_full_path(p)).collect();
+    let expand_normalized: Vec<String> = query
+        .expand
+        .iter()
+        .map(|p| normalize_full_path(p))
+        .collect();
 
     let mut all_paths = vec![path.clone()];
     all_paths.extend(expand_normalized.iter().cloned());
@@ -390,7 +412,11 @@ pub async fn get_project_tree(
         .filter_map(|p| all_nodes.remove(p).map(|nodes| (p.clone(), nodes)))
         .collect();
 
-    tracing::debug!(nodes = base_nodes.len(), expanded = expanded.len(), "project_tree complete");
+    tracing::debug!(
+        nodes = base_nodes.len(),
+        expanded = expanded.len(),
+        "project_tree complete"
+    );
 
     let response = TreeResponse {
         base_path: path,
@@ -435,10 +461,7 @@ pub async fn get_project_source(
         Ok(Some(content)) => content,
         Ok(None) => return HttpResponse::NotFound().body("File not found"),
         Err(StoreError::Storage(message)) => {
-            error!(
-                "Failed to load project source {}: {}",
-                project_id, message
-            );
+            error!("Failed to load project source {}: {}", project_id, message);
             return HttpResponse::InternalServerError().body("Failed to load project source");
         }
     };

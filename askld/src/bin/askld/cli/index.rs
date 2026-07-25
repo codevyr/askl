@@ -204,7 +204,8 @@ async fn resolve_project_id(
                 }
                 n => Err(anyhow!(
                     "{} projects named {:?} — use --id to disambiguate",
-                    n, name
+                    n,
+                    name
                 )),
             }
         }
@@ -255,7 +256,11 @@ async fn stream_bytes(
         .map_err(|e| anyhow!("Request failed: {}", e))?;
 
     let status = response.status();
-    let body = response.bytes().await.map_err(|e| anyhow!("{}", e))?.to_vec();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| anyhow!("{}", e))?
+        .to_vec();
     Ok((status, body))
 }
 
@@ -291,7 +296,11 @@ async fn upload_chunk_with_retry(
             }
         };
         let status = response.status();
-        let body = response.bytes().await.map_err(|e| anyhow!("{}", e))?.to_vec();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| anyhow!("{}", e))?
+            .to_vec();
         if status.is_success() {
             return Ok(());
         }
@@ -346,7 +355,10 @@ async fn upload_chunks_windowed(
             }
             continue;
         }
-        let permit = sem.clone().acquire_owned().await
+        let permit = sem
+            .clone()
+            .acquire_owned()
+            .await
             .map_err(|e| anyhow!("Semaphore closed: {}", e))?;
         let client = client.clone();
         let endpoint = endpoint.clone();
@@ -629,7 +641,10 @@ async fn upload_project_core(
     let obj_bytes: u64 = object_chunks.iter().map(|(_, b)| b.len() as u64).sum();
     let mut content_bytes: u64 = 0;
     for path in &content_file_paths {
-        content_bytes += tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0);
+        content_bytes += tokio::fs::metadata(path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
     }
     let total_bytes = sym_bytes + obj_bytes + content_bytes;
     let progress = build_progress_bar(total_bytes, show_progress);
@@ -865,10 +880,7 @@ async fn upload_directory(
 ) -> Result<()> {
     let project_pb = format!("{}/project.pb", dir_path);
     if !tokio::fs::try_exists(&project_pb).await.unwrap_or(false) {
-        return Err(anyhow!(
-            "project.pb not found in directory: {}",
-            dir_path
-        ));
+        return Err(anyhow!("project.pb not found in directory: {}", dir_path));
     }
 
     // Discover content batch files
@@ -947,22 +959,34 @@ mod tests {
 
     #[test]
     fn normalize_base_url_preserves_https() {
-        assert_eq!(normalize_base_url("https://example.com"), "https://example.com");
+        assert_eq!(
+            normalize_base_url("https://example.com"),
+            "https://example.com"
+        );
     }
 
     #[test]
     fn normalize_base_url_preserves_http() {
-        assert_eq!(normalize_base_url("http://example.com"), "http://example.com");
+        assert_eq!(
+            normalize_base_url("http://example.com"),
+            "http://example.com"
+        );
     }
 
     #[test]
     fn normalize_base_url_strips_trailing_slash() {
-        assert_eq!(normalize_base_url("http://example.com/"), "http://example.com");
+        assert_eq!(
+            normalize_base_url("http://example.com/"),
+            "http://example.com"
+        );
     }
 
     #[test]
     fn normalize_base_url_strips_multiple_trailing_slashes() {
-        assert_eq!(normalize_base_url("https://example.com///"), "https://example.com");
+        assert_eq!(
+            normalize_base_url("https://example.com///"),
+            "https://example.com"
+        );
     }
 
     // --- human_size ---
@@ -1075,11 +1099,15 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
 
             let path = std::path::Path::new(&index);
             if path.is_dir() {
-                upload_directory(&client, &base_url, &token, &index, project, json, window, force)
-                    .await?;
+                upload_directory(
+                    &client, &base_url, &token, &index, project, json, window, force,
+                )
+                .await?;
             } else if path.is_file() {
-                upload_single_file(&client, &base_url, &token, &index, project, json, window, force)
-                    .await?;
+                upload_single_file(
+                    &client, &base_url, &token, &index, project, json, window, force,
+                )
+                .await?;
             } else {
                 return Err(anyhow!("Index path does not exist: {}", index));
             }
@@ -1126,8 +1154,7 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
             let base_url = normalize_base_url(&url);
             let client = build_client(timeout);
 
-            let (project_id, _) =
-                resolve_project_id(&client, &base_url, &token, selector).await?;
+            let (project_id, _) = resolve_project_id(&client, &base_url, &token, selector).await?;
             let endpoint = Endpoints::new(&base_url).project(project_id);
 
             let response = client
@@ -1144,8 +1171,7 @@ pub async fn run_index_command(command: IndexCommand) -> Result<()> {
                 return Err(anyhow!("Request failed ({}): {}", status, body));
             }
 
-            let details: ProjectDetails =
-                response.json().await.map_err(|e| anyhow!("{}", e))?;
+            let details: ProjectDetails = response.json().await.map_err(|e| anyhow!("{}", e))?;
             if json {
                 let output = serde_json::to_string_pretty(&details)?;
                 println!("{}", output);

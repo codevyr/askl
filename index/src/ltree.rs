@@ -32,7 +32,11 @@ impl FromSql<Ltree, Pg> for String {
     fn from_sql(bytes: <Pg as Backend>::RawValue<'_>) -> deserialize::Result<Self> {
         // Strip the leading version byte before handing off to text deserialization.
         let bytes = bytes.as_bytes();
-        let payload = if bytes.first() == Some(&1) { &bytes[1..] } else { bytes };
+        let payload = if bytes.first() == Some(&1) {
+            &bytes[1..]
+        } else {
+            bytes
+        };
         std::str::from_utf8(payload)
             .map(|s| s.to_owned())
             .map_err(|e| e.into())

@@ -4,7 +4,7 @@ use crate::parser_context::{
     SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MACRO, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
 };
 use crate::span::Span;
-use index::db_diesel::{CompoundNameMixin, CompositeFilter, LeafNameMixin};
+use index::db_diesel::{CompositeFilter, CompoundNameMixin, LeafNameMixin};
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
 use std::collections::HashMap;
@@ -26,15 +26,15 @@ mod selectors;
 pub use self::filters::{DefaultTypeFilter, DirectOnlyFilter, GenericFilter};
 pub use self::selectors::{GenericSelector, NameSelector, UnitVerb};
 
-pub(super) use self::filters::{IgnoreVerb, ProjectFilter};
-pub(crate) use self::ephemeral::{EphemeralOps, LabelResolutions};
 pub(super) use self::ephemeral::LayerVerb;
 use self::ephemeral::{EphemeralInstanceVerb, EphemeralRefVerb, EphemeralSymbolVerb};
+pub(crate) use self::ephemeral::{EphemeralOps, LabelResolutions};
+pub(super) use self::filters::{IgnoreVerb, ProjectFilter};
 pub(super) use self::loc::LocSelector;
-pub(super) use self::search::SearchSelector;
 pub(super) use self::modifiers::{
     AnyModifier, DeriveModifier, HasModifier, IsolatedScope, RefsModifier, UnnestModifier,
 };
+pub(super) use self::search::SearchSelector;
 pub(super) use self::selectors::{ForcedVerb, TypeSelector};
 
 pub(crate) fn build_generic_verb(
@@ -73,7 +73,10 @@ pub(crate) fn build_generic_verb(
     // Reject non-ephemeral verbs inside layer blocks.
     if ctx.get_eph_ops().is_some() {
         match ident_name.as_str() {
-            EphemeralSymbolVerb::NAME | EphemeralInstanceVerb::NAME | EphemeralRefVerb::NAME | "_" => {}
+            EphemeralSymbolVerb::NAME
+            | EphemeralInstanceVerb::NAME
+            | EphemeralRefVerb::NAME
+            | "_" => {}
             other => {
                 return Err(Error::new_from_span(
                     CustomError {
@@ -130,22 +133,30 @@ pub(crate) fn build_generic_verb(
         LocSelector::NAME => LocSelector::new(verb_span, &positional, &named),
         SearchSelector::NAME => SearchSelector::new(verb_span, &positional, &named),
         LayerVerb::NAME => LayerVerb::new(verb_span, &positional, &named),
-        EphemeralSymbolVerb::NAME | EphemeralInstanceVerb::NAME | EphemeralRefVerb::NAME => {
-            ctx.get_eph_ops()
-                .ok_or_else(|| anyhow::anyhow!(
-                    "'{}' can only be used inside a layer {{ }} block", ident_name
-                ))
-                .and_then(|eph_ops| {
-                    let op = match ident_name.as_str() {
-                        EphemeralSymbolVerb::NAME => EphemeralSymbolVerb::new_op(verb_span.clone(), &positional, &named)?,
-                        EphemeralInstanceVerb::NAME => EphemeralInstanceVerb::new_op(verb_span.clone(), &positional, &named)?,
-                        EphemeralRefVerb::NAME => EphemeralRefVerb::new_op(verb_span.clone(), &positional, &named)?,
-                        _ => unreachable!(),
-                    };
-                    eph_ops.lock().unwrap().push(op);
-                    Ok(UnitVerb::new(verb_span))
-                })
-        }
+        EphemeralSymbolVerb::NAME | EphemeralInstanceVerb::NAME | EphemeralRefVerb::NAME => ctx
+            .get_eph_ops()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "'{}' can only be used inside a layer {{ }} block",
+                    ident_name
+                )
+            })
+            .and_then(|eph_ops| {
+                let op = match ident_name.as_str() {
+                    EphemeralSymbolVerb::NAME => {
+                        EphemeralSymbolVerb::new_op(verb_span.clone(), &positional, &named)?
+                    }
+                    EphemeralInstanceVerb::NAME => {
+                        EphemeralInstanceVerb::new_op(verb_span.clone(), &positional, &named)?
+                    }
+                    EphemeralRefVerb::NAME => {
+                        EphemeralRefVerb::new_op(verb_span.clone(), &positional, &named)?
+                    }
+                    _ => unreachable!(),
+                };
+                eph_ops.lock().unwrap().push(op);
+                Ok(UnitVerb::new(verb_span))
+            }),
         "_" => Ok(UnitVerb::new(verb_span)),
         unknown => Err(anyhow::anyhow!("unknown verb : {}", unknown)),
     };

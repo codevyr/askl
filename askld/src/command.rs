@@ -4,12 +4,18 @@ use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::Rule;
 use crate::span::Span;
 use crate::statement::Statement;
-use crate::verb::{add_verb, ConstraintAction, DeriveMethod, Filter, Labeler, LabelResolutions, LayerPopulate, LayerSpec, NotificationContext, Selector, SelectorId, Verb, VerbTag, find_symbol_by_instance_id};
+use crate::verb::{
+    add_verb, find_symbol_by_instance_id, ConstraintAction, DeriveMethod, Filter, LabelResolutions,
+    Labeler, LayerPopulate, LayerSpec, NotificationContext, Selector, SelectorId, Verb, VerbTag,
+};
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{CompositeFilter, EphContext, EphLayerKind, InnermostOnlyMixin, Index, ScopeContext, Selection, SymbolInstanceIdMixin};
-use sha2::{Digest, Sha256};
+use index::db_diesel::{
+    CompositeFilter, EphContext, EphLayerKind, Index, InnermostOnlyMixin, ScopeContext, Selection,
+    SymbolInstanceIdMixin,
+};
 use index::symbols::SymbolInstanceId;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -107,7 +113,9 @@ impl Command {
     /// Returns the verb-only span if available (for statements with non-empty scopes),
     /// otherwise falls back to the full statement span.
     pub fn query_statement_span(&self) -> &Span {
-        self.verb_span.as_ref().unwrap_or_else(|| self.span.as_ref().unwrap())
+        self.verb_span
+            .as_ref()
+            .unwrap_or_else(|| self.span.as_ref().unwrap())
     }
 
     pub fn extend(&mut self, other: Arc<dyn Verb>) {
@@ -125,7 +133,9 @@ impl Command {
 
     /// Check if any verb suppresses the default type filter.
     pub fn has_suppress_default_type_filter(&self) -> bool {
-        self.verbs.iter().any(|v| v.suppresses_default_type_filter())
+        self.verbs
+            .iter()
+            .any(|v| v.suppresses_default_type_filter())
     }
 
     pub fn has_selectors(&self) -> bool {
@@ -166,7 +176,8 @@ impl Command {
     /// Build a composite filter from all selectors (ORed across selectors).
     /// Used by scope builders to construct ScopeContext.
     pub fn get_selector_composite_filter(&self, eph: &EphContext) -> Option<CompositeFilter> {
-        let parts: Vec<_> = self.selectors()
+        let parts: Vec<_> = self
+            .selectors()
             .filter_map(|sel| sel.build_composite_filter(self, eph))
             .collect();
         match parts.len() {
@@ -207,7 +218,9 @@ impl Command {
     /// `Selector::layer_label_refs()` returns an empty `Vec`, so the
     /// iteration cost is negligible for the common no-label case.
     pub fn layer_label_refs(&self) -> Vec<String> {
-        self.selectors().flat_map(|s| s.layer_label_refs()).collect()
+        self.selectors()
+            .flat_map(|s| s.layer_label_refs())
+            .collect()
     }
 
     pub async fn aggregate_layer_spec(
@@ -219,7 +232,10 @@ impl Command {
     ) -> Result<Option<LayerSpec>> {
         let mut specs: Vec<LayerSpec> = Vec::new();
         for selector in self.selectors() {
-            if let Some(spec) = selector.layer_spec(cfg, eph, composite_filter, resolved).await? {
+            if let Some(spec) = selector
+                .layer_spec(cfg, eph, composite_filter, resolved)
+                .await?
+            {
                 specs.push(spec);
             }
         }
@@ -311,9 +327,10 @@ impl Command {
         let mut derivation_ids = None;
         for selector in self.selectors() {
             let span = selector.span();
-            let (constrained, sel_changed, sel_warnings) = selector_state_with(&mut ctx.registry, selector, |state| {
-                state.constrain_with_warning(dependency, &role, rel_type, span, "children")
-            });
+            let (constrained, sel_changed, sel_warnings) =
+                selector_state_with(&mut ctx.registry, selector, |state| {
+                    state.constrain_with_warning(dependency, &role, rel_type, span, "children")
+                });
             changed |= sel_changed;
             warnings.extend(sel_warnings);
 
@@ -333,33 +350,45 @@ impl Command {
                     find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new(&ctx.eph)));
                 }
                 let find_filter = CompositeFilter::and(find_parts);
-                derivation_ids = Some(index.find_parent_instance_ids(
-                    &child_ids,
-                    rel_type.contains(RelationshipType::REFS),
-                    rel_type.contains(RelationshipType::HAS),
-                    &find_filter,
-                    &ctx.eph,
-                ).await.map_err(|e| {
-                    pest::error::Error::new_from_span(
-                        pest::error::ErrorVariant::CustomError {
-                            message: format!("Failed to find parent instance IDs: {}", e),
-                        },
-                        selector.span(),
-                    )
-                })?);
+                derivation_ids = Some(
+                    index
+                        .find_parent_instance_ids(
+                            &child_ids,
+                            rel_type.contains(RelationshipType::REFS),
+                            rel_type.contains(RelationshipType::HAS),
+                            &find_filter,
+                            &ctx.eph,
+                        )
+                        .await
+                        .map_err(|e| {
+                            pest::error::Error::new_from_span(
+                                pest::error::ErrorVariant::CustomError {
+                                    message: format!("Failed to find parent instance IDs: {}", e),
+                                },
+                                selector.span(),
+                            )
+                        })?,
+                );
             }
             let decl_ids = derivation_ids.as_ref().unwrap();
 
-            let mut selection = find_symbol_by_instance_id(index, &selector_filters, decl_ids, parent_scope.clone(), children_scope.clone(), &ctx.eph)
-                .await
-                .map_err(|e| {
-                    pest::error::Error::new_from_span(
-                        pest::error::ErrorVariant::CustomError {
-                            message: format!("Failed to derive selection: {}", e),
-                        },
-                        selector.span(),
-                    )
-                })?;
+            let mut selection = find_symbol_by_instance_id(
+                index,
+                &selector_filters,
+                decl_ids,
+                parent_scope.clone(),
+                children_scope.clone(),
+                &ctx.eph,
+            )
+            .await
+            .map_err(|e| {
+                pest::error::Error::new_from_span(
+                    pest::error::ErrorVariant::CustomError {
+                        message: format!("Failed to derive selection: {}", e),
+                    },
+                    selector.span(),
+                )
+            })?;
 
             selector_filters.iter().for_each(|f| {
                 f.filter(&mut selection);
@@ -411,7 +440,12 @@ impl Command {
                 }
             }
 
-            match selector.try_constrain_notification(&mut ctx.registry, &dependency, &notif_ctx, notifier)? {
+            match selector.try_constrain_notification(
+                &mut ctx.registry,
+                &dependency,
+                &notif_ctx,
+                notifier,
+            )? {
                 ConstraintAction::Skip => continue,
                 ConstraintAction::Constrained(sel_changed, sel_warnings) => {
                     changed |= sel_changed;
@@ -424,15 +458,34 @@ impl Command {
             // Derive selection: dispatch based on dependency role
             let mut selection = match notif_ctx.role {
                 DependencyRole::Child => {
-                    selector.derive_from_parent(ctx, index, &selector_filters, notifier, &notif_ctx, parent_scope.clone(), children_scope.clone())
+                    selector
+                        .derive_from_parent(
+                            ctx,
+                            index,
+                            &selector_filters,
+                            notifier,
+                            &notif_ctx,
+                            parent_scope.clone(),
+                            children_scope.clone(),
+                        )
                         .await
                 }
                 DependencyRole::Parent => {
-                    selector.derive_from_child(ctx, index, &selector_filters, notifier, &notif_ctx, parent_scope.clone(), children_scope.clone())
+                    selector
+                        .derive_from_child(
+                            ctx,
+                            index,
+                            &selector_filters,
+                            notifier,
+                            &notif_ctx,
+                            parent_scope.clone(),
+                            children_scope.clone(),
+                        )
                         .await
                 }
                 DependencyRole::User => {
-                    selector.derive_from_provider(ctx, index, &selector_filters, notifier)
+                    selector
+                        .derive_from_provider(ctx, index, &selector_filters, notifier)
                         .await
                 }
                 // PreSeed* notifications never reach this dispatch —
@@ -513,10 +566,14 @@ impl Command {
             }
         }
 
-        let to_pest = |e: anyhow::Error| pest::error::Error::new_from_span(
-            pest::error::ErrorVariant::CustomError { message: e.to_string() },
-            self.span().as_pest_span(),
-        );
+        let to_pest = |e: anyhow::Error| {
+            pest::error::Error::new_from_span(
+                pest::error::ErrorVariant::CustomError {
+                    message: e.to_string(),
+                },
+                self.span().as_pest_span(),
+            )
+        };
 
         // Phase 1: materialise this statement's single ephemeral layer (if
         // any of its verbs contribute one).  Multi-verb statements get a
@@ -528,26 +585,34 @@ impl Command {
         // their cache key and apply its `compose_objects` to scope their
         // queries) and to the Phase 2 `select_from_all_impl` calls below.
         let mut local_eph = eph.clone();
-        let filter_parts_for_layer: Vec<CompositeFilter> = self.filters()
+        let filter_parts_for_layer: Vec<CompositeFilter> = self
+            .filters()
             .filter_map(|f| f.get_composite_filter(&local_eph))
             .collect();
         let layer_composite_filter = CompositeFilter::and(filter_parts_for_layer);
 
-        let materialised_layer_id: Option<i64> = if let Some(spec) =
-            self.aggregate_layer_spec(cfg, &local_eph, &layer_composite_filter, resolved).await.map_err(to_pest)?
+        let materialised_layer_id: Option<i64> = if let Some(spec) = self
+            .aggregate_layer_spec(cfg, &local_eph, &layer_composite_filter, resolved)
+            .await
+            .map_err(to_pest)?
         {
             let kind = spec.kind;
             let populate = spec.populate;
-            let (layer_id, created, truncated) = cfg.index.with_eph_layer(
-                spec.parent_id, &spec.hash, kind,
-                move |txn| populate(txn),
-            ).await.map_err(to_pest)?;
+            let (layer_id, created, truncated) = cfg
+                .index
+                .with_eph_layer(spec.parent_id, &spec.hash, kind, move |txn| populate(txn))
+                .await
+                .map_err(to_pest)?;
 
             if !created {
                 let _ = cfg.index.touch_eph_layer(layer_id).await;
             }
 
-            layer_activations.push(LayerActivation { layer_id, created, truncated });
+            layer_activations.push(LayerActivation {
+                layer_id,
+                created,
+                truncated,
+            });
 
             // Surface truncation warnings.  Each layer-creating selector
             // contributes a warning shaped by its own span; cache hits and
@@ -555,7 +620,9 @@ impl Command {
             // `eph_layers.truncated` flag is read on both paths.
             if truncated {
                 for selector in self.selectors() {
-                    if !selector.has_layer_spec() { continue; }
+                    if !selector.has_layer_spec() {
+                        continue;
+                    }
                     if let Some(w) = selector.make_truncation_warning() {
                         warnings.push(w);
                     }
@@ -574,7 +641,8 @@ impl Command {
         // freshly-materialised layer's contents.  All other selectors go
         // through `select_from_all_impl` with the command's composite
         // filter, as before.
-        let filter_parts: Vec<CompositeFilter> = self.filters()
+        let filter_parts: Vec<CompositeFilter> = self
+            .filters()
             .filter_map(|f| f.get_composite_filter(&local_eph))
             .collect();
 
@@ -588,16 +656,31 @@ impl Command {
                 // OR across selectors dedupes the union into one selection.
                 let layer_id = materialised_layer_id
                     .expect("has_layer_spec=true implies aggregate_layer_spec returned Some");
-                let instance_ids = cfg.index.get_eph_instance_ids_for_layer(layer_id)
-                    .await.map_err(to_pest)?;
+                let instance_ids = cfg
+                    .index
+                    .get_eph_instance_ids_for_layer(layer_id)
+                    .await
+                    .map_err(to_pest)?;
                 if instance_ids.is_empty() {
                     None
                 } else {
-                    let ids: Vec<_> = instance_ids.into_iter().map(SymbolInstanceId::new).collect();
+                    let ids: Vec<_> = instance_ids
+                        .into_iter()
+                        .map(SymbolInstanceId::new)
+                        .collect();
                     let filter = CompositeFilter::leaf(SymbolInstanceIdMixin::new(&ids));
-                    Some(cfg.index.find_symbol(
-                        &filter, parent_scope.clone(), children_scope.clone(), &local_eph
-                    ).await.map_err(to_pest)?.into_inner())
+                    Some(
+                        cfg.index
+                            .find_symbol(
+                                &filter,
+                                parent_scope.clone(),
+                                children_scope.clone(),
+                                &local_eph,
+                            )
+                            .await
+                            .map_err(to_pest)?
+                            .into_inner(),
+                    )
                 }
             } else {
                 // Normal selector: query via select_from_all_impl with the
@@ -607,7 +690,13 @@ impl Command {
                 let _select_from_all =
                     tracing::debug_span!("select_from_all", name = %select_from_all_name).entered();
                 selector
-                    .select_from_all_impl(cfg, filter, parent_scope.clone(), children_scope.clone(), &local_eph)
+                    .select_from_all_impl(
+                        cfg,
+                        filter,
+                        parent_scope.clone(),
+                        children_scope.clone(),
+                        &local_eph,
+                    )
                     .await
                     .map_err(to_pest)?
             };
@@ -628,7 +717,12 @@ impl Command {
             }
             selections.push((selector.id(), current_selection));
         }
-        Ok(ComputeResult { selections, warnings, new_eph_ids, layer_activations })
+        Ok(ComputeResult {
+            selections,
+            warnings,
+            new_eph_ids,
+            layer_activations,
+        })
     }
 }
 

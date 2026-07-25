@@ -10,16 +10,16 @@ use crate::statement::Statement;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    CompoundNameMixin, CompositeFilter, EphContext, ExactNameMixin, Index,
-    LeafNameMixin, ParentReference, ScopeContext, Selection, SymbolTypeMixin,
+    CompositeFilter, CompoundNameMixin, EphContext, ExactNameMixin, Index, LeafNameMixin,
+    ParentReference, ScopeContext, Selection, SymbolTypeMixin,
 };
 use index::models_diesel::SymbolRef;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::{Arc, OnceLock};
 
-use super::name_filter;
 use super::super::{DeriveMethod, Filter, Selector, Verb, VerbTag};
+use super::name_filter;
 
 #[derive(Debug)]
 pub struct NameSelector {
@@ -62,9 +62,15 @@ impl Verb for NameSelector {
 
 #[async_trait(?Send)]
 impl Selector for NameSelector {
-    fn build_composite_filter(&self, command: &crate::command::Command, eph: &EphContext) -> Option<CompositeFilter> {
-        let mut parts: Vec<CompositeFilter> =
-            command.filters().filter_map(|f| f.get_composite_filter(eph)).collect();
+    fn build_composite_filter(
+        &self,
+        command: &crate::command::Command,
+        eph: &EphContext,
+    ) -> Option<CompositeFilter> {
+        let mut parts: Vec<CompositeFilter> = command
+            .filters()
+            .filter_map(|f| f.get_composite_filter(eph))
+            .collect();
         parts.push(name_filter(&self.name));
         Some(CompositeFilter::and(parts))
     }
@@ -78,7 +84,11 @@ impl Selector for NameSelector {
         eph: &EphContext,
     ) -> Result<Option<Selection>> {
         let combined = CompositeFilter::and(vec![filter, name_filter(&self.name)]);
-        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope, eph).await?.into_inner();
+        let selection = cfg
+            .index
+            .find_symbol(&combined, parent_scope, children_scope, eph)
+            .await?
+            .into_inner();
         Ok(Some(selection))
     }
 }
@@ -126,9 +136,15 @@ impl Verb for ForcedVerb {
 
 #[async_trait(?Send)]
 impl Selector for ForcedVerb {
-    fn build_composite_filter(&self, command: &crate::command::Command, eph: &EphContext) -> Option<CompositeFilter> {
-        let mut parts: Vec<CompositeFilter> =
-            command.filters().filter_map(|f| f.get_composite_filter(eph)).collect();
+    fn build_composite_filter(
+        &self,
+        command: &crate::command::Command,
+        eph: &EphContext,
+    ) -> Option<CompositeFilter> {
+        let mut parts: Vec<CompositeFilter> = command
+            .filters()
+            .filter_map(|f| f.get_composite_filter(eph))
+            .collect();
         parts.push(name_filter(&self.name));
         Some(CompositeFilter::and(parts))
     }
@@ -150,7 +166,11 @@ impl Selector for ForcedVerb {
         eph: &EphContext,
     ) -> Result<Option<Selection>> {
         let combined = CompositeFilter::and(vec![filter, name_filter(&self.name)]);
-        let selection = cfg.index.find_symbol(&combined, parent_scope, children_scope, eph).await?.into_inner();
+        let selection = cfg
+            .index
+            .find_symbol(&combined, parent_scope, children_scope, eph)
+            .await?
+            .into_inner();
 
         // Cache the forced selection so derivations can fabricate the
         // correct parent <-> child relationship later on.
@@ -370,11 +390,7 @@ impl TypeSelector {
     }
 
     /// Returns the appropriate name filter for the given name and symbol type.
-    fn name_filter_leaf(
-        name: &str,
-        symbol_type_id: i32,
-        leaf_anchored: bool,
-    ) -> CompositeFilter {
+    fn name_filter_leaf(name: &str, symbol_type_id: i32, leaf_anchored: bool) -> CompositeFilter {
         match symbol_type_id {
             SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE if name.starts_with('/') => {
                 CompositeFilter::leaf(ExactNameMixin::new(name))
@@ -382,7 +398,11 @@ impl TypeSelector {
             SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE => {
                 let is_compound = name.contains('/') || name.contains(':');
                 if is_compound {
-                    CompositeFilter::leaf(CompoundNameMixin::with_options(name, leaf_anchored, false))
+                    CompositeFilter::leaf(CompoundNameMixin::with_options(
+                        name,
+                        leaf_anchored,
+                        false,
+                    ))
                 } else {
                     CompositeFilter::leaf(LeafNameMixin::new(name, false))
                 }
@@ -404,8 +424,9 @@ impl TypeSelector {
 
     /// Build composite filter parts for this type selector.
     fn build_filter_parts(&self) -> Vec<CompositeFilter> {
-        let mut parts: Vec<CompositeFilter> =
-            vec![CompositeFilter::leaf(SymbolTypeMixin::new(self.symbol_type_id))];
+        let mut parts: Vec<CompositeFilter> = vec![CompositeFilter::leaf(SymbolTypeMixin::new(
+            self.symbol_type_id,
+        ))];
         if let Some(ref name) = self.name_pattern {
             parts.push(Self::name_filter_leaf(
                 name,
@@ -530,7 +551,11 @@ impl Filter for TypeSelector {
                 self.symbol_type_id,
                 SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE
             );
-            Some(CompositeFilter::leaf(CompoundNameMixin::with_options(name, false, dot_is_separator)))
+            Some(CompositeFilter::leaf(CompoundNameMixin::with_options(
+                name,
+                false,
+                dot_is_separator,
+            )))
         } else {
             Some(CompositeFilter::and(self.build_filter_parts()))
         }
@@ -539,12 +564,22 @@ impl Filter for TypeSelector {
 
 #[async_trait(?Send)]
 impl Selector for TypeSelector {
-    fn build_composite_filter(&self, command: &crate::command::Command, eph: &EphContext) -> Option<CompositeFilter> {
+    fn build_composite_filter(
+        &self,
+        command: &crate::command::Command,
+        eph: &EphContext,
+    ) -> Option<CompositeFilter> {
         // TypeSelector implements as_filter(), so its get_composite_filter()
         // is already included via command.filters().
-        let parts: Vec<CompositeFilter> =
-            command.filters().filter_map(|f| f.get_composite_filter(eph)).collect();
-        if parts.is_empty() { None } else { Some(CompositeFilter::and(parts)) }
+        let parts: Vec<CompositeFilter> = command
+            .filters()
+            .filter_map(|f| f.get_composite_filter(eph))
+            .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(CompositeFilter::and(parts))
+        }
     }
 
     async fn select_from_all_impl(
@@ -561,7 +596,11 @@ impl Selector for TypeSelector {
 
         // `filter` already contains this TypeSelector's get_composite_filter()
         // (collected at compute_selected). Just use it directly.
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, eph).await?.into_inner();
+        let selection = cfg
+            .index
+            .find_symbol(&filter, parent_scope, children_scope, eph)
+            .await?
+            .into_inner();
         Ok(Some(selection))
     }
 }
@@ -631,10 +670,20 @@ impl Verb for GenericSelector {
 
 #[async_trait(?Send)]
 impl Selector for GenericSelector {
-    fn build_composite_filter(&self, command: &crate::command::Command, eph: &EphContext) -> Option<CompositeFilter> {
-        let parts: Vec<CompositeFilter> =
-            command.filters().filter_map(|f| f.get_composite_filter(eph)).collect();
-        if parts.is_empty() { None } else { Some(CompositeFilter::and(parts)) }
+    fn build_composite_filter(
+        &self,
+        command: &crate::command::Command,
+        eph: &EphContext,
+    ) -> Option<CompositeFilter> {
+        let parts: Vec<CompositeFilter> = command
+            .filters()
+            .filter_map(|f| f.get_composite_filter(eph))
+            .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(CompositeFilter::and(parts))
+        }
     }
 
     async fn select_from_all_impl(
@@ -645,7 +694,11 @@ impl Selector for GenericSelector {
         children_scope: ScopeContext,
         eph: &EphContext,
     ) -> Result<Option<Selection>> {
-        let selection = cfg.index.find_symbol(&filter, parent_scope, children_scope, eph).await?.into_inner();
+        let selection = cfg
+            .index
+            .find_symbol(&filter, parent_scope, children_scope, eph)
+            .await?
+            .into_inner();
         Ok(Some(selection))
     }
 }

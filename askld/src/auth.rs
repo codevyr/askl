@@ -18,7 +18,6 @@ use chrono::{DateTime, Utc};
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel_async::pooled_connection::{bb8, bb8::Pool, AsyncDieselConnectionManager};
-use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use futures::future::LocalBoxFuture;
@@ -191,9 +190,7 @@ impl AuthStore {
         Ok(Self { pool })
     }
 
-    async fn get_conn(
-        &self,
-    ) -> Result<bb8::PooledConnection<'_, AsyncPgConnection>, AuthError> {
+    async fn get_conn(&self) -> Result<bb8::PooledConnection<'_, AsyncPgConnection>, AuthError> {
         self.pool
             .get()
             .await
@@ -220,47 +217,44 @@ impl AuthStore {
 
         let mut conn = self.get_conn().await?;
 
-        conn.transaction::<_, diesel::result::Error, _>(|conn| {
-            async move {
-                let existing_user_id = users::table
-                    .filter(users::email.eq(&email))
-                    .select(users::id)
-                    .first::<Uuid>(conn)
-                    .await
-                    .optional()?;
+        conn.transaction::<_, diesel::result::Error, _>(async move |conn| {
+            let existing_user_id = users::table
+                .filter(users::email.eq(&email))
+                .select(users::id)
+                .first::<Uuid>(conn)
+                .await
+                .optional()?;
 
-                let user_id = if let Some(id) = existing_user_id {
-                    id
-                } else {
-                    let new_user = NewUser {
-                        id: Uuid::new_v4(),
-                        email: email.clone(),
-                        created_at: now,
-                    };
-                    diesel::insert_into(users::table)
-                        .values(&new_user)
-                        .execute(conn)
-                        .await?;
-                    new_user.id
-                };
-
-                let new_key = NewApiKey {
-                    id: key_id,
-                    user_id,
-                    hashed_secret: hashed_secret.clone(),
-                    name,
+            let user_id = if let Some(id) = existing_user_id {
+                id
+            } else {
+                let new_user = NewUser {
+                    id: Uuid::new_v4(),
+                    email: email.clone(),
                     created_at: now,
-                    last_used_at: None,
-                    revoked_at: None,
-                    expires_at,
                 };
-                diesel::insert_into(api_keys::table)
-                    .values(new_key)
+                diesel::insert_into(users::table)
+                    .values(&new_user)
                     .execute(conn)
                     .await?;
-                Ok(())
-            }
-            .scope_boxed()
+                new_user.id
+            };
+
+            let new_key = NewApiKey {
+                id: key_id,
+                user_id,
+                hashed_secret: hashed_secret.clone(),
+                name,
+                created_at: now,
+                last_used_at: None,
+                revoked_at: None,
+                expires_at,
+            };
+            diesel::insert_into(api_keys::table)
+                .values(new_key)
+                .execute(conn)
+                .await?;
+            Ok(())
         })
         .await
         .map_err(|err| AuthError::Storage(err.to_string()))?;
@@ -290,9 +284,7 @@ impl AuthStore {
                     String,
                     Option<DateTime<Utc>>,
                     Option<DateTime<Utc>>,
-                )>(
-                    &mut conn,
-                )
+                )>(&mut conn)
                 .await
                 .optional()
                 .map_err(|err| AuthError::Storage(err.to_string()))?
@@ -407,9 +399,9 @@ impl FromRequest for AuthIdentity {
             }
             match store.authenticate_token(&token).await {
                 Ok(identity) => Ok(identity),
-                Err(AuthError::InvalidToken | AuthError::RevokedToken | AuthError::ExpiredToken) => {
-                    Err(ErrorUnauthorized("Unauthorized"))
-                }
+                Err(
+                    AuthError::InvalidToken | AuthError::RevokedToken | AuthError::ExpiredToken,
+                ) => Err(ErrorUnauthorized("Unauthorized")),
                 Err(AuthError::Storage(_)) => Err(ErrorInternalServerError("Internal error")),
             }
         })
@@ -523,9 +515,7 @@ pub fn redact_auth_headers(req: &mut ServiceRequest) {
 
 fn parse_token(token: &str) -> Result<(Uuid, String), AuthError> {
     let token = token.trim();
-    let token = token
-        .strip_prefix("askl_")
-        .ok_or(AuthError::InvalidToken)?;
+    let token = token.strip_prefix("askl_").ok_or(AuthError::InvalidToken)?;
     let mut parts = token.splitn(2, '.');
     let id_part = parts.next().ok_or(AuthError::InvalidToken)?;
     let secret = parts.next().ok_or(AuthError::InvalidToken)?;

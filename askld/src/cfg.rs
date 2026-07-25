@@ -2,7 +2,7 @@ use std::{collections::HashSet, iter::Iterator};
 
 use index::db_diesel::{Index, SelectionNode};
 use index::symbols::Occurrence;
-use index::symbols::{SymbolInstanceId, SymbolId};
+use index::symbols::{SymbolId, SymbolInstanceId};
 
 pub struct ControlFlowGraph {
     pub index: Index,
