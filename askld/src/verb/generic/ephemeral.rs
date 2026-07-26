@@ -71,6 +71,23 @@ pub(crate) trait EphemeralOp: std::fmt::Debug + Send + Sync {
     }
 }
 
+/// Whether any row in the batch references an eph (negative) id.  This is
+/// the base/supplement classifier for `layer { … }` blocks: it inspects the
+/// rows an op actually emits, so classification is by resolved *value* (a
+/// literal negative id counts the same as a label that resolved to eph
+/// rows) and lives in exactly one place — an op cannot opt out by omission.
+/// When a new id-bearing field is added to a row type, extend this check.
+fn batch_references_eph(batch: &LayerBatch) -> bool {
+    batch.instances.iter().any(|r| r.symbol_id < 0) || batch.refs.iter().any(|r| r.to_symbol < 0)
+}
+
+/// Append `src`'s rows onto `dst`, preserving order within each row kind.
+fn merge_batch(dst: &mut LayerBatch, src: LayerBatch) {
+    dst.symbols.extend(src.symbols);
+    dst.instances.extend(src.instances);
+    dst.refs.extend(src.refs);
+}
+
 /// Shared, mutable collection of ephemeral operations for a `layer { … }`
 /// block.
 ///
@@ -502,50 +519,106 @@ impl Selector for LayerVerb {
         _composite_filter: &index::db_diesel::CompositeFilter,
         resolved: &LabelResolutions,
     ) -> Result<Option<crate::verb::LayerSpec>> {
-        // Compute hash and collect batch synchronously, then release the lock
-        // before any .await points.  The `Mutex` is uncontended at this point
-        // — see `EphemeralOps` rustdoc for why the lock exists at all.
-        let (hash, batch) = {
+        // Classify ops, compute hashes, and collect both batches
+        // synchronously, then release the lock before any .await points.
+        // The `Mutex` is uncontended at this point — see `EphemeralOps`
+        // rustdoc for why the lock exists at all.
+        let (base_hash, supplement_extra, base_batch, supp_batch) = {
             let ops = self.ops.lock().unwrap();
             if ops.is_empty() {
                 bail!("layer block must contain at least one ephemeral verb");
             }
 
-            let parent_id = eph.last();
+            // Classify each op by the ROWS it will actually emit, not by a
+            // per-op trait override: collect its rows into a probe batch and
+            // check every id-bearing field for eph (negative) ids.  Ops
+            // whose rows reference only persistent ids (or nothing) form
+            // the base half — keyed by their resolved content, so the base
+            // is shared across any upstream chains under which the labels
+            // resolve identically.  Ops emitting rows that reference eph
+            // ids form the supplement half.  Deriving this from the rows in
+            // one place means a future op (or a new id-bearing row field,
+            // once added to `batch_references_eph`) cannot be silently
+            // mis-classified into the chain-independent shared base by a
+            // forgotten override.  (`EphSymbolRow` carries no id
+            // references — `symbol_scope` is a Local/Global discriminator,
+            // not a symbol id.)
+            let mut base_ops = Vec::new();
+            let mut supp_ops = Vec::new();
+            let mut base_batch = LayerBatch::new();
+            let mut supp_batch = LayerBatch::new();
+            for op in ops.iter() {
+                let mut probe = LayerBatch::new();
+                op.collect_rows(&mut probe, resolved);
+                if batch_references_eph(&probe) {
+                    supp_ops.push(op);
+                    merge_batch(&mut supp_batch, probe);
+                } else {
+                    base_ops.push(op);
+                    merge_batch(&mut base_batch, probe);
+                }
+            }
+
+            if !supp_ops.is_empty() && eph.last().is_none() {
+                // Only reachable via a literal negative id: labels cannot
+                // resolve to eph rows without chain layers to supply them.
+                // Without a chain the executor creates no supplement, so
+                // these rows would be silently dropped — error instead.
+                bail!(
+                    "layer block references ephemeral (negative) ids but no \
+                     ephemeral context exists before this statement"
+                );
+            }
+
             let mut h = Sha256::new();
             h.update(EphLayerKind::Layer.as_str().as_bytes());
-            h.update(parent_id.unwrap_or(0i64).to_le_bytes());
-            for op in ops.iter() {
-                // Op insertion order is significant for the cache key by design;
-                // two layers with the same ops in different order will not share
-                // cache state.  Resolved labels (if any) feed into the hash via
-                // the op itself, so the cache key reflects the actual rows.
+            for op in &base_ops {
+                // Op insertion order is significant for the cache key by
+                // design (within each half); two layers with the same ops in
+                // different order will not share cache state.  Resolved
+                // labels (if any) feed into the hash via the op itself, so
+                // the cache key reflects the actual rows.
                 op.hash_params(&mut h, resolved);
             }
-            let hash_vec = h.finalize().to_vec();
+            let base_hash: [u8; 32] = h.finalize().into();
 
-            let mut batch = LayerBatch::new();
-            for op in ops.iter() {
-                op.collect_rows(&mut batch, resolved);
-            }
-            let mut hash = [0u8; 32];
-            hash.copy_from_slice(&hash_vec);
-            (hash, batch)
+            // The supplement key must fold the supplement ops' resolved
+            // content: (parent, base_hash) alone cannot distinguish two
+            // blocks that share base ops but differ in eph-referencing ops.
+            let supplement_extra: Vec<u8> = if supp_ops.is_empty() {
+                Vec::new()
+            } else {
+                let mut he = Sha256::new();
+                he.update(b"layer-supplement-ops-v1");
+                for op in &supp_ops {
+                    op.hash_params(&mut he, resolved);
+                }
+                he.finalize().to_vec()
+            };
+
+            (base_hash, supplement_extra, base_batch, supp_batch)
         }; // lock released here
 
-        let populate: crate::verb::LayerPopulate = Box::new(move |txn| {
+        let base_populate: crate::verb::LayerPopulate = Box::new(move |txn| {
             Box::pin(async move {
-                txn.insert_batch(&batch).await?;
+                txn.insert_batch(&base_batch).await?;
                 // `layer { … }` blocks never truncate; truncated = false.
+                Ok(false)
+            })
+        });
+        let supplement_populate: crate::verb::SupplementPopulate = Box::new(move |txn, _base| {
+            Box::pin(async move {
+                txn.insert_batch(&supp_batch).await?;
                 Ok(false)
             })
         });
 
         Ok(Some(crate::verb::LayerSpec {
-            hash,
-            kind: EphLayerKind::Layer,
-            parent_id: eph.last(),
-            populate,
+            base_hash,
+            base_kind: EphLayerKind::Layer,
+            base_populate,
+            supplement_populate,
+            supplement_extra,
         }))
     }
 }

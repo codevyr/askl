@@ -8,8 +8,8 @@ use crate::statement::Statement;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    CompositeFilter, DirectOnlyMixin, EphContext, EphLayerKind, EphScopedFut, EphTransaction,
-    Index, InnermostOnlyMixin, OuterParentFilterMixin, ScopeContext, Selection,
+    BaseLayerRef, CompositeFilter, DirectOnlyMixin, EphContext, EphLayerKind, EphScopedFut,
+    EphTransaction, Index, InnermostOnlyMixin, OuterParentFilterMixin, ScopeContext, Selection,
     SymbolInstanceIdMixin,
 };
 
@@ -29,20 +29,80 @@ use index::db_diesel::{
 pub type LayerPopulate =
     Box<dyn for<'b> FnOnce(&'b mut EphTransaction<'_>) -> EphScopedFut<'b, bool>>;
 
-/// Specification for an ephemeral layer that a [`Selector`] wants the
+/// Supplement-populate callback used by [`LayerSpec`].  Same contract as
+/// [`LayerPopulate`], plus the identity of the already-committed base layer
+/// so future mask/tombstone rows can reference what they mask.  The returned
+/// `bool` is the supplement's own `truncated` flag; verbs whose result limit
+/// fences the persistent scan return `false` here.
+///
+/// Mask-milestone caveat: under a multi-selector composite the executor
+/// merges all parts into ONE partitioned entry, so every part's supplement
+/// closure receives the COMPOSITE base's `BaseLayerRef` — not the ref of the
+/// base the part's own verb would have produced standalone.  Closures that
+/// start reading `BaseLayerRef` must account for this.
+pub type SupplementPopulate =
+    Box<dyn for<'b> FnOnce(&'b mut EphTransaction<'_>, BaseLayerRef) -> EphScopedFut<'b, bool>>;
+
+/// Specification for an ephemeral cache entry that a [`Selector`] wants the
 /// statement-execution layer to materialize before its query runs.
 ///
-/// Layer-creating selectors (e.g. `layer { … }`, `loc(…)`) implement
-/// [`Selector::layer_spec`] returning `Some(LayerSpec)`.  The statement layer
-/// calls [`Index::with_eph_layer`], passes the resulting `layer_id` into
-/// `ctx.eph_ids`, and then builds the `Selection` from the layer's instances.
-/// The selector itself does not own the transaction, the layer id, or any
-/// mutable interior state.
+/// Every cached verb produces a base layer keyed only on its inputs and,
+/// under a non-empty eph chain, a supplement layer holding the eph-derived
+/// delta (see [`Index::with_partitioned_layers`]).  Layer-creating selectors
+/// (`search`, `loc`, `layer { … }`) implement [`Selector::layer_spec`]
+/// returning `Some(LayerSpec)`.  The statement layer materializes the
+/// layer(s), passes the resulting id(s) into `ctx.eph_ids`, and then builds
+/// the `Selection` from the layers' instances.  The selector itself does not
+/// own the transaction, the layer ids, or any mutable interior state.
+///
+/// Carries no `parent_id`: chain topology is the executor's decision (it
+/// reads the live eph context), which removes the parent-disagreement
+/// failure mode entirely.
 pub struct LayerSpec {
-    pub hash: [u8; 32],
-    pub kind: EphLayerKind,
-    pub parent_id: Option<i64>,
-    pub populate: LayerPopulate,
+    /// Keyed ONLY on verb inputs + composite-filter hash — never on the
+    /// eph chain.  That independence is what lets the base survive any
+    /// upstream ephemeral change.
+    pub base_hash: [u8; 32],
+    pub base_kind: EphLayerKind,
+    /// Populates from persistent data only (the `eph_layer IS NULL` world),
+    /// unmasked — mask composition happens at read time, never here.
+    pub base_populate: LayerPopulate,
+    /// The eph-derived delta.  Provided unconditionally (uniform shape);
+    /// the executor runs it iff an upstream chain exists.
+    pub supplement_populate: SupplementPopulate,
+    /// Hash fragment covering whatever the supplement populate reads BEYOND
+    /// the chain and the base (folded into the supplement key by
+    /// `index::db_diesel::supplement_hash`).  Empty when the delta is fully
+    /// determined by (parent, base) — search, loc; the resolved
+    /// eph-referencing ops for `layer { … }` blocks.
+    pub supplement_extra: Vec<u8>,
+}
+
+impl LayerSpec {
+    /// Spec for a verb whose populate reads persistent data only (search,
+    /// loc): the eph-derived delta is structurally empty and fully
+    /// determined by (parent chain, base), so the supplement materialises
+    /// zero rows and nothing extra enters the supplement key.  The empty
+    /// supplement row still gets created under a non-empty chain so
+    /// downstream chaining keys stay deterministic.
+    ///
+    /// Invariant encoded here on purpose: `supplement_extra` must cover
+    /// everything the supplement populate reads beyond (parent, base).  A
+    /// verb that later grows a real supplement populate must stop using
+    /// this constructor and supply both fields together.
+    pub fn persistent_only(
+        base_hash: [u8; 32],
+        base_kind: EphLayerKind,
+        base_populate: LayerPopulate,
+    ) -> Self {
+        Self {
+            base_hash,
+            base_kind,
+            base_populate,
+            supplement_populate: Box::new(move |_txn, _base| Box::pin(async move { Ok(false) })),
+            supplement_extra: Vec::new(),
+        }
+    }
 }
 use index::symbols::SymbolInstanceId;
 use log::debug;

@@ -1,6 +1,6 @@
 use diesel::prelude::*;
 use diesel::OptionalExtension;
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 
 use std::collections::HashMap;
 
@@ -120,14 +120,23 @@ impl IndexStore {
     /// Proceeds in dependency order to avoid per-row ON DELETE CASCADE overhead:
     ///
     /// 1. Mark `Deleting` — reserves the name; a crash at any later step leaves a zombie
-    ///    that the next re-upload of the same name will clean up automatically.
-    /// 2. Delete `symbol_refs` and `symbol_instances` using a range scan on the global
-    ///    symbol ID: every symbol for project P has `id = P << 32 | local_id`, so all of
-    ///    a project's symbols occupy `[P << 32, (P+1) << 32)` in the B-tree index.
-    ///    This avoids a subquery join through `symbols` entirely.
-    /// 3. Delete `symbols` — CASCADE to the now-empty instances/refs is a no-op.
-    /// 4. Delete `objects` — CASCADE handles `object_contents` via its PK (fast 1:1).
-    /// 5. Delete the `projects` row.
+    ///    that the next re-upload of the same name will clean up automatically.  The
+    ///    mark deliberately auto-commits OUTSIDE the deletion transaction so the
+    ///    reservation survives a rollback.
+    /// 2. In ONE transaction (so partial failures roll back to the zombie state and
+    ///    the eph-cache purge commits atomically with the mutation):
+    ///    a. Delete `symbol_refs` and `symbol_instances` using a range scan on the global
+    ///       symbol ID: every symbol for project P has `id = P << 32 | local_id`, so all of
+    ///       a project's symbols occupy `[P << 32, (P+1) << 32)` in the B-tree index.
+    ///       This avoids a subquery join through `symbols` entirely.
+    ///    b. Delete `symbols` — CASCADE to the now-empty instances/refs is a no-op.
+    ///    c. Delete `objects` — CASCADE handles `object_contents` via its PK (fast 1:1).
+    ///    d. Delete the `projects` row.
+    ///    e. `purge_eph_cache` — this is a persistent-index mutation, so the invariant
+    ///       documented on `finalize_project` applies: without the purge, cached
+    ///       `eph_layers` rows survive with `populated = true` while their data rows
+    ///       cascade away, and input-only-keyed lookups (`loc`, `search`, `layer {…}`)
+    ///       silently serve hollow results for the deleted project.
     pub async fn delete_project(&self, project_id: i32) -> Result<bool, StoreError> {
         let mut conn = self.get_conn().await?;
 
@@ -149,54 +158,63 @@ impl IndexStore {
         }
         tracing::info!(project_id, "delete_project: marked Deleting");
 
-        // Global symbol IDs encode the project: symbol = project_id << 32 | local_id.
-        // All symbols for a project form a contiguous range in the B-tree — one range
-        // scan on symbol_refs_to_symbol_idx/symbol_instances_symbol_idx, no subquery.
-        let lower = super::upload::project_symbol_id_base(project_id);
-        let upper = super::upload::project_symbol_id_base(project_id + 1);
-        let n = diesel::delete(
-            index_schema::symbol_refs::table
-                .filter(index_schema::symbol_refs::to_symbol.ge(lower))
-                .filter(index_schema::symbol_refs::to_symbol.lt(upper)),
-        )
-        .execute(&mut conn)
-        .await?;
-        tracing::info!(project_id, rows = n, "delete_project: symbol_refs done");
+        conn.transaction::<_, StoreError, _>(async move |conn| {
+            // Global symbol IDs encode the project: symbol = project_id << 32 | local_id.
+            // All symbols for a project form a contiguous range in the B-tree — one range
+            // scan on symbol_refs_to_symbol_idx/symbol_instances_symbol_idx, no subquery.
+            let lower = super::upload::project_symbol_id_base(project_id);
+            let upper = super::upload::project_symbol_id_base(project_id + 1);
+            let n = diesel::delete(
+                index_schema::symbol_refs::table
+                    .filter(index_schema::symbol_refs::to_symbol.ge(lower))
+                    .filter(index_schema::symbol_refs::to_symbol.lt(upper)),
+            )
+            .execute(&mut *conn)
+            .await?;
+            tracing::info!(project_id, rows = n, "delete_project: symbol_refs done");
 
-        let n = diesel::delete(
-            index_schema::symbol_instances::table
-                .filter(index_schema::symbol_instances::symbol.ge(lower))
-                .filter(index_schema::symbol_instances::symbol.lt(upper)),
-        )
-        .execute(&mut conn)
-        .await?;
-        tracing::info!(
-            project_id,
-            rows = n,
-            "delete_project: symbol_instances done"
-        );
+            let n = diesel::delete(
+                index_schema::symbol_instances::table
+                    .filter(index_schema::symbol_instances::symbol.ge(lower))
+                    .filter(index_schema::symbol_instances::symbol.lt(upper)),
+            )
+            .execute(&mut *conn)
+            .await?;
+            tracing::info!(
+                project_id,
+                rows = n,
+                "delete_project: symbol_instances done"
+            );
 
-        let n = diesel::delete(
-            index_schema::symbols::table.filter(index_schema::symbols::project_id.eq(project_id)),
-        )
-        .execute(&mut conn)
-        .await?;
-        tracing::info!(project_id, rows = n, "delete_project: symbols done");
+            let n = diesel::delete(
+                index_schema::symbols::table
+                    .filter(index_schema::symbols::project_id.eq(project_id)),
+            )
+            .execute(&mut *conn)
+            .await?;
+            tracing::info!(project_id, rows = n, "delete_project: symbols done");
 
-        let n = diesel::delete(
-            index_schema::objects::table.filter(index_schema::objects::project_id.eq(project_id)),
-        )
-        .execute(&mut conn)
-        .await?;
-        tracing::info!(project_id, rows = n, "delete_project: objects done");
+            let n = diesel::delete(
+                index_schema::objects::table
+                    .filter(index_schema::objects::project_id.eq(project_id)),
+            )
+            .execute(&mut *conn)
+            .await?;
+            tracing::info!(project_id, rows = n, "delete_project: objects done");
 
-        // Deleting the project row cascades any remaining ON DELETE CASCADE children.
-        diesel::delete(
-            index_schema::projects::table.filter(index_schema::projects::id.eq(project_id)),
-        )
-        .execute(&mut conn)
+            // Deleting the project row cascades any remaining ON DELETE CASCADE children.
+            diesel::delete(
+                index_schema::projects::table.filter(index_schema::projects::id.eq(project_id)),
+            )
+            .execute(&mut *conn)
+            .await?;
+
+            let purged = index::db_diesel::purge_eph_cache(conn).await?;
+            tracing::info!(project_id, purged, "delete_project: complete");
+
+            Ok(())
+        })
         .await?;
-        tracing::info!(project_id, "delete_project: complete");
 
         Ok(true)
     }

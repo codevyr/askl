@@ -5,14 +5,12 @@ use askld::cfg::ControlFlowGraph;
 use askld::index_store::IndexStore;
 use diesel::pg::PgConnection;
 use diesel_async::pooled_connection::bb8::Pool as AsyncPool;
-use diesel_async::pooled_connection::{
-    AsyncDieselConnectionManager, ManagerConfig, RecyclingMethod,
-};
+use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_async::{AsyncConnection, AsyncPgConnection};
 use diesel_migrations::MigrationHarness;
 use futures::FutureExt;
 
-use index::db_diesel::{Index, EPH_POOL_RECYCLING_QUERY};
+use index::db_diesel::Index;
 use log::{info, warn};
 use tracing_chrome::ChromeLayerBuilder;
 use tracing_subscriber::layer::SubscriberExt;
@@ -97,30 +95,40 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
     }
 
     // Async pool for IndexStore and AuthStore (no statement_timeout).
-    // Recycling query is load-bearing for ephemeral-layer cancellation
-    // safety — see EPH_POOL_RECYCLING_QUERY rustdoc.
-    let mut auth_pool_config = ManagerConfig::<AsyncPgConnection>::default();
-    auth_pool_config.recycling_method =
-        RecyclingMethod::CustomQuery(EPH_POOL_RECYCLING_QUERY.into());
-    let async_config =
-        AsyncDieselConnectionManager::new_with_config(&serve_args.database_url, auth_pool_config);
+    // The shared config carries the recycling ROLLBACK (load-bearing for
+    // ephemeral-layer cancellation safety) and the idle-in-transaction
+    // session timeout — see eph_pool_manager_config rustdoc.
+    let async_config = AsyncDieselConnectionManager::new_with_config(
+        &serve_args.database_url,
+        index::db_diesel::eph_pool_manager_config(),
+    );
     let async_pool: AsyncPool<AsyncPgConnection> = AsyncPool::builder()
         .test_on_check_out(false)
         .build(async_config)
         .await
         .expect("Failed to build async database pool");
 
-    // Async pool for Index queries (with statement_timeout)
+    // Async pool for Index queries (with statement_timeout).  Starts from
+    // the shared eph config but overrides custom_setup to ALSO set the
+    // per-query statement_timeout; the idle-in-transaction timeout must be
+    // re-applied here because a replaced custom_setup does not compose.
     let query_timeout_secs = serve_args.query_timeout;
     let query_timeout_ms = query_timeout_secs * 1000;
-    let mut index_pool_config = ManagerConfig::<AsyncPgConnection>::default();
-    index_pool_config.recycling_method =
-        RecyclingMethod::CustomQuery(EPH_POOL_RECYCLING_QUERY.into());
+    let mut index_pool_config = index::db_diesel::eph_pool_manager_config();
     index_pool_config.custom_setup = Box::new(move |url| {
         async move {
             let mut conn = AsyncPgConnection::establish(url).await?;
             diesel_async::RunQueryDsl::<AsyncPgConnection>::execute(
                 diesel::sql_query(&format!("SET statement_timeout = {}", query_timeout_ms)),
+                &mut conn,
+            )
+            .await
+            .map_err(diesel::ConnectionError::CouldntSetupConfiguration)?;
+            diesel_async::RunQueryDsl::<AsyncPgConnection>::execute(
+                diesel::sql_query(&format!(
+                    "SET idle_in_transaction_session_timeout = '{}'",
+                    index::db_diesel::EPH_POOL_IDLE_IN_TXN_TIMEOUT
+                )),
                 &mut conn,
             )
             .await
