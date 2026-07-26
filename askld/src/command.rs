@@ -6,7 +6,8 @@ use crate::span::Span;
 use crate::statement::Statement;
 use crate::verb::{
     add_verb, find_symbol_by_instance_id, ConstraintAction, DeriveMethod, Filter, LabelResolutions,
-    Labeler, LayerPopulate, LayerSpec, NotificationContext, Selector, SelectorId, Verb, VerbTag,
+    Labeler, LayerPopulate, LayerSpec, NotificationContext, Selector, SelectorId,
+    SupplementPopulate, Verb, VerbTag,
 };
 use anyhow::Result;
 use core::fmt::Debug;
@@ -20,6 +21,17 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// Which half of a statement's cache entry a [`LayerActivation`] refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerRole {
+    /// Parentless base layer of a partitioned entry — keyed only on verb
+    /// inputs, reused under any upstream eph context.
+    Base,
+    /// Eph-chained delta layer of a partitioned entry; pushed last, so it
+    /// is what downstream verbs chain on.
+    Supplement,
+}
+
 /// One ephemeral-layer touch by a statement: either the layer was freshly
 /// created and populated in this call (`created = true`), or the statement
 /// hit an existing cache row (`created = false`).  `truncated` mirrors the
@@ -27,12 +39,14 @@ use std::sync::Arc;
 ///
 /// Recorded on [`ExecutionContext::layer_activations`] so tests can assert
 /// cache behaviour (populate vs reuse) directly instead of inferring it
-/// from eph instance IDs.
+/// from eph instance IDs.  A partitioned statement records two activations
+/// (base first, then supplement).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LayerActivation {
     pub layer_id: i64,
     pub created: bool,
     pub truncated: bool,
+    pub role: LayerRole,
 }
 
 /// Result of computing initial selections for a statement's selectors.
@@ -242,69 +256,74 @@ impl Command {
         match specs.len() {
             0 => Ok(None),
             1 => Ok(Some(specs.into_iter().next().unwrap())),
-            _ => {
-                let parent_id = specs[0].parent_id;
-                // Invariant: every spec was built from the same `eph`
-                // snapshot inside `compute_selected`, so they all derive
-                // `parent_id = eph.last()`.  A mismatch means a selector
-                // is producing a `LayerSpec` from a different `eph` than
-                // the others — silent fall-through to `specs[0]` would
-                // misattribute the composite parent and poison the cache
-                // for every future query that hashes to the same key.
-                // Hard-error: this is data-corruption territory, worth a
-                // visible failure even in release builds.
-                if !specs.iter().all(|s| s.parent_id == parent_id) {
-                    anyhow::bail!(
-                        "internal error: layer-creating selectors disagree on parent_id \
-                         (composite cache key would be incorrect); \
-                         parent_ids = {:?}, kinds = {:?}",
-                        specs.iter().map(|s| s.parent_id).collect::<Vec<_>>(),
-                        specs.iter().map(|s| s.kind).collect::<Vec<_>>(),
-                    );
-                }
-                let mut h = Sha256::new();
-                h.update(EphLayerKind::Composite.as_str().as_bytes());
-                for spec in &specs {
-                    h.update(spec.hash);
-                }
-                let composite_hash: [u8; 32] = h.finalize().into();
+            _ => Ok(Some(Self::partitioned_composite(specs))),
+        }
+    }
 
-                // Diagnostic crumb: composite layers show up in
-                // `eph_layers.kind = 'composite'` without any structured
-                // record of which verbs contributed.  Log the contributing
-                // (kind, hash-prefix) pairs so an operator debugging a
-                // composite row can `grep` for it and find this line.
-                tracing::debug!(
-                    composite_hash = ?&composite_hash[..8],
-                    parts = ?specs
-                        .iter()
-                        .map(|s| (s.kind, &s.hash[..8]))
-                        .collect::<Vec<_>>(),
-                    "composite layer synthesised",
-                );
+    /// Merge ≥2 specs into one composite: the base halves combine into one
+    /// composite base (keyed on the part base hashes in source order —
+    /// still eph-independent), the supplement halves into one composite
+    /// supplement.  Truncation ORs across parts per half.
+    fn partitioned_composite(parts: Vec<LayerSpec>) -> LayerSpec {
+        let mut h = Sha256::new();
+        h.update(b"composite-base-v1");
+        for p in &parts {
+            h.update(p.base_hash);
+        }
+        let base_hash: [u8; 32] = h.finalize().into();
 
-                let populate: LayerPopulate = Box::new(move |txn| {
-                    Box::pin(async move {
-                        // Composite truncation = OR across the contributing
-                        // specs.  If any single verb's populate hit its cap,
-                        // the whole composite layer is considered truncated
-                        // so the surfaced warning reflects the user-visible
-                        // outcome (some matches missing).
-                        let mut composite_truncated = false;
-                        for spec in specs {
-                            let part_truncated = (spec.populate)(txn).await?;
-                            composite_truncated = composite_truncated || part_truncated;
-                        }
-                        Ok(composite_truncated)
-                    })
-                });
-                Ok(Some(LayerSpec {
-                    hash: composite_hash,
-                    kind: EphLayerKind::Composite,
-                    parent_id,
-                    populate,
-                }))
-            }
+        tracing::debug!(
+            composite_base_hash = ?&base_hash[..8],
+            parts = ?parts
+                .iter()
+                .map(|p| (p.base_kind, &p.base_hash[..8]))
+                .collect::<Vec<_>>(),
+            "partitioned composite layer synthesised",
+        );
+
+        // Composite supplement key: fold every part's extra (length-prefixed,
+        // source order) so parts that differ only in their supplement inputs
+        // produce distinct composite supplements.
+        let mut he = Sha256::new();
+        he.update(b"composite-extra-v1");
+        for p in &parts {
+            he.update((p.supplement_extra.len() as u64).to_le_bytes());
+            he.update(&p.supplement_extra);
+        }
+        let supplement_extra: Vec<u8> = he.finalize().to_vec();
+
+        let mut base_populates = Vec::with_capacity(parts.len());
+        let mut supplement_populates = Vec::with_capacity(parts.len());
+        for p in parts {
+            base_populates.push(p.base_populate);
+            supplement_populates.push(p.supplement_populate);
+        }
+
+        let base_populate: LayerPopulate = Box::new(move |txn| {
+            Box::pin(async move {
+                let mut truncated = false;
+                for populate in base_populates {
+                    truncated |= populate(txn).await?;
+                }
+                Ok(truncated)
+            })
+        });
+        let supplement_populate: SupplementPopulate = Box::new(move |txn, base_ref| {
+            Box::pin(async move {
+                let mut truncated = false;
+                for populate in supplement_populates {
+                    truncated |= populate(txn, base_ref).await?;
+                }
+                Ok(truncated)
+            })
+        });
+
+        LayerSpec {
+            base_hash,
+            base_kind: EphLayerKind::Composite,
+            base_populate,
+            supplement_populate,
+            supplement_extra,
         }
     }
 
@@ -591,50 +610,91 @@ impl Command {
             .collect();
         let layer_composite_filter = CompositeFilter::and(filter_parts_for_layer);
 
-        let materialised_layer_id: Option<i64> = if let Some(spec) = self
+        let (materialised_layer_ids, any_truncated): (Vec<i64>, bool) = match self
             .aggregate_layer_spec(cfg, &local_eph, &layer_composite_filter, resolved)
             .await
             .map_err(to_pest)?
         {
-            let kind = spec.kind;
-            let populate = spec.populate;
-            let (layer_id, created, truncated) = cfg
-                .index
-                .with_eph_layer(spec.parent_id, &spec.hash, kind, move |txn| populate(txn))
-                .await
-                .map_err(to_pest)?;
+            None => (Vec::new(), false),
+            Some(spec) => {
+                // Defense in depth, uniform across verbs: non-empty
+                // supplement inputs under an empty chain means the verb
+                // computed eph-derived content that no supplement will ever
+                // materialize — those rows would be silently dropped.  The
+                // verb-side guards (with better spans) should have caught
+                // this; reaching here is an internal invariant violation.
+                if local_eph.last().is_none() && !spec.supplement_extra.is_empty() {
+                    return Err(to_pest(anyhow::anyhow!(
+                        "internal error: layer spec carries supplement inputs \
+                         but no ephemeral context exists before this statement"
+                    )));
+                }
 
-            if !created {
-                let _ = cfg.index.touch_eph_layer(layer_id).await;
+                // Chain topology is decided here, not by the verb: the base
+                // is always parentless; the supplement (created iff the
+                // upstream chain is non-empty) chains on `eph.last()`.
+                let result = cfg
+                    .index
+                    .with_partitioned_layers(
+                        local_eph.last(),
+                        &spec.base_hash,
+                        spec.base_kind,
+                        &spec.supplement_extra,
+                        spec.base_populate,
+                        spec.supplement_populate,
+                    )
+                    .await
+                    .map_err(to_pest)?;
+
+                // Push order matters: base first, supplement last, so
+                // `eph.last()` is the supplement and downstream chaining
+                // keys keep depending on the full upstream chain.
+                let outcomes = std::iter::once((result.base, LayerRole::Base)).chain(
+                    result
+                        .supplement
+                        .into_iter()
+                        .map(|s| (s, LayerRole::Supplement)),
+                );
+
+                let mut ids = Vec::with_capacity(2);
+                let mut hit_ids = Vec::with_capacity(2);
+                let mut truncated_any = false;
+                for (outcome, role) in outcomes {
+                    if !outcome.created {
+                        hit_ids.push(outcome.layer_id);
+                    }
+                    layer_activations.push(LayerActivation {
+                        layer_id: outcome.layer_id,
+                        created: outcome.created,
+                        truncated: outcome.truncated,
+                        role,
+                    });
+                    truncated_any |= outcome.truncated;
+                    new_eph_ids.push(outcome.layer_id);
+                    local_eph.push(outcome.layer_id);
+                    ids.push(outcome.layer_id);
+                }
+                // One LRU touch round trip for the whole pair.
+                let _ = cfg.index.touch_eph_layers(&hit_ids).await;
+                (ids, truncated_any)
             }
+        };
 
-            layer_activations.push(LayerActivation {
-                layer_id,
-                created,
-                truncated,
-            });
-
-            // Surface truncation warnings.  Each layer-creating selector
-            // contributes a warning shaped by its own span; cache hits and
-            // misses both surface the warning since the persistent
-            // `eph_layers.truncated` flag is read on both paths.
-            if truncated {
-                for selector in self.selectors() {
-                    if !selector.has_layer_spec() {
-                        continue;
-                    }
-                    if let Some(w) = selector.make_truncation_warning() {
-                        warnings.push(w);
-                    }
+        // Surface truncation warnings.  Each layer-creating selector
+        // contributes a warning shaped by its own span; cache hits and
+        // misses both surface the warning since the persistent
+        // `eph_layers.truncated` flag is read on both paths (for a
+        // partitioned entry, on either of its rows).
+        if any_truncated {
+            for selector in self.selectors() {
+                if !selector.has_layer_spec() {
+                    continue;
+                }
+                if let Some(w) = selector.make_truncation_warning() {
+                    warnings.push(w);
                 }
             }
-
-            new_eph_ids.push(layer_id);
-            local_eph.push(layer_id);
-            Some(layer_id)
-        } else {
-            None
-        };
+        }
 
         // Phase 2: build each selector's selection.  Layer-aware selectors
         // (those whose `has_layer_spec()` was true) read from the
@@ -654,11 +714,16 @@ impl Command {
                 // behaviour).  For multi-verb statements every layer-aware
                 // selector returns the same combined view — the command-level
                 // OR across selectors dedupes the union into one selection.
-                let layer_id = materialised_layer_id
-                    .expect("has_layer_spec=true implies aggregate_layer_spec returned Some");
+                // Union read across the statement's materialised layer(s):
+                // for a partitioned entry this is base ∪ supplement — the
+                // composition point where future mask rows will subtract.
+                assert!(
+                    !materialised_layer_ids.is_empty(),
+                    "has_layer_spec=true implies aggregate_layer_spec returned Some"
+                );
                 let instance_ids = cfg
                     .index
-                    .get_eph_instance_ids_for_layer(layer_id)
+                    .get_eph_instance_ids_for_layers(&materialised_layer_ids)
                     .await
                     .map_err(to_pest)?;
                 if instance_ids.is_empty() {

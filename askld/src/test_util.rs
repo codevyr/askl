@@ -129,6 +129,24 @@ fn create_fixture(fixture: &str) -> SharedFixture {
     .expect("fixture creation thread panicked")
 }
 
+/// A private, throwaway database for tests that run DESTRUCTIVE GLOBAL
+/// operations — `purge_eph_cache`, `delete_project`, or anything else that
+/// would contaminate the shared per-fixture DBs that all other tests race
+/// on (see the isolation note on `eph_gc_purges_old_layers`).  The postgres
+/// container lives as long as the returned value; each call boots a fresh
+/// instance (~seconds), so reserve this for tests that genuinely need it.
+pub struct IsolatedFixture(SharedFixture);
+
+impl IsolatedFixture {
+    pub fn url(&self) -> &str {
+        &self.0.url
+    }
+}
+
+pub fn create_isolated_fixture(fixture: &str) -> IsolatedFixture {
+    IsolatedFixture(create_fixture(fixture))
+}
+
 fn get_shared_fixture(fixture: &str) -> &'static SharedFixture {
     let lock = FIXTURES
         .get(fixture)
@@ -158,6 +176,16 @@ pub async fn run_query_traced_async_err(
     askl_query: &str,
 ) -> Result<(ExecutionResult, Vec<crate::command::LayerActivation>)> {
     let index = get_shared_index(askl_input).await;
+    run_query_traced_on(index, askl_query).await
+}
+
+/// Like [`run_query_traced_async_err`], but against a caller-supplied
+/// `Index` — for tests running on an [`IsolatedFixture`] instead of the
+/// shared per-fixture databases.
+pub async fn run_query_traced_on(
+    index: Index,
+    askl_query: &str,
+) -> Result<(ExecutionResult, Vec<crate::command::LayerActivation>)> {
     let cfg = ControlFlowGraph::from_symbols(index);
 
     let ast = parse(askl_query)?;

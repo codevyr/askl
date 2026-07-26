@@ -125,6 +125,7 @@ diesel::table! {
         last_used -> Timestamptz,
         populated -> Bool,
         truncated -> Bool,
+        base_id -> Nullable<BigInt>,
     }
 }
 

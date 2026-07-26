@@ -4,8 +4,8 @@ use crate::verb::LayerSpec;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    EphContext, EphInstanceRow, EphLayerKind, EphSymbolRow, LayerBatch, INSTANCE_TYPE_DEFINITION,
-    SYMBOL_TYPE_CONTENT,
+    EphContext, EphInstanceRow, EphLayerKind, EphSymbolRow, Index, LayerBatch,
+    INSTANCE_TYPE_DEFINITION, SYMBOL_TYPE_CONTENT,
 };
 use index::symbols::symbol_path_and_leaf;
 use sha2::{Digest, Sha256};
@@ -91,29 +91,35 @@ impl Selector for LocSelector {
         true
     }
 
-    /// The layer hash is over the request *inputs only* (file_path, line,
-    /// project, parent layer id).  It deliberately does **not** depend on
-    /// the matched-file set returned by `find_objects_by_path`, so the
-    /// cache stays meaningful across repeated calls with the same source
-    /// text.
+    /// The base-layer hash is over the request *inputs only* (file_path,
+    /// line, project).  It deliberately does **not** depend on the
+    /// matched-file set returned by `find_objects_by_path`, so the cache
+    /// stays meaningful across repeated calls with the same source text —
+    /// and it does not fold the eph chain, so the base survives any
+    /// upstream ephemeral change (chain dependence lives in the supplement
+    /// the executor creates alongside it).
     ///
     /// Consequence: if the underlying index changes (a new project is
     /// pushed, a file is renamed), a previously-cached layer becomes
     /// stale relative to the new index. Cache freshness is the
-    /// responsibility of `IndexStore::finalize_project`, which deletes
-    /// `index.eph_layers WHERE kind != 'canary'` inside its commit
-    /// transaction. Anywhere else that mutates the persistent index must
+    /// responsibility of `IndexStore::finalize_project` and
+    /// `delete_project`, which purge the eph cache inside their commit
+    /// transactions (with `purge_eph_cache` blocking on in-flight layer
+    /// transactions). Anywhere else that mutates the persistent index must
     /// also invalidate, or `loc(...)` calls will return stale rows.
+    /// The file-existence / line-range validation below runs only on a
+    /// cache MISS by design: with correct invalidation, a hit implies the
+    /// layer postdates the last index mutation, so re-validating on hits
+    /// would be redundant work.
     async fn layer_spec(
         &self,
-        cfg: &ControlFlowGraph,
-        eph: &EphContext,
+        _cfg: &ControlFlowGraph,
+        _eph: &EphContext,
         _composite_filter: &index::db_diesel::CompositeFilter,
         _resolved: &crate::verb::LabelResolutions,
     ) -> Result<Option<LayerSpec>> {
-        // 1. Compute content-addressed hash from inputs only.
+        // 1. Base cache key from inputs only — never the eph chain.
         let mut hasher = Sha256::new();
-        hasher.update(eph.last().unwrap_or(0i64).to_le_bytes());
         hasher.update(EphLayerKind::Loc.as_str().as_bytes());
         hasher.update((self.file_path.len() as u64).to_le_bytes());
         hasher.update(self.file_path.as_bytes());
@@ -129,74 +135,84 @@ impl Selector for LocSelector {
         }
         let hash: [u8; 32] = hasher.finalize().into();
 
-        // 2. Resolve file paths and compute byte offsets.  These read from
-        //    `objects`/`object_contents`, which have no `eph_layer` column,
-        //    so results are deterministic regardless of in-flight transactions.
-        let matches = cfg
-            .index
-            .find_objects_by_path(&self.file_path, self.project.as_deref())
-            .await?;
-
-        if matches.is_empty() {
-            bail!("loc: no file matching '{}' found in index", self.file_path);
-        }
-
-        struct FileMatch {
-            file_id: i32,
-            project_id: i32,
-            line_start: i64,
-            line_end: i64,
-        }
-        let mut file_matches = Vec::new();
-        for (file_id, project_id) in &matches {
-            let content = cfg.index.get_file_contents(*file_id).await?;
-            let content_bytes = content.as_bytes();
-
-            // CRLF detection: `line_to_offset` recognises only `\n`, so on CRLF
-            // files the resolved offset includes the preceding `\r` in the line
-            // above.  Emit a one-shot warning per affected file so operators
-            // can spot the discrepancy; offset semantics stay LF-based.
-            if content_bytes.contains(&b'\r') {
-                let fid: i32 = (*file_id).into();
-                let first_seen = CRLF_WARNED.lock().unwrap().insert(fid);
-                if first_seen {
-                    tracing::warn!(
-                        file_id = fid,
-                        "loc: file contains CR bytes; line offsets are LF-based and may be off by one per CRLF"
-                    );
-                }
-            }
-
-            let line_start = match line_to_offset(content_bytes, self.line) {
-                Some(offset) => offset,
-                None => continue,
-            };
-            let line_end = next_line_offset(content_bytes, line_start);
-
-            file_matches.push(FileMatch {
-                file_id: (*file_id).into(),
-                project_id: (*project_id).into(),
-                line_start,
-                line_end,
-            });
-        }
-
-        if file_matches.is_empty() {
-            bail!(
-                "loc: line {} out of range for all files matching '{}'",
-                self.line,
-                self.file_path
-            );
-        }
-
-        // 3. Build the populate closure.  Symbol IDs are only known after
-        //    insertion, so we insert symbols first, then build the instance
-        //    batch from the returned IDs.
+        // 2. Everything else is deferred into the populate so it runs only
+        //    on a cache miss.  The queries read `objects`/`object_contents`
+        //    (persistent only, no eph_layer columns) on the layer
+        //    transaction's own connection.  The user-facing bail!s on "no
+        //    file" / "line out of range" move with them: the transaction
+        //    rolls back, the error surfaces identically, and failed runs
+        //    never commit a layer (errors stay uncached, as before).
+        let file_path = self.file_path.clone();
+        let line = self.line;
+        let project = self.project.clone();
         let sym_name = format!("loc:{}:{}", self.file_path, self.line);
         let (sym_path, sym_leaf) = symbol_path_and_leaf(&sym_name, SYMBOL_TYPE_CONTENT);
 
-        let populate: crate::verb::LayerPopulate = Box::new(move |txn| {
+        let base_populate: crate::verb::LayerPopulate = Box::new(move |txn| {
             Box::pin(async move {
+                let matches = Index::find_objects_by_path_on(
+                    txn.connection(),
+                    &file_path,
+                    project.as_deref(),
+                )
+                .await?;
+
+                if matches.is_empty() {
+                    bail!("loc: no file matching '{}' found in index", file_path);
+                }
+
+                struct FileMatch {
+                    file_id: i32,
+                    project_id: i32,
+                    line_start: i64,
+                    line_end: i64,
+                }
+                let mut file_matches = Vec::new();
+                for (file_id, project_id) in &matches {
+                    let content = Index::get_file_contents_on(txn.connection(), *file_id).await?;
+                    let content_bytes = content.as_bytes();
+
+                    // CRLF detection: `line_to_offset` recognises only `\n`,
+                    // so on CRLF files the resolved offset includes the
+                    // preceding `\r` in the line above.  Emit a one-shot
+                    // warning per affected file so operators can spot the
+                    // discrepancy; offset semantics stay LF-based.
+                    if content_bytes.contains(&b'\r') {
+                        let fid: i32 = (*file_id).into();
+                        let first_seen = CRLF_WARNED.lock().unwrap().insert(fid);
+                        if first_seen {
+                            tracing::warn!(
+                                file_id = fid,
+                                "loc: file contains CR bytes; line offsets are LF-based and may be off by one per CRLF"
+                            );
+                        }
+                    }
+
+                    let line_start = match line_to_offset(content_bytes, line) {
+                        Some(offset) => offset,
+                        None => continue,
+                    };
+                    let line_end = next_line_offset(content_bytes, line_start);
+
+                    file_matches.push(FileMatch {
+                        file_id: (*file_id).into(),
+                        project_id: (*project_id).into(),
+                        line_start,
+                        line_end,
+                    });
+                }
+
+                if file_matches.is_empty() {
+                    bail!(
+                        "loc: line {} out of range for all files matching '{}'",
+                        line,
+                        file_path
+                    );
+                }
+
+                // Symbol IDs are only known after insertion, so insert
+                // symbols first, then build the instance batch from the
+                // returned IDs.
                 let mut sym_batch = LayerBatch::new();
                 for fm in &file_matches {
                     sym_batch.symbols.push(EphSymbolRow {
@@ -226,12 +242,14 @@ impl Selector for LocSelector {
             })
         });
 
-        Ok(Some(LayerSpec {
+        // Same shape as search: loc reads only persistent data
+        // (`objects`/`object_contents`), so the eph-derived delta is
+        // structurally empty and fully determined by (parent chain, base).
+        Ok(Some(LayerSpec::persistent_only(
             hash,
-            kind: EphLayerKind::Loc,
-            parent_id: eph.last(),
-            populate,
-        }))
+            EphLayerKind::Loc,
+            base_populate,
+        )))
     }
 }
 

@@ -286,7 +286,7 @@ impl Statement {
             for (dep_stmt, label) in pre_seed_deps {
                 let Some(label) = label else { continue };
                 if let Some(sel) = dep_stmt.get_selection(ctx) {
-                    let ids: Vec<i64> = sel.nodes.iter().map(|n| n.symbol.id).collect();
+                    let ids = canonical_ids(sel.nodes.iter().map(|n| n.symbol.id));
                     if ids.is_empty() {
                         tracing::warn!(
                             label = %label,
@@ -1058,6 +1058,24 @@ impl Worklist {
             .map(|(i, _)| i)?;
         Some(self.0.swap_remove(idx))
     }
+}
+
+/// Canonicalize resolved symbol ids for label resolution: sorted, deduped.
+///
+/// Selection nodes are per-INSTANCE and arrive in raw, unordered SQL result
+/// order (the selection queries have no ORDER BY, so the order is
+/// plan-dependent), and a symbol with N instances appears N times.  The
+/// resolved ids feed ephemeral-op cache keys verbatim (`hash_params` folds
+/// the sequence), so without canonicalization the same logical resolution
+/// produces different layer hashes run-to-run — duplicate cache entries and
+/// near-zero reuse.  Sorting + deduping also matches what the layer actually
+/// stores: duplicate rows are collapsed by `ON CONFLICT DO NOTHING` on
+/// insert anyway.
+pub(crate) fn canonical_ids(ids: impl Iterator<Item = i64>) -> Vec<i64> {
+    let mut ids: Vec<i64> = ids.collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 impl Hierarchy for Statement {

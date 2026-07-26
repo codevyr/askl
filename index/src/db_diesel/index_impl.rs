@@ -532,12 +532,86 @@ fn explain_eph_insert_err(
 /// input-only-keyed lookups (`loc(path, line)`, `layer { … }`) will
 /// keep returning rows derived from the pre-mutation state of the
 /// index.
+///
+/// ## Why the LOCK TABLE
+///
+/// Layer cache entries are keyed on inputs only, so a stale entry can
+/// never be evicted by a key change — the purge is the only invalidation.
+/// Under READ COMMITTED a plain DELETE cannot see an *in-flight* layer
+/// transaction's uncommitted `eph_layers` row: the layer would commit
+/// AFTER the purge with content computed from pre-mutation data and then
+/// be served forever.  `LOCK TABLE … IN EXCLUSIVE MODE` closes the race
+/// in both directions: the lock request queues behind every open layer
+/// transaction's `ROW EXCLUSIVE` (their upsert), so in-flight populates
+/// commit first and their rows become visible to the DELETE; and new
+/// layer creations block at `create_eph_layer`'s INSERT until the purging
+/// transaction commits, so post-purge populates read only post-mutation
+/// data.  Reads (`SELECT`) are unaffected.  No deadlock cycle: layer
+/// transactions only ever lock `eph_layers` rows and their own batch
+/// tables, never `projects`, so lock ordering is one-directional.
 pub async fn purge_eph_cache(conn: &mut AsyncPgConnection) -> Result<usize, diesel::result::Error> {
     use crate::schema_diesel::eph_layers;
     use diesel_async::RunQueryDsl;
+    diesel::sql_query("LOCK TABLE index.eph_layers IN EXCLUSIVE MODE")
+        .execute(&mut *conn)
+        .await?;
     diesel::delete(eph_layers::table.filter(eph_layers::kind.ne(EphLayerKind::Canary.as_str())))
         .execute(conn)
         .await
+}
+
+/// Build the doomed-closure DELETE for targeted eph-layer garbage
+/// collection (`purge_old_eph_layers`, `delete_eph_layer`).  `seed_where`
+/// selects the initially-doomed rows and is the only difference between the
+/// two variants ($1 is the caller's bind).
+///
+/// ## Why the closure, not just FK cascades
+///
+/// `symbol_instances.symbol` / `symbol_refs.to_symbol` cascade to
+/// `symbols.id`, and layers reference symbols ACROSS layer boundaries by
+/// design (a supplement's rows point into upstream layers).  A plain
+/// `DELETE FROM eph_layers WHERE <seed>` therefore cascade-deletes rows out
+/// of OTHER still-cached layers while leaving their `eph_layers` rows
+/// `populated = true` — hollow entries whose keys never change, served as
+/// valid cache hits with silently missing results.  The recursive CTE
+/// computes, BEFORE anything cascades, every layer transitively reachable
+/// from the seed through four dependency edges — instance→symbol references,
+/// ref→symbol references, chain parentage (`parent_id`), and pair coupling
+/// (`base_id`) — and deletes the whole closure atomically.  A layer is
+/// either fully alive or gone; hollow-but-populated is unconstructible
+/// through GC.  (Postgres allows one recursive self-reference, hence the
+/// edge-list UNION inside a single recursive term.)  The canary sentinel
+/// has no edges and is excluded from the seed.
+fn doomed_closure_delete_sql(seed_where: &str) -> String {
+    format!(
+        "WITH RECURSIVE doomed AS ( \
+             SELECT id FROM index.eph_layers \
+             WHERE ({seed}) AND kind <> 'canary' \
+           UNION \
+             SELECT e.dependent FROM ( \
+                 SELECT si.eph_layer AS dependent, s.eph_layer AS needed \
+                   FROM index.symbol_instances si \
+                   JOIN index.symbols s ON si.symbol = s.id \
+                  WHERE si.eph_layer IS NOT NULL AND s.eph_layer IS NOT NULL \
+                    AND si.eph_layer <> s.eph_layer \
+               UNION ALL \
+                 SELECT sr.eph_layer, s.eph_layer \
+                   FROM index.symbol_refs sr \
+                   JOIN index.symbols s ON sr.to_symbol = s.id \
+                  WHERE sr.eph_layer IS NOT NULL AND s.eph_layer IS NOT NULL \
+                    AND sr.eph_layer <> s.eph_layer \
+               UNION ALL \
+                 SELECT id, parent_id FROM index.eph_layers \
+                  WHERE parent_id IS NOT NULL \
+               UNION ALL \
+                 SELECT id, base_id FROM index.eph_layers \
+                  WHERE base_id IS NOT NULL \
+             ) e JOIN doomed d ON e.needed = d.id \
+         ) \
+         DELETE FROM index.eph_layers \
+         WHERE id IN (SELECT id FROM doomed)",
+        seed = seed_where,
+    )
 }
 
 /// Batch of ephemeral rows to insert into a single layer.
@@ -585,6 +659,13 @@ pub enum EphLayerKind {
     /// caller's `limit`; truncation sets `eph_layers.truncated = true` so
     /// the warning surfaces on both cache miss and cache hit.
     Search,
+    /// The eph-chained half of a partitioned cache entry (see
+    /// [`Index::with_partitioned_layers`]).  Holds only the eph-derived
+    /// delta of a base layer; the kind is generic because the supplement's
+    /// hash folds the base hash, which already encodes the verb identity.
+    /// Diagnostics: `kind='supplement'` + `parent_id` → the upstream layer
+    /// it chains on.
+    Supplement,
 }
 
 impl EphLayerKind {
@@ -596,6 +677,7 @@ impl EphLayerKind {
             Self::Loc => "loc",
             Self::Composite => "composite",
             Self::Search => "search",
+            Self::Supplement => "supplement",
         }
     }
 }
@@ -604,6 +686,65 @@ impl std::fmt::Display for EphLayerKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// Identity of a materialized base layer, handed to a supplement's populate
+/// closure by [`Index::with_partitioned_layers`].  Unused today; future
+/// mask/tombstone rows will need to reference the base they mask.  Note the
+/// two fields age differently: `hash` is stable across TTL purge + recreate
+/// of the base row, `layer_id` is not.
+#[derive(Debug, Clone, Copy)]
+pub struct BaseLayerRef {
+    pub layer_id: i64,
+    pub hash: [u8; 32],
+}
+
+/// Outcome of materializing one `eph_layers` row through the cache gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerOutcome {
+    pub layer_id: i64,
+    /// `true` iff this call created (and populated) the row; `false` on a
+    /// cache hit.
+    pub created: bool,
+    /// The row's persisted `truncated` flag (fresh on miss, the original
+    /// creator's value on hit).
+    pub truncated: bool,
+}
+
+/// Result of [`Index::with_partitioned_layers`].
+#[derive(Debug, Clone, Copy)]
+pub struct PartitionedLayerResult {
+    pub base: LayerOutcome,
+    /// `None` iff the upstream eph chain was empty (`parent_id = None`).
+    /// This is a chain-topology rule, not an overlay-emptiness shortcut:
+    /// under a non-empty chain the supplement row is always materialized,
+    /// even when its populate inserts zero rows.
+    pub supplement: Option<LayerOutcome>,
+}
+
+/// Cache key of a supplement layer: parent chain identity + base identity +
+/// the verb's own supplement inputs (`extra`).
+///
+/// `extra` is whatever the supplement populate reads BEYOND the chain and
+/// the base — empty for verbs whose delta is fully determined by
+/// (parent, base) (search, loc), a hash of the eph-referencing ops for
+/// `layer { … }` blocks.  Without it, two blocks sharing base content under
+/// the same chain but differing in their eph-referencing ops would collide
+/// on the supplement key.  Length-prefixed to keep the encoding injective.
+///
+/// Folds the parent layer *id*, not its hash — consistent with how verbs
+/// chain today (`hash.update(eph.last())`); ids are stable for the lifetime
+/// of the row, which is exactly the lifetime of the cache entry.  The domain
+/// tag keeps supplement hashes disjoint from every verb-computed hash.
+pub fn supplement_hash(parent_id: i64, base_hash: &[u8; 32], extra: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"eph-supplement-v1");
+    h.update(parent_id.to_le_bytes());
+    h.update(base_hash);
+    h.update((extra.len() as u64).to_le_bytes());
+    h.update(extra);
+    h.finalize().into()
 }
 
 /// Metadata of one `eph_layers` row, as read by [`Index::eph_layer_meta`].
@@ -627,11 +768,51 @@ pub struct EphLayerMeta {
 ///
 /// All three pool-builder sites — `Index::build_async_manager` (this
 /// crate) and the two pools in `askld/src/bin/askld/server.rs` — must
-/// use this constant.  Changing the value or the manager config without
-/// updating *all* sites silently disarms ephemeral-layer cancellation
-/// safety; see the rustdoc on [`Index::with_eph_layer`] for the
-/// load-bearing contract.
+/// use [`eph_pool_manager_config`] (which applies this constant).
+/// Changing the value or the manager config without updating *all* sites
+/// silently disarms ephemeral-layer cancellation safety; see the rustdoc
+/// on [`Index::with_eph_layer`] for the load-bearing contract.
 pub const EPH_POOL_RECYCLING_QUERY: &str = "ROLLBACK";
+
+/// Server-side backstop for abandoned layer transactions.  The recycling
+/// ROLLBACK above only runs when the abandoned connection is next checked
+/// out — until then the connection sits idle in bb8 with its transaction
+/// open and the `eph_layers` row lock held, blocking every concurrent
+/// identical query.  Deferred populates made this window as long as the
+/// whole content scan, so cap it: Postgres kills a session idle inside a
+/// transaction for longer than this, releasing the lock.  Legitimate
+/// populates are *active* (running SQL) during their long stretches; their
+/// idle-in-transaction gaps between statements are milliseconds, so 60s is
+/// generous.  Convoying of concurrent identical cold queries behind the
+/// row lock is intentional (it dedups the expensive work) — size the pool
+/// with that in mind.
+pub const EPH_POOL_IDLE_IN_TXN_TIMEOUT: &str = "60s";
+
+/// The one true `ManagerConfig` for pools that touch ephemeral layers:
+/// checkout-recycling ROLLBACK plus the idle-in-transaction session
+/// timeout.  Every pool-builder site must use this instead of hand-rolling
+/// a config, so the sites cannot drift apart.
+pub fn eph_pool_manager_config() -> ManagerConfig<AsyncPgConnection> {
+    use diesel_async::AsyncConnection;
+    use futures::FutureExt;
+    let mut config = ManagerConfig::default();
+    config.recycling_method = RecyclingMethod::CustomQuery(EPH_POOL_RECYCLING_QUERY.into());
+    config.custom_setup = Box::new(|url| {
+        async move {
+            let mut conn = AsyncPgConnection::establish(url).await?;
+            diesel::sql_query(format!(
+                "SET idle_in_transaction_session_timeout = '{}'",
+                EPH_POOL_IDLE_IN_TXN_TIMEOUT
+            ))
+            .execute(&mut conn)
+            .await
+            .map_err(diesel::ConnectionError::CouldntSetupConfiguration)?;
+            Ok(conn)
+        }
+        .boxed()
+    });
+    config
+}
 
 impl Index {
     pub fn from_pool(pool: bb8::Pool<AsyncPgConnection>) -> Self {
@@ -642,9 +823,7 @@ impl Index {
     }
 
     fn build_async_manager(database_url: &str) -> AsyncDieselConnectionManager<AsyncPgConnection> {
-        let mut config = ManagerConfig::default();
-        config.recycling_method = RecyclingMethod::CustomQuery(EPH_POOL_RECYCLING_QUERY.into());
-        AsyncDieselConnectionManager::new_with_config(database_url, config)
+        AsyncDieselConnectionManager::new_with_config(database_url, eph_pool_manager_config())
     }
 
     pub async fn connect(database_url: &str) -> Result<Self> {
@@ -832,6 +1011,16 @@ impl Index {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
+        Self::get_file_contents_on(&mut *connection, object_id).await
+    }
+
+    /// Same as [`Index::get_file_contents`], but on a caller-supplied
+    /// connection — for deferred populate closures running inside an
+    /// [`EphTransaction`] (see [`Index::search_content_matches_on`]).
+    pub async fn get_file_contents_on(
+        connection: &mut AsyncPgConnection,
+        object_id: FileId,
+    ) -> Result<String> {
         let object_id: i32 = object_id.into();
         let result: Option<Vec<u8>> = diesel::sql_query(
             r#"
@@ -1537,6 +1726,7 @@ impl Index {
     pub async fn create_eph_layer(
         &self,
         parent_id: Option<i64>,
+        base_id: Option<i64>,
         hash: &[u8],
         kind: EphLayerKind,
     ) -> Result<EphTransaction<'_>> {
@@ -1567,6 +1757,7 @@ impl Index {
         let upsert_result = diesel::insert_into(eph_layers::table)
             .values((
                 eph_layers::parent_id.eq(parent_id),
+                eph_layers::base_id.eq(base_id),
                 eph_layers::hash.eq(hash),
                 eph_layers::kind.eq(kind.as_str()),
                 eph_layers::populated.eq(false),
@@ -1587,6 +1778,24 @@ impl Index {
             Ok(row) => row,
             Err(e) => {
                 let _ = diesel::sql_query("ROLLBACK").execute(&mut *conn).await;
+                // A parent/base FK violation here means the referenced layer
+                // was purged between this statement's earlier materialization
+                // steps and this insert (e.g. `purge_eph_cache` won the
+                // eph_layers lock in the gap between a base commit and its
+                // supplement).  The cache is coherent — this request just
+                // straddled the purge — so tell the user to retry rather
+                // than surfacing a raw constraint error.
+                use diesel::result::{DatabaseErrorKind, Error as E};
+                if let E::DatabaseError(DatabaseErrorKind::ForeignKeyViolation, info) = &e {
+                    let constraint = info.constraint_name().unwrap_or("");
+                    if constraint.starts_with("eph_layers_") {
+                        anyhow::bail!(
+                            "ephemeral cache was purged while this statement was \
+                             executing (index update or project deletion); \
+                             please retry the query"
+                        );
+                    }
+                }
                 return Err(anyhow::anyhow!("Failed to upsert eph layer: {}", e));
             }
         };
@@ -1644,14 +1853,17 @@ impl Index {
     pub async fn with_eph_layer<'s, F>(
         &'s self,
         parent_id: Option<i64>,
+        base_id: Option<i64>,
         hash: &[u8],
         kind: EphLayerKind,
         body: F,
-    ) -> Result<(i64, bool, bool)>
+    ) -> Result<LayerOutcome>
     where
         F: for<'b> FnOnce(&'b mut EphTransaction<'s>) -> EphScopedFut<'b, bool>,
     {
-        let mut txn = self.create_eph_layer(parent_id, hash, kind).await?;
+        let mut txn = self
+            .create_eph_layer(parent_id, base_id, hash, kind)
+            .await?;
         let layer_id = txn.layer_id();
         let created = txn.created();
 
@@ -1663,7 +1875,11 @@ impl Index {
         if !created {
             let truncated = txn.truncated_on_open();
             txn.commit().await?;
-            return Ok((layer_id, false, truncated));
+            return Ok(LayerOutcome {
+                layer_id,
+                created: false,
+                truncated,
+            });
         }
 
         match body(&mut txn).await {
@@ -1674,7 +1890,11 @@ impl Index {
                 txn.mark_truncated(truncated).await?;
                 txn.mark_populated().await?;
                 txn.commit().await?;
-                Ok((layer_id, true, truncated))
+                Ok(LayerOutcome {
+                    layer_id,
+                    created: true,
+                    truncated,
+                })
             }
             Err(e) => {
                 let _ = txn.rollback().await;
@@ -1683,8 +1903,73 @@ impl Index {
         }
     }
 
-    /// Get all instance IDs belonging to a given ephemeral layer.
-    pub async fn get_eph_instance_ids_for_layer(&self, layer_id: i64) -> Result<Vec<i64>> {
+    /// Materialize a verb's partitioned cache entry: a parentless *base*
+    /// layer keyed only on `base_hash` (persistent data only, unmasked —
+    /// masks are composed at read time, never applied here) plus, iff an
+    /// upstream chain exists, a *supplement* layer chained on `parent_id`
+    /// holding the eph-derived delta.  The supplement is always materialized
+    /// under a non-empty chain — even with zero rows — so downstream
+    /// chaining keys stay deterministic.
+    ///
+    /// Runs as two sequential [`Index::with_eph_layer`] calls (each with the
+    /// full 2-PC populated protocol).  A failure after the base commits
+    /// leaves a valid, reusable base — benign.  Because populate closures
+    /// now run the expensive queries themselves, the work happens while the
+    /// layer's row lock is held: concurrent identical requests serialize on
+    /// the row and the losers get a cache hit instead of duplicating the
+    /// computation.
+    pub async fn with_partitioned_layers<'s, FB, FS>(
+        &'s self,
+        parent_id: Option<i64>,
+        base_hash: &[u8; 32],
+        base_kind: EphLayerKind,
+        supplement_extra: &[u8],
+        base_populate: FB,
+        supplement_populate: FS,
+    ) -> Result<PartitionedLayerResult>
+    where
+        FB: for<'b> FnOnce(&'b mut EphTransaction<'s>) -> EphScopedFut<'b, bool>,
+        FS: for<'b> FnOnce(&'b mut EphTransaction<'s>, BaseLayerRef) -> EphScopedFut<'b, bool>,
+    {
+        let base = self
+            .with_eph_layer(None, None, base_hash, base_kind, base_populate)
+            .await?;
+
+        let supplement = match parent_id {
+            None => None,
+            Some(parent) => {
+                let s_hash = supplement_hash(parent, base_hash, supplement_extra);
+                let base_ref = BaseLayerRef {
+                    layer_id: base.layer_id,
+                    hash: *base_hash,
+                };
+                // `base_id` couples the supplement's lifetime to its base
+                // (ON DELETE CASCADE): the base is always the older half of
+                // the pair, so when it ages out or is deleted, the
+                // supplement — whose key folds the stable base *hash*, not
+                // the id — can no longer produce a hit against a recreated
+                // base of a different incarnation.
+                Some(
+                    self.with_eph_layer(
+                        Some(parent),
+                        Some(base.layer_id),
+                        &s_hash,
+                        EphLayerKind::Supplement,
+                        move |txn| supplement_populate(txn, base_ref),
+                    )
+                    .await?,
+                )
+            }
+        };
+
+        Ok(PartitionedLayerResult { base, supplement })
+    }
+
+    /// Get all instance IDs belonging to any of the given ephemeral layers.
+    /// Union read across a base+supplement pair — the point where the two
+    /// halves of a partitioned entry compose (and where future mask rows
+    /// will subtract).
+    pub async fn get_eph_instance_ids_for_layers(&self, layer_ids: &[i64]) -> Result<Vec<i64>> {
         use crate::schema_diesel::symbol_instances;
 
         let connection = &mut self
@@ -1694,13 +1979,20 @@ impl Index {
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let ids = symbol_instances::table
-            .filter(symbol_instances::eph_layer.eq(layer_id))
+            .filter(symbol_instances::eph_layer.eq_any(layer_ids))
             .select(symbol_instances::id)
             .load::<i64>(&mut *connection)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get eph instance IDs: {}", e))?;
 
         Ok(ids)
+    }
+
+    /// Get all instance IDs belonging to a given ephemeral layer.
+    /// Delegates to the plural variant so there is exactly one read path
+    /// (and one future mask-composition point).
+    pub async fn get_eph_instance_ids_for_layer(&self, layer_id: i64) -> Result<Vec<i64>> {
+        self.get_eph_instance_ids_for_layers(&[layer_id]).await
     }
 
     /// Get the ephemeral layer ID(s) for a given instance ID.
@@ -1807,10 +2099,12 @@ impl Index {
         Ok((symbol_count, instance_count))
     }
 
-    /// Delete ephemeral layers older than the given duration. CASCADE cleans up rows.
+    /// Delete ephemeral layers older than the given duration, together with
+    /// their full dependent closure.  See [`doomed_closure_delete_sql`] for
+    /// why deleting the closure (rather than relying on FK cascades alone)
+    /// is a cache-correctness requirement, not an optimization.
     pub async fn purge_old_eph_layers(&self, older_than: Duration) -> Result<u64> {
-        use crate::schema_diesel::eph_layers;
-        use diesel::sql_types::{BigInt, Bool};
+        use diesel::sql_types::BigInt;
         let connection = &mut self
             .pool
             .get()
@@ -1818,18 +2112,10 @@ impl Index {
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let interval_secs = older_than.as_secs() as i64;
-        // The age-cutoff predicate is inlined as a typed SQL fragment
-        // because Diesel doesn't expose `make_interval`; the bind keeps
-        // the seconds value typed.  The canary exclusion uses the DSL.
-        let result = diesel::delete(
-            eph_layers::table
-                .filter(
-                    diesel::dsl::sql::<Bool>("last_used < now() - make_interval(secs => ")
-                        .bind::<BigInt, _>(interval_secs)
-                        .sql(")"),
-                )
-                .filter(eph_layers::kind.ne(EphLayerKind::Canary.as_str())),
-        )
+        let result = diesel::sql_query(doomed_closure_delete_sql(
+            "last_used < now() - make_interval(secs => $1)",
+        ))
+        .bind::<BigInt, _>(interval_secs)
         .execute(&mut *connection)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to purge old eph layers: {}", e))?;
@@ -1837,16 +2123,19 @@ impl Index {
         Ok(result as u64)
     }
 
-    /// Delete a single ephemeral layer by ID. CASCADE cleans up symbol/instance/ref rows.
+    /// Delete a single ephemeral layer by ID, together with its full
+    /// dependent closure (layers whose rows reference this layer's symbols,
+    /// transitively).  See [`doomed_closure_delete_sql`].
     pub async fn delete_eph_layer(&self, layer_id: i64) -> Result<()> {
-        use crate::schema_diesel::eph_layers;
+        use diesel::sql_types::BigInt;
         let connection = &mut self
             .pool
             .get()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
-        diesel::delete(eph_layers::table.filter(eph_layers::id.eq(layer_id)))
+        diesel::sql_query(doomed_closure_delete_sql("id = $1"))
+            .bind::<BigInt, _>(layer_id)
             .execute(&mut *connection)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to delete eph layer: {}", e))?;
@@ -1854,8 +2143,13 @@ impl Index {
         Ok(())
     }
 
-    /// Touch the last_used timestamp of an ephemeral layer (batched: only if stale).
-    pub async fn touch_eph_layer(&self, layer_id: i64) -> Result<()> {
+    /// Touch the last_used timestamps of ephemeral layers in one round trip
+    /// (throttled: rows fresher than an hour are skipped by the WHERE
+    /// clause, so repeated hits cost a no-op statement, not a write).
+    pub async fn touch_eph_layers(&self, layer_ids: &[i64]) -> Result<()> {
+        if layer_ids.is_empty() {
+            return Ok(());
+        }
         use crate::schema_diesel::eph_layers;
         use diesel::sql_types::Bool;
         let connection = &mut self
@@ -1866,7 +2160,7 @@ impl Index {
 
         diesel::update(
             eph_layers::table
-                .filter(eph_layers::id.eq(layer_id))
+                .filter(eph_layers::id.eq_any(layer_ids))
                 .filter(diesel::dsl::sql::<Bool>(
                     "last_used < now() - interval '1 hour'",
                 )),
@@ -1874,7 +2168,7 @@ impl Index {
         .set(eph_layers::last_used.eq(diesel::dsl::now))
         .execute(&mut *connection)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to touch eph layer: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to touch eph layers: {}", e))?;
 
         Ok(())
     }
@@ -1906,19 +2200,18 @@ impl Index {
         Ok(exists.is_some())
     }
 
-    /// Find file objects matching the given path suffix, optionally filtered by project name.
-    pub async fn find_objects_by_path(
-        &self,
+    /// Find file objects matching the given path suffix, optionally filtered
+    /// by project name.  Takes a caller-supplied connection: the only caller
+    /// is loc's deferred populate closure, which runs inside an
+    /// [`EphTransaction`] and must not check out a second pool connection
+    /// while the layer's row lock is held (see
+    /// [`Index::search_content_matches_on`]).
+    pub async fn find_objects_by_path_on(
+        connection: &mut AsyncPgConnection,
         path: &str,
         project_name: Option<&str>,
     ) -> Result<Vec<(FileId, crate::symbols::ProjectId)>> {
         use crate::schema_diesel::*;
-
-        let connection = &mut self
-            .pool
-            .get()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let escaped = path
             .replace('\\', r"\\")
@@ -2081,8 +2374,14 @@ impl Index {
     /// `LIMIT N+1`: if more than `limit` rows came back, the (limit+1)th is
     /// dropped and `truncated = true` is returned so the caller can persist
     /// the flag on the eph_layer and surface the warning.
-    pub async fn search_content_matches(
-        &self,
+    ///
+    /// Takes a caller-supplied connection: the only caller is search's
+    /// deferred populate closure, which runs inside an [`EphTransaction`]
+    /// and must not check out a second pool connection while the layer's
+    /// row lock is held (a pool-exhaustion deadlock under concurrent
+    /// searches).
+    pub async fn search_content_matches_on(
+        connection: &mut AsyncPgConnection,
         query: &str,
         case_sensitive: bool,
         whole_word: bool,
@@ -2093,12 +2392,6 @@ impl Index {
         use diesel::sql_types::{Array, Integer, Text};
 
         let limit_plus_one = (limit as i32).saturating_add(1);
-
-        let mut connection = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         // Two-step: resolve visible_project_ids via the typed objects_expr
         // hop when the composite filter constrains objects; pass None
@@ -2231,6 +2524,15 @@ pub struct EphTransaction<'a> {
 impl<'a> EphTransaction<'a> {
     pub fn layer_id(&self) -> i64 {
         self.layer_id
+    }
+
+    /// The transaction's own connection, for populate closures that defer
+    /// their (read-only) queries into the cache-miss path — e.g.
+    /// [`Index::search_content_matches_on`].  The connection is inside the
+    /// open layer transaction; callers must not issue transaction-control
+    /// statements on it.
+    pub fn connection(&mut self) -> &mut AsyncPgConnection {
+        &mut *self.conn
     }
 
     pub fn created(&self) -> bool {

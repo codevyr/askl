@@ -23,7 +23,7 @@ use crate::verb::LayerSpec;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    CompositeFilter, EphContext, EphInstanceRow, EphLayerKind, EphSymbolRow, LayerBatch,
+    CompositeFilter, EphContext, EphInstanceRow, EphLayerKind, EphSymbolRow, Index, LayerBatch,
     INSTANCE_TYPE_DEFINITION, SYMBOL_TYPE_CONTENT,
 };
 use index::symbols::symbol_path_and_leaf;
@@ -159,22 +159,24 @@ impl Selector for SearchSelector {
         true
     }
 
-    /// The layer hash mixes the user-visible inputs (query, case,
+    /// The base-layer hash mixes the user-visible inputs (query, case,
     /// whole_word, limit) with the canonical hash of the surrounding
     /// command's filters via [`CompositeFilter::hash_into`].  Different
     /// filter compositions therefore produce different cache entries; the
-    /// same query under the same filter set hits the cache.  Stale entries
-    /// are wiped by `purge_eph_cache` on each `finalize_project`.
+    /// same query under the same filter set hits the cache — under ANY
+    /// upstream ephemeral context, since the base hash deliberately does
+    /// not fold the eph chain.  Chain dependence lives in the supplement
+    /// layer the executor creates alongside the base.  Stale entries are
+    /// wiped by `purge_eph_cache` on each `finalize_project`.
     async fn layer_spec(
         &self,
-        cfg: &ControlFlowGraph,
-        eph: &EphContext,
+        _cfg: &ControlFlowGraph,
+        _eph: &EphContext,
         composite_filter: &CompositeFilter,
         _resolved: &crate::verb::LabelResolutions,
     ) -> Result<Option<LayerSpec>> {
-        // 1. Cache key over inputs + filter set.
+        // 1. Base cache key over inputs + filter set — never the eph chain.
         let mut hasher = Sha256::new();
-        hasher.update(eph.last().unwrap_or(0i64).to_le_bytes());
         hasher.update(EphLayerKind::Search.as_str().as_bytes());
         hasher.update((self.query.len() as u64).to_le_bytes());
         hasher.update(self.query.as_bytes());
@@ -184,54 +186,66 @@ impl Selector for SearchSelector {
         composite_filter.hash_into(&mut hasher);
         let hash: [u8; 32] = hasher.finalize().into();
 
-        // 2. Run the SQL.  All filtering, matching, and byte-range
-        //    extraction happens inside one of four straight-line SQL
-        //    variants picked from (whole_word, case_sensitive).
-        let (matches, truncated) = cfg
-            .index
-            .search_content_matches(
-                &self.query,
-                self.case_sensitive,
-                self.whole_word,
-                composite_filter,
-                self.limit,
-            )
-            .await?;
-
-        // 3. Group matches by project_id so we can emit one ephemeral
-        //    symbol per project (`symbols.project_id` is NOT NULL).
-        //    Materialise the populate inputs synchronously; the closure
-        //    only sees `Send` data so it stays cheap to .await past.
-        struct GroupedMatches {
-            project_id: i32,
-            ranges: Vec<(
-                i32, /* object_id */
-                i32, /* start_byte */
-                i32, /* end_byte */
-            )>,
-        }
-        let mut by_project: HashMap<i32, Vec<(i32, i32, i32)>> = HashMap::new();
-        for m in matches {
-            by_project.entry(m.project_id).or_default().push((
-                m.object_id,
-                m.start_byte,
-                m.end_byte,
-            ));
-        }
-        let mut groups: Vec<GroupedMatches> = by_project
-            .into_iter()
-            .map(|(project_id, ranges)| GroupedMatches { project_id, ranges })
-            .collect();
-        // Determinism for the populate batch — same input → same insert
-        // order → same symbol/instance ids.
-        groups.sort_by_key(|g| g.project_id);
-
+        // 2. Everything expensive is deferred into the populate closure so
+        //    it runs only on a cache miss; on a hit the layer's previously
+        //    materialised rows are served without touching content_store.
+        //    The closure owns its inputs (cloned query/filter) and runs the
+        //    SQL on the layer transaction's own connection — no second pool
+        //    checkout while the row lock is held.
+        let query = self.query.clone();
+        let case_sensitive = self.case_sensitive;
+        let whole_word = self.whole_word;
+        let limit = self.limit;
+        let filter = composite_filter.clone();
         let sym_name = format!("search:{}", Self::sanitise_for_symbol_name(&self.query));
         let (sym_path, sym_leaf) = symbol_path_and_leaf(&sym_name, SYMBOL_TYPE_CONTENT);
 
-        let populate: crate::verb::LayerPopulate = Box::new(move |txn| {
+        let base_populate: crate::verb::LayerPopulate = Box::new(move |txn| {
             Box::pin(async move {
-                // 3a. One ephemeral symbol per project_id.
+                // 2a. Run the SQL.  All filtering, matching, and byte-range
+                //     extraction happens inside one of four straight-line
+                //     SQL variants picked from (whole_word, case_sensitive).
+                //     Reads persistent data only (`content_store`/`objects`
+                //     have no eph_layer columns) — the base layer must stay
+                //     a pure function of the persistent index.
+                let (matches, truncated) = Index::search_content_matches_on(
+                    txn.connection(),
+                    &query,
+                    case_sensitive,
+                    whole_word,
+                    &filter,
+                    limit,
+                )
+                .await?;
+
+                // 2b. Group matches by project_id so we can emit one
+                //     ephemeral symbol per project (`symbols.project_id`
+                //     is NOT NULL).
+                struct GroupedMatches {
+                    project_id: i32,
+                    ranges: Vec<(
+                        i32, /* object_id */
+                        i32, /* start_byte */
+                        i32, /* end_byte */
+                    )>,
+                }
+                let mut by_project: HashMap<i32, Vec<(i32, i32, i32)>> = HashMap::new();
+                for m in matches {
+                    by_project.entry(m.project_id).or_default().push((
+                        m.object_id,
+                        m.start_byte,
+                        m.end_byte,
+                    ));
+                }
+                let mut groups: Vec<GroupedMatches> = by_project
+                    .into_iter()
+                    .map(|(project_id, ranges)| GroupedMatches { project_id, ranges })
+                    .collect();
+                // Determinism for the populate batch — same input → same
+                // insert order → same symbol/instance ids.
+                groups.sort_by_key(|g| g.project_id);
+
+                // 2c. One ephemeral symbol per project_id.
                 let mut sym_batch = LayerBatch::new();
                 for g in &groups {
                     sym_batch.symbols.push(EphSymbolRow {
@@ -245,7 +259,7 @@ impl Selector for SearchSelector {
                 }
                 let symbol_ids = txn.insert_batch(&sym_batch).await?;
 
-                // 3b. One ephemeral instance per byte-range match.
+                // 2d. One ephemeral instance per byte-range match.
                 let mut inst_batch = LayerBatch::new();
                 for (g, symbol_id) in groups.iter().zip(symbol_ids.iter()) {
                     for (object_id, start, end) in &g.ranges {
@@ -264,12 +278,21 @@ impl Selector for SearchSelector {
             })
         });
 
-        Ok(Some(LayerSpec {
+        // Search reads persistent data only: content lives exclusively in
+        // `content_store`/`objects` (no eph_layer columns), and no
+        // CompositeFilter leaf can scope objects through eph rows (the only
+        // `objects_expr` implementation is ProjectFilterMixin, eph-free by
+        // the contract documented on the trait method).  When eph-visible
+        // content exists, stop using `persistent_only`: run the eph-scoped
+        // search variant in a real supplement populate (a hand-built SQL
+        // variant, not a mode flag on the persistent query), fold its
+        // inputs into `supplement_extra`, and emit mask rows referencing
+        // the `BaseLayerRef`.
+        Ok(Some(LayerSpec::persistent_only(
             hash,
-            kind: EphLayerKind::Search,
-            parent_id: eph.last(),
-            populate,
-        }))
+            EphLayerKind::Search,
+            base_populate,
+        )))
     }
 
     /// Reconstruct the truncation warning every time the layer reports
