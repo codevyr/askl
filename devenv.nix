@@ -49,6 +49,7 @@
 
   # https://devenv.sh/pre-commit-hooks/
   # pre-commit.hooks.shellcheck.enable = true;
+  git-hooks.hooks.rustfmt.enable = true;
 
   # See full reference at https://devenv.sh/reference/options/
   languages.rust = {
