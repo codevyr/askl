@@ -158,6 +158,10 @@ impl IndexStore {
         }
         tracing::info!(project_id, "delete_project: marked Deleting");
 
+        // Cancellation-safe invalidation (see ClearOnDrop): clears the RAM
+        // cache on normal completion and if this future is dropped between
+        // COMMIT and return.
+        let _clear = index::db_diesel::ClearOnDrop(self.sql_cache.clone());
         conn.transaction::<_, StoreError, _>(async move |conn| {
             // Global symbol IDs encode the project: symbol = project_id << 32 | local_id.
             // All symbols for a project form a contiguous range in the B-tree — one range

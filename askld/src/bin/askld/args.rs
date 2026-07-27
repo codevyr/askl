@@ -36,6 +36,10 @@ pub struct ServeArgs {
     /// Query timeout in seconds (PG statement_timeout + tokio timeout)
     #[clap(long, default_value = "5", env = "ASKL_QUERY_TIMEOUT")]
     pub query_timeout: u64,
+
+    /// In-RAM SQL result cache budget in bytes (0 disables the cache)
+    #[clap(long, default_value = "268435456", env = "ASKL_SQL_CACHE_BYTES")]
+    pub sql_cache_bytes: usize,
 }
 
 #[derive(ClapArgs, Debug)]

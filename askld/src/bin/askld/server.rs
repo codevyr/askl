@@ -149,10 +149,13 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
         .expect("Failed to initialize auth store");
     let auth_store = web::Data::new(auth_store);
 
-    let index_store = IndexStore::from_pool(async_pool.clone());
+    // One shared SQL result cache: the query side (Index) reads it, the
+    // mutation side (IndexStore: finalize/delete project) clears it.
+    let sql_cache = index::db_diesel::SqlResultCache::new(serve_args.sql_cache_bytes);
+    let index_store = IndexStore::from_pool_with_cache(async_pool.clone(), sql_cache.clone());
     let index_store = web::Data::new(index_store);
 
-    let index_query = Index::from_pool(index_pool);
+    let index_query = Index::from_pool_with_cache(index_pool, sql_cache.clone());
     index_query
         .validate_canary()
         .await

@@ -734,7 +734,10 @@ impl Statement {
             }
         }
 
-        let all_ids: Vec<i64> = all_nodes.iter().map(|id| Into::<i64>::into(*id)).collect();
+        // Canonical order: all_nodes is a HashSet with random iteration
+        // order, and these ids become rendered binds in the SQL-cache key
+        // for find_edges_between.
+        let all_ids = canonical_ids(all_nodes.iter().map(|id| Into::<i64>::into(*id)));
         if let Ok(implicit_edges) = index.find_edges_between(&all_ids, &ctx.eph).await {
             for edge in implicit_edges {
                 let from_node = instance_to_node.get(&edge.from_instance_id);

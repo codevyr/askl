@@ -147,6 +147,29 @@ pub fn create_isolated_fixture(fixture: &str) -> IsolatedFixture {
     IsolatedFixture(create_fixture(fixture))
 }
 
+/// Build an `(IndexStore, Index)` pair sharing ONE `SqlResultCache`,
+/// mirroring the server wiring — mutation-side clears (finalize/delete
+/// project) invalidate the cache the query side reads.  Use for tests that
+/// interleave uploads/deletions with queries.
+pub async fn store_and_index_with_shared_cache(
+    url: &str,
+) -> (crate::index_store::IndexStore, Index) {
+    use diesel_async::pooled_connection::bb8::Pool;
+    use diesel_async::pooled_connection::AsyncDieselConnectionManager;
+
+    let index = Index::connect(url)
+        .await
+        .expect("index connect")
+        .with_sql_cache(index::db_diesel::SqlResultCache::new(
+            index::db_diesel::DEFAULT_SQL_CACHE_BYTES,
+        ));
+    let config = AsyncDieselConnectionManager::<AsyncPgConnection>::new(url);
+    let pool = Pool::builder().build(config).await.expect("store pool");
+    let store =
+        crate::index_store::IndexStore::from_pool_with_cache(pool, index.sql_cache().clone());
+    (store, index)
+}
+
 fn get_shared_fixture(fixture: &str) -> &'static SharedFixture {
     let lock = FIXTURES
         .get(fixture)
@@ -156,7 +179,15 @@ fn get_shared_fixture(fixture: &str) -> &'static SharedFixture {
 
 pub async fn get_shared_index(fixture: &str) -> Index {
     let url = &get_shared_fixture(fixture).url;
-    Index::connect(url).await.unwrap()
+    // Cache-ON: the whole suite doubles as the partition-union regression
+    // harness.  Plain constructors default the cache OFF (see
+    // DEFAULT_SQL_CACHE_BYTES docs), so tests enable it explicitly.
+    Index::connect(url)
+        .await
+        .unwrap()
+        .with_sql_cache(index::db_diesel::SqlResultCache::new(
+            index::db_diesel::DEFAULT_SQL_CACHE_BYTES,
+        ))
 }
 
 pub fn get_shared_db_url(fixture: &str) -> &'static str {

@@ -63,6 +63,9 @@ impl IndexStore {
         }
 
         let mut conn = self.get_upload_conn().await?;
+        // Cancellation-safe invalidation: creating a project may cascade-
+        // delete a zombie's persistent rows inside the transaction.
+        let _clear = index::db_diesel::ClearOnDrop(self.sql_cache.clone());
         conn.transaction::<_, UploadError, _>(async move |conn| {
             create_project(
                 conn,
@@ -87,6 +90,11 @@ impl IndexStore {
         symbols: Vec<UploadSymbol>,
     ) -> Result<(), UploadError> {
         let mut conn = self.get_upload_conn().await?;
+        // Chunk rows are query-visible immediately (queries do not filter
+        // by upload_status), so each committed chunk must invalidate the
+        // RAM cache — otherwise a warm cache freezes results at the first
+        // mid-upload read until finalize.
+        let _clear = index::db_diesel::ClearOnDrop(self.sql_cache.clone());
         conn.transaction::<_, UploadError, _>(async move |conn| {
             // Claim this chunk slot.
             let inserted = diesel::insert_into(index_schema::project_symbol_chunks::table)
@@ -132,6 +140,8 @@ impl IndexStore {
 
         let mut conn = self.get_upload_conn().await?;
         let upload_span = tracing::info_span!("index_upload_object_chunk", seq);
+        // See upload_symbol_chunk: committed chunk rows are query-visible.
+        let _clear = index::db_diesel::ClearOnDrop(self.sql_cache.clone());
         conn.transaction::<_, UploadError, _>(async move |conn| {
             let inserted = diesel::insert_into(index_schema::project_object_chunks::table)
                 .values(NewProjectObjectChunk { project_id, seq })
@@ -151,86 +161,102 @@ impl IndexStore {
 
     pub async fn finalize_project(&self, project_id: i32) -> Result<bool, UploadError> {
         let mut conn = self.get_upload_conn().await?;
-        conn.transaction::<_, UploadError, _>(async move |conn| {
-            let row: Option<(UploadStatus, Option<i32>, Option<i32>)> =
-                index_schema::projects::table
-                    .filter(index_schema::projects::id.eq(project_id))
-                    .select((
-                        index_schema::projects::upload_status,
-                        index_schema::projects::symbol_chunks_total,
-                        index_schema::projects::object_chunks_total,
-                    ))
-                    .for_update()
-                    .first(conn)
-                    .await
-                    .optional()?;
+        // Cancellation-safe invalidation: the RAM cache mirrors the DB-side
+        // eph purge inside the transaction; the guard clears it on normal
+        // completion AND if this future is dropped between COMMIT and the
+        // return (the epoch check rejects inserts from loads that read
+        // pre-mutation data).
+        let _clear = index::db_diesel::ClearOnDrop(self.sql_cache.clone());
+        let finalized = conn
+            .transaction::<_, UploadError, _>(async move |conn| {
+                let row: Option<(UploadStatus, Option<i32>, Option<i32>)> =
+                    index_schema::projects::table
+                        .filter(index_schema::projects::id.eq(project_id))
+                        .select((
+                            index_schema::projects::upload_status,
+                            index_schema::projects::symbol_chunks_total,
+                            index_schema::projects::object_chunks_total,
+                        ))
+                        .for_update()
+                        .first(conn)
+                        .await
+                        .optional()?;
 
-            match row {
-                None => Ok(false),
-                Some((UploadStatus::Complete, _, _)) => Ok(true), // idempotent
-                Some((UploadStatus::Uploading, sym_total, obj_total)) => {
-                    // Null-safe: only validate if totals were recorded (new protocol).
-                    if let Some(total) = sym_total {
-                        let committed: i64 = index_schema::project_symbol_chunks::table
-                            .filter(index_schema::project_symbol_chunks::project_id.eq(project_id))
-                            .count()
-                            .get_result(conn)
-                            .await?;
-                        if committed != total as i64 {
-                            return Err(UploadError::Invalid(format!(
-                                "{}/{} symbol chunks committed — upload incomplete",
-                                committed, total
-                            )));
+                match row {
+                    None => Ok(false),
+                    Some((UploadStatus::Complete, _, _)) => Ok(true), // idempotent
+                    Some((UploadStatus::Uploading, sym_total, obj_total)) => {
+                        // Null-safe: only validate if totals were recorded (new protocol).
+                        if let Some(total) = sym_total {
+                            let committed: i64 = index_schema::project_symbol_chunks::table
+                                .filter(
+                                    index_schema::project_symbol_chunks::project_id.eq(project_id),
+                                )
+                                .count()
+                                .get_result(conn)
+                                .await?;
+                            if committed != total as i64 {
+                                return Err(UploadError::Invalid(format!(
+                                    "{}/{} symbol chunks committed — upload incomplete",
+                                    committed, total
+                                )));
+                            }
                         }
-                    }
-                    if let Some(total) = obj_total {
-                        let committed: i64 = index_schema::project_object_chunks::table
-                            .filter(index_schema::project_object_chunks::project_id.eq(project_id))
-                            .count()
-                            .get_result(conn)
-                            .await?;
-                        if committed != total as i64 {
-                            return Err(UploadError::Invalid(format!(
-                                "{}/{} object chunks committed — upload incomplete",
-                                committed, total
-                            )));
+                        if let Some(total) = obj_total {
+                            let committed: i64 = index_schema::project_object_chunks::table
+                                .filter(
+                                    index_schema::project_object_chunks::project_id.eq(project_id),
+                                )
+                                .count()
+                                .get_result(conn)
+                                .await?;
+                            if committed != total as i64 {
+                                return Err(UploadError::Invalid(format!(
+                                    "{}/{} object chunks committed — upload incomplete",
+                                    committed, total
+                                )));
+                            }
                         }
-                    }
-                    diesel::update(
-                        index_schema::projects::table
-                            .filter(index_schema::projects::id.eq(project_id)),
-                    )
-                    .set(index_schema::projects::upload_status.eq(UploadStatus::Complete))
-                    .execute(conn)
-                    .await?;
+                        diesel::update(
+                            index_schema::projects::table
+                                .filter(index_schema::projects::id.eq(project_id)),
+                        )
+                        .set(index_schema::projects::upload_status.eq(UploadStatus::Complete))
+                        .execute(conn)
+                        .await?;
 
-                    // Persistent data has changed; drop the ephemeral layer
-                    // cache atomically with the upload commit.  See
-                    // `index::db_diesel::purge_eph_cache` for the rationale.
-                    //
-                    // **Invariant for future authors**: any *other* code
-                    // path that mutates the persistent index (delete
-                    // project, content-overwrite, schema-migrating data
-                    // moves, …) must also call `purge_eph_cache` in the
-                    // same transaction.  Stale `loc(...)` / `layer {…}`
-                    // results would otherwise re-surface against the
-                    // pre-mutation state.
-                    let purged = index::db_diesel::purge_eph_cache(conn).await?;
-                    tracing::info!(
-                        project_id,
-                        purged_layers = purged,
-                        "purged ephemeral layer cache after project finalize"
-                    );
-                    Ok(true)
+                        // Persistent data has changed; drop the ephemeral layer
+                        // cache atomically with the upload commit.  See
+                        // `index::db_diesel::purge_eph_cache` for the rationale.
+                        //
+                        // **Invariant for future authors**: any *other* code
+                        // path that mutates the persistent index (delete
+                        // project, content-overwrite, schema-migrating data
+                        // moves, …) must also call `purge_eph_cache` in the
+                        // same transaction.  Stale `loc(...)` / `layer {…}`
+                        // results would otherwise re-surface against the
+                        // pre-mutation state.
+                        let purged = index::db_diesel::purge_eph_cache(conn).await?;
+                        tracing::info!(
+                            project_id,
+                            purged_layers = purged,
+                            "purged ephemeral layer cache after project finalize"
+                        );
+                        Ok(true)
+                    }
+                    Some((_, _, _)) => Err(UploadError::Conflict),
                 }
-                Some((_, _, _)) => Err(UploadError::Conflict),
-            }
-        })
-        .await
+            })
+            .await?;
+
+        Ok(finalized)
     }
 
     pub async fn upload_contents(&self, batch: ContentBatch) -> Result<usize, UploadError> {
         let mut conn = self.get_upload_conn().await?;
+        // See upload_symbol_chunk: committed content rows are query-visible
+        // (search's content scan reads content_store directly).
+        let _clear = index::db_diesel::ClearOnDrop(self.sql_cache.clone());
 
         let rows: Vec<NewContentStoreRow> = batch
             .contents
@@ -323,6 +349,18 @@ async fn create_project(
                 )
                 .execute(conn)
                 .await?;
+                // This cascade-deletes the zombie's persistent rows — a
+                // persistent-index mutation like any other, so the eph
+                // cache must be purged in the same transaction (the
+                // invariant documented on finalize_project).  The RAM
+                // cache is cleared by the ClearOnDrop guard in
+                // upload_index.
+                let purged = index::db_diesel::purge_eph_cache(conn).await?;
+                tracing::info!(
+                    project_id = existing_id,
+                    purged,
+                    "upload_index: purged eph cache after zombie deletion"
+                );
             }
             UploadStatus::Complete => {
                 return Err(UploadError::Conflict);

@@ -75,6 +75,9 @@ impl FromSql<diesel::sql_types::Text, Pg> for UploadStatus {
 #[derive(Clone)]
 pub struct IndexStore {
     pool: Pool<AsyncPgConnection>,
+    /// Shared with the query-side `Index` (server wiring): mutation paths
+    /// clear it post-commit, alongside the DB-side `purge_eph_cache`.
+    pub(crate) sql_cache: std::sync::Arc<index::db_diesel::SqlResultCache>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -259,8 +262,23 @@ impl From<diesel::result::Error> for StoreError {
 }
 
 impl IndexStore {
+    /// Standalone constructor (tests, tools): DISABLED cache — its clear()
+    /// is a no-op.  A store built this way performs no RAM-cache
+    /// invalidation, so it must never be paired with a cache-enabled
+    /// query-side Index; use [`Self::from_pool_with_cache`] with the SAME
+    /// instance for that.
     pub fn from_pool(pool: Pool<AsyncPgConnection>) -> Self {
-        Self { pool }
+        Self::from_pool_with_cache(pool, index::db_diesel::SqlResultCache::new(0))
+    }
+
+    /// Server constructor: the cache MUST be the same instance handed to
+    /// the query-side `Index`, so post-commit clears invalidate the cache
+    /// queries actually read.
+    pub fn from_pool_with_cache(
+        pool: Pool<AsyncPgConnection>,
+        sql_cache: std::sync::Arc<index::db_diesel::SqlResultCache>,
+    ) -> Self {
+        Self { pool, sql_cache }
     }
 
     async fn get_conn(&self) -> Result<bb8::PooledConnection<'_, AsyncPgConnection>, StoreError> {
