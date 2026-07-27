@@ -202,9 +202,9 @@ impl Verb for DirectOnlyFilter {
 }
 
 impl Filter for DirectOnlyFilter {
-    fn get_composite_filter(&self, eph: &index::db_diesel::EphContext) -> Option<CompositeFilter> {
+    fn get_composite_filter(&self, _eph: &index::db_diesel::EphContext) -> Option<CompositeFilter> {
         Some(CompositeFilter::leaf(
-            index::db_diesel::DirectOnlyMixin::new(eph),
+            index::db_diesel::DirectOnlyMixin::new(),
         ))
     }
 }

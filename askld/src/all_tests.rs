@@ -5899,28 +5899,24 @@ fn delete_project_purges_eph_cache() {
     // project deletion hollow (its rows cascade away, populated stays
     // true) and the rerun would silently hit it; with the purge, the rerun
     // repopulates and fails loudly because the file is gone.
-    use crate::test_util::{create_isolated_fixture, run_query_traced_on};
+    use crate::test_util::{
+        create_isolated_fixture, run_query_traced_on, store_and_index_with_shared_cache,
+    };
     let fx = create_isolated_fixture(VERB_TEST);
 
     let mut rt = tokio::runtime::Runtime::new().unwrap();
     let local = tokio::task::LocalSet::new();
     local.block_on(&mut rt, async {
-        let index = index::db_diesel::Index::connect(fx.url()).await.unwrap();
+        // Shared-cache pair: the store's clear must invalidate the cache
+        // the index reads (a split-cache pairing would pass this test only
+        // incidentally — the review caught exactly that).
+        let (store, index) = store_and_index_with_shared_cache(fx.url()).await;
 
         const QUERY: &str = r#"loc("main.c", "2", project="test_project")"#;
         let (_res, acts) = run_query_traced_on(index.clone(), QUERY).await.unwrap();
         assert!(acts[0].created, "cold loc base, got {:?}", acts);
         assert!(index.eph_layer_count().await.unwrap() >= 1);
 
-        let config = diesel_async::pooled_connection::AsyncDieselConnectionManager::<
-            diesel_async::AsyncPgConnection,
-        >::new(fx.url());
-        let pool = diesel_async::pooled_connection::bb8::Pool::builder()
-            .max_size(1)
-            .build(config)
-            .await
-            .unwrap();
-        let store = crate::index_store::IndexStore::from_pool(pool);
         assert!(store.delete_project(1).await.unwrap());
 
         assert_eq!(
@@ -5990,5 +5986,528 @@ fn purge_blocks_on_inflight_layer_txn() {
             purged
         );
         assert_eq!(index.eph_layer_count().await.unwrap(), 0);
+    });
+}
+
+// ============================================================================
+// SQL result cache tests
+// ============================================================================
+
+#[test]
+fn cached_load_miss_then_hit() {
+    // The generic proxy: the same query (by rendered SQL + binds) misses
+    // once and hits afterwards; a bind change misses again.  One Index
+    // instance throughout — the cache is per-Index (per-process in the
+    // server), not per-database.
+    use diesel::prelude::*;
+    use index::schema_diesel::symbols;
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(VERB_TEST).await;
+        let build = |min_id: i64| {
+            symbols::table
+                .filter(symbols::id.gt(min_id))
+                .select(symbols::id)
+                .into_boxed::<diesel::pg::Pg>()
+        };
+
+        let s0 = index.sql_cache().stats();
+        let first = index.cached_load::<_, i64>(build(0)).await.unwrap();
+        let s1 = index.sql_cache().stats();
+        assert_eq!(s1.misses, s0.misses + 1, "cold query is a miss");
+        assert_eq!(s1.hits, s0.hits, "no hit yet");
+        assert!(!first.is_empty(), "fixture has symbols");
+
+        let second = index.cached_load::<_, i64>(build(0)).await.unwrap();
+        let s2 = index.sql_cache().stats();
+        assert_eq!(s2.hits, s1.hits + 1, "identical query is a hit");
+        assert_eq!(s2.misses, s1.misses, "no extra miss");
+        assert_eq!(*first, *second, "hit returns the same rows");
+
+        let third = index.cached_load::<_, i64>(build(1)).await.unwrap();
+        let s3 = index.sql_cache().stats();
+        assert_eq!(s3.misses, s2.misses + 1, "differing bind is a distinct key");
+        assert!(third.len() <= first.len());
+    });
+}
+
+// ============================================================================
+// SQL result cache: end-to-end partition/invalidation tests
+// ============================================================================
+//
+// NOTE: the cache is per-Index (per-process in the server).  run_query_traced
+// creates a fresh Index — and thus a COLD cache — per call, which is why
+// these tests build one Index and run queries through run_query_traced_on.
+
+#[test]
+fn sql_cache_persistent_branch_shared_across_chains() {
+    // Genuine persistent-branch sharing: the BARE statement "fn_basic"
+    // populates chain-free keys; the SAME statement under two different
+    // ephemeral prefixes must then HIT those entries (its select_current
+    // persistent branch renders identical SQL — the statement's inputs
+    // are chain-free).  NOT asserted here, by design: statements whose
+    // inputs embed chain-derived ids (downstream of an eph selection) and
+    // chain-dependent (direct/innermost) filters do not share across
+    // chains — see cached_load_partitioned's documented limitations.
+    use crate::test_util::run_query_traced_on;
+    const BARE: &str = r#""fn_basic""#;
+    const Q_A: &str = concat!(
+        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
+        r#"start="90000", end="90100", instance_type="1") }; "#,
+        r#""fn_basic""#,
+    );
+    const Q_B: &str = concat!(
+        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
+        r#"start="91000", end="91100", instance_type="1") }; "#,
+        r#""fn_basic""#,
+    );
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(TEST_INPUT_SEARCH).await;
+
+        // Cold: the bare statement stores the chain-free entries.
+        let (_bare, _) = run_query_traced_on(index.clone(), BARE).await.unwrap();
+        let s0 = index.sql_cache().stats();
+
+        let (_res_a, _) = run_query_traced_on(index.clone(), Q_A).await.unwrap();
+        let s1 = index.sql_cache().stats();
+        assert!(
+            s1.hits > s0.hits,
+            "prefixed run must hit the bare run's persistent entries, {:?} -> {:?}",
+            s0,
+            s1,
+        );
+
+        let (_res_b, _) = run_query_traced_on(index.clone(), Q_B).await.unwrap();
+        let s2 = index.sql_cache().stats();
+        assert!(
+            s2.hits > s1.hits,
+            "a different prefix must hit the same persistent entries, {:?} -> {:?}",
+            s1,
+            s2,
+        );
+    });
+}
+
+#[test]
+fn sql_cache_eph_rows_visible_cold_and_warm() {
+    // The eph branch carries the ephemeral rows: a prefixed query whose
+    // selection includes an eph instance returns identical, duplicate-free
+    // nodes on a cold cache and on a warm one.
+    use crate::test_util::run_query_traced_on;
+    const QUERY: &str = concat!(
+        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
+        r#"start="92000", end="92100", instance_type="1") }; "#,
+        r#""fn_basic""#,
+    );
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(TEST_INPUT_SEARCH).await;
+
+        let (cold, _) = run_query_traced_on(index.clone(), QUERY).await.unwrap();
+        let (warm, _) = run_query_traced_on(index.clone(), QUERY).await.unwrap();
+
+        let cold_nodes = cold.nodes.as_vec();
+        let warm_nodes = warm.nodes.as_vec();
+        assert!(
+            cold_nodes.iter().any(|id| {
+                let v: i64 = (*id).into();
+                v < 0
+            }),
+            "eph instance must be visible through the eph branch"
+        );
+        let cold_set: std::collections::HashSet<_> = cold_nodes.iter().copied().collect();
+        let warm_set: std::collections::HashSet<_> = warm_nodes.iter().copied().collect();
+        assert_eq!(cold_set, warm_set, "cold and warm results must agree");
+        assert_eq!(
+            cold_nodes.len(),
+            cold_set.len(),
+            "branch merge must not duplicate nodes (cold)"
+        );
+        assert_eq!(
+            warm_nodes.len(),
+            warm_set.len(),
+            "branch merge must not duplicate nodes (warm)"
+        );
+    });
+}
+
+#[test]
+fn sql_cache_containment_correct_under_prefixes() {
+    // Containment queries involve the chain-dependent direct/innermost
+    // machinery (the Combined fallback): results must stay correct across
+    // differing prefixes and cache temperatures.
+    use crate::test_util::run_query_traced_on;
+    const Q_A: &str = concat!(
+        r#"layer { ephemeral_instance(symbol_id="201", object_id="1", "#,
+        r#"start="93000", end="93100", instance_type="1") }; "#,
+        r#"dir("/") has { file }"#,
+    );
+    const Q_B: &str = concat!(
+        r#"layer { ephemeral_instance(symbol_id="201", object_id="1", "#,
+        r#"start="93500", end="93600", instance_type="1") }; "#,
+        r#"dir("/") has { file }"#,
+    );
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(TEST_INPUT_TREE_BROWSER).await;
+
+        let (a1, _) = run_query_traced_on(index.clone(), Q_A).await.unwrap();
+        let (a2, _) = run_query_traced_on(index.clone(), Q_A).await.unwrap();
+        let (b, _) = run_query_traced_on(index.clone(), Q_B).await.unwrap();
+
+        let set = |r: &crate::statement::ExecutionResult| {
+            r.nodes
+                .as_vec()
+                .iter()
+                .filter(|id| {
+                    let v: i64 = (**id).into();
+                    v > 0 // ignore the per-prefix layer instance
+                })
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+        };
+        assert_eq!(set(&a1), set(&a2), "warm rerun must equal cold run");
+        assert_eq!(
+            set(&a1),
+            set(&b),
+            "persistent containment results must not vary with the prefix"
+        );
+    });
+}
+
+#[test]
+fn sql_cache_cleared_by_delete_project() {
+    // Invalidation end-to-end: a warm cache must not serve pre-deletion
+    // results after delete_project clears it (shared-cache wiring).
+    use crate::test_util::{create_isolated_fixture, store_and_index_with_shared_cache};
+    let fx = create_isolated_fixture(VERB_TEST);
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        use crate::test_util::run_query_traced_on;
+        let (store, index) = store_and_index_with_shared_cache(fx.url()).await;
+
+        const QUERY: &str = r#""foo""#;
+        let (first, _) = run_query_traced_on(index.clone(), QUERY).await.unwrap();
+        assert!(!first.nodes.as_vec().is_empty(), "foo exists before delete");
+
+        // Warm the cache and prove it hits.
+        let hits_before = index.sql_cache().stats().hits;
+        let (_warm, _) = run_query_traced_on(index.clone(), QUERY).await.unwrap();
+        assert!(
+            index.sql_cache().stats().hits > hits_before,
+            "second run must be served from cache"
+        );
+
+        assert!(store.delete_project(1).await.unwrap());
+
+        let (after, _) = run_query_traced_on(index.clone(), QUERY).await.unwrap();
+        assert!(
+            after.nodes.as_vec().is_empty(),
+            "post-delete query must see fresh (empty) results, not the warm \
+             cache: got {:?}",
+            after.nodes.as_vec(),
+        );
+    });
+}
+
+#[test]
+fn sql_cache_concurrent_identical_loads() {
+    // Concurrency smoke: two identical cold loads racing on one Index both
+    // succeed (no singleflight — both may execute; documented non-goal).
+    use diesel::prelude::*;
+    use index::schema_diesel::symbols;
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(VERB_TEST).await;
+        let build = || {
+            symbols::table
+                .filter(symbols::id.gt(-1_000_000i64))
+                .select(symbols::id)
+                .into_boxed::<diesel::pg::Pg>()
+        };
+        let (a, b) = tokio::join!(
+            index.cached_load::<_, i64>(build()),
+            index.cached_load::<_, i64>(build()),
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_eq!(*a, *b, "concurrent identical loads must agree");
+    });
+}
+
+// ============================================================================
+// SQL cache review fixes: edge semantics + key stability
+// ============================================================================
+
+#[test]
+fn edges_pick_min_instance_across_branches() {
+    // Contract of find_edges_between (legacy single-query semantics):
+    // DISTINCT ON (from_inst, sr) ... ORDER BY ... to_inst.id — exactly ONE
+    // row per (from, ref), targeting the MIN to_instance.  With an eph
+    // instance of the target symbol in the chain that is the eph instance
+    // (negative id).  The partitioned branches each run their own DISTINCT
+    // ON, so without the post-merge collapse this returns one row per
+    // branch and the persistent row leads the vector.
+    //
+    // Tested at the Index level: in end-to-end query flows the implicit
+    // edges are currently shadowed by explicit children/parents collection
+    // (statement/mod.rs seeds seen_edges first, and that path sorts to the
+    // min instance itself), so only Skip-scoped selectors (search/loc)
+    // observe this function's rows directly.
+    use crate::test_util::run_query_traced_on;
+    const SETUP: &str = concat!(
+        r#"layer { ephemeral_instance(symbol_id="2", object_id="1", "#,
+        r#"start="95000", end="95100", instance_type="1") }"#,
+    );
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(VERB_TEST).await;
+        let (res, acts) = run_query_traced_on(index.clone(), SETUP).await.unwrap();
+        let eph_inst: i64 = res
+            .nodes
+            .as_vec()
+            .iter()
+            .map(|id| Into::<i64>::into(*id))
+            .find(|v| *v < 0)
+            .expect("layer created an eph instance");
+        let chain: Vec<i64> = acts.iter().map(|a| a.layer_id).collect();
+        let eph = index::db_diesel::EphContext::from_slice(&chain);
+
+        // Candidates: foo's instance (91), foo.bar's persistent instance
+        // (92), and the eph instance of foo.bar.  Two persistent refs run
+        // foo -> foo.bar.
+        let edges = index
+            .find_edges_between(&[91, 92, eph_inst], &eph)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            edges.len(),
+            2,
+            "exactly one row per (from, ref) — the collapse must apply              across branches, got {:?}",
+            edges
+                .iter()
+                .map(|e| (e.ref_id, e.from_instance_id, e.to_instance_id))
+                .collect::<Vec<_>>(),
+        );
+        for e in &edges {
+            assert_eq!(e.from_instance_id, 91);
+            assert_eq!(
+                e.to_instance_id, eph_inst,
+                "each ref must target the MIN to_instance (the eph one)"
+            );
+        }
+    });
+}
+
+#[test]
+fn sql_cache_warm_arrow_query_hits_traversal_families() {
+    // Keying stability for the traversal pipeline: the same layer+arrow
+    // query twice on ONE Index must hit on the second run — this covers
+    // find_edges_between (whose candidate ids formerly arrived in random
+    // HashSet order, re-keying every request) and the parents/children
+    // families.
+    use crate::test_util::run_query_traced_on;
+    const QUERY: &str = concat!(
+        r#"layer { ephemeral_instance(symbol_id="2", object_id="1", "#,
+        r#"start="96000", end="96100", instance_type="1") }; "#,
+        r#""foo" { "foo.bar" }"#,
+    );
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(VERB_TEST).await;
+
+        let (r1, _) = run_query_traced_on(index.clone(), QUERY).await.unwrap();
+        let s1 = index.sql_cache().stats();
+        let (r2, _) = run_query_traced_on(index.clone(), QUERY).await.unwrap();
+        let s2 = index.sql_cache().stats();
+
+        assert!(
+            s2.hits >= s1.hits + 3,
+            "warm rerun must hit the selection/edges families, stats {:?} -> {:?}",
+            s1,
+            s2,
+        );
+        assert_eq!(
+            format_edges(r1.edges),
+            format_edges(r2.edges),
+            "warm rerun must produce identical edges"
+        );
+    });
+}
+
+#[test]
+fn zombie_project_reupload_purges_caches() {
+    // upload_index deleting a Failed/Deleting zombie project cascades its
+    // persistent rows away — a mutation like any other: the eph-layer
+    // cache must be purged in the same transaction and the RAM cache
+    // cleared, or warm queries keep serving the deleted project's symbols.
+    use crate::proto::askl::index::Project as UploadProject;
+    use crate::test_util::{create_isolated_fixture, store_and_index_with_shared_cache};
+    use diesel_async::AsyncConnection;
+    let fx = create_isolated_fixture(VERB_TEST);
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        use crate::test_util::run_query_traced_on;
+        let (store, index) = store_and_index_with_shared_cache(fx.url()).await;
+
+        // Warm both caches: a query result in RAM, an eph layer in the DB.
+        const QUERY: &str = concat!(
+            r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
+            r#"start="97000", end="97100", instance_type="1") }; "#,
+            r#""foo""#,
+        );
+        let (before, _) = run_query_traced_on(index.clone(), QUERY).await.unwrap();
+        assert!(!before.nodes.as_vec().is_empty());
+        assert!(index.eph_layer_count().await.unwrap() >= 1);
+
+        // Mark the project as a zombie, then re-upload the same name.
+        let mut conn = diesel_async::AsyncPgConnection::establish(fx.url())
+            .await
+            .unwrap();
+        diesel_async::RunQueryDsl::execute(
+            diesel::sql_query("UPDATE index.projects SET upload_status = 'failed' WHERE id = 1"),
+            &mut conn,
+        )
+        .await
+        .unwrap();
+
+        let upload = UploadProject {
+            project_name: "test_project".to_string(),
+            root_path: "/test_project".to_string(),
+            ..Default::default()
+        };
+        let (_new_id, resumed) = store.upload_index(upload, Some(0), Some(0)).await.unwrap();
+        assert!(!resumed, "zombie must be replaced, not resumed");
+
+        assert_eq!(
+            index.eph_layer_count().await.unwrap(),
+            0,
+            "zombie deletion must purge the eph-layer cache"
+        );
+        let (after, _) = run_query_traced_on(index.clone(), r#""foo""#)
+            .await
+            .unwrap();
+        assert!(
+            after.nodes.as_vec().is_empty(),
+            "warm RAM cache must not survive the zombie deletion, got {:?}",
+            after.nodes.as_vec(),
+        );
+    });
+}
+
+#[test]
+fn finalize_project_clears_ram_cache() {
+    // Closes the review's coverage gap: only delete_project's invalidation
+    // was tested end-to-end.  Seed an Uploading project state with
+    // matching (zero) chunk totals, warm the cache, finalize, and assert
+    // fresh reads.
+    use crate::test_util::{create_isolated_fixture, store_and_index_with_shared_cache};
+    use diesel_async::AsyncConnection;
+    let fx = create_isolated_fixture(VERB_TEST);
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        use crate::test_util::run_query_traced_on;
+        let (store, index) = store_and_index_with_shared_cache(fx.url()).await;
+
+        let (_warm, _) = run_query_traced_on(index.clone(), r#""foo""#)
+            .await
+            .unwrap();
+        let hits0 = index.sql_cache().stats().hits;
+        let (_warm2, _) = run_query_traced_on(index.clone(), r#""foo""#)
+            .await
+            .unwrap();
+        assert!(index.sql_cache().stats().hits > hits0, "cache warmed");
+        let epoch_before = index.sql_cache().epoch();
+
+        let mut conn = diesel_async::AsyncPgConnection::establish(fx.url())
+            .await
+            .unwrap();
+        diesel_async::RunQueryDsl::execute(
+            diesel::sql_query(
+                "UPDATE index.projects SET upload_status = 'uploading', \
+                 symbol_chunks_total = 0, object_chunks_total = 0 WHERE id = 1",
+            ),
+            &mut conn,
+        )
+        .await
+        .unwrap();
+
+        assert!(store.finalize_project(1).await.unwrap());
+        assert!(
+            index.sql_cache().epoch() > epoch_before,
+            "finalize must clear (epoch-bump) the shared RAM cache"
+        );
+    });
+}
+
+#[test]
+fn combined_fallback_consults_eph_rows() {
+    // Pins is_chain_dependent semantics for the direct-only machinery: an
+    // eph mid-instance nested between a container and a child must demote
+    // the child from the DIRECT has-children of the container.  Runs both
+    // variants on ONE Index: if the direct-only query were wrongly
+    // partitioned (chain-independent persistent key), the layered run
+    // would cache-hit the bare run's result and keep foo — this test
+    // fails in exactly that case.
+    use crate::test_util::run_query_traced_on;
+    const BARE: &str = r#"mod("testmodule") has { func }"#;
+    const LAYERED: &str = concat!(
+        // Mid covers [50,250): strictly inside the module instance
+        // [0,1000), strictly containing foo [100,200); bar [200,300) and
+        // baz [300,400) are not contained.
+        r#"layer { ephemeral_instance(symbol_id="2", object_id="1", "#,
+        r#"start="50", end="250", instance_type="1") }; "#,
+        r#"mod("testmodule") has { func }"#,
+    );
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(TEST_INPUT_CONTAINMENT).await;
+
+        let (bare, _) = run_query_traced_on(index.clone(), BARE).await.unwrap();
+        let bare_nodes = bare.nodes.as_vec();
+        assert!(
+            bare_nodes.contains(&SymbolInstanceId::new(20)),
+            "foo (inst 20) is a direct child without the eph mid, got {:?}",
+            bare_nodes,
+        );
+
+        let (layered, _) = run_query_traced_on(index.clone(), LAYERED).await.unwrap();
+        let layered_nodes = layered.nodes.as_vec();
+        assert!(
+            !layered_nodes.contains(&SymbolInstanceId::new(20)),
+            "the eph mid must demote foo from DIRECT children — the \
+             chain-dependent query must consult eph rows, not a \
+             chain-free cache entry, got {:?}",
+            layered_nodes,
+        );
+        assert!(
+            layered_nodes.contains(&SymbolInstanceId::new(30))
+                && layered_nodes.contains(&SymbolInstanceId::new(40)),
+            "bar/baz stay direct (mid does not contain them), got {:?}",
+            layered_nodes,
+        );
     });
 }

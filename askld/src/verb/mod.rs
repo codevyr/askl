@@ -699,10 +699,9 @@ pub trait Selector: std::fmt::Debug + Verb {
         let parent_ids = parent_sel.get_instance_ids();
         let mut find_parts: Vec<CompositeFilter> = vec![];
         if !notif_ctx.unnest {
-            find_parts.push(CompositeFilter::leaf(DirectOnlyMixin::new(&ctx.eph)));
+            find_parts.push(CompositeFilter::leaf(DirectOnlyMixin::new()));
             find_parts.push(CompositeFilter::leaf(OuterParentFilterMixin::new(
                 &parent_ids,
-                &ctx.eph,
             )));
         }
         let find_filter = CompositeFilter::and(find_parts);
@@ -748,7 +747,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         let child_ids = child_sel.get_instance_ids();
         let mut find_parts: Vec<CompositeFilter> = vec![];
         if !notif_ctx.unnest {
-            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new(&ctx.eph)));
+            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new()));
         }
         let find_filter = CompositeFilter::and(find_parts);
         let eph = &ctx.eph;

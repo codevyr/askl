@@ -25,7 +25,7 @@ use super::cte::{
     build_has_children_query_against_cte, CteFindEdgesBetween, CteHasChildren,
 };
 use super::mixins::{
-    ChildrenQuery, CompositeFilter, CurrentQuery, HasParentsQuery, ParentsQuery,
+    ChildrenQuery, CompositeFilter, CurrentQuery, EphVisibility, HasParentsQuery, ParentsQuery,
     CONTAINER_INSTANCE_ALIAS, CONTAINER_SYMBOL_ALIAS, CONTAINER_TYPE_ALIAS, PARENT_DECLS_ALIAS,
     PARENT_SYMBOLS_ALIAS,
 };
@@ -33,7 +33,6 @@ use super::selection::{
     is_eph_leak, ChildReference, EphContext, HasChildReference, HasParentReference,
     ParentReference, Selection, SelectionNode,
 };
-use super::Connection;
 
 // ============================================================================
 // Scope context — controls parent/children query scoping in find_symbol
@@ -67,7 +66,7 @@ enum ScopeRole {
 /// Build a base CurrentQuery (symbols ⋈ instances ⋈ projects ⋈ objects).
 /// Applies ephemeral visibility filter: only persistent rows (eph_layer IS NULL)
 /// and rows belonging to the given ephemeral layers are returned.
-fn build_current_query(eph_ids: &[i64]) -> CurrentQuery<'static> {
+fn build_current_query(vis: &EphVisibility) -> CurrentQuery<'static> {
     use crate::schema_diesel::*;
     let mut query = symbols::dsl::symbols
         .inner_join(
@@ -84,18 +83,10 @@ fn build_current_query(eph_ids: &[i64]) -> CurrentQuery<'static> {
         ))
         .into_boxed::<Pg>();
 
-    // Ephemeral visibility: persistent rows + rows from active layers
-    let eph_ids_owned = eph_ids.to_vec();
-    query = query.filter(
-        symbols::eph_layer
-            .is_null()
-            .or(symbols::eph_layer.eq_any(eph_ids_owned.clone())),
-    );
-    query = query.filter(
-        symbol_instances::eph_layer
-            .is_null()
-            .or(symbol_instances::eph_layer.eq_any(eph_ids_owned)),
-    );
+    // Ephemeral visibility on the selected-row columns, rendered by the
+    // partition token (records the columns for the eph-branch guard).
+    query = query.filter(vis.pred("symbols.eph_layer"));
+    query = query.filter(vis.pred("symbol_instances.eph_layer"));
 
     query
 }
@@ -103,115 +94,122 @@ fn build_current_query(eph_ids: &[i64]) -> CurrentQuery<'static> {
 use super::mixins::EphSqlFragment;
 
 /// Resolve a CompositeFilter to instance IDs by running a CurrentQuery.
-async fn resolve_filter_to_ids(
-    filter: &CompositeFilter,
-    role: Option<&ScopeRole>,
-    eph_ids: &[i64],
-    conn: &mut Connection,
-) -> Result<Vec<i64>> {
-    use diesel::sql_types::Bool;
+///
+/// Runs in Combined (legacy-visibility) mode through the SQL cache: the
+/// ScopeRole reference-subqueries below consult chain-visible rows, so the
+/// persistent/eph partition union would not equal the legacy result.  The
+/// query is still cached — chain binds are part of the key.
+impl Index {
+    async fn resolve_filter_to_ids(
+        &self,
+        filter: &CompositeFilter,
+        role: Option<&ScopeRole>,
+        eph_ids: &[i64],
+    ) -> Result<Vec<i64>> {
+        use diesel::sql_types::Bool;
 
-    let _span = tracing::info_span!("resolve_filter_to_ids", eph_count = eph_ids.len()).entered();
-    let t0 = std::time::Instant::now();
+        let _span =
+            tracing::info_span!("resolve_filter_to_ids", eph_count = eph_ids.len()).entered();
+        let t0 = std::time::Instant::now();
 
-    let eph = EphContext::from_slice(eph_ids);
-    let mut query = build_current_query(eph_ids);
-    if let Some(expr) = filter.compose_current() {
-        query = query.filter(expr);
-    }
-
-    // Add reference-based constraint when resolving scoped filters.
-    match role {
-        Some(ScopeRole::Children(parent_ids)) if !parent_ids.is_empty() => {
-            query = query.filter(
-                EphSqlFragment::<Bool>::builder()
-                    .sql(
-                        "symbol_instances.id IN (\
-                            SELECT si.id FROM index.symbol_refs sr \
-                            JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
-                            JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                              AND pd.offset_range @> sr.from_offset_range \
-                            WHERE ",
-                    )
-                    .eph_visibility("sr.eph_layer", &eph)
-                    .sql(" AND ")
-                    .eph_visibility("si.eph_layer", &eph)
-                    .sql(" AND ")
-                    .eph_visibility("pd.eph_layer", &eph)
-                    .sql(" AND pd.id = ANY(")
-                    .bind(parent_ids.clone())
-                    .sql("))")
-                    .build(),
-            );
+        let eph = EphContext::from_slice(eph_ids);
+        let vis = EphVisibility::combined(&eph);
+        let mut query = build_current_query(&vis);
+        if let Some(expr) = filter.compose_current(&vis) {
+            query = query.filter(expr);
         }
-        Some(ScopeRole::Parents(child_ids)) if !child_ids.is_empty() => {
-            query = query.filter(
-                EphSqlFragment::<Bool>::builder()
-                    .sql(
-                        "symbol_instances.id IN (\
-                            SELECT pd.id FROM index.symbol_refs sr \
-                            JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                              AND pd.offset_range @> sr.from_offset_range \
-                            JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
-                            WHERE ",
-                    )
-                    .eph_visibility("sr.eph_layer", &eph)
-                    .sql(" AND ")
-                    .eph_visibility("si.eph_layer", &eph)
-                    .sql(" AND ")
-                    .eph_visibility("pd.eph_layer", &eph)
-                    .sql(" AND si.id = ANY(")
-                    .bind(child_ids.clone())
-                    .sql("))")
-                    .build(),
-            );
+
+        // Add reference-based constraint when resolving scoped filters.
+        match role {
+            Some(ScopeRole::Children(parent_ids)) if !parent_ids.is_empty() => {
+                query = query.filter(
+                    EphSqlFragment::<Bool>::builder()
+                        .sql(
+                            "symbol_instances.id IN (\
+                                SELECT si.id FROM index.symbol_refs sr \
+                                JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
+                                JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
+                                  AND pd.offset_range @> sr.from_offset_range \
+                                WHERE ",
+                        )
+                        .eph_visibility("sr.eph_layer", &vis)
+                        .sql(" AND ")
+                        .eph_visibility("si.eph_layer", &vis)
+                        .sql(" AND ")
+                        .eph_visibility("pd.eph_layer", &vis)
+                        .sql(" AND pd.id = ANY(")
+                        .bind(parent_ids.clone())
+                        .sql("))")
+                        .build(),
+                );
+            }
+            Some(ScopeRole::Parents(child_ids)) if !child_ids.is_empty() => {
+                query = query.filter(
+                    EphSqlFragment::<Bool>::builder()
+                        .sql(
+                            "symbol_instances.id IN (\
+                                SELECT pd.id FROM index.symbol_refs sr \
+                                JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
+                                  AND pd.offset_range @> sr.from_offset_range \
+                                JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
+                                WHERE ",
+                        )
+                        .eph_visibility("sr.eph_layer", &vis)
+                        .sql(" AND ")
+                        .eph_visibility("si.eph_layer", &vis)
+                        .sql(" AND ")
+                        .eph_visibility("pd.eph_layer", &vis)
+                        .sql(" AND si.id = ANY(")
+                        .bind(child_ids.clone())
+                        .sql("))")
+                        .build(),
+                );
+            }
+            _ => {}
         }
-        _ => {}
+
+        let results: std::sync::Arc<Vec<(Symbol, SymbolInstance, Object, Project)>> = self
+            .cached_load(query)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to resolve filter to IDs: {}", e))?;
+        tracing::info!(
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            result_rows = results.len(),
+            "resolve_filter_to_ids completed",
+        );
+        let mut ids: Vec<i64> = results.iter().map(|(_, inst, _, _)| inst.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(ids)
     }
 
-    let results = query
-        .load::<(Symbol, SymbolInstance, Object, Project)>(conn)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to resolve filter to IDs: {}", e))?;
-    tracing::info!(
-        elapsed_ms = t0.elapsed().as_millis() as u64,
-        result_rows = results.len(),
-        "resolve_filter_to_ids SQL completed",
-    );
-    let mut ids: Vec<i64> = results.iter().map(|(_, inst, _, _)| inst.id).collect();
-    ids.sort_unstable();
-    ids.dedup();
-    Ok(ids)
-}
-
-/// Resolve a Scope's fields into a set of instance IDs for filtering.
-async fn resolve_scope_ids(
-    ids: &[i64],
-    filter: &Option<CompositeFilter>,
-    role: Option<&ScopeRole>,
-    eph_ids: &[i64],
-    conn: &mut Connection,
-) -> Result<Vec<i64>> {
-    let mut all_ids = ids.to_vec();
-    if let Some(ref f) = filter {
-        all_ids.extend(resolve_filter_to_ids(f, role, eph_ids, conn).await?);
-        all_ids.sort_unstable();
-        all_ids.dedup();
+    /// Resolve a Scope's fields into a set of instance IDs for filtering.
+    async fn resolve_scope_ids(
+        &self,
+        ids: &[i64],
+        filter: &Option<CompositeFilter>,
+        role: Option<&ScopeRole>,
+        eph_ids: &[i64],
+    ) -> Result<Vec<i64>> {
+        let mut all_ids = ids.to_vec();
+        if let Some(ref f) = filter {
+            all_ids.extend(self.resolve_filter_to_ids(f, role, eph_ids).await?);
+            all_ids.sort_unstable();
+            all_ids.dedup();
+        }
+        Ok(all_ids)
     }
-    Ok(all_ids)
 }
 
 // ============================================================================
 // Shared query builders — used by both find_symbol and find_*_instance_ids
 // ============================================================================
 
-fn build_parents_query(source_ids: Vec<i64>, eph_ids: &[i64]) -> ParentsQuery<'static> {
+fn build_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ParentsQuery<'static> {
     use crate::schema_diesel::*;
 
     let parent_decls = PARENT_DECLS_ALIAS;
     let parent_symbols = PARENT_SYMBOLS_ALIAS;
-
-    let eph_ids_owned = eph_ids.to_vec();
 
     symbol_refs::dsl::symbol_refs
         .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::dsl::id)))
@@ -235,38 +233,13 @@ fn build_parents_query(source_ids: Vec<i64>, eph_ids: &[i64]) -> ParentsQuery<'s
                 .contains_range(symbol_refs::dsl::from_offset_range),
         )
         .filter(symbol_instances::dsl::id.eq_any(source_ids))
-        // Ephemeral visibility — filter canonical and aliased tables
-        .filter(
-            symbol_refs::eph_layer
-                .is_null()
-                .or(symbol_refs::eph_layer.eq_any(eph_ids_owned.clone())),
-        )
-        .filter(
-            symbols::eph_layer
-                .is_null()
-                .or(symbols::eph_layer.eq_any(eph_ids_owned.clone())),
-        )
-        .filter(
-            symbol_instances::eph_layer
-                .is_null()
-                .or(symbol_instances::eph_layer.eq_any(eph_ids_owned.clone())),
-        )
-        .filter(
-            parent_decls
-                .field(symbol_instances::eph_layer)
-                .is_null()
-                .or(parent_decls
-                    .field(symbol_instances::eph_layer)
-                    .eq_any(eph_ids_owned.clone())),
-        )
-        .filter(
-            parent_symbols
-                .field(symbols::eph_layer)
-                .is_null()
-                .or(parent_symbols
-                    .field(symbols::eph_layer)
-                    .eq_any(eph_ids_owned)),
-        )
+        // Ephemeral visibility — canonical and aliased tables, rendered by
+        // the partition token (records columns for the eph-branch guard).
+        .filter(vis.pred("symbol_refs.eph_layer"))
+        .filter(vis.pred("symbols.eph_layer"))
+        .filter(vis.pred("symbol_instances.eph_layer"))
+        .filter(vis.pred("parent_decls.eph_layer"))
+        .filter(vis.pred("parent_symbols.eph_layer"))
         .select((
             SymbolRef::as_select(),
             Symbol::as_select(),
@@ -276,13 +249,11 @@ fn build_parents_query(source_ids: Vec<i64>, eph_ids: &[i64]) -> ParentsQuery<'s
         .into_boxed::<Pg>()
 }
 
-fn build_children_query(source_ids: Vec<i64>, eph_ids: &[i64]) -> ChildrenQuery<'static> {
+fn build_children_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ChildrenQuery<'static> {
     use crate::schema_diesel::*;
 
     let parent_decls = PARENT_DECLS_ALIAS;
     let parent_symbols = PARENT_SYMBOLS_ALIAS;
-
-    let eph_ids_owned = eph_ids.to_vec();
 
     symbol_refs::dsl::symbol_refs
         .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::id)))
@@ -314,38 +285,13 @@ fn build_children_query(source_ids: Vec<i64>, eph_ids: &[i64]) -> ChildrenQuery<
             objects::dsl::objects
                 .on(objects::dsl::id.eq(parent_decls.field(symbol_instances::dsl::object_id))),
         )
-        // Ephemeral visibility — filter canonical and aliased tables
-        .filter(
-            symbol_refs::eph_layer
-                .is_null()
-                .or(symbol_refs::eph_layer.eq_any(eph_ids_owned.clone())),
-        )
-        .filter(
-            symbols::eph_layer
-                .is_null()
-                .or(symbols::eph_layer.eq_any(eph_ids_owned.clone())),
-        )
-        .filter(
-            symbol_instances::eph_layer
-                .is_null()
-                .or(symbol_instances::eph_layer.eq_any(eph_ids_owned.clone())),
-        )
-        .filter(
-            parent_decls
-                .field(symbol_instances::eph_layer)
-                .is_null()
-                .or(parent_decls
-                    .field(symbol_instances::eph_layer)
-                    .eq_any(eph_ids_owned.clone())),
-        )
-        .filter(
-            parent_symbols
-                .field(symbols::eph_layer)
-                .is_null()
-                .or(parent_symbols
-                    .field(symbols::eph_layer)
-                    .eq_any(eph_ids_owned)),
-        )
+        // Ephemeral visibility — canonical and aliased tables, rendered by
+        // the partition token (records columns for the eph-branch guard).
+        .filter(vis.pred("symbol_refs.eph_layer"))
+        .filter(vis.pred("symbols.eph_layer"))
+        .filter(vis.pred("symbol_instances.eph_layer"))
+        .filter(vis.pred("parent_decls.eph_layer"))
+        .filter(vis.pred("parent_symbols.eph_layer"))
         .select((
             parent_symbols.fields(crate::schema_diesel::symbols::all_columns),
             Symbol::as_select(),
@@ -357,14 +303,12 @@ fn build_children_query(source_ids: Vec<i64>, eph_ids: &[i64]) -> ChildrenQuery<
         .into_boxed::<Pg>()
 }
 
-fn build_has_parents_query(source_ids: Vec<i64>, eph_ids: &[i64]) -> HasParentsQuery<'static> {
+fn build_has_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> HasParentsQuery<'static> {
     use crate::schema_diesel::*;
 
     let container_instance = CONTAINER_INSTANCE_ALIAS;
     let container_symbol = CONTAINER_SYMBOL_ALIAS;
     let container_type = CONTAINER_TYPE_ALIAS;
-
-    let eph_ids_owned = eph_ids.to_vec();
 
     symbol_instances::dsl::symbol_instances
         .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
@@ -400,33 +344,12 @@ fn build_has_parents_query(source_ids: Vec<i64>, eph_ids: &[i64]) -> HasParentsQ
                 .field(symbol_instances::dsl::id)
                 .ne(symbol_instances::dsl::id),
         )
-        // Ephemeral visibility — filter both source and aliased (container) tables
-        .filter(
-            symbols::eph_layer
-                .is_null()
-                .or(symbols::eph_layer.eq_any(eph_ids_owned.clone())),
-        )
-        .filter(
-            symbol_instances::eph_layer
-                .is_null()
-                .or(symbol_instances::eph_layer.eq_any(eph_ids_owned.clone())),
-        )
-        .filter(
-            container_symbol
-                .field(symbols::eph_layer)
-                .is_null()
-                .or(container_symbol
-                    .field(symbols::eph_layer)
-                    .eq_any(eph_ids_owned.clone())),
-        )
-        .filter(
-            container_instance
-                .field(symbol_instances::eph_layer)
-                .is_null()
-                .or(container_instance
-                    .field(symbol_instances::eph_layer)
-                    .eq_any(eph_ids_owned)),
-        )
+        // Ephemeral visibility — source and aliased (container) tables,
+        // rendered by the partition token.
+        .filter(vis.pred("symbols.eph_layer"))
+        .filter(vis.pred("symbol_instances.eph_layer"))
+        .filter(vis.pred("container_symbols.eph_layer"))
+        .filter(vis.pred("container_instances.eph_layer"))
         .select((
             Symbol::as_select(),
             SymbolInstance::as_select(),
@@ -441,7 +364,19 @@ pub struct Index {
     pub(super) pool: bb8::Pool<AsyncPgConnection>,
     /// Stored for test helpers that need sync DDL connections (migrations, batch_execute).
     database_url: Option<String>,
+    /// In-RAM SQL result cache; see [`super::sql_cache`] module docs.  All
+    /// clones of an `Index` share one cache (Arc), mirroring the shared pool.
+    sql_cache: std::sync::Arc<super::sql_cache::SqlResultCache>,
 }
+
+/// Default budget for the SQL result cache (256 MiB) — used by the server
+/// (`--sql-cache-bytes` default) and by the test harness, which enables the
+/// cache explicitly.  Plain constructors (`from_pool`, `connect`) create a
+/// DISABLED cache: correctness of a warm cache depends on the mutation
+/// side clearing the SAME instance (see `from_pool_with_cache`), and a
+/// silently-enabled private cache in embedder/tooling code would serve
+/// stale results after any out-of-band mutation.
+pub const DEFAULT_SQL_CACHE_BYTES: usize = 256 * 1024 * 1024;
 
 // ============================================================================
 // Ephemeral layer batch types
@@ -815,11 +750,191 @@ pub fn eph_pool_manager_config() -> ManagerConfig<AsyncPgConnection> {
 }
 
 impl Index {
+    /// Plain constructor: SQL result cache DISABLED (see
+    /// [`DEFAULT_SQL_CACHE_BYTES`] docs for why).  Enable via
+    /// [`Index::with_sql_cache`] or construct through
+    /// [`Index::from_pool_with_cache`] with an instance shared with the
+    /// mutation side.
     pub fn from_pool(pool: bb8::Pool<AsyncPgConnection>) -> Self {
+        Self::from_pool_with_cache(pool, super::sql_cache::SqlResultCache::new(0))
+    }
+
+    /// Builder-style override of the SQL result cache (used by the test
+    /// harness to run the suite cache-ON with per-fixture instances).
+    pub fn with_sql_cache(
+        mut self,
+        sql_cache: std::sync::Arc<super::sql_cache::SqlResultCache>,
+    ) -> Self {
+        self.sql_cache = sql_cache;
+        self
+    }
+
+    /// Construct with an explicit (possibly shared) SQL result cache — the
+    /// server hands the same instance to `IndexStore` so the mutation side
+    /// clears the cache the query side reads.
+    pub fn from_pool_with_cache(
+        pool: bb8::Pool<AsyncPgConnection>,
+        sql_cache: std::sync::Arc<super::sql_cache::SqlResultCache>,
+    ) -> Self {
         Self {
             pool,
             database_url: None,
+            sql_cache,
         }
+    }
+
+    pub fn sql_cache(&self) -> &std::sync::Arc<super::sql_cache::SqlResultCache> {
+        &self.sql_cache
+    }
+
+    /// Execute a read query through the SQL result cache — the single entry
+    /// point ("proxy") for cacheable reads.  The key is derived from the
+    /// query's rendered SQL + binds, so any query routed through here is
+    /// keyed on exactly what Postgres would see; a future query cannot be
+    /// under-keyed by forgetting a parameter.
+    ///
+    /// Order matters: a cache hit never touches the connection pool; the
+    /// cache epoch is snapshotted BEFORE the DB read so a concurrent
+    /// [`SqlResultCache::clear`] (index mutation committing) rejects this
+    /// load's insert.  A query that fails to render degrades to a plain
+    /// uncached load through the same path.
+    ///
+    /// NOT for populate closures: those run inside an [`EphTransaction`] on
+    /// `txn.connection()` and must see uncommitted state — keeping them off
+    /// `Index` methods is the structural opt-out.
+    pub async fn cached_load<Q, T>(&self, query: Q) -> Result<std::sync::Arc<Vec<T>>>
+    where
+        Q: diesel_async::methods::LoadQuery<'static, AsyncPgConnection, T>
+            + diesel::query_builder::QueryFragment<Pg>
+            + 'static,
+        T: Clone + Send + Sync + super::sql_cache::CacheWeight + 'static,
+    {
+        use super::sql_cache::{vec_weight, CacheKey};
+
+        let key = CacheKey::for_query::<T, _>(&query);
+        if let Some(k) = &key {
+            if let Some(hit) = self.sql_cache.get::<T>(k) {
+                return Ok(hit);
+            }
+        }
+
+        let epoch = self.sql_cache.epoch();
+        let mut connection = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+        let rows: Vec<T> = query
+            .load(&mut *connection)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to load cached query: {}", e))?;
+        drop(connection);
+
+        let arc = std::sync::Arc::new(rows);
+        if let Some(k) = key {
+            let bytes = vec_weight(&arc);
+            self.sql_cache.put_if_epoch(k, arc.clone(), bytes, epoch);
+        }
+        Ok(arc)
+    }
+
+    /// The ONLY way to run an eph-visible read on the query hot path.
+    ///
+    /// Instantiates the query template `build` per branch via the
+    /// [`EphVisibility`] capability token:
+    ///
+    /// - `chain_dependent = false`: a PERSISTENT instantiation (every eph
+    ///   column `IS NULL` — its rendered SQL, hence its cache key, is
+    ///   chain-free, so the expensive branch is shared across all upstream
+    ///   ephemeral contexts) plus an EPH instantiation (legacy visibility +
+    ///   the disjointness guard, chain-keyed).  Results merge with
+    ///   mandatory row-identity dedup: node consumers are
+    ///   duplicate-sensitive, so dedup is a correctness requirement, which
+    ///   also makes a missing guard benign (wasted cache bytes, never wrong
+    ///   results).
+    /// - `chain_dependent = true` (the filter tree contains subquery-level
+    ///   chain dependence, [`CompositeFilter::is_chain_dependent`]): the
+    ///   partition union would not equal the legacy result, so ONE Combined
+    ///   legacy-visibility query runs instead — still cached, chain-keyed.
+    ///
+    /// The builder cannot skip the split or leak the chain: tokens are only
+    /// minted here, and the chain ids live inside the token.
+    ///
+    /// ## Accepted limitations (documented, by design decision)
+    ///
+    /// - **Torn reads under concurrent mutation**: the two branch loads
+    ///   are separate statements (and independent cache states); a
+    ///   mutation committing between them can merge pre- and
+    ///   post-mutation rows in one result.  Legacy already had this
+    ///   window BETWEEN query families (READ COMMITTED, one statement
+    ///   each); the intra-family window is new and accepted for a
+    ///   single-user tool — the epoch check prevents such reads from
+    ///   being cached, not from being returned once.
+    /// - **Sharing scope**: the persistent branch's key contains ALL
+    ///   binds.  Statements whose inputs embed chain-derived ids
+    ///   (negative instance ids from an upstream eph selection) therefore
+    ///   do not share across chains — cross-chain sharing applies to
+    ///   selections whose inputs are chain-free (typically the first
+    ///   statement of a pipeline).
+    /// - **Combined fallback**: direct/innermost/outer-parent filters are
+    ///   chain-dependent and demote to one Combined query.  With an empty
+    ///   chain those keys are still stable and shared; only cross-chain
+    ///   sharing for eph workloads is lost.  Partitioning those
+    ///   subqueries is a possible follow-up.
+    pub async fn cached_load_partitioned<Q, T, F>(
+        &self,
+        eph: &EphContext,
+        chain_dependent: bool,
+        build: F,
+    ) -> Result<Vec<T>>
+    where
+        F: Fn(&EphVisibility) -> Q,
+        Q: diesel_async::methods::LoadQuery<'static, AsyncPgConnection, T>
+            + diesel::query_builder::QueryFragment<Pg>
+            + 'static,
+        T: Clone + Send + Sync + super::sql_cache::CacheWeight + super::sql_cache::RowKey + 'static,
+    {
+        if chain_dependent {
+            let vis = EphVisibility::combined(eph);
+            let rows = self.cached_load(build(&vis)).await?;
+            return Ok(rows.as_ref().clone());
+        }
+
+        // Loader-level algebraic short-circuit: with an EMPTY chain the
+        // eph branch is `visibility AND guard` = `(col IS NULL OR col =
+        // ANY('{}')) AND NOT(all cols IS NULL)` — a contradiction, so it
+        // provably returns zero rows.  This is a uniform rule of the cache
+        // layer (branch algebra), not per-verb overlay peeking; it saves
+        // one guaranteed-empty roundtrip per family on every plain query
+        // plus the dead cache entry it would store.
+        if eph.as_slice().is_empty() {
+            let persistent = self
+                .cached_load(build(&EphVisibility::persistent_only()))
+                .await?;
+            return Ok(persistent.as_ref().clone());
+        }
+
+        let evis = EphVisibility::eph_touching(eph);
+        let eph_query = build(&evis);
+        debug_assert!(
+            evis.guard_was_taken(),
+            "eph-branch query built without applying vis.guard()"
+        );
+        // The branches are independent (separate pool connections on
+        // misses); run them concurrently.
+        let (persistent, ephemeral) = tokio::try_join!(
+            self.cached_load(build(&EphVisibility::persistent_only())),
+            self.cached_load(eph_query),
+        )?;
+
+        let mut seen = std::collections::HashSet::with_capacity(persistent.len() + ephemeral.len());
+        let mut merged = Vec::with_capacity(persistent.len() + ephemeral.len());
+        for row in persistent.iter().chain(ephemeral.iter()) {
+            if seen.insert(row.row_key()) {
+                merged.push(row.clone());
+            }
+        }
+        Ok(merged)
     }
 
     fn build_async_manager(database_url: &str) -> AsyncDieselConnectionManager<AsyncPgConnection> {
@@ -845,6 +960,7 @@ impl Index {
         let index = Self {
             pool,
             database_url: Some(database_url.to_string()),
+            sql_cache: super::sql_cache::SqlResultCache::new(0),
         };
         index.validate_canary().await?;
         Ok(index)
@@ -909,6 +1025,7 @@ impl Index {
         Ok(Self {
             pool,
             database_url: Some(database_url.to_string()),
+            sql_cache: super::sql_cache::SqlResultCache::new(0),
         })
     }
 
@@ -1058,40 +1175,43 @@ impl Index {
         let eph_ids = eph.as_slice();
         use crate::schema_diesel::*;
 
-        let connection = &mut self
-            .pool
-            .get()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
-        let connection: &mut AsyncPgConnection = &mut *connection;
+        // One chain-dependence decision for the whole statement's filter
+        // tree (conservative: any chain-dependent leaf demotes every
+        // sub-query to the Combined fallback — correctness-neutral, minor
+        // sharing loss, simple plumbing).
+        let chain_dependent = filter.is_chain_dependent();
 
         let current = {
             let _select_current: tracing::span::EnteredSpan =
                 tracing::info_span!("select_current", eph_count = eph_ids.len()).entered();
             let t0 = std::time::Instant::now();
 
-            let mut joined_query = build_current_query(eph_ids);
-
-            if let Some(expr) = filter.compose_current() {
-                joined_query = joined_query.filter(expr);
-            }
-
-            let rows = joined_query
-                .load::<(Symbol, SymbolInstance, Object, Project)>(connection)
+            let rows: Vec<(Symbol, SymbolInstance, Object, Project)> = self
+                .cached_load_partitioned(eph, chain_dependent, |vis| {
+                    let mut q = build_current_query(vis);
+                    if let Some(expr) = filter.compose_current(vis) {
+                        q = q.filter(expr);
+                    }
+                    q.filter(vis.guard())
+                })
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?;
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = rows.len(),
-                "select_current SQL completed",
+                "select_current completed",
             );
             rows
         };
 
         // Use the IDs that survived current's filters (type, name, etc.)
-        // so that parents/children queries don't process instances that current excluded.
-        let current_instance_ids: Vec<i64> =
+        // so that parents/children queries don't process instances that
+        // current excluded.  Sorted: SQL result order is plan-dependent and
+        // these ids become rendered binds in downstream cache keys.
+        let mut current_instance_ids: Vec<i64> =
             current.iter().map(|(_, inst, _, _)| inst.id).collect();
+        current_instance_ids.sort_unstable();
+        current_instance_ids.dedup();
 
         let parents = match parent_scope {
             ScopeContext::Skip => vec![],
@@ -1104,18 +1224,20 @@ impl Index {
                 )
                 .entered();
                 let t0 = std::time::Instant::now();
-                let mut parents_query = build_parents_query(current_instance_ids.clone(), eph_ids);
-                if let Some(expr) = filter.compose_parents() {
-                    parents_query = parents_query.filter(expr);
-                }
-                let rows = parents_query
-                    .load::<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)>(connection)
+                let rows: Vec<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)> = self
+                    .cached_load_partitioned(eph, chain_dependent, |vis| {
+                        let mut q = build_parents_query(current_instance_ids.clone(), vis);
+                        if let Some(expr) = filter.compose_parents(vis) {
+                            q = q.filter(expr);
+                        }
+                        q.filter(vis.guard())
+                    })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
                 tracing::info!(
                     elapsed_ms = t0.elapsed().as_millis() as u64,
                     result_rows = rows.len(),
-                    "select_parents SQL completed",
+                    "select_parents completed",
                 );
                 rows
             }
@@ -1133,31 +1255,33 @@ impl Index {
                 let t0 = std::time::Instant::now();
 
                 let role = ScopeRole::Parents(current_instance_ids.clone());
-                let scope_ids =
-                    resolve_scope_ids(ids, scope_filter, Some(&role), eph_ids, connection).await?;
+                let scope_ids = self
+                    .resolve_scope_ids(ids, scope_filter, Some(&role), eph_ids)
+                    .await?;
 
-                let mut parents_query = build_parents_query(current_instance_ids.clone(), eph_ids);
-                if let Some(expr) = filter.compose_parents() {
-                    parents_query = parents_query.filter(expr);
-                }
-
-                // Always apply scope filter. When scope_ids is empty, eq_any([])
-                // correctly returns zero rows (scope specified but matched nothing).
-                let parent_decls = PARENT_DECLS_ALIAS;
-                parents_query = parents_query.filter(
-                    parent_decls
-                        .field(symbol_instances::dsl::id)
-                        .eq_any(scope_ids),
-                );
-
-                let rows = parents_query
-                    .load::<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)>(connection)
+                let rows: Vec<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)> = self
+                    .cached_load_partitioned(eph, chain_dependent, |vis| {
+                        let mut q = build_parents_query(current_instance_ids.clone(), vis);
+                        if let Some(expr) = filter.compose_parents(vis) {
+                            q = q.filter(expr);
+                        }
+                        // Always apply scope filter. When scope_ids is empty,
+                        // eq_any([]) correctly returns zero rows (scope
+                        // specified but matched nothing).
+                        let parent_decls = PARENT_DECLS_ALIAS;
+                        q = q.filter(
+                            parent_decls
+                                .field(symbol_instances::dsl::id)
+                                .eq_any(scope_ids.clone()),
+                        );
+                        q.filter(vis.guard())
+                    })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
                 tracing::info!(
                     elapsed_ms = t0.elapsed().as_millis() as u64,
                     result_rows = rows.len(),
-                    "select_parents SQL completed",
+                    "select_parents completed",
                 );
                 rows
             }
@@ -1174,26 +1298,27 @@ impl Index {
                 )
                 .entered();
                 let t0 = std::time::Instant::now();
-                let mut children_query =
-                    build_children_query(current_instance_ids.clone(), eph_ids);
-                if let Some(expr) = filter.compose_children() {
-                    children_query = children_query.filter(expr);
-                }
-                let rows = children_query
-                    .load::<(
-                        Symbol,
-                        Symbol,
-                        SymbolInstance,
-                        SymbolInstance,
-                        SymbolRef,
-                        Object,
-                    )>(connection)
+                let rows: Vec<(
+                    Symbol,
+                    Symbol,
+                    SymbolInstance,
+                    SymbolInstance,
+                    SymbolRef,
+                    Object,
+                )> = self
+                    .cached_load_partitioned(eph, chain_dependent, |vis| {
+                        let mut q = build_children_query(current_instance_ids.clone(), vis);
+                        if let Some(expr) = filter.compose_children(vis) {
+                            q = q.filter(expr);
+                        }
+                        q.filter(vis.guard())
+                    })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
                 tracing::info!(
                     elapsed_ms = t0.elapsed().as_millis() as u64,
                     result_rows = rows.len(),
-                    "select_children SQL completed",
+                    "select_children completed",
                 );
                 rows
             }
@@ -1211,33 +1336,33 @@ impl Index {
                 let t0 = std::time::Instant::now();
 
                 let role = ScopeRole::Children(current_instance_ids.clone());
-                let scope_ids =
-                    resolve_scope_ids(ids, scope_filter, Some(&role), eph_ids, connection).await?;
+                let scope_ids = self
+                    .resolve_scope_ids(ids, scope_filter, Some(&role), eph_ids)
+                    .await?;
 
-                let mut children_query =
-                    build_children_query(current_instance_ids.clone(), eph_ids);
-                if let Some(expr) = filter.compose_children() {
-                    children_query = children_query.filter(expr);
-                }
-
-                // Always apply scope filter.
-                children_query = children_query.filter(symbol_instances::dsl::id.eq_any(scope_ids));
-
-                let rows = children_query
-                    .load::<(
-                        Symbol,
-                        Symbol,
-                        SymbolInstance,
-                        SymbolInstance,
-                        SymbolRef,
-                        Object,
-                    )>(connection)
+                let rows: Vec<(
+                    Symbol,
+                    Symbol,
+                    SymbolInstance,
+                    SymbolInstance,
+                    SymbolRef,
+                    Object,
+                )> = self
+                    .cached_load_partitioned(eph, chain_dependent, |vis| {
+                        let mut q = build_children_query(current_instance_ids.clone(), vis);
+                        if let Some(expr) = filter.compose_children(vis) {
+                            q = q.filter(expr);
+                        }
+                        // Always apply scope filter.
+                        q = q.filter(symbol_instances::dsl::id.eq_any(scope_ids.clone()));
+                        q.filter(vis.guard())
+                    })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
                 tracing::info!(
                     elapsed_ms = t0.elapsed().as_millis() as u64,
                     result_rows = rows.len(),
-                    "select_children SQL completed",
+                    "select_children completed",
                 );
                 rows
             }
@@ -1252,20 +1377,20 @@ impl Index {
             .entered();
             let t0 = std::time::Instant::now();
 
-            let mut has_parents_query =
-                build_has_parents_query(current_instance_ids.clone(), eph_ids);
-            if let Some(expr) = filter.compose_has_parents() {
-                has_parents_query = has_parents_query.filter(expr);
-            }
-
-            let rows = has_parents_query
-                .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance)>(connection)
+            let rows: Vec<(Symbol, SymbolInstance, Symbol, SymbolInstance)> = self
+                .cached_load_partitioned(eph, chain_dependent, |vis| {
+                    let mut q = build_has_parents_query(current_instance_ids.clone(), vis);
+                    if let Some(expr) = filter.compose_has_parents(vis) {
+                        q = q.filter(expr);
+                    }
+                    q.filter(vis.guard())
+                })
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to load containment parents: {}", e))?;
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = rows.len(),
-                "select_has_parents SQL completed",
+                "select_has_parents completed",
             );
             rows
         };
@@ -1280,27 +1405,31 @@ impl Index {
             .entered();
             let t0 = std::time::Instant::now();
 
-            let maybe_filter = filter.compose_has_children();
-            let rows = if let Some(expr) = maybe_filter {
-                build_has_children_query(current_instance_ids, eph_ids)
-                    .filter(expr)
-                    .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(connection)
+            let has_children_filtered = filter.constrains_has_children();
+            let rows: Vec<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)> =
+                if has_children_filtered {
+                    self.cached_load_partitioned(eph, chain_dependent, |vis| {
+                        let mut q = build_has_children_query(current_instance_ids.clone(), vis);
+                        if let Some(expr) = filter.compose_has_children(vis) {
+                            q = q.filter(expr);
+                        }
+                        q.filter(vis.guard())
+                    })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?
-            } else {
-                // Fast path: CTE-materialised source set (planner-hint fix).
-                CteHasChildren {
-                    cte_body: build_has_children_cte_body(current_instance_ids, eph_ids),
-                    outer: build_has_children_query_against_cte(eph_ids),
-                }
-                .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(connection)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?
-            };
+                } else {
+                    // Fast path: CTE-materialised source set (planner-hint fix).
+                    self.cached_load_partitioned(eph, chain_dependent, |vis| CteHasChildren {
+                        cte_body: build_has_children_cte_body(current_instance_ids.clone(), vis),
+                        outer: build_has_children_query_against_cte(vis).filter(vis.guard()),
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?
+                };
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = rows.len(),
-                "select_has_children SQL completed",
+                "select_has_children completed",
             );
             rows
         };
@@ -1410,11 +1539,12 @@ impl Index {
         eph: &EphContext,
     ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
         let eph_ids = eph.as_slice();
-        let connection = &mut self
-            .pool
-            .get()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+        let chain_dependent = filter.is_chain_dependent();
+
+        // Canonical bind order for cache-key stability (see find_edges_between).
+        let mut source_ids = parent_ids.to_vec();
+        source_ids.sort_unstable();
+        source_ids.dedup();
 
         let mut all_ids: Vec<i64> = Vec::new();
 
@@ -1426,29 +1556,31 @@ impl Index {
             )
             .entered();
             let t0 = std::time::Instant::now();
-            let maybe_filter = filter.compose_has_children();
-            let results = if let Some(expr) = maybe_filter {
-                build_has_children_query(parent_ids.to_vec(), eph_ids)
-                    .filter(expr)
-                    .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(
-                        &mut *connection,
-                    )
+            let has_children_filtered = filter.constrains_has_children();
+            let results: Vec<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)> =
+                if has_children_filtered {
+                    self.cached_load_partitioned(eph, chain_dependent, |vis| {
+                        let mut q = build_has_children_query(source_ids.clone(), vis);
+                        if let Some(expr) = filter.compose_has_children(vis) {
+                            q = q.filter(expr);
+                        }
+                        q.filter(vis.guard())
+                    })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to find has-child instance IDs: {}", e))?
-            } else {
-                // Fast path: CTE-materialised source set (planner-hint fix).
-                CteHasChildren {
-                    cte_body: build_has_children_cte_body(parent_ids.to_vec(), eph_ids),
-                    outer: build_has_children_query_against_cte(eph_ids),
-                }
-                .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)>(&mut *connection)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to find has-child instance IDs: {}", e))?
-            };
+                } else {
+                    // Fast path: CTE-materialised source set (planner-hint fix).
+                    self.cached_load_partitioned(eph, chain_dependent, |vis| CteHasChildren {
+                        cte_body: build_has_children_cte_body(source_ids.clone(), vis),
+                        outer: build_has_children_query_against_cte(vis).filter(vis.guard()),
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to find has-child instance IDs: {}", e))?
+                };
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = results.len(),
-                "find_child_instance_ids (has) SQL completed",
+                "find_child_instance_ids (has) completed",
             );
             for (ps, pi, cs, ci, _) in &results {
                 if is_eph_leak(ps.eph_layer, eph_ids)
@@ -1471,25 +1603,27 @@ impl Index {
             )
             .entered();
             let t0 = std::time::Instant::now();
-            let mut query = build_children_query(parent_ids.to_vec(), eph_ids);
-            if let Some(expr) = filter.compose_children() {
-                query = query.filter(expr);
-            }
-            let results = query
-                .load::<(
-                    Symbol,
-                    Symbol,
-                    SymbolInstance,
-                    SymbolInstance,
-                    SymbolRef,
-                    Object,
-                )>(&mut *connection)
+            let results: Vec<(
+                Symbol,
+                Symbol,
+                SymbolInstance,
+                SymbolInstance,
+                SymbolRef,
+                Object,
+            )> = self
+                .cached_load_partitioned(eph, chain_dependent, |vis| {
+                    let mut q = build_children_query(source_ids.clone(), vis);
+                    if let Some(expr) = filter.compose_children(vis) {
+                        q = q.filter(expr);
+                    }
+                    q.filter(vis.guard())
+                })
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to find ref-child instance IDs: {}", e))?;
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = results.len(),
-                "find_child_instance_ids (refs) SQL completed",
+                "find_child_instance_ids (refs) completed",
             );
             for (ps, cs, ci, fi, sr, _) in &results {
                 if is_eph_leak(ps.eph_layer, eph_ids)
@@ -1527,11 +1661,12 @@ impl Index {
         eph: &EphContext,
     ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
         let eph_ids = eph.as_slice();
-        let connection = &mut self
-            .pool
-            .get()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+        let chain_dependent = filter.is_chain_dependent();
+
+        // Canonical bind order for cache-key stability (see find_edges_between).
+        let mut source_ids = child_ids.to_vec();
+        source_ids.sort_unstable();
+        source_ids.dedup();
 
         let mut all_ids: Vec<i64> = Vec::new();
 
@@ -1543,18 +1678,20 @@ impl Index {
             )
             .entered();
             let t0 = std::time::Instant::now();
-            let mut query = build_parents_query(child_ids.to_vec(), eph_ids);
-            if let Some(expr) = filter.compose_parents() {
-                query = query.filter(expr);
-            }
-            let results = query
-                .load::<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)>(&mut *connection)
+            let results: Vec<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)> = self
+                .cached_load_partitioned(eph, chain_dependent, |vis| {
+                    let mut q = build_parents_query(source_ids.clone(), vis);
+                    if let Some(expr) = filter.compose_parents(vis) {
+                        q = q.filter(expr);
+                    }
+                    q.filter(vis.guard())
+                })
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to find ref-parent instance IDs: {}", e))?;
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = results.len(),
-                "find_parent_instance_ids (refs) SQL completed",
+                "find_parent_instance_ids (refs) completed",
             );
             for (sr, s, ci, pi) in &results {
                 if is_eph_leak(sr.eph_layer, eph_ids)
@@ -1580,18 +1717,20 @@ impl Index {
             )
             .entered();
             let t0 = std::time::Instant::now();
-            let mut query = build_has_parents_query(child_ids.to_vec(), eph_ids);
-            if let Some(expr) = filter.compose_has_parents() {
-                query = query.filter(expr);
-            }
-            let results = query
-                .load::<(Symbol, SymbolInstance, Symbol, SymbolInstance)>(&mut *connection)
+            let results: Vec<(Symbol, SymbolInstance, Symbol, SymbolInstance)> = self
+                .cached_load_partitioned(eph, chain_dependent, |vis| {
+                    let mut q = build_has_parents_query(source_ids.clone(), vis);
+                    if let Some(expr) = filter.compose_has_parents(vis) {
+                        q = q.filter(expr);
+                    }
+                    q.filter(vis.guard())
+                })
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to find has-parent instance IDs: {}", e))?;
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = results.len(),
-                "find_parent_instance_ids (has) SQL completed",
+                "find_parent_instance_ids (has) completed",
             );
             for (cs, ci, ps, pi) in &results {
                 if is_eph_leak(cs.eph_layer, eph_ids)
@@ -1628,12 +1767,14 @@ impl Index {
         if instance_ids.is_empty() {
             return Ok(vec![]);
         }
-
-        let connection = &mut self
-            .pool
-            .get()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+        // Canonicalize the candidate ids: eq_any membership is
+        // order-insensitive, but the rendered binds are part of the cache
+        // key — a caller iterating a HashSet would otherwise re-key this
+        // (expensive) query on every request.
+        let mut instance_ids = instance_ids.to_vec();
+        instance_ids.sort_unstable();
+        instance_ids.dedup();
+        let instance_ids = &instance_ids[..];
 
         let _span = tracing::info_span!(
             "find_edges_between",
@@ -1660,18 +1801,34 @@ impl Index {
         // aliases) and stays as raw SQL inside `CteFindEdgesBetween`;
         // its single bind (eph_ids for `sr.eph_layer`) goes through
         // `push_bind_param` so the final query has only typed binds.
-        let results = CteFindEdgesBetween {
-            cte_body: build_find_edges_cte_body(instance_ids.to_vec(), eph_ids.to_vec()),
-            eph_ids: eph_ids.to_vec(),
-        }
-        .load::<ImplicitEdge>(&mut *connection)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to find edges between instances: {}", e))?;
+        // No composite filter reaches this query, so it always partitions.
+        // The eph branch's guard is rendered inside CteFindEdgesBetween's
+        // walk_ast (raw outer SQL) from the token snapshot.
+        let mut results: Vec<ImplicitEdge> = self
+            .cached_load_partitioned(eph, false, |vis| CteFindEdgesBetween {
+                cte_body: build_find_edges_cte_body(instance_ids.to_vec(), vis),
+                vis: vis.snapshot(),
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to find edges between instances: {}", e))?;
+
+        // Restore the legacy single-query `DISTINCT ON (from_inst.id, sr.id)
+        // ... ORDER BY from_inst.id, sr.id, to_inst.id` invariant ACROSS the
+        // merged branches: each branch ran its own DISTINCT ON, so a
+        // (from, ref) pair whose target symbol has both a persistent and an
+        // eph instance yields one row per branch.  Downstream dedups edges
+        // by (from_instance, to_symbol, occurrence) with first-row-wins, so
+        // without this collapse the winner would be picked by merge order
+        // (persistent first) instead of min to_instance_id — silently
+        // retargeting implicit edges away from eph instances (negative ids
+        // sort first, so legacy picked the eph one).
+        results.sort_unstable_by_key(|e| (e.from_instance_id, e.ref_id, e.to_instance_id));
+        results.dedup_by_key(|e| (e.from_instance_id, e.ref_id));
 
         tracing::info!(
             elapsed_ms = t0.elapsed().as_millis() as u64,
             result_rows = results.len(),
-            "find_edges_between SQL completed",
+            "find_edges_between completed",
         );
 
         for edge in &results {
@@ -2719,5 +2876,47 @@ impl Drop for EphTransaction<'_> {
                  pool will ROLLBACK on next checkout"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the disjointness property of the partition at the SQL level,
+    /// with no database: the eph-branch instantiation must render the
+    /// `NOT (...all recorded columns IS NULL...)` guard over every
+    /// selected-row eph column, and the persistent instantiation must not
+    /// embed the chain ids anywhere (its rendered SQL is the cache key —
+    /// chain-freedom IS the sharing guarantee).
+    #[test]
+    fn branch_sql_renders_guard_and_stays_chain_free() {
+        let eph = EphContext::from_slice(&[-7]);
+
+        let evis = EphVisibility::eph_touching(&eph);
+        let eq = build_parents_query(vec![1, 2], &evis).filter(evis.guard());
+        let esql = format!("{:?}", diesel::debug_query::<Pg, _>(&eq));
+        assert!(
+            esql.contains(
+                "NOT (symbol_refs.eph_layer IS NULL AND symbols.eph_layer IS NULL \
+                 AND symbol_instances.eph_layer IS NULL AND parent_decls.eph_layer IS NULL \
+                 AND parent_symbols.eph_layer IS NULL)"
+            ),
+            "eph branch must render the disjointness guard over all five \
+             recorded columns, got: {esql}"
+        );
+
+        let pvis = EphVisibility::persistent_only();
+        let pq = build_parents_query(vec![1, 2], &pvis).filter(pvis.guard());
+        let psql = format!("{:?}", diesel::debug_query::<Pg, _>(&pq));
+        assert!(
+            psql.contains("symbols.eph_layer IS NULL"),
+            "persistent branch pins columns to IS NULL, got: {psql}"
+        );
+        assert!(
+            !psql.contains("-7") && !psql.contains("eph_layer = ANY"),
+            "persistent branch must not embed chain ids or chain-visibility \
+             binds — its rendered SQL is the chain-free cache key, got: {psql}"
+        );
     }
 }

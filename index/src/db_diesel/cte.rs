@@ -36,8 +36,8 @@ use diesel::query_builder::{
 };
 
 use super::mixins::{
-    HasChildrenBoolExpr, HasChildrenQuery, CONTAINED_INSTANCE_ALIAS, CONTAINED_SYMBOL_ALIAS,
-    CONTAINED_TYPE_ALIAS,
+    EphVisibility, HasChildrenBoolExpr, HasChildrenQuery, CONTAINED_INSTANCE_ALIAS,
+    CONTAINED_SYMBOL_ALIAS, CONTAINED_TYPE_ALIAS,
 };
 use crate::models_diesel::{Object, Symbol, SymbolInstance};
 
@@ -60,7 +60,7 @@ use crate::models_diesel::{Object, Symbol, SymbolInstance};
 /// the same SQL as inlining it mid-construction in the original
 /// builder.
 fn build_has_children_inner(
-    eph_ids: &[i64],
+    vis: &EphVisibility,
     source_filter: HasChildrenBoolExpr,
 ) -> HasChildrenQuery<'static> {
     use crate::schema_diesel::*;
@@ -68,7 +68,6 @@ fn build_has_children_inner(
     let contained_instance = CONTAINED_INSTANCE_ALIAS;
     let contained_symbol = CONTAINED_SYMBOL_ALIAS;
     let contained_type = CONTAINED_TYPE_ALIAS;
-    let eph_ids_owned = eph_ids.to_vec();
 
     symbol_instances::dsl::symbol_instances
         .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
@@ -97,33 +96,12 @@ fn build_has_children_inner(
         ))
         .filter(symbol_types::dsl::level.ge(contained_type.field(symbol_types::dsl::level)))
         .filter(symbol_instances::dsl::id.ne(contained_instance.field(symbol_instances::dsl::id)))
-        // Ephemeral visibility — filter both source and aliased (contained) tables
-        .filter(
-            symbols::eph_layer
-                .is_null()
-                .or(symbols::eph_layer.eq_any(eph_ids_owned.clone())),
-        )
-        .filter(
-            symbol_instances::eph_layer
-                .is_null()
-                .or(symbol_instances::eph_layer.eq_any(eph_ids_owned.clone())),
-        )
-        .filter(
-            contained_symbol
-                .field(symbols::eph_layer)
-                .is_null()
-                .or(contained_symbol
-                    .field(symbols::eph_layer)
-                    .eq_any(eph_ids_owned.clone())),
-        )
-        .filter(
-            contained_instance
-                .field(symbol_instances::eph_layer)
-                .is_null()
-                .or(contained_instance
-                    .field(symbol_instances::eph_layer)
-                    .eq_any(eph_ids_owned)),
-        )
+        // Ephemeral visibility — source and aliased (contained) tables,
+        // rendered by the partition token.
+        .filter(vis.pred("symbols.eph_layer"))
+        .filter(vis.pred("symbol_instances.eph_layer"))
+        .filter(vis.pred("contained_symbols.eph_layer"))
+        .filter(vis.pred("contained_instances.eph_layer"))
         .select((
             Symbol::as_select(),
             SymbolInstance::as_select(),
@@ -138,11 +116,11 @@ fn build_has_children_inner(
 /// `contained_instances` rules out the CTE form.
 pub(super) fn build_has_children_query(
     source_ids: Vec<i64>,
-    eph_ids: &[i64],
+    vis: &EphVisibility,
 ) -> HasChildrenQuery<'static> {
     use crate::schema_diesel::symbol_instances;
     let source_filter: HasChildrenBoolExpr = Box::new(symbol_instances::dsl::id.eq_any(source_ids));
-    build_has_children_inner(eph_ids, source_filter)
+    build_has_children_inner(vis, source_filter)
 }
 
 /// Variant of [`build_has_children_query`] whose source-row filter is
@@ -151,11 +129,13 @@ pub(super) fn build_has_children_query(
 /// wrapper.  Result shape and joins are identical to
 /// `build_has_children_query`; rows still deserialise as the natural
 /// tuple `(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)`.
-pub(super) fn build_has_children_query_against_cte(eph_ids: &[i64]) -> HasChildrenQuery<'static> {
+pub(super) fn build_has_children_query_against_cte(
+    vis: &EphVisibility,
+) -> HasChildrenQuery<'static> {
     let source_filter: HasChildrenBoolExpr = Box::new(diesel::dsl::sql::<diesel::sql_types::Bool>(
         "symbol_instances.id IN (SELECT id FROM candidates)",
     ));
-    build_has_children_inner(eph_ids, source_filter)
+    build_has_children_inner(vis, source_filter)
 }
 
 /// Build the inner CTE body: the source-row filter, projected to just
@@ -163,7 +143,7 @@ pub(super) fn build_has_children_query_against_cte(eph_ids: &[i64]) -> HasChildr
 /// emitted via the normal DSL mechanism.
 pub(super) fn build_has_children_cte_body(
     source_ids: Vec<i64>,
-    eph_ids: &[i64],
+    vis: &EphVisibility,
 ) -> BoxedSelectStatement<
     'static,
     diesel::sql_types::BigInt,
@@ -171,14 +151,10 @@ pub(super) fn build_has_children_cte_body(
     Pg,
 > {
     use crate::schema_diesel::symbol_instances;
-    let eph_ids_owned = eph_ids.to_vec();
     symbol_instances::table
         .filter(symbol_instances::id.eq_any(source_ids))
-        .filter(
-            symbol_instances::eph_layer
-                .is_null()
-                .or(symbol_instances::eph_layer.eq_any(eph_ids_owned)),
-        )
+        // Subquery position: candidate-set membership, not a selected row.
+        .filter(vis.subquery_pred("symbol_instances.eph_layer"))
         .select(symbol_instances::id)
         .into_boxed::<Pg>()
 }
@@ -233,7 +209,7 @@ use diesel::sql_types::{BigInt, Int4range, Integer, Nullable};
 /// Diesel.
 pub(super) fn build_find_edges_cte_body(
     source_ids: Vec<i64>,
-    eph_ids: Vec<i64>,
+    vis: &EphVisibility,
 ) -> diesel::query_builder::BoxedSelectStatement<
     'static,
     (BigInt, BigInt, Integer, Int4range, Nullable<BigInt>),
@@ -243,11 +219,11 @@ pub(super) fn build_find_edges_cte_body(
     use crate::schema_diesel::symbol_instances;
     symbol_instances::table
         .filter(symbol_instances::id.eq_any(source_ids))
-        .filter(
-            symbol_instances::eph_layer
-                .is_null()
-                .or(symbol_instances::eph_layer.eq_any(eph_ids)),
-        )
+        // Subquery position: the candidate set feeds BOTH edge endpoints.
+        // In the eph branch it must contain persistent AND eph rows (a
+        // mixed edge pairs them); the outer guard makes the branches
+        // disjoint at the edge level, not here.
+        .filter(vis.subquery_pred("symbol_instances.eph_layer"))
         .select((
             symbol_instances::id,
             symbol_instances::symbol,
@@ -287,7 +263,10 @@ pub(super) type FindEdgesRowSqlType = (
 /// [`FindEdgesRowSqlType`].
 pub(super) struct CteFindEdgesBetween<CteBody> {
     pub cte_body: CteBody,
-    pub eph_ids: Vec<i64>,
+    /// Branch snapshot from the partition token (see `EphVisibility`):
+    /// controls the outer `sr.eph_layer` visibility and, for the eph
+    /// branch, the disjointness guard over (sr, from_inst, to_inst).
+    pub vis: super::mixins::VisibilitySpec,
 }
 
 impl<CteBody> QueryId for CteFindEdgesBetween<CteBody> {
@@ -304,6 +283,7 @@ where
     CteBody: QueryFragment<Pg>,
 {
     fn walk_ast<'b>(&'b self, mut out: AstPass<'_, 'b, Pg>) -> diesel::QueryResult<()> {
+        use super::mixins::VisibilitySpec;
         use diesel::sql_types::Array;
         out.push_sql("WITH candidates AS MATERIALIZED (");
         self.cte_body.walk_ast(out.reborrow())?;
@@ -322,10 +302,30 @@ where
               JOIN candidates to_inst \
                   ON to_inst.symbol = sr.to_symbol \
               WHERE from_inst.id != to_inst.id \
-                AND (sr.eph_layer IS NULL OR sr.eph_layer = ANY(",
+                AND ",
         );
-        out.push_bind_param::<Array<BigInt>, _>(&self.eph_ids)?;
-        out.push_sql(")) ORDER BY from_inst.id, sr.id, to_inst.id");
+        match &self.vis {
+            VisibilitySpec::PersistentOnly => {
+                out.push_sql("sr.eph_layer IS NULL");
+            }
+            VisibilitySpec::EphTouching(chain) => {
+                out.push_sql("(sr.eph_layer IS NULL OR sr.eph_layer = ANY(");
+                out.push_bind_param::<Array<BigInt>, _>(chain)?;
+                // Disjointness guard: an all-persistent edge already
+                // belongs to the persistent branch.
+                out.push_sql(
+                    ")) AND NOT (sr.eph_layer IS NULL \
+                         AND from_inst.eph_layer IS NULL \
+                         AND to_inst.eph_layer IS NULL)",
+                );
+            }
+            VisibilitySpec::Combined(chain) => {
+                out.push_sql("(sr.eph_layer IS NULL OR sr.eph_layer = ANY(");
+                out.push_bind_param::<Array<BigInt>, _>(chain)?;
+                out.push_sql("))");
+            }
+        }
+        out.push_sql(" ORDER BY from_inst.id, sr.id, to_inst.id");
         Ok(())
     }
 }

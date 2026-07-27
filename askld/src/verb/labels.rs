@@ -300,7 +300,7 @@ impl Selector for UserVerb {
         let child_ids = child.get_instance_ids();
         let mut find_parts: Vec<CompositeFilter> = vec![];
         if !notif_ctx.unnest {
-            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new(&ctx.eph)));
+            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new()));
         }
         let find_filter = CompositeFilter::and(find_parts);
         let parent_ids = index

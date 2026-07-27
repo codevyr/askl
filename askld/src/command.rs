@@ -366,7 +366,7 @@ impl Command {
                 let child_ids = dependency.get_instance_ids();
                 let mut find_parts: Vec<CompositeFilter> = vec![];
                 if !unnest {
-                    find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new(&ctx.eph)));
+                    find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new()));
                 }
                 let find_filter = CompositeFilter::and(find_parts);
                 derivation_ids = Some(

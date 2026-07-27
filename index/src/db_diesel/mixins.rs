@@ -361,7 +361,7 @@ enum EphSqlPart {
 ///                       WHERE op.id = ANY(")
 ///     .bind(self.parent_ids.clone())
 ///     .sql(") AND ")
-///     .eph_visibility("op.eph_layer", &self.eph)
+///     .eph_visibility("op.eph_layer", vis)
 ///     .sql(")")
 ///     .build()
 /// ```
@@ -401,20 +401,30 @@ impl<ST> EphSqlBuilder<ST> {
         self
     }
 
-    /// Emit `(<column> IS NULL OR <column> = ANY($N))` where `$N` is the
-    /// position of the bound `eph` array.  Each call binds the array
-    /// separately; if the same array is referenced from multiple call sites
-    /// in one fragment, the wire payload is duplicated — acceptable for the
-    /// short arrays we deal with in practice.
-    pub(crate) fn eph_visibility(mut self, column: &str, eph: &EphContext) -> Self {
-        let sql = format!("({} IS NULL OR {} = ANY(", column, column);
-        match self.parts.last_mut() {
-            Some(EphSqlPart::Sql(buf)) => buf.push_str(&sql),
-            _ => self.parts.push(EphSqlPart::Sql(sql)),
+    /// Emit the eph-visibility predicate for `column` according to the
+    /// token's branch (see [`EphVisibility`]).  This is the SUBQUERY
+    /// position: the column is deliberately NOT recorded for the
+    /// eph-branch disjointness guard — subquery columns affect row
+    /// *membership*, not which selected rows are eph-derived.
+    pub(crate) fn eph_visibility(mut self, column: &str, vis: &EphVisibility) -> Self {
+        match &vis.branch {
+            VisibilitySpec::PersistentOnly => {
+                let sql = format!("{} IS NULL", column);
+                match self.parts.last_mut() {
+                    Some(EphSqlPart::Sql(buf)) => buf.push_str(&sql),
+                    _ => self.parts.push(EphSqlPart::Sql(sql)),
+                }
+            }
+            VisibilitySpec::EphTouching(chain) | VisibilitySpec::Combined(chain) => {
+                let sql = format!("({} IS NULL OR {} = ANY(", column, column);
+                match self.parts.last_mut() {
+                    Some(EphSqlPart::Sql(buf)) => buf.push_str(&sql),
+                    _ => self.parts.push(EphSqlPart::Sql(sql)),
+                }
+                self.parts.push(EphSqlPart::BindI64Array(chain.clone()));
+                self.parts.push(EphSqlPart::Sql("))".to_string()));
+            }
         }
-        self.parts
-            .push(EphSqlPart::BindI64Array(eph.as_slice().to_vec()));
-        self.parts.push(EphSqlPart::Sql("))".to_string()));
         self
     }
 
@@ -424,6 +434,124 @@ impl<ST> EphSqlBuilder<ST> {
             _marker: PhantomData,
         }
     }
+}
+
+// ============================================================================
+// EphVisibility — the capability token that enforces query partitioning
+// ============================================================================
+
+/// Capability token for eph-layer visibility in read queries.
+///
+/// Query builders can only OBTAIN one from `Index::cached_load_partitioned`
+/// (or the Combined constructor used during migration) — the constructors
+/// are `pub(crate)` and the chain ids live inside the token, so a builder
+/// cannot embed the chain into a persistent-branch query, cannot skip the
+/// partition split, and (because keys are rendered from the final SQL)
+/// cannot under-key a cache entry.  What remains conventional: eph-branch
+/// builders should end with `.filter(vis.guard())`; omitting it is benign
+/// for correctness (the branch merge dedups by row identity) but wastes
+/// cache bytes — `guard_was_taken` backs a debug assertion in the loader.
+#[derive(Debug)]
+pub struct EphVisibility {
+    branch: VisibilitySpec,
+    /// Selected-row eph columns this token was applied to via [`Self::pred`],
+    /// in application order — the members of the eph-branch guard.
+    /// Interior mutability is single-threaded on purpose (RefCell/Cell):
+    /// the token is created, threaded through a synchronous build closure,
+    /// and consumed within one loader call — it never crosses threads.
+    applied: std::cell::RefCell<Vec<String>>,
+    guard_taken: std::cell::Cell<bool>,
+}
+
+impl EphVisibility {
+    pub(crate) fn persistent_only() -> Self {
+        Self::new(VisibilitySpec::PersistentOnly)
+    }
+
+    pub(crate) fn eph_touching(eph: &EphContext) -> Self {
+        Self::new(VisibilitySpec::EphTouching(eph.as_slice().to_vec()))
+    }
+
+    pub(crate) fn combined(eph: &EphContext) -> Self {
+        Self::new(VisibilitySpec::Combined(eph.as_slice().to_vec()))
+    }
+
+    fn new(branch: VisibilitySpec) -> Self {
+        Self {
+            branch,
+            applied: std::cell::RefCell::new(Vec::new()),
+            guard_taken: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Visibility predicate for a SELECTED-ROW eph column (fully qualified
+    /// SQL name, e.g. `"index"."symbols"."eph_layer"` or an alias like
+    /// `"parent_decls"."eph_layer"`).  Records the column as a guard member.
+    /// The returned fragment applies to any Diesel query source (blanket
+    /// `AppearsOnTable`), so DSL and raw-SQL builders use the same call.
+    pub(crate) fn pred(&self, column: &str) -> EphSqlFragment<Bool> {
+        self.applied.borrow_mut().push(column.to_string());
+        EphSqlFragment::<Bool>::builder()
+            .eph_visibility(column, self)
+            .build()
+    }
+
+    /// Visibility predicate for a SUBQUERY-position eph column: rendered the
+    /// same way as [`Self::pred`] but NOT recorded as a guard member —
+    /// subquery columns affect row membership, not whether a selected row is
+    /// eph-derived.
+    pub(crate) fn subquery_pred(&self, column: &str) -> EphSqlFragment<Bool> {
+        EphSqlFragment::<Bool>::builder()
+            .eph_visibility(column, self)
+            .build()
+    }
+
+    /// Eph-branch disjointness guard: `NOT (c1 IS NULL AND c2 IS NULL ...)`
+    /// over the columns recorded by [`Self::pred`] — a row every one of
+    /// whose eph columns is NULL already belongs to the persistent branch.
+    /// Returns a no-op `TRUE` fragment for the other branches so builders
+    /// can apply it unconditionally.
+    pub(crate) fn guard(&self) -> EphSqlFragment<Bool> {
+        self.guard_taken.set(true);
+        match &self.branch {
+            VisibilitySpec::EphTouching(_) => {
+                let applied = self.applied.borrow();
+                if applied.is_empty() {
+                    return EphSqlFragment::<Bool>::builder().sql("TRUE").build();
+                }
+                let clauses: Vec<String> =
+                    applied.iter().map(|c| format!("{} IS NULL", c)).collect();
+                EphSqlFragment::<Bool>::builder()
+                    .sql(format!("NOT ({})", clauses.join(" AND ")))
+                    .build()
+            }
+            _ => EphSqlFragment::<Bool>::builder().sql("TRUE").build(),
+        }
+    }
+
+    pub(crate) fn guard_was_taken(&self) -> bool {
+        self.guard_taken.get()
+    }
+
+    /// Cloneable snapshot for custom `QueryFragment` impls (the CTE
+    /// wrappers) that render visibility inside `walk_ast`.  Taking a
+    /// snapshot TRANSFERS guard responsibility: the consuming `walk_ast`
+    /// must render the eph-branch disjointness guard itself (see
+    /// `CteFindEdgesBetween`), so the loader's guard assertion is
+    /// satisfied here.
+    pub(crate) fn snapshot(&self) -> VisibilitySpec {
+        self.guard_taken.set(true);
+        self.branch.clone()
+    }
+}
+
+/// Owned, cloneable form of a token's branch for CTE `walk_ast` rendering.
+/// Only obtainable from a token, so it inherits the capability property.
+#[derive(Debug, Clone)]
+pub enum VisibilitySpec {
+    PersistentOnly,
+    EphTouching(Vec<i64>),
+    Combined(Vec<i64>),
 }
 
 impl<ST: 'static + Send + diesel::sql_types::SingleValue> Expression for EphSqlFragment<ST> {
@@ -510,21 +638,43 @@ impl Clone for Box<dyn FilterLeaf> {
 
 /// A leaf filter that produces Diesel boolean expressions for each query context.
 /// Each method returns `None` if this leaf does not constrain that query context.
+///
+/// The eph-visible contexts receive the [`EphVisibility`] token: leaves that
+/// need chain visibility inside their SQL (subqueries) MUST render it
+/// through the token (they no longer hold an `EphContext` of their own), so
+/// a persistent-branch instantiation cannot accidentally embed the chain.
 pub trait FilterLeaf: std::fmt::Debug + FilterLeafClone + Send + Sync {
-    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+    fn current_expr(&self, _vis: &EphVisibility) -> Option<CurrentBoolExpr> {
         None
     }
-    fn parents_expr(&self) -> Option<ParentsBoolExpr> {
+    fn parents_expr(&self, _vis: &EphVisibility) -> Option<ParentsBoolExpr> {
         None
     }
-    fn children_expr(&self) -> Option<ChildrenBoolExpr> {
+    fn children_expr(&self, _vis: &EphVisibility) -> Option<ChildrenBoolExpr> {
         None
     }
-    fn has_parents_expr(&self) -> Option<HasParentsBoolExpr> {
+    fn has_parents_expr(&self, _vis: &EphVisibility) -> Option<HasParentsBoolExpr> {
         None
     }
-    fn has_children_expr(&self) -> Option<HasChildrenBoolExpr> {
+    fn has_children_expr(&self, _vis: &EphVisibility) -> Option<HasChildrenBoolExpr> {
         None
+    }
+
+    /// Whether `has_children_expr` returns Some for this leaf.  MUST stay
+    /// consistent with the expr method and MUST NOT depend on the
+    /// visibility token (see `CompositeFilter::constrains_has_children`).
+    fn constrains_has_children(&self) -> bool {
+        false
+    }
+
+    /// Whether this leaf's SQL references chain-visible rows beyond the
+    /// selected-row visibility columns (e.g. inside NOT EXISTS / IN
+    /// subqueries).  For such filters a persistent row's *membership* can
+    /// depend on eph rows, so the persistent/eph partition union does not
+    /// equal the legacy single-query result — the loader must fall back to
+    /// one Combined query (still cached, chain-keyed).
+    fn is_chain_dependent(&self) -> bool {
+        false
     }
 
     /// Object-level predicate, used by `search()` to scope its content scan.
@@ -629,15 +779,15 @@ fn fold_or<QS: 'static>(
 // For OR:  if ANY child is None (unconstrained), the whole OR is unconstrained.
 // For NOT: not(None) = None — negating "no constraint" is still "no constraint"
 //          (we can't negate something that doesn't apply to this context).
-macro_rules! compose_method {
+macro_rules! compose_method_vis {
     ($method:ident, $leaf_method:ident, $expr_type:ty) => {
-        pub fn $method(&self) -> Option<$expr_type> {
+        pub fn $method(&self, vis: &EphVisibility) -> Option<$expr_type> {
             match self {
-                CompositeFilter::Leaf(leaf) => leaf.$leaf_method(),
+                CompositeFilter::Leaf(leaf) => leaf.$leaf_method(vis),
                 CompositeFilter::And(children) => {
                     // None children are dropped (no constraint = identity for AND).
                     // Empty result from fold_and = None = match everything.
-                    let exprs: Vec<_> = children.iter().filter_map(|c| c.$method()).collect();
+                    let exprs: Vec<_> = children.iter().filter_map(|c| c.$method(vis)).collect();
                     fold_and(exprs)
                 }
                 CompositeFilter::Or(children) => {
@@ -647,7 +797,7 @@ macro_rules! compose_method {
                     }
                     let mut exprs = Vec::with_capacity(children.len());
                     for child in children {
-                        match child.$method() {
+                        match child.$method(vis) {
                             // A child with no constraint means "match everything" —
                             // OR with "everything" is "everything".
                             None => return None,
@@ -657,7 +807,7 @@ macro_rules! compose_method {
                     fold_or(exprs)
                 }
                 CompositeFilter::Not(inner) => inner
-                    .$method()
+                    .$method(vis)
                     .map(|e| Box::new(diesel::dsl::not(e)) as $expr_type),
             }
         }
@@ -665,12 +815,78 @@ macro_rules! compose_method {
 }
 
 impl CompositeFilter {
-    compose_method!(compose_current, current_expr, CurrentBoolExpr);
-    compose_method!(compose_parents, parents_expr, ParentsBoolExpr);
-    compose_method!(compose_children, children_expr, ChildrenBoolExpr);
-    compose_method!(compose_has_parents, has_parents_expr, HasParentsBoolExpr);
-    compose_method!(compose_has_children, has_children_expr, HasChildrenBoolExpr);
-    compose_method!(compose_objects, objects_expr, ObjectsBoolExpr);
+    compose_method_vis!(compose_current, current_expr, CurrentBoolExpr);
+    compose_method_vis!(compose_parents, parents_expr, ParentsBoolExpr);
+    compose_method_vis!(compose_children, children_expr, ChildrenBoolExpr);
+    compose_method_vis!(compose_has_parents, has_parents_expr, HasParentsBoolExpr);
+    compose_method_vis!(compose_has_children, has_children_expr, HasChildrenBoolExpr);
+
+    /// Object-level composition for `search()`; tokenless on purpose — the
+    /// `objects_expr` contract requires chain-independence.
+    pub fn compose_objects(&self) -> Option<ObjectsBoolExpr> {
+        match self {
+            CompositeFilter::Leaf(leaf) => leaf.objects_expr(),
+            CompositeFilter::And(children) => {
+                let exprs: Vec<_> = children
+                    .iter()
+                    .filter_map(|c| c.compose_objects())
+                    .collect();
+                fold_and(exprs)
+            }
+            CompositeFilter::Or(children) => {
+                if children.is_empty() {
+                    return Some(Box::new(OwnedSql::<Bool>::new("FALSE".into())) as ObjectsBoolExpr);
+                }
+                let mut exprs = Vec::with_capacity(children.len());
+                for child in children {
+                    match child.compose_objects() {
+                        None => return None,
+                        Some(expr) => exprs.push(expr),
+                    }
+                }
+                fold_or(exprs)
+            }
+            CompositeFilter::Not(inner) => inner
+                .compose_objects()
+                .map(|e| Box::new(diesel::dsl::not(e)) as ObjectsBoolExpr),
+        }
+    }
+
+    /// Whether composing `compose_has_children` would return Some — the
+    /// shape probe for the has_children CTE fast path, WITHOUT building
+    /// (and discarding) the boxed expression tree.  Mirrors the compose
+    /// macro's None-propagation rules exactly: AND drops None children,
+    /// OR is Some iff non-empty and all children Some, NOT propagates.
+    /// Leaves must keep their Some/None decision independent of the
+    /// visibility token (all current impls decide from their own fields).
+    pub fn constrains_has_children(&self) -> bool {
+        match self {
+            CompositeFilter::Leaf(leaf) => leaf.constrains_has_children(),
+            CompositeFilter::And(children) => children
+                .iter()
+                .any(CompositeFilter::constrains_has_children),
+            CompositeFilter::Or(children) => {
+                !children.is_empty()
+                    && children
+                        .iter()
+                        .all(CompositeFilter::constrains_has_children)
+            }
+            CompositeFilter::Not(inner) => inner.constrains_has_children(),
+        }
+    }
+
+    /// True when any leaf's SQL is chain-dependent beyond selected-row
+    /// visibility — the loader then uses one Combined query instead of the
+    /// persistent/eph partition (see [`FilterLeaf::is_chain_dependent`]).
+    pub fn is_chain_dependent(&self) -> bool {
+        match self {
+            CompositeFilter::Leaf(leaf) => leaf.is_chain_dependent(),
+            CompositeFilter::And(children) | CompositeFilter::Or(children) => {
+                children.iter().any(CompositeFilter::is_chain_dependent)
+            }
+            CompositeFilter::Not(inner) => inner.is_chain_dependent(),
+        }
+    }
 
     /// Canonical hash of the filter tree.  Verbs that build an ephemeral layer
     /// whose contents depend on the surrounding command's filters (currently
@@ -755,7 +971,7 @@ impl CompoundNameMixin {
 }
 
 impl FilterLeaf for CompoundNameMixin {
-    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+    fn current_expr(&self, _vis: &EphVisibility) -> Option<CurrentBoolExpr> {
         let mut parts: Vec<CurrentBoolExpr> = vec![];
         if let Some(ref leaf) = self.leaf_token {
             parts.push(Box::new(
@@ -807,7 +1023,7 @@ impl LeafNameMixin {
 }
 
 impl FilterLeaf for LeafNameMixin {
-    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+    fn current_expr(&self, _vis: &EphVisibility) -> Option<CurrentBoolExpr> {
         Some(Box::new(
             index_schema::symbols::dsl::leaf_name.eq(self.leaf_name.clone()),
         ))
@@ -835,7 +1051,7 @@ impl ExactNameMixin {
 }
 
 impl FilterLeaf for ExactNameMixin {
-    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+    fn current_expr(&self, _vis: &EphVisibility) -> Option<CurrentBoolExpr> {
         Some(Box::new(
             index_schema::symbols::dsl::name.eq(self.name.clone()),
         ))
@@ -862,7 +1078,7 @@ impl SymbolInstanceIdMixin {
 }
 
 impl FilterLeaf for SymbolInstanceIdMixin {
-    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+    fn current_expr(&self, _vis: &EphVisibility) -> Option<CurrentBoolExpr> {
         Some(Box::new(
             index_schema::symbol_instances::dsl::id.eq_any(self.instance_ids.clone()),
         ))
@@ -891,7 +1107,7 @@ impl ProjectFilterMixin {
 }
 
 impl FilterLeaf for ProjectFilterMixin {
-    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+    fn current_expr(&self, _vis: &EphVisibility) -> Option<CurrentBoolExpr> {
         Some(Box::new(
             index_schema::projects::dsl::project_name.eq(self.project_name.clone()),
         ))
@@ -923,18 +1139,22 @@ impl FilterLeaf for ProjectFilterMixin {
 
 /// DirectOnlyMixin — filters children/has_children to "direct" only.
 #[derive(Debug, Clone)]
-pub struct DirectOnlyMixin {
-    eph: EphContext,
-}
+pub struct DirectOnlyMixin;
 
 impl DirectOnlyMixin {
-    pub fn new(eph: &EphContext) -> Self {
-        Self { eph: eph.clone() }
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for DirectOnlyMixin {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl FilterLeaf for DirectOnlyMixin {
-    fn has_children_expr(&self) -> Option<HasChildrenBoolExpr> {
+    fn has_children_expr(&self, vis: &EphVisibility) -> Option<HasChildrenBoolExpr> {
         Some(Box::new(
             EphSqlFragment::<Bool>::builder()
                 .sql(
@@ -952,15 +1172,15 @@ impl FilterLeaf for DirectOnlyMixin {
                           AND symbol_types.level >= mid_type.level \
                           AND ",
                 )
-                .eph_visibility("mid.eph_layer", &self.eph)
+                .eph_visibility("mid.eph_layer", vis)
                 .sql(" AND ")
-                .eph_visibility("mid_sym.eph_layer", &self.eph)
+                .eph_visibility("mid_sym.eph_layer", vis)
                 .sql(")")
                 .build(),
         ))
     }
 
-    fn children_expr(&self) -> Option<ChildrenBoolExpr> {
+    fn children_expr(&self, vis: &EphVisibility) -> Option<ChildrenBoolExpr> {
         Some(Box::new(
             EphSqlFragment::<Bool>::builder()
                 .sql("NOT EXISTS (\
@@ -975,9 +1195,9 @@ impl FilterLeaf for DirectOnlyMixin {
                           AND container.id != parent_decls.id \
                           AND cont_type.level <= parent_type.level \
                           AND ")
-                .eph_visibility("container.eph_layer", &self.eph)
+                .eph_visibility("container.eph_layer", vis)
                 .sql(" AND ")
-                .eph_visibility("cont_sym.eph_layer", &self.eph)
+                .eph_visibility("cont_sym.eph_layer", vis)
                 .sql(")")
                 .build()
         ))
@@ -987,22 +1207,38 @@ impl FilterLeaf for DirectOnlyMixin {
         // EphContext is ephemeral state, excluded by contract.
         h.update(b"DirectOnly");
     }
+
+    fn is_chain_dependent(&self) -> bool {
+        // The NOT EXISTS subqueries consult chain-visible mid/container
+        // rows: an eph instance can change a persistent row's membership,
+        // so the persistent/eph partition union would not equal the legacy
+        // result.  Forces the Combined fallback.
+        true
+    }
+
+    fn constrains_has_children(&self) -> bool {
+        true // has_children_expr always returns Some
+    }
 }
 
 /// InnermostOnlyMixin — filters has_parents to innermost container only.
 #[derive(Debug, Clone)]
-pub struct InnermostOnlyMixin {
-    eph: EphContext,
-}
+pub struct InnermostOnlyMixin;
 
 impl InnermostOnlyMixin {
-    pub fn new(eph: &EphContext) -> Self {
-        Self { eph: eph.clone() }
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for InnermostOnlyMixin {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl FilterLeaf for InnermostOnlyMixin {
-    fn has_parents_expr(&self) -> Option<HasParentsBoolExpr> {
+    fn has_parents_expr(&self, vis: &EphVisibility) -> Option<HasParentsBoolExpr> {
         Some(Box::new(
             EphSqlFragment::<Bool>::builder()
                 .sql(
@@ -1018,9 +1254,9 @@ impl FilterLeaf for InnermostOnlyMixin {
                           AND mid.id != symbol_instances.id \
                           AND ",
                 )
-                .eph_visibility("mid.eph_layer", &self.eph)
+                .eph_visibility("mid.eph_layer", vis)
                 .sql(" AND ")
-                .eph_visibility("mid_sym.eph_layer", &self.eph)
+                .eph_visibility("mid_sym.eph_layer", vis)
                 .sql(")")
                 .build(),
         ))
@@ -1030,26 +1266,28 @@ impl FilterLeaf for InnermostOnlyMixin {
         // EphContext is ephemeral state, excluded by contract.
         h.update(b"InnermostOnly");
     }
+
+    fn is_chain_dependent(&self) -> bool {
+        true // see DirectOnlyMixin::is_chain_dependent
+    }
 }
 
 /// OuterParentFilterMixin — filters out nested parent instances from REFS queries.
 #[derive(Debug, Clone)]
 pub struct OuterParentFilterMixin {
     parent_ids: Vec<i64>,
-    eph: EphContext,
 }
 
 impl OuterParentFilterMixin {
-    pub fn new(parent_ids: &[i64], eph: &EphContext) -> Self {
+    pub fn new(parent_ids: &[i64]) -> Self {
         Self {
             parent_ids: parent_ids.to_vec(),
-            eph: eph.clone(),
         }
     }
 }
 
 impl FilterLeaf for OuterParentFilterMixin {
-    fn children_expr(&self) -> Option<ChildrenBoolExpr> {
+    fn children_expr(&self, vis: &EphVisibility) -> Option<ChildrenBoolExpr> {
         if self.parent_ids.is_empty() {
             return None;
         }
@@ -1069,7 +1307,7 @@ impl FilterLeaf for OuterParentFilterMixin {
                           AND op.offset_range != parent_decls.offset_range \
                           AND ",
                 )
-                .eph_visibility("op.eph_layer", &self.eph)
+                .eph_visibility("op.eph_layer", vis)
                 .sql(")")
                 .build(),
         ))
@@ -1082,6 +1320,13 @@ impl FilterLeaf for OuterParentFilterMixin {
         for id in &self.parent_ids {
             h.update(id.to_le_bytes());
         }
+    }
+
+    fn is_chain_dependent(&self) -> bool {
+        // Only when the NOT EXISTS subquery is actually emitted —
+        // children_expr returns None for empty parent_ids, and a leaf
+        // that renders no SQL cannot make the query chain-dependent.
+        !self.parent_ids.is_empty()
     }
 }
 
@@ -1098,7 +1343,7 @@ impl SymbolTypeMixin {
 }
 
 impl FilterLeaf for SymbolTypeMixin {
-    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+    fn current_expr(&self, _vis: &EphVisibility) -> Option<CurrentBoolExpr> {
         Some(Box::new(
             index_schema::symbols::dsl::symbol_type.eq(self.symbol_type_id),
         ))
@@ -1123,7 +1368,7 @@ impl DefaultSymbolTypeMixin {
 }
 
 impl FilterLeaf for DefaultSymbolTypeMixin {
-    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+    fn current_expr(&self, _vis: &EphVisibility) -> Option<CurrentBoolExpr> {
         Some(Box::new(
             index_schema::symbols::dsl::symbol_type.eq_any(self.symbol_type_ids.clone()),
         ))
@@ -1157,7 +1402,7 @@ impl PackageDescendantLeaf {
 }
 
 impl FilterLeaf for PackageDescendantLeaf {
-    fn current_expr(&self) -> Option<CurrentBoolExpr> {
+    fn current_expr(&self, _vis: &EphVisibility) -> Option<CurrentBoolExpr> {
         // "descendants only, not exact match" — sanitized via symbol_name_to_path
         Some(Box::new(OwnedSql::<Bool>::new(format!(
             "( '{}'::ltree @> symbols.symbol_path ) AND (symbols.symbol_path <> '{}')",
