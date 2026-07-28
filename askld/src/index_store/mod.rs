@@ -151,6 +151,7 @@ struct NewProject {
     upload_status: UploadStatus,
     symbol_chunks_total: Option<i32>,
     object_chunks_total: Option<i32>,
+    root_layer_id: i64,
 }
 
 #[derive(Insertable, Clone)]
@@ -198,6 +199,7 @@ struct NewSymbol {
     symbol_type: i32,
     symbol_scope: Option<i32>,
     leaf_name: String, // pre-computed in Rust; trigger only fires on UPDATE OF name
+    layer: i64,        // the project's root layer — every row belongs to a layer
 }
 
 #[derive(Insertable, Clone)]
@@ -207,6 +209,7 @@ struct NewSymbolInstance {
     object_id: i32,
     offset_range: std::ops::Range<i32>,
     instance_type: i32,
+    layer: i64, // the project's root layer
 }
 
 #[derive(Insertable, Clone)]
@@ -215,6 +218,7 @@ struct NewSymbolRef {
     to_symbol: i64,
     from_object: i32,
     from_offset_range: std::ops::Range<i32>,
+    layer: i64, // the project's root layer
 }
 
 #[derive(Debug, QueryableByName)]

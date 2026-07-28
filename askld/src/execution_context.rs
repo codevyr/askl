@@ -80,11 +80,14 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
-    pub fn new() -> Self {
+    /// A context is always rooted in an explicit root-layer set (resolved
+    /// per request via `Index::load_root_layers`) — visibility of persistent
+    /// data is an allowlist, never ambient.
+    pub fn new(roots: Vec<index::db_diesel::RootLayer>) -> Self {
         Self {
             registry: SelectorRegistry::new(),
             current_statement_span: None,
-            eph: EphContext::new(),
+            eph: EphContext::rooted(roots),
             layer_activations: Vec::new(),
         }
     }

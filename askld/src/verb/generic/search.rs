@@ -1,8 +1,13 @@
 //! Full-text content search verb.
 //!
-//! `search("query"[, case=..., whole_word=..., limit=N])` materialises an
-//! ephemeral layer whose instances point at every byte-range occurrence of
-//! `query` inside indexed source content, up to `limit` matches.
+//! `search("query"[, case=..., whole_word=..., limit=N])` materialises one
+//! ephemeral layer per visible project, whose instances point at every
+//! byte-range occurrence of `query` inside that project's indexed source
+//! content, up to `limit` matches PER PROJECT.  The per-project cap is
+//! deliberate (not just cosmetic): each project's layer is cached
+//! independently of co-visible projects, so its contents cannot depend on
+//! how many matches other projects have.  The union across projects is
+//! therefore bounded by `limit × visible projects`, not `limit`.
 //!
 //! **NO REGEX.** The query is matched as a literal string by all four
 //! variants (substring / whole-word × case-sensitive / -insensitive).
@@ -34,9 +39,9 @@ use std::sync::Arc;
 
 use super::super::{DeriveMethod, Selector, Verb};
 
-/// Default cap when the caller omits `limit=`.  Predictable cost; explicit
-/// `limit=N` overrides it.  Aligns with how interactive code-search tools
-/// (GitHub, Sourcegraph) pace result sets.
+/// Default per-project cap when the caller omits `limit=`.  Predictable
+/// cost; explicit `limit=N` overrides it.  Aligns with how interactive
+/// code-search tools (GitHub, Sourcegraph) pace result sets.
 const DEFAULT_LIMIT: usize = 500;
 
 /// `search(query, ...)` selector — produces one ephemeral content-anchored
@@ -189,97 +194,97 @@ impl Selector for SearchSelector {
         // 2. Everything expensive is deferred into the populate closure so
         //    it runs only on a cache miss; on a hit the layer's previously
         //    materialised rows are served without touching content_store.
-        //    The closure owns its inputs (cloned query/filter) and runs the
-        //    SQL on the layer transaction's own connection — no second pool
-        //    checkout while the row lock is held.
-        let query = self.query.clone();
-        let case_sensitive = self.case_sensitive;
-        let whole_word = self.whole_word;
-        let limit = self.limit;
-        let filter = composite_filter.clone();
+        //    The closure runs once PER ROOT (`Fn`), so it shares its inputs
+        //    via `Arc` and clones the handle into each returned future; the
+        //    SQL runs on the layer transaction's own connection — no second
+        //    pool checkout while the row lock is held.
+        struct SearchInputs {
+            query: String,
+            case_sensitive: bool,
+            whole_word: bool,
+            limit: usize,
+            filter: CompositeFilter,
+            sym_name: String,
+            sym_path: String,
+            sym_leaf: String,
+        }
         let sym_name = format!("search:{}", Self::sanitise_for_symbol_name(&self.query));
         let (sym_path, sym_leaf) = symbol_path_and_leaf(&sym_name, SYMBOL_TYPE_CONTENT);
+        let inputs = std::sync::Arc::new(SearchInputs {
+            query: self.query.clone(),
+            case_sensitive: self.case_sensitive,
+            whole_word: self.whole_word,
+            limit: self.limit,
+            filter: composite_filter.clone(),
+            sym_name,
+            sym_path,
+            sym_leaf,
+        });
 
-        let base_populate: crate::verb::LayerPopulate = Box::new(move |txn| {
+        let base_populate: crate::verb::LayerPopulate = Box::new(move |txn, root| {
+            let inputs = std::sync::Arc::clone(&inputs);
             Box::pin(async move {
-                // 2a. Run the SQL.  All filtering, matching, and byte-range
-                //     extraction happens inside one of four straight-line
-                //     SQL variants picked from (whole_word, case_sensitive).
+                // 2a. Run the SQL for THIS root's project.  All filtering,
+                //     matching, and byte-range extraction happens inside one
+                //     of four straight-line SQL variants picked from
+                //     (whole_word, case_sensitive); the project scope is an
+                //     always-present bind, and the limit caps matches PER
+                //     PROJECT — required for cache correctness (this root's
+                //     base content must not depend on co-visible projects).
                 //     Reads persistent data only (`content_store`/`objects`
-                //     have no eph_layer columns) — the base layer must stay
+                //     have no layer columns) — the base layer must stay
                 //     a pure function of the persistent index.
                 let (matches, truncated) = Index::search_content_matches_on(
                     txn.connection(),
-                    &query,
-                    case_sensitive,
-                    whole_word,
-                    &filter,
-                    limit,
+                    &inputs.query,
+                    inputs.case_sensitive,
+                    inputs.whole_word,
+                    &inputs.filter,
+                    inputs.limit,
+                    root.project_id,
                 )
                 .await?;
 
-                // 2b. Group matches by project_id so we can emit one
-                //     ephemeral symbol per project (`symbols.project_id`
-                //     is NOT NULL).
-                struct GroupedMatches {
-                    project_id: i32,
-                    ranges: Vec<(
-                        i32, /* object_id */
-                        i32, /* start_byte */
-                        i32, /* end_byte */
-                    )>,
+                if matches.is_empty() {
+                    // Uniform empty base: no matches in this project (or the
+                    // filter excludes it) — the layer row itself is still
+                    // materialised by the executor.
+                    return Ok(truncated);
                 }
-                let mut by_project: HashMap<i32, Vec<(i32, i32, i32)>> = HashMap::new();
-                for m in matches {
-                    by_project.entry(m.project_id).or_default().push((
-                        m.object_id,
-                        m.start_byte,
-                        m.end_byte,
-                    ));
-                }
-                let mut groups: Vec<GroupedMatches> = by_project
-                    .into_iter()
-                    .map(|(project_id, ranges)| GroupedMatches { project_id, ranges })
-                    .collect();
-                // Determinism for the populate batch — same input → same
-                // insert order → same symbol/instance ids.
-                groups.sort_by_key(|g| g.project_id);
 
-                // 2c. One ephemeral symbol per project_id.
+                // 2b. One ephemeral symbol for this root's project, then one
+                //     ephemeral instance per byte-range match.  SQL result
+                //     order (object_id, start) keeps the batch deterministic.
                 let mut sym_batch = LayerBatch::new();
-                for g in &groups {
-                    sym_batch.symbols.push(EphSymbolRow {
-                        name: sym_name.clone(),
-                        path: sym_path.clone(),
-                        project_id: g.project_id,
-                        symbol_type: SYMBOL_TYPE_CONTENT,
-                        scope: None,
-                        leaf_name: sym_leaf.clone(),
+                sym_batch.symbols.push(EphSymbolRow {
+                    name: inputs.sym_name.clone(),
+                    path: inputs.sym_path.clone(),
+                    project_id: root.project_id,
+                    symbol_type: SYMBOL_TYPE_CONTENT,
+                    scope: None,
+                    leaf_name: inputs.sym_leaf.clone(),
+                });
+                let symbol_ids = txn.insert_batch(&sym_batch, root.project_id).await?;
+                let symbol_id = symbol_ids[0];
+
+                let mut inst_batch = LayerBatch::new();
+                for m in &matches {
+                    inst_batch.instances.push(EphInstanceRow {
+                        symbol_id,
+                        object_id: m.object_id,
+                        start: m.start_byte as i64,
+                        end: m.end_byte as i64,
+                        instance_type: INSTANCE_TYPE_DEFINITION,
                     });
                 }
-                let symbol_ids = txn.insert_batch(&sym_batch).await?;
-
-                // 2d. One ephemeral instance per byte-range match.
-                let mut inst_batch = LayerBatch::new();
-                for (g, symbol_id) in groups.iter().zip(symbol_ids.iter()) {
-                    for (object_id, start, end) in &g.ranges {
-                        inst_batch.instances.push(EphInstanceRow {
-                            symbol_id: *symbol_id,
-                            object_id: *object_id,
-                            start: *start as i64,
-                            end: *end as i64,
-                            instance_type: INSTANCE_TYPE_DEFINITION,
-                        });
-                    }
-                }
-                txn.insert_batch(&inst_batch).await?;
+                txn.insert_batch(&inst_batch, root.project_id).await?;
 
                 Ok(truncated)
             })
         });
 
         // Search reads persistent data only: content lives exclusively in
-        // `content_store`/`objects` (no eph_layer columns), and no
+        // `content_store`/`objects` (no layer columns), and no
         // CompositeFilter leaf can scope objects through eph rows (the only
         // `objects_expr` implementation is ProjectFilterMixin, eph-free by
         // the contract documented on the trait method).  When eph-visible
@@ -297,15 +302,16 @@ impl Selector for SearchSelector {
 
     /// Reconstruct the truncation warning every time the layer reports
     /// truncated=true.  Cache hits and misses both reach here because
-    /// `eph_layers.truncated` is read on both paths.  The verb owns the
+    /// `layers.truncated` is read on both paths.  The verb owns the
     /// wording and uses its own span, so the warning UX is identical
     /// across calls.
     fn make_truncation_warning(&self) -> Option<pest::error::Error<crate::parser::Rule>> {
         Some(pest::error::Error::new_from_span(
             pest::error::ErrorVariant::CustomError {
                 message: format!(
-                    "search({:?}): result truncated at {} matches; narrow the query \
-                     (more specific text, project(\"name\"), whole_word=\"true\")",
+                    "search({:?}): result truncated at {} matches in at least one \
+                     project; narrow the query (more specific text, \
+                     project(\"name\"), whole_word=\"true\")",
                     self.query, self.limit,
                 ),
             },

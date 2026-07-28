@@ -137,97 +137,149 @@ impl Selector for LocSelector {
 
         // 2. Everything else is deferred into the populate so it runs only
         //    on a cache miss.  The queries read `objects`/`object_contents`
-        //    (persistent only, no eph_layer columns) on the layer
+        //    (persistent only, no layer columns) on the layer
         //    transaction's own connection.  The user-facing bail!s on "no
         //    file" / "line out of range" move with them: the transaction
         //    rolls back, the error surfaces identically, and failed runs
         //    never commit a layer (errors stay uncached, as before).
-        let file_path = self.file_path.clone();
-        let line = self.line;
-        let project = self.project.clone();
+        //
+        //    The populate runs once PER ROOT (`Fn`, Arc-shared inputs).
+        //    The path/line resolution deliberately stays GLOBAL so the
+        //    bails are functions of global data and behave uniformly
+        //    across roots: either every root's populate bails (file
+        //    matches nowhere) or none does.  Only the batch built from the
+        //    resolved matches is scoped to the root's project.
+        struct FileMatch {
+            file_id: i32,
+            project_id: i32,
+            line_start: i64,
+            line_end: i64,
+        }
+        struct LocInputs {
+            file_path: String,
+            line: usize,
+            project: Option<String>,
+            sym_name: String,
+            sym_path: String,
+            sym_leaf: String,
+            /// Global path/line resolution, shared across the per-root
+            /// populates of ONE materialisation: the first root to run
+            /// resolves (path query + content reads + line offsets) and
+            /// memoises; siblings await the cell instead of re-reading
+            /// every matching file's contents once per root.  The bails
+            /// stay inside the initialiser, so error semantics — functions
+            /// of global data, uniform across roots — are unchanged, and
+            /// cache hits still skip resolution entirely (populates only
+            /// run on a miss).
+            resolved: tokio::sync::OnceCell<Vec<FileMatch>>,
+        }
         let sym_name = format!("loc:{}:{}", self.file_path, self.line);
         let (sym_path, sym_leaf) = symbol_path_and_leaf(&sym_name, SYMBOL_TYPE_CONTENT);
+        let inputs = std::sync::Arc::new(LocInputs {
+            file_path: self.file_path.clone(),
+            line: self.line,
+            project: self.project.clone(),
+            sym_name,
+            sym_path,
+            sym_leaf,
+            resolved: tokio::sync::OnceCell::new(),
+        });
 
-        let base_populate: crate::verb::LayerPopulate = Box::new(move |txn| {
+        let base_populate: crate::verb::LayerPopulate = Box::new(move |txn, root| {
+            let inputs = std::sync::Arc::clone(&inputs);
             Box::pin(async move {
-                let matches = Index::find_objects_by_path_on(
-                    txn.connection(),
-                    &file_path,
-                    project.as_deref(),
-                )
-                .await?;
+                let file_path = &inputs.file_path;
+                let line = inputs.line;
+                let file_matches: &Vec<FileMatch> = inputs
+                    .resolved
+                    .get_or_try_init(|| async {
+                        let matches = Index::find_objects_by_path_on(
+                            txn.connection(),
+                            file_path,
+                            inputs.project.as_deref(),
+                        )
+                        .await?;
 
-                if matches.is_empty() {
-                    bail!("loc: no file matching '{}' found in index", file_path);
-                }
+                        if matches.is_empty() {
+                            bail!("loc: no file matching '{}' found in index", file_path);
+                        }
 
-                struct FileMatch {
-                    file_id: i32,
-                    project_id: i32,
-                    line_start: i64,
-                    line_end: i64,
-                }
-                let mut file_matches = Vec::new();
-                for (file_id, project_id) in &matches {
-                    let content = Index::get_file_contents_on(txn.connection(), *file_id).await?;
-                    let content_bytes = content.as_bytes();
+                        let mut file_matches = Vec::new();
+                        for (file_id, project_id) in &matches {
+                            let content =
+                                Index::get_file_contents_on(txn.connection(), *file_id).await?;
+                            let content_bytes = content.as_bytes();
 
-                    // CRLF detection: `line_to_offset` recognises only `\n`,
-                    // so on CRLF files the resolved offset includes the
-                    // preceding `\r` in the line above.  Emit a one-shot
-                    // warning per affected file so operators can spot the
-                    // discrepancy; offset semantics stay LF-based.
-                    if content_bytes.contains(&b'\r') {
-                        let fid: i32 = (*file_id).into();
-                        let first_seen = CRLF_WARNED.lock().unwrap().insert(fid);
-                        if first_seen {
-                            tracing::warn!(
-                                file_id = fid,
-                                "loc: file contains CR bytes; line offsets are LF-based and may be off by one per CRLF"
+                            // CRLF detection: `line_to_offset` recognises
+                            // only `\n`, so on CRLF files the resolved
+                            // offset includes the preceding `\r` in the line
+                            // above.  Emit a one-shot warning per affected
+                            // file so operators can spot the discrepancy;
+                            // offset semantics stay LF-based.
+                            if content_bytes.contains(&b'\r') {
+                                let fid: i32 = (*file_id).into();
+                                let first_seen = CRLF_WARNED.lock().unwrap().insert(fid);
+                                if first_seen {
+                                    tracing::warn!(
+                                        file_id = fid,
+                                        "loc: file contains CR bytes; line offsets are LF-based and may be off by one per CRLF"
+                                    );
+                                }
+                            }
+
+                            let line_start = match line_to_offset(content_bytes, line) {
+                                Some(offset) => offset,
+                                None => continue,
+                            };
+                            let line_end = next_line_offset(content_bytes, line_start);
+
+                            file_matches.push(FileMatch {
+                                file_id: (*file_id).into(),
+                                project_id: (*project_id).into(),
+                                line_start,
+                                line_end,
+                            });
+                        }
+
+                        if file_matches.is_empty() {
+                            bail!(
+                                "loc: line {} out of range for all files matching '{}'",
+                                line,
+                                file_path
                             );
                         }
-                    }
+                        Ok::<_, anyhow::Error>(file_matches)
+                    })
+                    .await?;
 
-                    let line_start = match line_to_offset(content_bytes, line) {
-                        Some(offset) => offset,
-                        None => continue,
-                    };
-                    let line_end = next_line_offset(content_bytes, line_start);
-
-                    file_matches.push(FileMatch {
-                        file_id: (*file_id).into(),
-                        project_id: (*project_id).into(),
-                        line_start,
-                        line_end,
-                    });
-                }
-
-                if file_matches.is_empty() {
-                    bail!(
-                        "loc: line {} out of range for all files matching '{}'",
-                        line,
-                        file_path
-                    );
-                }
+                // This root's share of the resolved matches.  Constructed
+                // (not post-filtered) per root so the returned symbol ids
+                // stay 1:1 with the instance rows built from them; the
+                // scoped insert's SQL filter is then a consistency no-op.
+                // An empty share is the uniform empty base for this root.
+                let root_matches: Vec<&FileMatch> = file_matches
+                    .iter()
+                    .filter(|fm| fm.project_id == root.project_id)
+                    .collect();
 
                 // Symbol IDs are only known after insertion, so insert
                 // symbols first, then build the instance batch from the
                 // returned IDs.
                 let mut sym_batch = LayerBatch::new();
-                for fm in &file_matches {
+                for fm in &root_matches {
                     sym_batch.symbols.push(EphSymbolRow {
-                        name: sym_name.clone(),
-                        path: sym_path.clone(),
+                        name: inputs.sym_name.clone(),
+                        path: inputs.sym_path.clone(),
                         project_id: fm.project_id,
                         symbol_type: SYMBOL_TYPE_CONTENT,
                         scope: None,
-                        leaf_name: sym_leaf.clone(),
+                        leaf_name: inputs.sym_leaf.clone(),
                     });
                 }
-                let symbol_ids = txn.insert_batch(&sym_batch).await?;
+                let symbol_ids = txn.insert_batch(&sym_batch, root.project_id).await?;
 
                 let mut inst_batch = LayerBatch::new();
-                for (fm, symbol_id) in file_matches.iter().zip(symbol_ids.iter()) {
+                for (fm, symbol_id) in root_matches.iter().zip(symbol_ids.iter()) {
                     inst_batch.instances.push(EphInstanceRow {
                         symbol_id: *symbol_id,
                         object_id: fm.file_id,
@@ -236,7 +288,7 @@ impl Selector for LocSelector {
                         instance_type: INSTANCE_TYPE_DEFINITION,
                     });
                 }
-                txn.insert_batch(&inst_batch).await?;
+                txn.insert_batch(&inst_batch, root.project_id).await?;
                 // loc never truncates; truncated = false.
                 Ok(false)
             })

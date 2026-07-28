@@ -9,39 +9,49 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
     BaseLayerRef, CompositeFilter, DirectOnlyMixin, EphContext, EphLayerKind, EphScopedFut,
-    EphTransaction, Index, InnermostOnlyMixin, OuterParentFilterMixin, ScopeContext, Selection,
-    SymbolInstanceIdMixin,
+    EphTransaction, Index, InnermostOnlyMixin, OuterParentFilterMixin, RootLayer, ScopeContext,
+    Selection, SymbolInstanceIdMixin,
 };
 
 /// Populate-callback type used by [`LayerSpec`].  Called by the statement-
-/// execution layer inside [`Index::with_eph_layer`] only when the layer is
-/// freshly inserted (cache miss); on hit the executor skips it.
+/// execution layer inside [`Index::with_eph_layer`] — once PER VISIBLE ROOT
+/// (each root gets its own base layer holding only that project's rows) and
+/// only when that root's layer is freshly inserted (cache miss); on hit the
+/// executor skips it.  `Fn`, not `FnOnce`: the same closure runs for every
+/// root, so verbs capture their inputs in `Arc`/cheap clones and clone them
+/// into each returned future (the HRTB means the future cannot borrow the
+/// closure's environment).
 ///
 /// The closure borrows mutably from the `EphTransaction` across `.await`
 /// points; the boxed `Future` carries the inner borrow lifetime.
 ///
-/// The returned `bool` is the `truncated` flag: `true` means the layer's
-/// contents were capped by a result limit and the caller should surface a
-/// truncation warning.  Layers that don't have a notion of truncation
-/// (e.g. `loc`, manual `layer { … }` blocks) always return `false`.  The
-/// flag is persisted to `eph_layers.truncated` so cache hits propagate it
-/// without re-running the populate batch.
+/// The returned `bool` is the layer's `truncated` flag: `true` means this
+/// ROOT's contents were capped by a result limit (limits apply per project)
+/// and the caller should surface a truncation warning.  Layers that don't
+/// have a notion of truncation (e.g. `loc`, manual `layer { … }` blocks)
+/// always return `false`.  The flag is persisted to `layers.truncated`
+/// so cache hits propagate it without re-running the populate batch.
 pub type LayerPopulate =
-    Box<dyn for<'b> FnOnce(&'b mut EphTransaction<'_>) -> EphScopedFut<'b, bool>>;
+    Box<dyn for<'b> Fn(&'b mut EphTransaction<'_>, &'b RootLayer) -> EphScopedFut<'b, bool>>;
 
 /// Supplement-populate callback used by [`LayerSpec`].  Same contract as
-/// [`LayerPopulate`], plus the identity of the already-committed base layer
-/// so future mask/tombstone rows can reference what they mask.  The returned
-/// `bool` is the supplement's own `truncated` flag; verbs whose result limit
-/// fences the persistent scan return `false` here.
+/// [`LayerPopulate`], plus the identity of that root's already-committed
+/// base layer so future mask/tombstone rows can reference what they mask.
+/// The returned `bool` is the supplement's own `truncated` flag; verbs whose
+/// result limit fences the persistent scan return `false` here.
 ///
 /// Mask-milestone caveat: under a multi-selector composite the executor
-/// merges all parts into ONE partitioned entry, so every part's supplement
-/// closure receives the COMPOSITE base's `BaseLayerRef` — not the ref of the
-/// base the part's own verb would have produced standalone.  Closures that
-/// start reading `BaseLayerRef` must account for this.
-pub type SupplementPopulate =
-    Box<dyn for<'b> FnOnce(&'b mut EphTransaction<'_>, BaseLayerRef) -> EphScopedFut<'b, bool>>;
+/// merges all parts into ONE partitioned entry per root, so every part's
+/// supplement closure receives the COMPOSITE base's `BaseLayerRef` — not the
+/// ref of the base the part's own verb would have produced standalone.
+/// Closures that start reading `BaseLayerRef` must account for this.
+pub type SupplementPopulate = Box<
+    dyn for<'b> Fn(
+        &'b mut EphTransaction<'_>,
+        &'b RootLayer,
+        BaseLayerRef,
+    ) -> EphScopedFut<'b, bool>,
+>;
 
 /// Specification for an ephemeral cache entry that a [`Selector`] wants the
 /// statement-execution layer to materialize before its query runs.
@@ -50,10 +60,11 @@ pub type SupplementPopulate =
 /// under a non-empty eph chain, a supplement layer holding the eph-derived
 /// delta (see [`Index::with_partitioned_layers`]).  Layer-creating selectors
 /// (`search`, `loc`, `layer { … }`) implement [`Selector::layer_spec`]
-/// returning `Some(LayerSpec)`.  The statement layer materializes the
-/// layer(s), passes the resulting id(s) into `ctx.eph_ids`, and then builds
-/// the `Selection` from the layers' instances.  The selector itself does not
-/// own the transaction, the layer ids, or any mutable interior state.
+/// returning `Some(LayerSpec)`.  The executor materializes the layers per
+/// visible root, records them as `LayerActivation`s (whose replay grows
+/// each root's chain in the `EphContext`), and then builds the `Selection`
+/// from the layers' instances.  The selector itself does not own the
+/// transaction, the layer ids, or any mutable interior state.
 ///
 /// Carries no `parent_id`: chain topology is the executor's decision (it
 /// reads the live eph context), which removes the parent-disagreement
@@ -61,11 +72,13 @@ pub type SupplementPopulate =
 pub struct LayerSpec {
     /// Keyed ONLY on verb inputs + composite-filter hash — never on the
     /// eph chain.  That independence is what lets the base survive any
-    /// upstream ephemeral change.
+    /// upstream ephemeral change.  (The executor additionally salts this
+    /// per root — `root_salted_hash` — so each root's base is keyed on that
+    /// single root's identity, independent of co-visible projects.)
     pub base_hash: [u8; 32],
     pub base_kind: EphLayerKind,
-    /// Populates from persistent data only (the `eph_layer IS NULL` world),
-    /// unmasked — mask composition happens at read time, never here.
+    /// Populates from root-layer (persistent) data only, unmasked — mask
+    /// composition happens at read time, never here.
     pub base_populate: LayerPopulate,
     /// The eph-derived delta.  Provided unconditionally (uniform shape);
     /// the executor runs it iff an upstream chain exists.
@@ -99,7 +112,9 @@ impl LayerSpec {
             base_hash,
             base_kind,
             base_populate,
-            supplement_populate: Box::new(move |_txn, _base| Box::pin(async move { Ok(false) })),
+            supplement_populate: Box::new(move |_txn, _root, _base| {
+                Box::pin(async move { Ok(false) })
+            }),
             supplement_extra: Vec::new(),
         }
     }

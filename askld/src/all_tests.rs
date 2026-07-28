@@ -3705,31 +3705,26 @@ fn layer_block_cache_hit() {
         "same layer block should produce same ephemeral IDs (cache hit)"
     );
 
-    assert_eq!(
-        acts1.len(),
-        1,
-        "one layer-bearing statement, got {:?}",
+    // One layer-bearing statement, materialised per visible root: one base
+    // per fixture project (project 2's base is empty — the op references
+    // project 1's object — but goes through the same cache gate).
+    use crate::command::LayerRole;
+    assert_root_roles(&acts1, &[(R1, LayerRole::Base), (R2, LayerRole::Base)]);
+    assert_root_roles(&acts2, &[(R1, LayerRole::Base), (R2, LayerRole::Base)]);
+    assert!(
+        acts1.iter().all(|a| a.created),
+        "first run must create each root's layer, got {:?}",
         acts1
     );
-    assert_eq!(
-        acts2.len(),
-        1,
-        "one layer-bearing statement, got {:?}",
+    assert!(
+        acts2.iter().all(|a| !a.created),
+        "second run must hit the cache on every root, got {:?}",
         acts2
     );
-    assert!(
-        acts1[0].created,
-        "first run must create the layer, got {:?}",
-        acts1[0]
-    );
-    assert!(
-        !acts2[0].created,
-        "second run must hit the cache, got {:?}",
-        acts2[0]
-    );
     assert_eq!(
-        acts1[0].layer_id, acts2[0].layer_id,
-        "cache hit must reuse the same layer row"
+        acts1.iter().map(|a| a.layer_id).collect::<Vec<_>>(),
+        acts2.iter().map(|a| a.layer_id).collect::<Vec<_>>(),
+        "cache hits must reuse the same per-root layer rows"
     );
 }
 
@@ -3864,13 +3859,14 @@ fn canary_filtered_by_find_symbol() {
         // Build a filter that would match the canary symbol by name.
         let filter = CompositeFilter::leaf(LeafNameMixin::new("__canary__", true));
 
-        // Call find_symbol with no ephemeral layers visible.
+        // Call find_symbol with no ephemeral layers visible (roots only).
+        let roots = index.load_root_layers().await.unwrap();
         let result = index
             .find_symbol(
                 &filter,
                 ScopeContext::Skip,
                 ScopeContext::Skip,
-                &EphContext::new(),
+                &EphContext::rooted(roots.clone()),
             )
             .await
             .expect("find_symbol should succeed (canary must be filtered out)")
@@ -3879,20 +3875,25 @@ fn canary_filtered_by_find_symbol() {
         // The canary row must never appear in results.
         assert!(
             result.nodes.is_empty(),
-            "canary symbol must not appear in results with eph_ids=[], got {} nodes",
+            "canary symbol must not appear in results with an empty chain, got {} nodes",
             result.nodes.len()
         );
 
-        // Even with canary layer in eph_ids, the canary should be findable.
+        // Even with the canary layer visible, the canary should be findable.
+        // Pseudo-root construction: visibility is a flat set, so admitting
+        // the canary as an extra "root" makes it visible without inventing
+        // a chain for it.
+        let mut canary_roots = roots;
+        canary_roots.push(index::db_diesel::RootLayer {
+            id: CANARY_LAYER_ID,
+            project_id: -999999,
+            hash: vec![],
+        });
+        let canary_eph = EphContext::rooted(canary_roots);
         let result = index
-            .find_symbol(
-                &filter,
-                ScopeContext::Skip,
-                ScopeContext::Skip,
-                &EphContext::from_slice(&[CANARY_LAYER_ID]),
-            )
+            .find_symbol(&filter, ScopeContext::Skip, ScopeContext::Skip, &canary_eph)
             .await
-            .expect("find_symbol with canary in eph_ids should succeed")
+            .expect("find_symbol with canary visible should succeed")
             .into_inner();
         assert_eq!(
             result.nodes.len(),
@@ -3938,7 +3939,7 @@ fn canary_leak_detected_by_has_eph_leak() {
             symbol_type: 1,
             symbol_scope: None,
             leaf_name: "__canary__".into(),
-            eph_layer: Some(CANARY_LAYER_ID),
+            layer: CANARY_LAYER_ID,
         },
         symbol_instance: SymbolInstance {
             id: -999999,
@@ -3946,7 +3947,7 @@ fn canary_leak_detected_by_has_eph_leak() {
             object_id: -999999,
             offset_range: (Bound::Included(0), Bound::Excluded(1)),
             instance_type: 1,
-            eph_layer: Some(CANARY_LAYER_ID),
+            layer: CANARY_LAYER_ID,
         },
         object: Object {
             id: -999999,
@@ -3961,26 +3962,37 @@ fn canary_leak_detected_by_has_eph_leak() {
             project_name: "__canary__".into(),
             root_path: "/__canary__".into(),
             upload_status: "complete".into(),
+            root_layer_id: 1,
         },
         query_statements: vec![],
     });
 
-    // With empty eph_ids, the canary is a leak.
+    // With an empty visible set, the canary is a leak.
     assert!(
-        selection.has_eph_leak(&EphContext::new()),
-        "canary row must be detected as a leak with empty eph_ids"
+        selection.has_eph_leak(&EphContext::rooted(vec![])),
+        "canary row must be detected as a leak with an empty visible set"
     );
 
-    // With some other layer, canary is still a leak.
+    // With some other layer visible, canary is still a leak.
+    let other = EphContext::rooted(vec![index::db_diesel::RootLayer {
+        id: -1,
+        project_id: 1,
+        hash: vec![],
+    }]);
     assert!(
-        selection.has_eph_leak(&EphContext::from_slice(&[-1])),
-        "canary row must be detected as a leak when its ID is not in eph_ids"
+        selection.has_eph_leak(&other),
+        "canary row must be detected as a leak when its ID is not visible"
     );
 
     // Only when canary layer is explicitly included, it's not a leak.
+    let canary_visible = EphContext::rooted(vec![index::db_diesel::RootLayer {
+        id: CANARY_LAYER_ID,
+        project_id: -999999,
+        hash: vec![],
+    }]);
     assert!(
-        !selection.has_eph_leak(&EphContext::from_slice(&[CANARY_LAYER_ID])),
-        "canary row must not be a leak when its ID is in eph_ids"
+        !selection.has_eph_leak(&canary_visible),
+        "canary row must not be a leak when its ID is visible"
     );
 }
 
@@ -4016,7 +4028,7 @@ fn canary_leak_in_each_relationship_field_detected() {
             symbol_type: 1,
             symbol_scope: None,
             leaf_name: "__canary__".into(),
-            eph_layer: Some(CANARY_LAYER_ID),
+            layer: CANARY_LAYER_ID,
         }
     }
     fn canary_instance() -> SymbolInstance {
@@ -4026,7 +4038,7 @@ fn canary_leak_in_each_relationship_field_detected() {
             object_id: -999999,
             offset_range: (Bound::Included(0), Bound::Excluded(1)),
             instance_type: 1,
-            eph_layer: Some(CANARY_LAYER_ID),
+            layer: CANARY_LAYER_ID,
         }
     }
     fn canary_object() -> Object {
@@ -4045,11 +4057,11 @@ fn canary_leak_in_each_relationship_field_detected() {
             to_symbol: -999999,
             from_object: -999999,
             from_offset_range: (Bound::Included(0), Bound::Excluded(1)),
-            eph_layer: Some(CANARY_LAYER_ID),
+            layer: CANARY_LAYER_ID,
         }
     }
 
-    let empty_eph = EphContext::new();
+    let empty_eph = EphContext::rooted(vec![]);
 
     let mut s = Selection::new();
     s.parents.push(ParentReference {
@@ -4142,6 +4154,38 @@ fn loc_bad_line_number_errors() {
 }
 
 #[test]
+fn layer_block_unknown_object_id_errors() {
+    // The scoped per-root inserts silently drop rows whose object matches
+    // no visible project, and the resulting layer is cached on its inputs —
+    // so without verb-level validation a typo'd id would produce a sticky,
+    // silently-empty result.  The validation must reject it loudly instead.
+    let res = run_query_err(
+        VERB_TEST,
+        r#"layer { ephemeral_instance(symbol_id="1", object_id="99999", start="0", end="10", instance_type="1") }"#,
+    );
+    let msg = res.err().expect("should be an error").to_string();
+    assert!(
+        msg.contains("unknown object_id"),
+        "expected unknown-object error, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn ephemeral_symbol_unknown_project_errors() {
+    let res = run_query_err(
+        VERB_TEST,
+        r#"layer { ephemeral_symbol(name="ghost", project_id="424242", symbol_type="1") }"#,
+    );
+    let msg = res.err().expect("should be an error").to_string();
+    assert!(
+        msg.contains("does not match any visible project"),
+        "expected unknown-project error, got: {}",
+        msg
+    );
+}
+
+#[test]
 fn loc_missing_args_errors() {
     let res = run_query_err(VERB_TEST, r#"loc("main.c")"#);
     let msg = res.err().expect("should be an error").to_string();
@@ -4153,12 +4197,14 @@ fn loc_missing_args_errors() {
 }
 
 #[test]
-fn negative_id_with_null_eph_layer_rejected_by_check() {
-    // Regression: an orphan row shaped like `id < 0, eph_layer = NULL`
-    // would re-surface as a stale loc:* node (this is what produced the
-    // duplicate `-18` instance pre-CHECK).  The migration's CHECK
-    // constraints `id > 0 OR eph_layer IS NOT NULL` on symbols /
-    // symbol_instances / symbol_refs must reject any such insert.
+fn layer_sign_check_rejects_mismatched_rows() {
+    // Regression lineage: an orphan row shaped like `id < 0, layer =
+    // NULL` once re-surfaced as a stale loc:* node (the duplicate `-18`
+    // instance).  Under root layers the schema enforces strictly more:
+    // layer is NOT NULL, and the sign CHECK `(id > 0) = (layer > 0)`
+    // pins persistent (positive-id) rows to root layers and ephemeral
+    // (negative-id) rows to ephemeral layers.  All three orphan shapes must
+    // be rejected.
     use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 
     let mut rt = tokio::runtime::Runtime::new().unwrap();
@@ -4172,20 +4218,52 @@ fn negative_id_with_null_eph_layer_rejected_by_check() {
             .await
             .expect("connect to test DB");
 
+        // (a) Negative id with NULL layer — rejected by NOT NULL.
         let err = diesel::sql_query(
             "INSERT INTO index.symbol_instances \
-             (id, symbol, object_id, offset_range, instance_type, eph_layer) \
+             (id, symbol, object_id, offset_range, instance_type, layer) \
              VALUES (-424242, 1, 1, int4range(0, 1), 1, NULL)",
         )
         .execute(&mut conn)
         .await
         .err()
-        .expect("CHECK constraint must reject id<0 with eph_layer=NULL");
-        let msg = format!("{:?}", err);
+        .expect("NOT NULL must reject id<0 with layer=NULL");
         assert!(
-            msg.contains("eph_id_sign_check") || msg.contains("check constraint"),
-            "expected CHECK-constraint violation, got: {}",
-            msg
+            format!("{:?}", err).contains("not-null"),
+            "expected not-null violation, got: {:?}",
+            err
+        );
+
+        // (b) Negative (ephemeral) id in a root layer (fixture root 1000001).
+        let err = diesel::sql_query(
+            "INSERT INTO index.symbol_instances \
+             (id, symbol, object_id, offset_range, instance_type, layer) \
+             VALUES (-424242, 1, 1, int4range(0, 1), 1, 1000001)",
+        )
+        .execute(&mut conn)
+        .await
+        .err()
+        .expect("sign CHECK must reject id<0 in a root layer");
+        assert!(
+            format!("{:?}", err).contains("layer_sign_check"),
+            "expected layer_sign_check violation, got: {:?}",
+            err
+        );
+
+        // (c) Positive (persistent) id in an ephemeral layer (canary -999999).
+        let err = diesel::sql_query(
+            "INSERT INTO index.symbol_instances \
+             (id, symbol, object_id, offset_range, instance_type, layer) \
+             VALUES (424242, 1, 1, int4range(0, 1), 1, -999999)",
+        )
+        .execute(&mut conn)
+        .await
+        .err()
+        .expect("sign CHECK must reject id>0 in an ephemeral layer");
+        assert!(
+            format!("{:?}", err).contains("layer_sign_check"),
+            "expected layer_sign_check violation, got: {:?}",
+            err
         );
     });
 }
@@ -4298,7 +4376,7 @@ fn ephemeral_instance_label_hash_matches_equivalent_literal() {
     // `symbol_instances` with a shared negative `id`.  We assert that
     // the negative-ID set produced by the literal form intersects the
     // negative-ID set produced by the label form — only possible if
-    // both runs hit the same eph_layers row.  (Using identical
+    // both runs hit the same layers row.  (Using identical
     // start/end ensures the rows are byte-identical; running the
     // label form after the literal means the literal's already-
     // committed row is what the label run finds via ON CONFLICT.)
@@ -4345,7 +4423,7 @@ fn ephemeral_instance_label_hash_matches_equivalent_literal() {
         !shared.is_empty(),
         "ephemeral_instance(symbol_id=\"@target\") where @target → [1] \
          must share at least one materialised instance row with the \
-         equivalent literal form (same layer hash means same eph_layers \
+         equivalent literal form (same layer hash means same layers \
          row means same instance id).  literal_eph={:?}, label_eph={:?}",
         literal_eph,
         label_eph,
@@ -4388,7 +4466,7 @@ fn search_skeleton_single_match() {
 fn search_skeleton_no_match_returns_empty() {
     // Nonexistent needle ≥ 3 chars: helper returns an empty match set, the
     // verb should not bail.  Step 6 returns Ok(Some(LayerSpec)) regardless,
-    // so the eph_layer is created (empty); the caller's selection is then
+    // so the layer is created (empty); the caller's selection is then
     // empty.  Critically: the query should succeed (no err), and produce a
     // result with zero matched instances.
     const QUERY: &str = r#"search("nonexistent_xyzzy")"#;
@@ -4557,22 +4635,28 @@ fn search_truncation_warning_surfaces_on_cache_miss() {
     const QUERY: &str = r#"search("foo", whole_word="true", limit="3")"#;
     let (res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
 
-    assert_eq!(acts.len(), 1, "one layer-bearing statement, got {:?}", acts);
+    // One layer-bearing statement, one base per visible root (no upstream
+    // chain, so no supplements).
+    use crate::command::LayerRole;
+    assert_root_roles(&acts, &[(R1, LayerRole::Base), (R2, LayerRole::Base)]);
     assert!(
-        acts[0].created,
-        "unique limit must produce a cache miss, got {:?}",
-        acts[0]
+        acts.iter().all(|a| a.created),
+        "unique limit must produce a cache miss on every root, got {:?}",
+        acts
     );
+    // The limit caps matches PER PROJECT: whole-word "foo" has 6 matches
+    // in proj 1 (1 basic + 3 multi + 2 boundary) and 4 in proj 2
+    // (3 mixedcase + 1 docless), so limit=3 truncates both roots' bases.
     assert!(
-        acts[0].truncated,
-        "limit=3 must truncate, got {:?}",
-        acts[0]
+        acts.iter().all(|a| a.truncated),
+        "limit=3 must truncate in both projects, got {:?}",
+        acts
     );
 
     assert_eq!(
         res.nodes.as_vec().len(),
-        3,
-        "limit=3 should return exactly 3 matches, got {}",
+        6,
+        "limit=3 caps per project: 3 (proj 1) + 3 (proj 2) = 6 matches, got {}",
         res.nodes.as_vec().len(),
     );
 
@@ -4592,7 +4676,7 @@ fn search_truncation_warning_surfaces_on_cache_miss() {
 #[test]
 fn search_truncation_warning_surfaces_on_cache_hit() {
     // Two back-to-back identical queries.  The first call's populate
-    // writes truncated=true to eph_layers; the second call hits the cache
+    // writes truncated=true to layers; the second call hits the cache
     // (no populate) and reads truncated=true back, reconstructing the
     // warning from the verb's own span via make_truncation_warning.
     //
@@ -4822,7 +4906,7 @@ fn search_non_utf8_skipped() {
 #[test]
 fn search_cache_hit_on_repeat_same_filter() {
     // Two identical search()s with the same composite filter must hit the
-    // same eph_layer row.  The activation trace asserts the cache paths
+    // same layer row.  The activation trace asserts the cache paths
     // directly: first call creates+populates, second reuses the same layer
     // id without repopulating.  limit=399 is unique to this test (limit is
     // part of the layer hash) so the miss->hit sequence is guaranteed even
@@ -4855,7 +4939,7 @@ fn search_cache_hit_on_repeat_same_filter() {
 
 #[test]
 fn search_different_filter_different_cache() {
-    // The composite filter is mixed into the eph_layer hash via
+    // The composite filter is mixed into the layer hash via
     // CompositeFilter::hash_into.  project("p1") and project("p2")
     // therefore produce DIFFERENT hashes and different cache entries,
     // each scoped to its own project's matches.  Asserted two ways: the
@@ -4900,7 +4984,7 @@ fn search_different_filter_different_cache() {
 // ============================================================================
 //
 // These tests assert cache behaviour DIRECTLY -- via the layer-activation
-// trace (created vs cache hit) and the eph_layers row state (populated /
+// trace (created vs cache hit) and the layers row state (populated /
 // truncated flags, per-layer row counts) -- rather than inferring it from
 // eph instance IDs.
 //
@@ -4924,56 +5008,77 @@ fn eph_layer_state(fixture: &str, layer_id: i64) -> (index::db_diesel::EphLayerM
 
 #[test]
 fn search_first_call_reports_created_and_populated() {
-    // A cold search() must report exactly one activation with created=true,
-    // and leave behind an eph_layers row with populated=true (2-phase
-    // commit completed) and truncated=false, whose instance rows match the
+    // A cold search() must report one created=true base activation per
+    // visible root, and leave behind, per root, an layers row with
+    // populated=true (2-phase commit completed) and truncated=false, whose
+    // instance rows hold exactly that project's matches — summing to the
     // returned nodes 1:1.
+    use crate::command::LayerRole;
     const QUERY: &str = r#"search("foo", limit="397")"#;
     let (res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
 
-    assert_eq!(acts.len(), 1, "one layer-bearing statement, got {:?}", acts);
-    let act = acts[0];
-    assert!(
-        act.created,
-        "unique limit must produce a cache miss, got {:?}",
-        act
-    );
-    assert!(
-        !act.truncated,
-        "limit=397 leaves ample headroom, got {:?}",
-        act
-    );
+    assert_root_roles(&acts, &[(R1, LayerRole::Base), (R2, LayerRole::Base)]);
+    for act in &acts {
+        assert!(
+            act.created,
+            "unique limit must produce a cache miss, got {:?}",
+            act
+        );
+        assert!(
+            !act.truncated,
+            "limit=397 leaves ample headroom, got {:?}",
+            act
+        );
+    }
 
-    let (meta, (symbols, instances)) = eph_layer_state(TEST_INPUT_SEARCH, act.layer_id);
-    assert_eq!(
-        meta.kind, "search",
-        "layer kind must be 'search', got {:?}",
-        meta
-    );
-    assert!(
-        meta.populated,
-        "populate must have been committed, got {:?}",
-        meta
-    );
-    assert!(
-        !meta.truncated,
-        "truncated flag must be false on the row, got {:?}",
-        meta
-    );
+    let mut total_instances = 0;
+    let mut per_root_instances = Vec::new();
+    for act in &acts {
+        let (meta, (symbols, instances)) = eph_layer_state(TEST_INPUT_SEARCH, act.layer_id);
+        assert_eq!(
+            meta.kind, "search",
+            "layer kind must be 'search', got {:?}",
+            meta
+        );
+        assert_eq!(
+            meta.parent_id,
+            Some(act.root_id),
+            "base layers parent their root, got {:?}",
+            meta
+        );
+        assert!(
+            meta.populated,
+            "populate must have been committed, got {:?}",
+            meta
+        );
+        assert!(
+            !meta.truncated,
+            "truncated flag must be false on the row, got {:?}",
+            meta
+        );
+        // Each root's base holds only its own project's rows: exactly one
+        // 'search:foo' eph symbol.
+        assert_eq!(
+            symbols, 1,
+            "expected one 'search:foo' symbol in each root's base"
+        );
+        total_instances += instances;
+        per_root_instances.push(instances);
+    }
 
-    // One instance per byte-range match; the statement's selection is
-    // exactly the layer's instances.
+    // One instance per byte-range match, per project: proj 1 has 8
+    // substring matches (1 basic + 3 multi + 4 boundary), proj 2 has 4
+    // (3 mixedcase + 1 docless; the binary blob is skipped).
     assert_eq!(
-        instances,
+        per_root_instances,
+        vec![8, 4],
+        "per-root bases must hold exactly their project's matches",
+    );
+    // The statement's selection is exactly the union of the bases' rows.
+    assert_eq!(
+        total_instances,
         res.nodes.as_vec().len() as i64,
         "layer instance rows must match returned nodes 1:1",
-    );
-    // One eph symbol per matching project: substring "foo" matches objects
-    // in both fixture projects (proj 1: basic/multi/boundary; proj 2:
-    // mixedcase/docless).
-    assert_eq!(
-        symbols, 2,
-        "expected one 'search:foo' symbol per matching project"
     );
 }
 
@@ -5024,7 +5129,7 @@ fn search_repeat_call_hits_cache_without_repopulating() {
 
 #[test]
 fn search_truncated_flag_persists_on_layer_row() {
-    // Truncation state lives on the eph_layers row itself.  First call
+    // Truncation state lives on the layers row itself.  First call
     // truncates (whole-word "foo" has ~10 matches, limit=1) and writes
     // truncated=true in the same transaction as the populate; the repeat
     // call reads it back on the cache-hit path and still surfaces the
@@ -5080,22 +5185,33 @@ fn search_truncated_flag_persists_on_layer_row() {
 // Partitioned base/supplement cache tests
 // ============================================================================
 //
-// search() now produces a parentless BASE layer keyed only on its inputs
-// (never the upstream eph chain) plus, under a non-empty chain, a chained
-// SUPPLEMENT layer holding the eph-derived delta (structurally empty today).
-// These tests pin down the partitioning contract: base reuse across upstream
-// eph changes, chain-topology rules, and warning/chaining stability.
+// search() now produces, PER VISIBLE ROOT, a BASE layer parented on that
+// root and keyed on the root-salted verb inputs (never the upstream eph
+// chain) plus, iff that root's chain is non-empty, a chained SUPPLEMENT
+// layer holding the eph-derived delta (structurally empty today).  Each
+// root's base holds only that project's rows.  These tests pin down the
+// partitioning contract: per-root base reuse across upstream eph changes,
+// chain-topology rules, and warning/chaining stability.
 //
 // Same isolation convention as above: every cache-sensitive test uses a
 // limit value unique across this file, and layer blocks use byte ranges
 // unique per test so their chained hashes never collide across tests.
 
-/// Assert an activation trace's roles match `expected` (statement order:
-/// each statement contributes its base first, then — under a non-empty
-/// chain — its supplement) and return the trace for positional access.
-fn assert_roles(acts: &[crate::command::LayerActivation], expected: &[crate::command::LayerRole]) {
-    let roles: Vec<_> = acts.iter().map(|a| a.role).collect();
-    assert_eq!(roles, expected, "unexpected activation shape: {:?}", acts);
+/// Root layer ids of the two fixture projects — TEST_INPUT_SEARCH and
+/// VERB_TEST both define projects 1/2 with root layers 1000001/1000002.
+const R1: i64 = 1000001;
+const R2: i64 = 1000002;
+
+/// Assert an activation trace's (root, role) pairs match `expected`.
+/// Statement order: each statement materialises per visible root
+/// (ascending); within a root, base first, then — under a non-empty chain
+/// for that root — its supplement.
+fn assert_root_roles(
+    acts: &[crate::command::LayerActivation],
+    expected: &[(i64, crate::command::LayerRole)],
+) {
+    let got: Vec<_> = acts.iter().map(|a| (a.root_id, a.role)).collect();
+    assert_eq!(got, expected, "unexpected activation shape: {:?}", acts);
 }
 
 #[test]
@@ -5118,47 +5234,62 @@ fn search_base_reused_across_eph_prefix_change() {
         r#"search("foo", limit="21")"#,
     );
 
-    // Trace shape: the layer{} block (itself partitioned now) contributes
-    // its parentless base; the search statement contributes base +
-    // supplement (chain is non-empty by then).
+    // Trace shape, per visible root (ascending): the layer{} block (itself
+    // partitioned now) contributes a base per root; the search statement
+    // contributes base + supplement per root (every root's chain is
+    // non-empty by then).
+    let shape: &[(i64, LayerRole)] = &[
+        (R1, LayerRole::Base),       // layer block base, root 1
+        (R2, LayerRole::Base),       // layer block base, root 2 (empty)
+        (R1, LayerRole::Base),       // search base, root 1
+        (R1, LayerRole::Supplement), // search supplement, root 1
+        (R2, LayerRole::Base),       // search base, root 2
+        (R2, LayerRole::Supplement), // search supplement, root 2
+    ];
     let (res_a, acts_a) = run_query_traced(TEST_INPUT_SEARCH, Q_A);
-    assert_roles(
-        &acts_a,
-        &[LayerRole::Base, LayerRole::Base, LayerRole::Supplement],
+    assert_root_roles(&acts_a, shape);
+    assert!(
+        acts_a.iter().all(|a| a.created),
+        "unique limit and byte range ⇒ cold everywhere, got {:?}",
+        acts_a
     );
-    let (base_a, supp_a) = (acts_a[1], acts_a[2]);
-    assert!(base_a.created, "unique limit ⇒ cold base, got {:?}", acts_a);
-    assert!(supp_a.created, "cold supplement, got {:?}", acts_a);
+    let (base_a_r1, supp_a_r1, base_a_r2, supp_a_r2) = (acts_a[2], acts_a[3], acts_a[4], acts_a[5]);
 
     let (res_b, acts_b) = run_query_traced(TEST_INPUT_SEARCH, Q_B);
-    assert_roles(
-        &acts_b,
-        &[LayerRole::Base, LayerRole::Base, LayerRole::Supplement],
-    );
-    let (layer_b, base_b, supp_b) = (acts_b[0], acts_b[1], acts_b[2]);
+    assert_root_roles(&acts_b, shape);
+    let (layer_b_r1, layer_b_r2) = (acts_b[0], acts_b[1]);
+    let (base_b_r1, supp_b_r1, base_b_r2, supp_b_r2) = (acts_b[2], acts_b[3], acts_b[4], acts_b[5]);
 
     assert!(
-        layer_b.created,
-        "different byte range ⇒ new layer block, got {:?}",
+        layer_b_r1.created && layer_b_r2.created,
+        "different byte range ⇒ new layer block on each root, got {:?}",
         acts_b
     );
     assert!(
-        !base_b.created,
-        "base must be reused despite the changed eph prefix, got {:?}",
+        !base_b_r1.created && !base_b_r2.created,
+        "each root's base must be reused despite the changed eph prefix, got {:?}",
         acts_b
     );
     assert_eq!(
-        base_b.layer_id, base_a.layer_id,
-        "base reuse must hit the same eph_layers row"
+        base_b_r1.layer_id, base_a_r1.layer_id,
+        "root 1 base reuse must hit the same layers row"
+    );
+    assert_eq!(
+        base_b_r2.layer_id, base_a_r2.layer_id,
+        "root 2 base reuse must hit the same layers row"
     );
     assert!(
-        supp_b.created,
-        "different upstream chain ⇒ fresh supplement, got {:?}",
+        supp_b_r1.created && supp_b_r2.created,
+        "different upstream chain ⇒ fresh supplements, got {:?}",
         acts_b
     );
     assert_ne!(
-        supp_b.layer_id, supp_a.layer_id,
-        "each prefix gets its own supplement row"
+        supp_b_r1.layer_id, supp_a_r1.layer_id,
+        "each prefix gets its own supplement row (root 1)"
+    );
+    assert_ne!(
+        supp_b_r2.layer_id, supp_a_r2.layer_id,
+        "each prefix gets its own supplement row (root 2)"
     );
 
     // Result equivalence: the search-derived nodes are the SAME rows in
@@ -5177,34 +5308,41 @@ fn search_base_reused_across_eph_prefix_change() {
 #[test]
 fn search_without_upstream_creates_only_base() {
     // Chain-topology rule: with an empty upstream eph chain there is no
-    // supplement — a bare search materialises exactly one activation, the
-    // parentless base, and repeat runs hit it.
+    // supplement — a bare search materialises exactly one activation per
+    // visible root, the root-parented base, and repeat runs hit both.
     use crate::command::LayerRole;
     const QUERY: &str = r#"search("foo", limit="22")"#;
 
     let (_res, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
-    assert_eq!(acts1.len(), 1, "bare search ⇒ base only, got {:?}", acts1);
-    assert_eq!(acts1[0].role, LayerRole::Base, "got {:?}", acts1);
+    assert_root_roles(&acts1, &[(R1, LayerRole::Base), (R2, LayerRole::Base)]);
     assert!(
-        acts1[0].created,
-        "unique limit ⇒ cold base, got {:?}",
+        acts1.iter().all(|a| a.created),
+        "unique limit ⇒ cold bases, got {:?}",
         acts1
     );
 
-    let (meta, _) = eph_layer_state(TEST_INPUT_SEARCH, acts1[0].layer_id);
-    assert_eq!(meta.kind, "search", "got {:?}", meta);
-    assert_eq!(
-        meta.parent_id, None,
-        "base layers are parentless by construction, got {:?}",
-        meta
-    );
+    for act in &acts1 {
+        let (meta, _) = eph_layer_state(TEST_INPUT_SEARCH, act.layer_id);
+        assert_eq!(meta.kind, "search", "got {:?}", meta);
+        assert_eq!(
+            meta.parent_id,
+            Some(act.root_id),
+            "base layers parent their root by construction, got {:?}",
+            meta
+        );
+    }
 
     let (_res, acts2) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
-    assert_eq!(acts2.len(), 1, "got {:?}", acts2);
-    assert!(!acts2[0].created, "repeat run must hit, got {:?}", acts2);
+    assert_root_roles(&acts2, &[(R1, LayerRole::Base), (R2, LayerRole::Base)]);
+    assert!(
+        acts2.iter().all(|a| !a.created),
+        "repeat run must hit on every root, got {:?}",
+        acts2
+    );
     assert_eq!(
-        acts2[0].layer_id, acts1[0].layer_id,
-        "hit must reuse the same base row"
+        acts1.iter().map(|a| a.layer_id).collect::<Vec<_>>(),
+        acts2.iter().map(|a| a.layer_id).collect::<Vec<_>>(),
+        "hits must reuse the same per-root base rows"
     );
 }
 
@@ -5222,64 +5360,81 @@ fn search_supplement_empty_but_materialized() {
     );
 
     let (_res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
-    assert_roles(
+    assert_root_roles(
         &acts,
-        &[LayerRole::Base, LayerRole::Base, LayerRole::Supplement],
-    );
-    let (layer_block, base, supp) = (acts[0], acts[1], acts[2]);
-
-    let (layer_meta, _) = eph_layer_state(TEST_INPUT_SEARCH, layer_block.layer_id);
-    assert_eq!(layer_meta.kind, "layer", "got {:?}", layer_meta);
-    assert_eq!(
-        layer_meta.parent_id, None,
-        "the layer block's own base is parentless too, got {:?}",
-        layer_meta
+        &[
+            (R1, LayerRole::Base),       // layer block base, root 1
+            (R2, LayerRole::Base),       // layer block base, root 2
+            (R1, LayerRole::Base),       // search base, root 1
+            (R1, LayerRole::Supplement), // search supplement, root 1
+            (R2, LayerRole::Base),       // search base, root 2
+            (R2, LayerRole::Supplement), // search supplement, root 2
+        ],
     );
 
-    let (base_meta, (base_symbols, base_instances)) =
-        eph_layer_state(TEST_INPUT_SEARCH, base.layer_id);
-    assert_eq!(base_meta.kind, "search", "got {:?}", base_meta);
-    assert_eq!(base_meta.parent_id, None, "got {:?}", base_meta);
-    assert!(base_meta.populated, "got {:?}", base_meta);
-    assert!(
-        base_symbols > 0 && base_instances > 0,
-        "search matches live in the base, got ({}, {})",
-        base_symbols,
-        base_instances
-    );
+    // The supplement contract holds per root: each root's supplement
+    // chains on that root's own layer-block base.
+    for (layer_block, base, supp) in [(acts[0], acts[2], acts[3]), (acts[1], acts[4], acts[5])] {
+        let root_id = layer_block.root_id;
 
-    let (supp_meta, (supp_symbols, supp_instances)) =
-        eph_layer_state(TEST_INPUT_SEARCH, supp.layer_id);
-    assert_eq!(supp_meta.kind, "supplement", "got {:?}", supp_meta);
-    assert_eq!(
-        supp_meta.parent_id,
-        Some(layer_block.layer_id),
-        "supplement chains on the upstream layer block's base, got {:?}",
-        supp_meta
-    );
-    assert!(
-        supp_meta.populated,
-        "empty supplement still commits through 2-PC, got {:?}",
-        supp_meta
-    );
-    assert_eq!(
-        (supp_symbols, supp_instances),
-        (0, 0),
-        "search's eph delta is structurally empty today",
-    );
-    assert!(
-        !supp_meta.truncated,
-        "empty supplement never truncates, got {:?}",
-        supp_meta
-    );
+        let (layer_meta, _) = eph_layer_state(TEST_INPUT_SEARCH, layer_block.layer_id);
+        assert_eq!(layer_meta.kind, "layer", "got {:?}", layer_meta);
+        assert_eq!(
+            layer_meta.parent_id,
+            Some(root_id),
+            "the layer block's own base parents its root too, got {:?}",
+            layer_meta
+        );
+
+        let (base_meta, (base_symbols, base_instances)) =
+            eph_layer_state(TEST_INPUT_SEARCH, base.layer_id);
+        assert_eq!(base_meta.kind, "search", "got {:?}", base_meta);
+        assert_eq!(base_meta.parent_id, Some(root_id), "got {:?}", base_meta);
+        assert!(base_meta.populated, "got {:?}", base_meta);
+        assert!(
+            base_symbols > 0 && base_instances > 0,
+            "search matches live in each root's base (both fixture projects \
+             contain \"foo\"), got ({}, {}) for root {}",
+            base_symbols,
+            base_instances,
+            root_id
+        );
+
+        let (supp_meta, (supp_symbols, supp_instances)) =
+            eph_layer_state(TEST_INPUT_SEARCH, supp.layer_id);
+        assert_eq!(supp_meta.kind, "supplement", "got {:?}", supp_meta);
+        assert_eq!(
+            supp_meta.parent_id,
+            Some(layer_block.layer_id),
+            "supplement chains on its root's upstream layer-block base, got {:?}",
+            supp_meta
+        );
+        assert!(
+            supp_meta.populated,
+            "empty supplement still commits through 2-PC, got {:?}",
+            supp_meta
+        );
+        assert_eq!(
+            (supp_symbols, supp_instances),
+            (0, 0),
+            "search's eph delta is structurally empty today",
+        );
+        assert!(
+            !supp_meta.truncated,
+            "empty supplement never truncates, got {:?}",
+            supp_meta
+        );
+    }
 }
 
 #[test]
 fn search_truncation_on_base_survives_eph_change() {
     // The truncated flag lives on the base row (the limit fences the
-    // persistent scan).  A truncating search under prefix A rerun under
-    // prefix B hits the base and must still surface the warning — the
-    // warning survives BOTH cache dimensions (hit, and changed prefix).
+    // persistent scan) and is PER ROOT: whole-word "foo" has 6 matches in
+    // proj 1 (> limit=4 ⇒ truncated) but exactly 4 in proj 2 (not
+    // truncated).  A truncating search under prefix A rerun under prefix B
+    // hits the bases and must still surface the warning — the warning
+    // survives BOTH cache dimensions (hit, and changed prefix).
     use crate::command::LayerRole;
     const Q_A: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
@@ -5292,38 +5447,63 @@ fn search_truncation_on_base_survives_eph_change() {
         r#"search("foo", whole_word="true", limit="4")"#,
     );
 
+    let shape: &[(i64, LayerRole)] = &[
+        (R1, LayerRole::Base),       // layer block base, root 1
+        (R2, LayerRole::Base),       // layer block base, root 2
+        (R1, LayerRole::Base),       // search base, root 1
+        (R1, LayerRole::Supplement), // search supplement, root 1
+        (R2, LayerRole::Base),       // search base, root 2
+        (R2, LayerRole::Supplement), // search supplement, root 2
+    ];
     let (_res_a, acts_a) = run_query_traced(TEST_INPUT_SEARCH, Q_A);
-    assert_roles(
-        &acts_a,
-        &[LayerRole::Base, LayerRole::Base, LayerRole::Supplement],
-    );
-    let base_a = acts_a[1];
-    assert!(base_a.created, "cold base, got {:?}", acts_a);
+    assert_root_roles(&acts_a, shape);
+    let (base_a_r1, base_a_r2) = (acts_a[2], acts_a[4]);
     assert!(
-        base_a.truncated,
-        "whole-word foo at limit=4 must truncate, got {:?}",
+        base_a_r1.created && base_a_r2.created,
+        "cold bases, got {:?}",
         acts_a
+    );
+    assert!(
+        base_a_r1.truncated,
+        "whole-word foo (6 matches in proj 1) at limit=4 must truncate root 1's base, got {:?}",
+        acts_a
+    );
+    assert!(
+        !base_a_r2.truncated,
+        "proj 2 has exactly 4 whole-word matches — within limit=4, so root 2's \
+         base must NOT truncate, got {:?}",
+        acts_a
+    );
+    let (meta_a_r1, _) = eph_layer_state(TEST_INPUT_SEARCH, base_a_r1.layer_id);
+    let (meta_a_r2, _) = eph_layer_state(TEST_INPUT_SEARCH, base_a_r2.layer_id);
+    assert!(
+        meta_a_r1.truncated && !meta_a_r2.truncated,
+        "the per-root truncated flags must be persisted on the base rows, got {:?} / {:?}",
+        meta_a_r1,
+        meta_a_r2
     );
 
     let (res_b, acts_b) = run_query_traced(TEST_INPUT_SEARCH, Q_B);
-    assert_roles(
-        &acts_b,
-        &[LayerRole::Base, LayerRole::Base, LayerRole::Supplement],
-    );
-    let (base_b, supp_b) = (acts_b[1], acts_b[2]);
+    assert_root_roles(&acts_b, shape);
+    let (base_b_r1, supp_b_r1, base_b_r2, supp_b_r2) = (acts_b[2], acts_b[3], acts_b[4], acts_b[5]);
     assert!(
-        !base_b.created,
-        "base reused under prefix B, got {:?}",
+        !base_b_r1.created && !base_b_r2.created,
+        "bases reused under prefix B, got {:?}",
         acts_b
     );
     assert!(
-        base_b.truncated,
-        "persisted truncated flag must propagate on the base hit, got {:?}",
+        base_b_r1.truncated,
+        "persisted truncated flag must propagate on root 1's base hit, got {:?}",
         acts_b
     );
     assert!(
-        !supp_b.truncated,
-        "the supplement carries no truncation, got {:?}",
+        !base_b_r2.truncated,
+        "root 2's base stays untruncated on the hit, got {:?}",
+        acts_b
+    );
+    assert!(
+        !supp_b_r1.truncated && !supp_b_r2.truncated,
+        "the supplements carry no truncation, got {:?}",
         acts_b
     );
     assert!(
@@ -5338,12 +5518,13 @@ fn search_truncation_on_base_survives_eph_change() {
 
 #[test]
 fn downstream_chaining_keys_deterministic() {
-    // Downstream verbs chain off the supplement id, which folds the
-    // upstream prefix and the base hash — so a repeat of the whole
-    // pipeline is a full cache hit on every layer, including a layer{}
-    // block AFTER the search.  This pins the push order (base first,
-    // supplement last = eph.last()) and the supplement-id stability that
-    // downstream keys depend on.
+    // Downstream verbs chain off their root's supplement id, which folds
+    // that root's upstream prefix and the root-salted base hash — so a
+    // repeat of the whole pipeline is a full cache hit on every layer of
+    // every root, including a layer{} block AFTER the search.  This pins
+    // the per-root push order (base first, supplement last = that root's
+    // chain tail) and the supplement-id stability downstream keys depend
+    // on.
     const QUERY: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
         r#"start="65000", end="65100", instance_type="1") }; "#,
@@ -5352,15 +5533,25 @@ fn downstream_chaining_keys_deterministic() {
         r#"start="66000", end="66100", instance_type="1") }"#,
     );
 
-    // 5 activations: layer base; search base + supplement; trailing layer
-    // base + supplement (it sits under a non-empty chain).
+    // 10 activations — each statement materialises per root: the leading
+    // layer block contributes a base per root; the search and the trailing
+    // layer block each contribute base + supplement per root (both sit
+    // under a non-empty per-root chain).
+    use crate::command::LayerRole;
+    let shape: &[(i64, LayerRole)] = &[
+        (R1, LayerRole::Base), // leading layer block
+        (R2, LayerRole::Base),
+        (R1, LayerRole::Base), // search
+        (R1, LayerRole::Supplement),
+        (R2, LayerRole::Base),
+        (R2, LayerRole::Supplement),
+        (R1, LayerRole::Base), // trailing layer block
+        (R1, LayerRole::Supplement),
+        (R2, LayerRole::Base),
+        (R2, LayerRole::Supplement),
+    ];
     let (_res1, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
-    assert_eq!(
-        acts1.len(),
-        5,
-        "layer base + (base, supp) + (base, supp), got {:?}",
-        acts1
-    );
+    assert_root_roles(&acts1, shape);
     assert!(
         acts1.iter().all(|a| a.created),
         "first run is cold everywhere, got {:?}",
@@ -5368,7 +5559,7 @@ fn downstream_chaining_keys_deterministic() {
     );
 
     let (_res2, acts2) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
-    assert_eq!(acts2.len(), 5, "got {:?}", acts2);
+    assert_root_roles(&acts2, shape);
     assert!(
         acts2.iter().all(|a| !a.created),
         "repeat run must be a full cache hit on every layer, got {:?}",
@@ -5407,40 +5598,53 @@ fn loc_base_reused_across_eph_prefix_change() {
         r#"loc("main.c", "2")"#,
     );
 
+    let shape: &[(i64, LayerRole)] = &[
+        (R1, LayerRole::Base),       // layer block base, root 1
+        (R2, LayerRole::Base),       // layer block base, root 2
+        (R1, LayerRole::Base),       // loc base, root 1 (/main.c)
+        (R1, LayerRole::Supplement), // loc supplement, root 1
+        (R2, LayerRole::Base),       // loc base, root 2 (/src/main.c)
+        (R2, LayerRole::Supplement), // loc supplement, root 2
+    ];
     let (_res_a, acts_a) = run_query_traced(VERB_TEST, Q_A);
-    assert_roles(
-        &acts_a,
-        &[LayerRole::Base, LayerRole::Base, LayerRole::Supplement],
-    );
-    let (loc_base_a, loc_supp_a) = (acts_a[1], acts_a[2]);
+    assert_root_roles(&acts_a, shape);
+    let (loc_base_a_r1, loc_supp_a_r1, loc_base_a_r2, loc_supp_a_r2) =
+        (acts_a[2], acts_a[3], acts_a[4], acts_a[5]);
     assert!(
-        loc_base_a.created,
-        "line 2 is unique to this test ⇒ cold loc base, got {:?}",
+        loc_base_a_r1.created && loc_base_a_r2.created,
+        "line 2 is unique to this test ⇒ cold loc bases, got {:?}",
         acts_a
     );
 
-    let (loc_meta, _) = eph_layer_state(VERB_TEST, loc_base_a.layer_id);
-    assert_eq!(loc_meta.kind, "loc", "got {:?}", loc_meta);
-    assert_eq!(
-        loc_meta.parent_id, None,
-        "loc base is parentless, got {:?}",
-        loc_meta
-    );
+    for act in [loc_base_a_r1, loc_base_a_r2] {
+        let (loc_meta, _) = eph_layer_state(VERB_TEST, act.layer_id);
+        assert_eq!(loc_meta.kind, "loc", "got {:?}", loc_meta);
+        assert_eq!(
+            loc_meta.parent_id,
+            Some(act.root_id),
+            "loc base parents its root, got {:?}",
+            loc_meta
+        );
+    }
 
     let (_res_b, acts_b) = run_query_traced(VERB_TEST, Q_B);
-    assert_roles(
-        &acts_b,
-        &[LayerRole::Base, LayerRole::Base, LayerRole::Supplement],
-    );
-    let (loc_base_b, loc_supp_b) = (acts_b[1], acts_b[2]);
+    assert_root_roles(&acts_b, shape);
+    let (loc_base_b_r1, loc_supp_b_r1, loc_base_b_r2, loc_supp_b_r2) =
+        (acts_b[2], acts_b[3], acts_b[4], acts_b[5]);
     assert!(
-        !loc_base_b.created,
-        "loc base must survive the changed eph prefix, got {:?}",
+        !loc_base_b_r1.created && !loc_base_b_r2.created,
+        "loc bases must survive the changed eph prefix, got {:?}",
         acts_b
     );
-    assert_eq!(loc_base_b.layer_id, loc_base_a.layer_id);
-    assert!(loc_supp_b.created, "fresh supplement, got {:?}", acts_b);
-    assert_ne!(loc_supp_b.layer_id, loc_supp_a.layer_id);
+    assert_eq!(loc_base_b_r1.layer_id, loc_base_a_r1.layer_id);
+    assert_eq!(loc_base_b_r2.layer_id, loc_base_a_r2.layer_id);
+    assert!(
+        loc_supp_b_r1.created && loc_supp_b_r2.created,
+        "fresh supplements, got {:?}",
+        acts_b
+    );
+    assert_ne!(loc_supp_b_r1.layer_id, loc_supp_a_r1.layer_id);
+    assert_ne!(loc_supp_b_r2.layer_id, loc_supp_a_r2.layer_id);
 }
 
 #[test]
@@ -5462,33 +5666,48 @@ fn layer_block_base_reused_across_eph_prefix_change() {
         r#"start="72000", end="72100", instance_type="1") }"#,
     );
 
+    let shape: &[(i64, LayerRole)] = &[
+        (R1, LayerRole::Base),       // first layer block base, root 1
+        (R2, LayerRole::Base),       // first layer block base, root 2
+        (R1, LayerRole::Base),       // second layer block base, root 1
+        (R1, LayerRole::Supplement), // second layer block supplement, root 1
+        (R2, LayerRole::Base),       // second layer block base, root 2
+        (R2, LayerRole::Supplement), // second layer block supplement, root 2
+    ];
     let (_res_a, acts_a) = run_query_traced(VERB_TEST, Q_A);
-    assert_roles(
-        &acts_a,
-        &[LayerRole::Base, LayerRole::Base, LayerRole::Supplement],
+    assert_root_roles(&acts_a, shape);
+    let (block2_base_a_r1, block2_supp_a_r1, block2_base_a_r2, block2_supp_a_r2) =
+        (acts_a[2], acts_a[3], acts_a[4], acts_a[5]);
+    assert!(
+        block2_base_a_r1.created && block2_base_a_r2.created,
+        "cold block bases, got {:?}",
+        acts_a
     );
-    let (block2_base_a, block2_supp_a) = (acts_a[1], acts_a[2]);
-    assert!(block2_base_a.created, "cold block base, got {:?}", acts_a);
 
     let (_res_b, acts_b) = run_query_traced(VERB_TEST, Q_B);
-    assert_roles(
-        &acts_b,
-        &[LayerRole::Base, LayerRole::Base, LayerRole::Supplement],
-    );
-    let (block1_base_b, block2_base_b, block2_supp_b) = (acts_b[0], acts_b[1], acts_b[2]);
+    assert_root_roles(&acts_b, shape);
+    let (block1_base_b_r1, block1_base_b_r2) = (acts_b[0], acts_b[1]);
+    let (block2_base_b_r1, block2_supp_b_r1, block2_base_b_r2, block2_supp_b_r2) =
+        (acts_b[2], acts_b[3], acts_b[4], acts_b[5]);
     assert!(
-        block1_base_b.created,
-        "changed prefix block is fresh, got {:?}",
+        block1_base_b_r1.created && block1_base_b_r2.created,
+        "changed prefix block is fresh on each root, got {:?}",
         acts_b
     );
     assert!(
-        !block2_base_b.created,
-        "identical persistent-ops block must reuse its base across prefixes, got {:?}",
+        !block2_base_b_r1.created && !block2_base_b_r2.created,
+        "identical persistent-ops block must reuse its per-root bases across prefixes, got {:?}",
         acts_b
     );
-    assert_eq!(block2_base_b.layer_id, block2_base_a.layer_id);
-    assert!(block2_supp_b.created, "fresh supplement, got {:?}", acts_b);
-    assert_ne!(block2_supp_b.layer_id, block2_supp_a.layer_id);
+    assert_eq!(block2_base_b_r1.layer_id, block2_base_a_r1.layer_id);
+    assert_eq!(block2_base_b_r2.layer_id, block2_base_a_r2.layer_id);
+    assert!(
+        block2_supp_b_r1.created && block2_supp_b_r2.created,
+        "fresh supplements, got {:?}",
+        acts_b
+    );
+    assert_ne!(block2_supp_b_r1.layer_id, block2_supp_a_r1.layer_id);
+    assert_ne!(block2_supp_b_r2.layer_id, block2_supp_a_r2.layer_id);
 }
 
 #[test]
@@ -5509,33 +5728,61 @@ fn layer_block_eph_ops_split_into_supplement() {
     );
 
     let (_res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
-    assert_roles(
+    assert_root_roles(
         &acts,
-        &[LayerRole::Base, LayerRole::Base, LayerRole::Supplement],
+        &[
+            (R1, LayerRole::Base),       // search base, root 1 (no chain yet)
+            (R2, LayerRole::Base),       // search base, root 2
+            (R1, LayerRole::Base),       // mixed block base, root 1
+            (R1, LayerRole::Supplement), // mixed block supplement, root 1
+            (R2, LayerRole::Base),       // mixed block base, root 2
+            (R2, LayerRole::Supplement), // mixed block supplement, root 2
+        ],
     );
-    let (mixed_base, mixed_supp) = (acts[1], acts[2]);
+    let (mixed_base_r1, mixed_supp_r1, mixed_base_r2, mixed_supp_r2) =
+        (acts[2], acts[3], acts[4], acts[5]);
 
+    // Row partitioning is two-dimensional now: base vs supplement (op
+    // classification) AND per root (row's project).  splitsym2 declares
+    // project_id=1, the @e instance targets object 1 (project 1) — so all
+    // rows land in root 1's halves; root 2's halves stay empty but still
+    // materialise.
     let (_, (base_symbols, base_instances)) =
-        eph_layer_state(TEST_INPUT_SEARCH, mixed_base.layer_id);
+        eph_layer_state(TEST_INPUT_SEARCH, mixed_base_r1.layer_id);
     assert_eq!(
         (base_symbols, base_instances),
         (1, 0),
-        "persistent op (splitsym2) lands in the base",
+        "persistent op (splitsym2, project 1) lands in root 1's base",
+    );
+    let (_, r2_base_counts) = eph_layer_state(TEST_INPUT_SEARCH, mixed_base_r2.layer_id);
+    assert_eq!(
+        r2_base_counts,
+        (0, 0),
+        "root 2's base gets no rows — splitsym2 belongs to project 1",
     );
 
     let (supp_meta, (supp_symbols, supp_instances)) =
-        eph_layer_state(TEST_INPUT_SEARCH, mixed_supp.layer_id);
+        eph_layer_state(TEST_INPUT_SEARCH, mixed_supp_r1.layer_id);
     assert_eq!(supp_meta.kind, "supplement", "got {:?}", supp_meta);
     assert_eq!(
         supp_symbols, 0,
         "the eph-referencing op creates no symbols, got {:?}",
         supp_meta
     );
-    assert!(
-        supp_instances >= 1,
+    assert_eq!(
+        supp_instances, 2,
         "eph-referencing op (@e instance, one row per resolved search \
-         symbol) lands in the supplement, got {} instances",
+         symbol — one per project — all on project 1's object) lands in \
+         root 1's supplement, got {} instances",
         supp_instances
+    );
+
+    let (r2_supp_meta, r2_supp_counts) = eph_layer_state(TEST_INPUT_SEARCH, mixed_supp_r2.layer_id);
+    assert_eq!(r2_supp_meta.kind, "supplement", "got {:?}", r2_supp_meta);
+    assert_eq!(
+        r2_supp_counts,
+        (0, 0),
+        "root 2's supplement is empty — object 1 is not in project 2",
     );
 }
 
@@ -5560,45 +5807,59 @@ fn supplement_collision_guard_extra_disambiguates() {
         r#"start="75000", end="75001") }"#,
     );
 
+    let shape: &[(i64, LayerRole)] = &[
+        (R1, LayerRole::Base),       // search base, root 1 (no chain yet)
+        (R2, LayerRole::Base),       // search base, root 2
+        (R1, LayerRole::Base),       // layer block (empty) base, root 1
+        (R1, LayerRole::Supplement), // layer block supplement, root 1
+        (R2, LayerRole::Base),       // layer block (empty) base, root 2
+        (R2, LayerRole::Supplement), // layer block supplement, root 2
+    ];
     let (_res1, acts1) = run_query_traced(TEST_INPUT_SEARCH, Q_1);
-    assert_roles(
-        &acts1,
-        &[LayerRole::Base, LayerRole::Base, LayerRole::Supplement],
+    assert_root_roles(&acts1, shape);
+    let (final_base_1_r1, final_supp_1_r1, final_base_1_r2, final_supp_1_r2) =
+        (acts1[2], acts1[3], acts1[4], acts1[5]);
+    assert!(
+        final_supp_1_r1.created && final_supp_1_r2.created,
+        "cold supplements, got {:?}",
+        acts1
     );
-    let (final_base_1, final_supp_1) = (acts1[1], acts1[2]);
-    assert!(final_supp_1.created, "cold supplement, got {:?}", acts1);
 
     let (_res2, acts2) = run_query_traced(TEST_INPUT_SEARCH, Q_2);
-    assert_roles(
-        &acts2,
-        &[LayerRole::Base, LayerRole::Base, LayerRole::Supplement],
-    );
-    let (prefix_base_2, final_base_2, final_supp_2) = (acts2[0], acts2[1], acts2[2]);
+    assert_root_roles(&acts2, shape);
+    let (prefix_base_2_r1, prefix_base_2_r2) = (acts2[0], acts2[1]);
+    let (final_base_2_r1, final_supp_2_r1, final_base_2_r2, final_supp_2_r2) =
+        (acts2[2], acts2[3], acts2[4], acts2[5]);
 
-    // Identical prefix and identical (empty) base half: both shared.
+    // Identical prefix and identical (empty) base half: shared per root.
     assert!(
-        !prefix_base_2.created,
-        "identical prefix block must hit, got {:?}",
+        !prefix_base_2_r1.created && !prefix_base_2_r2.created,
+        "identical prefix (search) bases must hit, got {:?}",
         acts2
     );
     assert!(
-        !final_base_2.created,
-        "the empty base half is shared between the two blocks, got {:?}",
+        !final_base_2_r1.created && !final_base_2_r2.created,
+        "the empty base halves are shared between the two blocks, got {:?}",
         acts2
     );
-    assert_eq!(final_base_2.layer_id, final_base_1.layer_id);
+    assert_eq!(final_base_2_r1.layer_id, final_base_1_r1.layer_id);
+    assert_eq!(final_base_2_r2.layer_id, final_base_1_r2.layer_id);
 
-    // The load-bearing assertion: same parent, same base hash, different
-    // eph-referencing ops ⇒ DIFFERENT supplement.  Without the
-    // supplement_extra fold this was created=false with final_supp_1's id.
+    // The load-bearing assertion, per root: same parent, same base hash,
+    // different eph-referencing ops ⇒ DIFFERENT supplement.  Without the
+    // supplement_extra fold this was created=false with Q_1's supplement id.
     assert!(
-        final_supp_2.created,
-        "differing eph ops must produce a fresh supplement, got {:?}",
+        final_supp_2_r1.created && final_supp_2_r2.created,
+        "differing eph ops must produce fresh supplements, got {:?}",
         acts2
     );
     assert_ne!(
-        final_supp_2.layer_id, final_supp_1.layer_id,
-        "supplement key must fold the eph-referencing op content"
+        final_supp_2_r1.layer_id, final_supp_1_r1.layer_id,
+        "supplement key must fold the eph-referencing op content (root 1)"
+    );
+    assert_ne!(
+        final_supp_2_r2.layer_id, final_supp_1_r2.layer_id,
+        "supplement key must fold the eph-referencing op content (root 2)"
     );
 }
 
@@ -5659,29 +5920,47 @@ fn base_delete_cascades_supplement() {
         r#"search("foo", limit="28")"#,
     );
     let (_res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
-    assert_roles(
+    assert_root_roles(
         &acts,
-        &[LayerRole::Base, LayerRole::Base, LayerRole::Supplement],
+        &[
+            (R1, LayerRole::Base),       // prefix layer block base, root 1
+            (R2, LayerRole::Base),       // prefix layer block base, root 2
+            (R1, LayerRole::Base),       // search base, root 1
+            (R1, LayerRole::Supplement), // search supplement, root 1
+            (R2, LayerRole::Base),       // search base, root 2
+            (R2, LayerRole::Supplement), // search supplement, root 2
+        ],
     );
-    let (prefix, base, supp) = (acts[0], acts[1], acts[2]);
+    let (prefix_r1, prefix_r2) = (acts[0], acts[1]);
+    let (base_r1, supp_r1, base_r2, supp_r2) = (acts[2], acts[3], acts[4], acts[5]);
 
     let mut rt = tokio::runtime::Runtime::new().unwrap();
     let local = tokio::task::LocalSet::new();
     local.block_on(&mut rt, async {
         let index = get_shared_index(TEST_INPUT_SEARCH).await;
-        index.delete_eph_layer(base.layer_id).await.unwrap();
+        // Delete root 1's base only: its pair dies, root 2's pair survives.
+        index.delete_eph_layer(base_r1.layer_id).await.unwrap();
 
         assert!(
-            index.eph_layer_meta(base.layer_id).await.is_err(),
-            "base row must be gone"
+            index.eph_layer_meta(base_r1.layer_id).await.is_err(),
+            "root 1's base row must be gone"
         );
         assert!(
-            index.eph_layer_meta(supp.layer_id).await.is_err(),
-            "supplement must cascade with its base (base_id FK)"
+            index.eph_layer_meta(supp_r1.layer_id).await.is_err(),
+            "root 1's supplement must cascade with its base (base_id FK)"
         );
         assert!(
-            index.eph_layer_meta(prefix.layer_id).await.is_ok(),
-            "unrelated prefix layer must survive"
+            index.eph_layer_meta(base_r2.layer_id).await.is_ok(),
+            "root 2's base is an independent cache entry and must survive"
+        );
+        assert!(
+            index.eph_layer_meta(supp_r2.layer_id).await.is_ok(),
+            "root 2's supplement pairs with root 2's base and must survive"
+        );
+        assert!(
+            index.eph_layer_meta(prefix_r1.layer_id).await.is_ok()
+                && index.eph_layer_meta(prefix_r2.layer_id).await.is_ok(),
+            "unrelated prefix layers must survive"
         );
     });
 }
@@ -5690,10 +5969,11 @@ fn base_delete_cascades_supplement() {
 fn delete_eph_layer_removes_reference_dependents() {
     // The doomed-closure GC: deleting a layer also deletes every layer
     // whose rows reference its symbols, transitively — no layer is left
-    // hollow with populated=true.  The search base here is parentless and
-    // is nobody's parent (the chain runs through its supplement), so only
-    // the closure — base_id edge to its supplement, reference/parent edges
-    // to the downstream block's supplement — can clean up the dependents.
+    // hollow with populated=true.  The search base here is parented on its
+    // root and is nobody's parent (the chain runs through its supplement),
+    // so only the closure — base_id edge to its supplement, reference/
+    // parent edges to the downstream block's supplement — can clean up the
+    // dependents.
     use crate::command::LayerRole;
     const QUERY: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
@@ -5703,45 +5983,70 @@ fn delete_eph_layer_removes_reference_dependents() {
         r#"start="82500", end="82600", instance_type="1") }"#,
     );
     let (_res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
-    assert_roles(
+    assert_root_roles(
         &acts,
         &[
-            LayerRole::Base,       // prefix layer block
-            LayerRole::Base,       // search base (parentless)
-            LayerRole::Supplement, // search supplement (parent = prefix base)
-            LayerRole::Base,       // eph-ops block: empty base
-            LayerRole::Supplement, // eph-ops block: rows referencing search base
+            (R1, LayerRole::Base),       // prefix layer block base, root 1
+            (R2, LayerRole::Base),       // prefix layer block base, root 2
+            (R1, LayerRole::Base),       // search base, root 1
+            (R1, LayerRole::Supplement), // search supplement, root 1
+            (R2, LayerRole::Base),       // search base, root 2
+            (R2, LayerRole::Supplement), // search supplement, root 2
+            (R1, LayerRole::Base),       // eph-ops block: empty base, root 1
+            (R1, LayerRole::Supplement), // eph-ops block: @e rows (object 1 ⇒ root 1)
+            (R2, LayerRole::Base),       // eph-ops block: empty base, root 2
+            (R2, LayerRole::Supplement), // eph-ops block: empty supplement, root 2
         ],
     );
-    let (prefix, search_base, search_supp, block_base, block_supp) =
-        (acts[0], acts[1], acts[2], acts[3], acts[4]);
+    let (prefix_r1, prefix_r2) = (acts[0], acts[1]);
+    let (search_base_r1, search_supp_r1, search_base_r2, search_supp_r2) =
+        (acts[2], acts[3], acts[4], acts[5]);
+    let (block_base_r1, block_supp_r1, block_base_r2, block_supp_r2) =
+        (acts[6], acts[7], acts[8], acts[9]);
 
     let mut rt = tokio::runtime::Runtime::new().unwrap();
     let local = tokio::task::LocalSet::new();
     local.block_on(&mut rt, async {
         let index = get_shared_index(TEST_INPUT_SEARCH).await;
-        index.delete_eph_layer(search_base.layer_id).await.unwrap();
+        // Delete root 1's search base: the closure takes exactly root 1's
+        // dependents; root 2's chain is untouched.
+        index
+            .delete_eph_layer(search_base_r1.layer_id)
+            .await
+            .unwrap();
 
         assert!(
-            index.eph_layer_meta(search_base.layer_id).await.is_err(),
+            index.eph_layer_meta(search_base_r1.layer_id).await.is_err(),
             "seed must be gone"
         );
         assert!(
-            index.eph_layer_meta(search_supp.layer_id).await.is_err(),
-            "search supplement dies with its base"
+            index.eph_layer_meta(search_supp_r1.layer_id).await.is_err(),
+            "root 1's search supplement dies with its base"
         );
         assert!(
-            index.eph_layer_meta(block_supp.layer_id).await.is_err(),
+            index.eph_layer_meta(block_supp_r1.layer_id).await.is_err(),
             "layer referencing the deleted base's symbols must be deleted, \
              not left hollow with populated=true"
         );
         assert!(
-            index.eph_layer_meta(prefix.layer_id).await.is_ok(),
-            "prefix layer has no dependency on the search base"
+            index.eph_layer_meta(prefix_r1.layer_id).await.is_ok()
+                && index.eph_layer_meta(prefix_r2.layer_id).await.is_ok(),
+            "prefix layers have no dependency on root 1's search base"
         );
         assert!(
-            index.eph_layer_meta(block_base.layer_id).await.is_ok(),
-            "the eph-ops block's empty base has no dependency either"
+            index.eph_layer_meta(block_base_r1.layer_id).await.is_ok()
+                && index.eph_layer_meta(block_base_r2.layer_id).await.is_ok(),
+            "the eph-ops block's empty bases have no dependency either"
+        );
+        assert!(
+            index.eph_layer_meta(search_base_r2.layer_id).await.is_ok()
+                && index.eph_layer_meta(search_supp_r2.layer_id).await.is_ok(),
+            "root 2's search pair is an independent cache entry and must survive"
+        );
+        assert!(
+            index.eph_layer_meta(block_supp_r2.layer_id).await.is_ok(),
+            "root 2's block supplement holds no rows referencing root 1's \
+             base (object 1 is project 1's) and must survive"
         );
     });
 }
@@ -5763,18 +6068,26 @@ fn ttl_purge_takes_dependent_closure() {
         r#"start="84500", end="84600", instance_type="1") }"#,
     );
     let (_res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
-    assert_roles(
+    assert_root_roles(
         &acts,
         &[
-            LayerRole::Base,
-            LayerRole::Base,
-            LayerRole::Supplement,
-            LayerRole::Base,
-            LayerRole::Supplement,
+            (R1, LayerRole::Base),       // prefix layer block base, root 1
+            (R2, LayerRole::Base),       // prefix layer block base, root 2
+            (R1, LayerRole::Base),       // search base, root 1
+            (R1, LayerRole::Supplement), // search supplement, root 1
+            (R2, LayerRole::Base),       // search base, root 2
+            (R2, LayerRole::Supplement), // search supplement, root 2
+            (R1, LayerRole::Base),       // eph-ops block: empty base, root 1
+            (R1, LayerRole::Supplement), // eph-ops block: @e rows (object 1 ⇒ root 1)
+            (R2, LayerRole::Base),       // eph-ops block: empty base, root 2
+            (R2, LayerRole::Supplement), // eph-ops block: empty supplement, root 2
         ],
     );
-    let (prefix, search_base, search_supp, _block_base, block_supp) =
-        (acts[0], acts[1], acts[2], acts[3], acts[4]);
+    let (prefix_r1, prefix_r2) = (acts[0], acts[1]);
+    let (search_base_r1, search_supp_r1, search_base_r2, search_supp_r2) =
+        (acts[2], acts[3], acts[4], acts[5]);
+    let (_block_base_r1, block_supp_r1, _block_base_r2, block_supp_r2) =
+        (acts[6], acts[7], acts[8], acts[9]);
 
     let mut rt = tokio::runtime::Runtime::new().unwrap();
     let local = tokio::task::LocalSet::new();
@@ -5785,9 +6098,9 @@ fn ttl_purge_takes_dependent_closure() {
             .unwrap();
         diesel_async::RunQueryDsl::execute(
             diesel::sql_query(format!(
-                "UPDATE index.eph_layers SET last_used = now() - interval '2 hours' \
+                "UPDATE index.layers SET last_used = now() - interval '2 hours' \
                  WHERE id = {}",
-                search_base.layer_id
+                search_base_r1.layer_id
             )),
             &mut conn,
         )
@@ -5801,20 +6114,79 @@ fn ttl_purge_takes_dependent_closure() {
             .unwrap();
 
         assert!(
-            index.eph_layer_meta(search_base.layer_id).await.is_err(),
+            index.eph_layer_meta(search_base_r1.layer_id).await.is_err(),
             "expired base must be purged"
         );
         assert!(
-            index.eph_layer_meta(search_supp.layer_id).await.is_err(),
+            index.eph_layer_meta(search_supp_r1.layer_id).await.is_err(),
             "its supplement must go with it"
         );
         assert!(
-            index.eph_layer_meta(block_supp.layer_id).await.is_err(),
+            index.eph_layer_meta(block_supp_r1.layer_id).await.is_err(),
             "referencing layer must go with it (no hollow survivors)"
         );
         assert!(
-            index.eph_layer_meta(prefix.layer_id).await.is_ok(),
-            "fresh, unrelated layer must survive the TTL purge"
+            index.eph_layer_meta(prefix_r1.layer_id).await.is_ok()
+                && index.eph_layer_meta(prefix_r2.layer_id).await.is_ok(),
+            "fresh, unrelated layers must survive the TTL purge"
+        );
+        assert!(
+            index.eph_layer_meta(search_base_r2.layer_id).await.is_ok()
+                && index.eph_layer_meta(search_supp_r2.layer_id).await.is_ok(),
+            "root 2's search pair is fresh and dependency-free — it must \
+             survive the purge of root 1's base"
+        );
+        assert!(
+            index.eph_layer_meta(block_supp_r2.layer_id).await.is_ok(),
+            "root 2's block supplement holds no rows referencing the purged \
+             base and must survive"
+        );
+    });
+}
+
+#[test]
+fn ttl_purge_never_collects_roots() {
+    // Roots' last_used is never refreshed by queries, so without an explicit
+    // exclusion an epoch-old root would enter the TTL seed and its deletion
+    // would cascade a project's entire persistent index away.  Rewind ALL
+    // root layers far past the cutoff and verify the purge leaves them — and
+    // the persistent data reachable through them — untouched.
+    use diesel_async::AsyncConnection;
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let url = get_shared_db_url(TEST_INPUT_A);
+        let mut conn = diesel_async::AsyncPgConnection::establish(url)
+            .await
+            .unwrap();
+        diesel_async::RunQueryDsl::execute(
+            diesel::sql_query(
+                "UPDATE index.layers SET last_used = now() - interval '10 years' \
+                 WHERE kind = 'root'",
+            ),
+            &mut conn,
+        )
+        .await
+        .unwrap();
+
+        let index = get_shared_index(TEST_INPUT_A).await;
+        index
+            .purge_old_eph_layers(std::time::Duration::from_secs(3600))
+            .await
+            .unwrap();
+
+        let roots = index.load_root_layers().await.unwrap();
+        assert!(
+            !roots.is_empty(),
+            "root layers must survive the TTL purge unconditionally"
+        );
+
+        let (res, _acts) = crate::test_util::run_query_traced_on(index, r#""a""#)
+            .await
+            .unwrap();
+        assert!(
+            !res.nodes.as_vec().is_empty(),
+            "persistent data must remain queryable after the purge"
         );
     });
 }
@@ -5839,24 +6211,34 @@ fn search_base_reused_with_filters_across_eph_change() {
         r#"project("search_proj_1") search("foo", limit="30")"#,
     );
 
+    let shape: &[(i64, LayerRole)] = &[
+        (R1, LayerRole::Base),       // layer block base, root 1
+        (R2, LayerRole::Base),       // layer block base, root 2
+        (R1, LayerRole::Base),       // filtered search base, root 1
+        (R1, LayerRole::Supplement), // search supplement, root 1
+        (R2, LayerRole::Base),       // filtered search base, root 2 (empty)
+        (R2, LayerRole::Supplement), // search supplement, root 2
+    ];
     let (_res_a, acts_a) = run_query_traced(TEST_INPUT_SEARCH, Q_A);
-    assert_roles(
-        &acts_a,
-        &[LayerRole::Base, LayerRole::Base, LayerRole::Supplement],
+    assert_root_roles(&acts_a, shape);
+    let (base_a_r1, base_a_r2) = (acts_a[2], acts_a[4]);
+    assert!(
+        base_a_r1.created && base_a_r2.created,
+        "cold filtered bases (root 2's is empty — the filter excludes its \
+         project — but still materialises), got {:?}",
+        acts_a
     );
-    assert!(acts_a[1].created, "cold filtered base, got {:?}", acts_a);
 
     let (_res_b, acts_b) = run_query_traced(TEST_INPUT_SEARCH, Q_B);
-    assert_roles(
-        &acts_b,
-        &[LayerRole::Base, LayerRole::Base, LayerRole::Supplement],
-    );
+    assert_root_roles(&acts_b, shape);
+    let (base_b_r1, base_b_r2) = (acts_b[2], acts_b[4]);
     assert!(
-        !acts_b[1].created,
-        "filtered search base must be chain-independent, got {:?}",
+        !base_b_r1.created && !base_b_r2.created,
+        "filtered search bases must be chain-independent, got {:?}",
         acts_b
     );
-    assert_eq!(acts_b[1].layer_id, acts_a[1].layer_id);
+    assert_eq!(base_b_r1.layer_id, base_a_r1.layer_id);
+    assert_eq!(base_b_r2.layer_id, base_a_r2.layer_id);
 }
 
 #[test]
@@ -5931,6 +6313,130 @@ fn delete_project_purges_eph_cache() {
             "rerun must repopulate and fail loudly (file gone), not serve \
              a hollow cached layer"
         );
+    });
+}
+
+#[test]
+fn per_root_base_reused_under_narrowed_roots() {
+    // The headline property of per-root chains: a root's base is keyed on
+    // that single root's identity (`root_salted_hash`), so narrowing the
+    // visible root set — the future multitenancy/versioning entry point —
+    // reuses the already-cached base instead of repopulating.  Request-level
+    // narrowing doesn't exist yet, so the test constructs the narrowed set
+    // directly, exactly as a narrowing entry point would.
+    use crate::command::LayerRole;
+    use crate::test_util::run_query_traced_with_roots;
+    const QUERY: &str = r#"search("foo", limit="97")"#; // unique limit → own cache rows
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(TEST_INPUT_SEARCH).await;
+        let roots = index.load_root_layers().await.unwrap();
+
+        // Full visibility: one base per root, both freshly created.
+        let (full_res, full_acts) =
+            run_query_traced_with_roots(index.clone(), roots.clone(), QUERY)
+                .await
+                .unwrap();
+        assert_root_roles(&full_acts, &[(R1, LayerRole::Base), (R2, LayerRole::Base)]);
+        assert!(full_acts.iter().all(|a| a.created), "cold run creates both");
+        let r1_base = full_acts[0].layer_id;
+
+        // Narrowed to root 1 only: exactly one activation, a HIT on the
+        // very same base layer — its key never depended on root 2.
+        let narrowed: Vec<_> = roots.iter().filter(|r| r.id == R1).cloned().collect();
+        let (narrow_res, narrow_acts) = run_query_traced_with_roots(index.clone(), narrowed, QUERY)
+            .await
+            .unwrap();
+        assert_root_roles(&narrow_acts, &[(R1, LayerRole::Base)]);
+        assert!(
+            !narrow_acts[0].created,
+            "narrowed run must hit root 1's cached base, got {:?}",
+            narrow_acts
+        );
+        assert_eq!(
+            narrow_acts[0].layer_id, r1_base,
+            "same base layer across visibility sets"
+        );
+
+        // The narrowed result is exactly project 1's share: 8 substring
+        // "foo" matches (the per-project counts pinned by
+        // search_first_call_reports_created_and_populated).
+        assert_eq!(narrow_res.nodes.as_vec().len(), 8);
+        assert_eq!(full_res.nodes.as_vec().len(), 12);
+    });
+}
+
+#[test]
+fn root_deletion_cascades_only_that_projects_chains() {
+    // Root-parented bases: deleting a project's root layer (the tail of
+    // delete_project's ordering, after the project row releases the FK)
+    // cascades that project's cached bases via `parent_id` and their
+    // supplements via `base_id` — while the OTHER root's chains survive
+    // untouched.  Pinned at the SQL level on an isolated fixture because
+    // delete_project's trailing purge_eph_cache would mask the cascade.
+    use crate::test_util::{create_isolated_fixture, run_query_traced_on};
+    use diesel_async::AsyncConnection;
+    let fx = create_isolated_fixture(TEST_INPUT_SEARCH);
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = index::db_diesel::Index::connect(fx.url()).await.unwrap();
+
+        // Two statements → per root: prefix base, then search base +
+        // supplement (chains on both roots).
+        const QUERY: &str = concat!(
+            r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
+            r#"start="90000", end="90100", instance_type="1") }; "#,
+            r#"search("foo", limit="93")"#,
+        );
+        let (_res, acts) = run_query_traced_on(index.clone(), QUERY).await.unwrap();
+        let r1_layers: Vec<i64> = acts
+            .iter()
+            .filter(|a| a.root_id == R1)
+            .map(|a| a.layer_id)
+            .collect();
+        let r2_layers: Vec<i64> = acts
+            .iter()
+            .filter(|a| a.root_id == R2)
+            .map(|a| a.layer_id)
+            .collect();
+        assert_eq!(r1_layers.len(), 3, "prefix base + search base + supplement");
+        assert_eq!(r2_layers.len(), 3);
+
+        // Mimic delete_project's tail for project 1: the project row goes
+        // first (its FK hard-blocks deleting a live project's root), then
+        // the root layer.
+        let mut conn = diesel_async::AsyncPgConnection::establish(fx.url())
+            .await
+            .unwrap();
+        diesel_async::RunQueryDsl::execute(
+            diesel::sql_query("DELETE FROM index.projects WHERE id = 1"),
+            &mut conn,
+        )
+        .await
+        .unwrap();
+        diesel_async::RunQueryDsl::execute(
+            diesel::sql_query(format!("DELETE FROM index.layers WHERE id = {R1}")),
+            &mut conn,
+        )
+        .await
+        .unwrap();
+
+        for id in &r1_layers {
+            assert!(
+                index.eph_layer_meta(*id).await.is_err(),
+                "project 1's cached layer {id} must cascade with its root"
+            );
+        }
+        for id in &r2_layers {
+            assert!(
+                index.eph_layer_meta(*id).await.is_ok(),
+                "project 2's cached layer {id} must survive project 1's deletion"
+            );
+        }
     });
 }
 
@@ -6284,8 +6790,10 @@ fn edges_pick_min_instance_across_branches() {
             .map(|id| Into::<i64>::into(*id))
             .find(|v| *v < 0)
             .expect("layer created an eph instance");
-        let chain: Vec<i64> = acts.iter().map(|a| a.layer_id).collect();
-        let eph = index::db_diesel::EphContext::from_slice(&chain);
+        let mut eph =
+            index::db_diesel::EphContext::rooted(index.load_root_layers().await.unwrap());
+        let round: Vec<(i64, i64)> = acts.iter().map(|a| (a.root_id, a.layer_id)).collect();
+        eph.push_round(&round);
 
         // Candidates: foo's instance (91), foo.bar's persistent instance
         // (92), and the eph instance of foo.bar.  Two persistent refs run

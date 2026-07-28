@@ -98,10 +98,10 @@ fn build_has_children_inner(
         .filter(symbol_instances::dsl::id.ne(contained_instance.field(symbol_instances::dsl::id)))
         // Ephemeral visibility — source and aliased (contained) tables,
         // rendered by the partition token.
-        .filter(vis.pred("symbols.eph_layer"))
-        .filter(vis.pred("symbol_instances.eph_layer"))
-        .filter(vis.pred("contained_symbols.eph_layer"))
-        .filter(vis.pred("contained_instances.eph_layer"))
+        .filter(vis.pred("symbols.layer"))
+        .filter(vis.pred("symbol_instances.layer"))
+        .filter(vis.pred("contained_symbols.layer"))
+        .filter(vis.pred("contained_instances.layer"))
         .select((
             Symbol::as_select(),
             SymbolInstance::as_select(),
@@ -154,7 +154,7 @@ pub(super) fn build_has_children_cte_body(
     symbol_instances::table
         .filter(symbol_instances::id.eq_any(source_ids))
         // Subquery position: candidate-set membership, not a selected row.
-        .filter(vis.subquery_pred("symbol_instances.eph_layer"))
+        .filter(vis.subquery_pred("symbol_instances.layer"))
         .select(symbol_instances::id)
         .into_boxed::<Pg>()
 }
@@ -200,11 +200,11 @@ where
 // CteFindEdgesBetween — typed wrapper around `find_edges_between`'s CTE form
 // ============================================================================
 
-use diesel::sql_types::{BigInt, Int4range, Integer, Nullable};
+use diesel::sql_types::{BigInt, Int4range, Integer};
 
 /// Build the inner CTE body for `find_edges_between`: select the full
 /// candidate `symbol_instances` row set (id + symbol + object_id +
-/// offset_range + eph_layer) for the given source IDs, with the
+/// offset_range + layer) for the given source IDs, with the
 /// ephemeral-visibility predicate applied.  All binds are typed
 /// Diesel.
 pub(super) fn build_find_edges_cte_body(
@@ -212,7 +212,7 @@ pub(super) fn build_find_edges_cte_body(
     vis: &EphVisibility,
 ) -> diesel::query_builder::BoxedSelectStatement<
     'static,
-    (BigInt, BigInt, Integer, Int4range, Nullable<BigInt>),
+    (BigInt, BigInt, Integer, Int4range, BigInt),
     diesel::query_builder::FromClause<crate::schema_diesel::symbol_instances::table>,
     Pg,
 > {
@@ -223,13 +223,13 @@ pub(super) fn build_find_edges_cte_body(
         // In the eph branch it must contain persistent AND eph rows (a
         // mixed edge pairs them); the outer guard makes the branches
         // disjoint at the edge level, not here.
-        .filter(vis.subquery_pred("symbol_instances.eph_layer"))
+        .filter(vis.subquery_pred("symbol_instances.layer"))
         .select((
             symbol_instances::id,
             symbol_instances::symbol,
             symbol_instances::object_id,
             symbol_instances::offset_range,
-            symbol_instances::eph_layer,
+            symbol_instances::layer,
         ))
         .into_boxed::<Pg>()
 }
@@ -237,15 +237,15 @@ pub(super) fn build_find_edges_cte_body(
 /// Result-row `SqlType` for `CteFindEdgesBetween`'s outer SELECT.
 /// Matches the column order in `ImplicitEdge`.
 pub(super) type FindEdgesRowSqlType = (
-    BigInt,           // ref_id
-    BigInt,           // to_symbol
-    Integer,          // from_object
-    Int4range,        // from_offset_range
-    BigInt,           // to_instance_id
-    BigInt,           // from_instance_id
-    Nullable<BigInt>, // sr_eph_layer
-    Nullable<BigInt>, // from_eph_layer
-    Nullable<BigInt>, // to_eph_layer
+    BigInt,    // ref_id
+    BigInt,    // to_symbol
+    Integer,   // from_object
+    Int4range, // from_offset_range
+    BigInt,    // to_instance_id
+    BigInt,    // from_instance_id
+    BigInt,    // sr_layer
+    BigInt,    // from_layer
+    BigInt,    // to_layer
 );
 
 /// Typed wrapper around `find_edges_between`'s CTE-form query.
@@ -264,7 +264,7 @@ pub(super) type FindEdgesRowSqlType = (
 pub(super) struct CteFindEdgesBetween<CteBody> {
     pub cte_body: CteBody,
     /// Branch snapshot from the partition token (see `EphVisibility`):
-    /// controls the outer `sr.eph_layer` visibility and, for the eph
+    /// controls the outer `sr.layer` visibility and, for the eph
     /// branch, the disjointness guard over (sr, from_inst, to_inst).
     pub vis: super::mixins::VisibilitySpec,
 }
@@ -292,9 +292,9 @@ where
                   sr.id AS ref_id, sr.to_symbol, sr.from_object, sr.from_offset_range, \
                   to_inst.id AS to_instance_id, \
                   from_inst.id AS from_instance_id, \
-                  sr.eph_layer AS sr_eph_layer, \
-                  from_inst.eph_layer AS from_eph_layer, \
-                  to_inst.eph_layer AS to_eph_layer \
+                  sr.layer AS sr_layer, \
+                  from_inst.layer AS from_layer, \
+                  to_inst.layer AS to_layer \
               FROM candidates from_inst \
               JOIN index.symbol_refs sr \
                   ON sr.from_object = from_inst.object_id \
@@ -305,24 +305,28 @@ where
                 AND ",
         );
         match &self.vis {
-            VisibilitySpec::PersistentOnly => {
-                out.push_sql("sr.eph_layer IS NULL");
+            VisibilitySpec::RootOnly(roots) => {
+                out.push_sql("sr.layer = ANY(");
+                out.push_bind_param::<Array<BigInt>, _>(roots)?;
+                out.push_sql(")");
             }
-            VisibilitySpec::EphTouching(chain) => {
-                out.push_sql("(sr.eph_layer IS NULL OR sr.eph_layer = ANY(");
-                out.push_bind_param::<Array<BigInt>, _>(chain)?;
-                // Disjointness guard: an all-persistent edge already
-                // belongs to the persistent branch.
+            VisibilitySpec::EphTouching(visible) => {
+                out.push_sql("sr.layer = ANY(");
+                out.push_bind_param::<Array<BigInt>, _>(visible)?;
+                // Disjointness guard: an all-root edge already belongs to
+                // the persistent branch.  Sign form — within the visible
+                // set, roots are exactly the positive ids (see
+                // `EphVisibility::guard` for the equivalence argument).
                 out.push_sql(
-                    ")) AND NOT (sr.eph_layer IS NULL \
-                         AND from_inst.eph_layer IS NULL \
-                         AND to_inst.eph_layer IS NULL)",
+                    ") AND NOT (sr.layer > 0 \
+                         AND from_inst.layer > 0 \
+                         AND to_inst.layer > 0)",
                 );
             }
-            VisibilitySpec::Combined(chain) => {
-                out.push_sql("(sr.eph_layer IS NULL OR sr.eph_layer = ANY(");
-                out.push_bind_param::<Array<BigInt>, _>(chain)?;
-                out.push_sql("))");
+            VisibilitySpec::Combined(visible) => {
+                out.push_sql("sr.layer = ANY(");
+                out.push_bind_param::<Array<BigInt>, _>(visible)?;
+                out.push_sql(")");
             }
         }
         out.push_sql(" ORDER BY from_inst.id, sr.id, to_inst.id");

@@ -3,10 +3,23 @@ SET search_path TO index, public;
 -- With modules as symbols, we test project filtering by having multiple projects.
 -- Module filtering now works by symbol name matching (modules are symbols with type=MODULE).
 
-INSERT INTO projects (id, project_name, root_path)
+-- Root layers for the fixture projects.  Persistent inserts inherit
+-- layer via the column DEFAULT, switched per project section.
+INSERT INTO layers (id, parent_id, hash, kind, populated)
+OVERRIDING SYSTEM VALUE
 VALUES
-    (1, 'test_project', '/test_project'),
-    (2, 'other_project', '/other_project');
+    (1000001, NULL, decode(md5('fixture-root-1'), 'hex'), 'root', TRUE),
+    (1000002, NULL, decode(md5('fixture-root-2'), 'hex'), 'root', TRUE);
+
+INSERT INTO projects (id, project_name, root_path, root_layer_id)
+VALUES
+    (1, 'test_project', '/test_project', 1000001),
+    (2, 'other_project', '/other_project', 1000002);
+
+-- Project 1 section: symbols/instances/refs below inherit project 1's root layer.
+ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000001;
 
 -- directories table has been removed - directories are now symbols
 
@@ -22,30 +35,26 @@ INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
 VALUES
     (500, '/main.c', 1, 2, NULL),
     (501, '/bar.c', 1, 2, NULL),
-    (502, '/other_main.c', 1, 2, NULL),
-    (503, '/project_only_main.c', 2, 2, NULL);
+    (502, '/other_main.c', 1, 2, NULL);
 
 -- Directory symbols (type=4)
 INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
 VALUES
-    (510, '/', 1, 4, NULL),
-    (511, '/', 2, 4, NULL);
+    (510, '/', 1, 4, NULL);
 
 -- File symbol instances
 INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
 VALUES
     (5001, 500, 1, int4range(0, 10000), 6),
     (5011, 501, 2, int4range(0, 10000), 6),
-    (5021, 502, 3, int4range(0, 10000), 6),
-    (5031, 503, 4, int4range(0, 10000), 6);
+    (5021, 502, 3, int4range(0, 10000), 6);
 
 -- Directory symbol instances
 INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
 VALUES
     (5100, 510, 1, int4range(0, 10000), 5),
     (5101, 510, 2, int4range(0, 10000), 5),
-    (5102, 510, 3, int4range(0, 10000), 5),
-    (5110, 511, 4, int4range(0, 10000), 5);
+    (5102, 510, 3, int4range(0, 10000), 5);
 
 -- Symbols are now project-scoped. For the "module filter" tests, we use symbol names
 -- that include a module-like prefix (e.g., "test.a", "other.a") to simulate modules.
@@ -61,8 +70,7 @@ VALUES
     (42,  'test.main', 1, 1, 1),
     (101, 'other.a',    1, 1, 1),
     (102, 'other.b',    1, 1, 1),
-    (142, 'other.main', 1, 1, 1),
-    (301, 'project_only.a',    2, 1, 1);
+    (142, 'other.main', 1, 1, 1);
 
 INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
 VALUES
@@ -77,8 +85,7 @@ VALUES
     (942, 42,  1, int4range(9420, 9429), 1),
     (201, 101, 3, int4range(2010, 2019), 1),
     (202, 102, 3, int4range(2020, 2029), 1),
-    (242, 142, 3, int4range(2420, 2429), 1),
-    (301, 301, 4, int4range(3010, 3019), 1);
+    (242, 142, 3, int4range(2420, 2429), 1);
 
 INSERT INTO
     symbol_refs(to_symbol, from_object, from_offset_range)
@@ -94,6 +101,45 @@ VALUES
     (2,   1, int4range(9422, 9423)),
     (102, 3, int4range(2011, 2012)),
     (101, 3, int4range(2421, 2422));
+
+-- Project 2 section: switch the layer DEFAULT to project 2's root layer.
+-- All rows below belong to project 2 (object 4).
+ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000002;
+ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000002;
+ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000002;
+
+-- File symbol (type=2)
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
+VALUES
+    (503, '/project_only_main.c', 2, 2, NULL);
+
+-- Directory symbol (type=4)
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
+VALUES
+    (511, '/', 2, 4, NULL);
+
+-- File symbol instance
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES
+    (5031, 503, 4, int4range(0, 10000), 6);
+
+-- Directory symbol instance
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES
+    (5110, 511, 4, int4range(0, 10000), 5);
+
+-- Function symbol
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
+VALUES
+    (301, 'project_only.a',    2, 1, 1);
+
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES
+    (301, 301, 4, int4range(3010, 3019), 1);
+
+ALTER TABLE symbols          ALTER COLUMN layer DROP DEFAULT;
+ALTER TABLE symbol_instances ALTER COLUMN layer DROP DEFAULT;
+ALTER TABLE symbol_refs      ALTER COLUMN layer DROP DEFAULT;
 
 -- "test" symbols has the same layout as test_input_b.
 -- "other" symbols mirrors a subset of the data to exercise module-like filtering.

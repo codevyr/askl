@@ -1,8 +1,21 @@
 SET search_path TO index, public;
 
-INSERT INTO projects (id, project_name, root_path)
+-- Root layers for the fixture projects.  Persistent inserts inherit
+-- layer via the column DEFAULT, switched per project section.
+INSERT INTO layers (id, parent_id, hash, kind, populated)
+OVERRIDING SYSTEM VALUE
 VALUES
-    (1, 'test_project', '/test_project');
+    (1000001, NULL, decode(md5('fixture-root-1'), 'hex'), 'root', TRUE),
+    (1000002, NULL, decode(md5('fixture-root-2'), 'hex'), 'root', TRUE);
+
+INSERT INTO projects (id, project_name, root_path, root_layer_id)
+VALUES
+    (1, 'test_project', '/test_project', 1000001);
+
+-- Project 1 section: symbols/instances/refs below inherit project 1's root layer.
+ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000001;
 
 -- directories table has been removed - directories are now symbols
 
@@ -134,8 +147,13 @@ VALUES
 -- Both match the suffix "main.c" so loc("main.c", ...) should find both.
 -- ============================================================================
 
-INSERT INTO projects (id, project_name, root_path)
-VALUES (2, 'test_project_2', '/test_project_2');
+-- Project 2 section: switch the layer DEFAULT to project 2's root layer.
+ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000002;
+ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000002;
+ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000002;
+
+INSERT INTO projects (id, project_name, root_path, root_layer_id)
+VALUES (2, 'test_project_2', '/test_project_2', 1000002);
 
 INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, content_hash)
 VALUES (3, 2, 'main.c', '/src/main.c', 'cc', '');
@@ -154,6 +172,12 @@ VALUES
     (1, E'int main() { return 0; }\nint foo() { return 1; }\n'),
     (3, E'void setup() {}\nvoid loop() {}\n');
 
+-- Back to project 1: the wrap_loc fixture below attaches to object 1
+-- (project 1), so switch the layer DEFAULT back.
+ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000001;
+
 -- ============================================================================
 -- wrap_loc test fixture
 -- A function whose body offset range strictly contains line 1 of object 1
@@ -168,3 +192,7 @@ VALUES (9, 'wrap_loc_target', 1, 1, 1);
 
 INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
 VALUES (99, 9, 1, int4range(0, 50), 1);
+
+ALTER TABLE symbols          ALTER COLUMN layer DROP DEFAULT;
+ALTER TABLE symbol_instances ALTER COLUMN layer DROP DEFAULT;
+ALTER TABLE symbol_refs      ALTER COLUMN layer DROP DEFAULT;

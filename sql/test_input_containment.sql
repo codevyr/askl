@@ -1,7 +1,17 @@
 SET search_path TO index, public;
 
-INSERT INTO projects (id, project_name, root_path)
-VALUES (1, 'test_project', '/test_project');
+-- Root layer for the fixture project.  Persistent inserts below inherit it
+-- via the layer column DEFAULT.
+INSERT INTO layers (id, parent_id, hash, kind, populated)
+OVERRIDING SYSTEM VALUE
+VALUES (1000001, NULL, decode(md5('fixture-root-1'), 'hex'), 'root', TRUE);
+
+INSERT INTO projects (id, project_name, root_path, root_layer_id)
+VALUES (1, 'test_project', '/test_project', 1000001);
+
+ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000001;
 
 -- Object 1: /main.go file content
 INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, content_hash)
@@ -67,3 +77,7 @@ INSERT INTO symbol_refs(to_symbol, from_object, from_offset_range) VALUES
 --   "/main.go" (file, level 2) > foo, bar, baz (functions, level 1)
 --
 -- Directory→directory hierarchy uses symbol_refs (none in this test data, only one dir).
+
+ALTER TABLE symbols          ALTER COLUMN layer DROP DEFAULT;
+ALTER TABLE symbol_instances ALTER COLUMN layer DROP DEFAULT;
+ALTER TABLE symbol_refs      ALTER COLUMN layer DROP DEFAULT;

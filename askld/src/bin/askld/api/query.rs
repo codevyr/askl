@@ -37,7 +37,16 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
     };
     debug!("Global scope: {:#?}", ast);
 
-    let mut ctx = ExecutionContext::new();
+    // Resolve the visible root layers (all projects today; a narrower,
+    // per-tenant set later).  RAM-cached via the SQL result cache.
+    let roots = match data.cfg.index.load_root_layers().await {
+        Ok(roots) => roots,
+        Err(err) => {
+            warn!("Failed to resolve root layers: {}", err);
+            return HttpResponse::InternalServerError().body("Failed to resolve root layers");
+        }
+    };
+    let mut ctx = ExecutionContext::new(roots);
 
     let res = {
         let _query_execute = tracing::info_span!("query_execute").entered();

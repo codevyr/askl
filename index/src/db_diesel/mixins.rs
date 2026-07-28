@@ -67,14 +67,7 @@ type SelectionTuple = (
 pub type CurrentQuery<'a> =
     BoxedSelectStatement<'a, SelectionTuple, FromClause<SymbolInstanceProjectObjectJoin>, Pg>;
 
-type SymbolInstanceColumnsSqlType = (
-    BigInt,
-    BigInt,
-    Integer,
-    Int4range,
-    Integer,
-    Nullable<BigInt>,
-);
+type SymbolInstanceColumnsSqlType = (BigInt, BigInt, Integer, Int4range, Integer, BigInt);
 
 type SymbolColumnsSqlType = (
     BigInt,
@@ -84,8 +77,8 @@ type SymbolColumnsSqlType = (
     Integer,
     Nullable<Integer>,
     Text,
-    Nullable<BigInt>,
-); // (id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name, eph_layer)
+    BigInt,
+); // (id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name, layer)
 
 type ParentSelectionTuple = (
     AsSelect<SymbolRef, Pg>,
@@ -361,7 +354,7 @@ enum EphSqlPart {
 ///                       WHERE op.id = ANY(")
 ///     .bind(self.parent_ids.clone())
 ///     .sql(") AND ")
-///     .eph_visibility("op.eph_layer", vis)
+///     .eph_visibility("op.layer", vis)
 ///     .sql(")")
 ///     .build()
 /// ```
@@ -406,25 +399,19 @@ impl<ST> EphSqlBuilder<ST> {
     /// position: the column is deliberately NOT recorded for the
     /// eph-branch disjointness guard — subquery columns affect row
     /// *membership*, not which selected rows are eph-derived.
+    ///
+    /// One uniform shape for every branch: `column = ANY($visible)`.  Every
+    /// row belongs to a layer, so visibility is always membership in an
+    /// explicit set — roots only, or roots ∪ chain.
     pub(crate) fn eph_visibility(mut self, column: &str, vis: &EphVisibility) -> Self {
-        match &vis.branch {
-            VisibilitySpec::PersistentOnly => {
-                let sql = format!("{} IS NULL", column);
-                match self.parts.last_mut() {
-                    Some(EphSqlPart::Sql(buf)) => buf.push_str(&sql),
-                    _ => self.parts.push(EphSqlPart::Sql(sql)),
-                }
-            }
-            VisibilitySpec::EphTouching(chain) | VisibilitySpec::Combined(chain) => {
-                let sql = format!("({} IS NULL OR {} = ANY(", column, column);
-                match self.parts.last_mut() {
-                    Some(EphSqlPart::Sql(buf)) => buf.push_str(&sql),
-                    _ => self.parts.push(EphSqlPart::Sql(sql)),
-                }
-                self.parts.push(EphSqlPart::BindI64Array(chain.clone()));
-                self.parts.push(EphSqlPart::Sql("))".to_string()));
-            }
+        let visible = vis.branch.visible();
+        let sql = format!("{} = ANY(", column);
+        match self.parts.last_mut() {
+            Some(EphSqlPart::Sql(buf)) => buf.push_str(&sql),
+            _ => self.parts.push(EphSqlPart::Sql(sql)),
         }
+        self.parts.push(EphSqlPart::BindI64Array(visible.to_vec()));
+        self.parts.push(EphSqlPart::Sql(")".to_string()));
         self
     }
 
@@ -464,16 +451,18 @@ pub struct EphVisibility {
 }
 
 impl EphVisibility {
-    pub(crate) fn persistent_only() -> Self {
-        Self::new(VisibilitySpec::PersistentOnly)
+    /// Root-only visibility: the persistent branch — rows of the visible
+    /// projects' root layers, no ephemeral chain.
+    pub(crate) fn root_only(eph: &EphContext) -> Self {
+        Self::new(VisibilitySpec::RootOnly(eph.root_ids()))
     }
 
     pub(crate) fn eph_touching(eph: &EphContext) -> Self {
-        Self::new(VisibilitySpec::EphTouching(eph.as_slice().to_vec()))
+        Self::new(VisibilitySpec::EphTouching(eph.visible_ids()))
     }
 
     pub(crate) fn combined(eph: &EphContext) -> Self {
-        Self::new(VisibilitySpec::Combined(eph.as_slice().to_vec()))
+        Self::new(VisibilitySpec::Combined(eph.visible_ids()))
     }
 
     fn new(branch: VisibilitySpec) -> Self {
@@ -485,8 +474,8 @@ impl EphVisibility {
     }
 
     /// Visibility predicate for a SELECTED-ROW eph column (fully qualified
-    /// SQL name, e.g. `"index"."symbols"."eph_layer"` or an alias like
-    /// `"parent_decls"."eph_layer"`).  Records the column as a guard member.
+    /// SQL name, e.g. `"index"."symbols"."layer"` or an alias like
+    /// `"parent_decls"."layer"`).  Records the column as a guard member.
     /// The returned fragment applies to any Diesel query source (blanket
     /// `AppearsOnTable`), so DSL and raw-SQL builders use the same call.
     pub(crate) fn pred(&self, column: &str) -> EphSqlFragment<Bool> {
@@ -506,11 +495,19 @@ impl EphVisibility {
             .build()
     }
 
-    /// Eph-branch disjointness guard: `NOT (c1 IS NULL AND c2 IS NULL ...)`
-    /// over the columns recorded by [`Self::pred`] — a row every one of
-    /// whose eph columns is NULL already belongs to the persistent branch.
-    /// Returns a no-op `TRUE` fragment for the other branches so builders
-    /// can apply it unconditionally.
+    /// Eph-branch disjointness guard: `NOT (c1 > 0 AND c2 > 0 ...)` over the
+    /// columns recorded by [`Self::pred`] — a row every one of whose eph
+    /// columns is positive already belongs to the persistent branch.
+    ///
+    /// The sign form is equivalent to root-set membership for guarded
+    /// columns: each is independently constrained to the visible set by its
+    /// own `pred()` conjunct, and within the visible set the positive ids
+    /// are exactly the roots (root ids are structurally positive, ephemeral
+    /// ids structurally negative — sequence direction plus the data tables'
+    /// `(id > 0) = (layer > 0)` CHECK).  Bind-free on purpose: the guard
+    /// SQL is independent of the root set, so cache keys don't grow with
+    /// project count.  Returns a no-op `TRUE` fragment for the other
+    /// branches so builders can apply it unconditionally.
     pub(crate) fn guard(&self) -> EphSqlFragment<Bool> {
         self.guard_taken.set(true);
         match &self.branch {
@@ -519,8 +516,7 @@ impl EphVisibility {
                 if applied.is_empty() {
                     return EphSqlFragment::<Bool>::builder().sql("TRUE").build();
                 }
-                let clauses: Vec<String> =
-                    applied.iter().map(|c| format!("{} IS NULL", c)).collect();
+                let clauses: Vec<String> = applied.iter().map(|c| format!("{} > 0", c)).collect();
                 EphSqlFragment::<Bool>::builder()
                     .sql(format!("NOT ({})", clauses.join(" AND ")))
                     .build()
@@ -549,9 +545,25 @@ impl EphVisibility {
 /// Only obtainable from a token, so it inherits the capability property.
 #[derive(Debug, Clone)]
 pub enum VisibilitySpec {
-    PersistentOnly,
+    /// Persistent branch: the visible root layers only.
+    RootOnly(Vec<i64>),
+    /// Eph branch: roots ∪ chain visible.  The disjointness guard needs no
+    /// separate root set — within the visible set, roots are exactly the
+    /// positive ids (see [`EphVisibility::guard`]).
     EphTouching(Vec<i64>),
+    /// Legacy-visibility mode: roots ∪ chain, no guard.
     Combined(Vec<i64>),
+}
+
+impl VisibilitySpec {
+    /// The layer-id set a visibility predicate binds for this branch.
+    pub(crate) fn visible(&self) -> &[i64] {
+        match self {
+            VisibilitySpec::RootOnly(roots) => roots,
+            VisibilitySpec::EphTouching(visible) => visible,
+            VisibilitySpec::Combined(visible) => visible,
+        }
+    }
 }
 
 impl<ST: 'static + Send + diesel::sql_types::SingleValue> Expression for EphSqlFragment<ST> {
@@ -890,7 +902,7 @@ impl CompositeFilter {
 
     /// Canonical hash of the filter tree.  Verbs that build an ephemeral layer
     /// whose contents depend on the surrounding command's filters (currently
-    /// `search()`) mix this into their eph_layer cache key so that different
+    /// `search()`) mix this into their layer cache key so that different
     /// filter compositions produce different layers.
     ///
     /// Recursion encodes the tree shape: a one-byte discriminator per variant,
@@ -1172,9 +1184,9 @@ impl FilterLeaf for DirectOnlyMixin {
                           AND symbol_types.level >= mid_type.level \
                           AND ",
                 )
-                .eph_visibility("mid.eph_layer", vis)
+                .eph_visibility("mid.layer", vis)
                 .sql(" AND ")
-                .eph_visibility("mid_sym.eph_layer", vis)
+                .eph_visibility("mid_sym.layer", vis)
                 .sql(")")
                 .build(),
         ))
@@ -1195,9 +1207,9 @@ impl FilterLeaf for DirectOnlyMixin {
                           AND container.id != parent_decls.id \
                           AND cont_type.level <= parent_type.level \
                           AND ")
-                .eph_visibility("container.eph_layer", vis)
+                .eph_visibility("container.layer", vis)
                 .sql(" AND ")
-                .eph_visibility("cont_sym.eph_layer", vis)
+                .eph_visibility("cont_sym.layer", vis)
                 .sql(")")
                 .build()
         ))
@@ -1254,9 +1266,9 @@ impl FilterLeaf for InnermostOnlyMixin {
                           AND mid.id != symbol_instances.id \
                           AND ",
                 )
-                .eph_visibility("mid.eph_layer", vis)
+                .eph_visibility("mid.layer", vis)
                 .sql(" AND ")
-                .eph_visibility("mid_sym.eph_layer", vis)
+                .eph_visibility("mid_sym.layer", vis)
                 .sql(")")
                 .build(),
         ))
@@ -1307,7 +1319,7 @@ impl FilterLeaf for OuterParentFilterMixin {
                           AND op.offset_range != parent_decls.offset_range \
                           AND ",
                 )
-                .eph_visibility("op.eph_layer", vis)
+                .eph_visibility("op.layer", vis)
                 .sql(")")
                 .build(),
         ))

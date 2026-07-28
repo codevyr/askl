@@ -514,7 +514,7 @@ impl Selector for LayerVerb {
 
     async fn layer_spec(
         &self,
-        _cfg: &ControlFlowGraph,
+        cfg: &ControlFlowGraph,
         eph: &EphContext,
         _composite_filter: &index::db_diesel::CompositeFilter,
         resolved: &LabelResolutions,
@@ -559,7 +559,7 @@ impl Selector for LayerVerb {
                 }
             }
 
-            if !supp_ops.is_empty() && eph.last().is_none() {
+            if !supp_ops.is_empty() && !eph.has_chain() {
                 // Only reachable via a literal negative id: labels cannot
                 // resolve to eph rows without chain layers to supply them.
                 // Without a chain the executor creates no supplement, so
@@ -599,19 +599,75 @@ impl Selector for LayerVerb {
             (base_hash, supplement_extra, base_batch, supp_batch)
         }; // lock released here
 
-        let base_populate: crate::verb::LayerPopulate = Box::new(move |txn| {
+        // Validate op references against the visible root set BEFORE any
+        // layer is created.  The scoped inserts partition rows per root in
+        // SQL and silently drop rows matching no visible project — without
+        // this check a typo'd project_id/object_id would commit hollow,
+        // input-keyed (i.e. sticky) cache layers with no diagnostic, where
+        // the pre-scoping inserts raised a loud FK error.
+        let visible_projects: std::collections::HashSet<i32> =
+            eph.roots().iter().map(|r| r.project_id).collect();
+        for row in base_batch.symbols.iter().chain(supp_batch.symbols.iter()) {
+            if !visible_projects.contains(&row.project_id) {
+                bail!(
+                    "ephemeral_symbol: project_id {} does not match any visible project",
+                    row.project_id
+                );
+            }
+        }
+        let mut object_ids: Vec<i32> = base_batch
+            .instances
+            .iter()
+            .chain(supp_batch.instances.iter())
+            .map(|r| r.object_id)
+            .chain(
+                base_batch
+                    .refs
+                    .iter()
+                    .chain(supp_batch.refs.iter())
+                    .map(|r| r.from_object),
+            )
+            .collect();
+        object_ids.sort_unstable();
+        object_ids.dedup();
+        if !object_ids.is_empty() {
+            let known = cfg.index.load_object_projects(&object_ids).await?;
+            for id in &object_ids {
+                match known.get(id) {
+                    None => bail!("layer block references unknown object_id {}", id),
+                    Some(p) if !visible_projects.contains(p) => bail!(
+                        "layer block references object_id {} in project {}, \
+                         which is not a visible project",
+                        id,
+                        p
+                    ),
+                    Some(_) => {}
+                }
+            }
+        }
+
+        // Populates run once per root (`Fn`): the batches — which may mix
+        // rows of several projects — are shared via `Arc`, and the scoped
+        // insert's SQL partitions each root's share (symbols by their
+        // explicit project_id, instances/refs by their object's project).
+        let base_batch = std::sync::Arc::new(base_batch);
+        let supp_batch = std::sync::Arc::new(supp_batch);
+        let base_populate: crate::verb::LayerPopulate = Box::new(move |txn, root| {
+            let batch = std::sync::Arc::clone(&base_batch);
             Box::pin(async move {
-                txn.insert_batch(&base_batch).await?;
+                txn.insert_batch(&batch, root.project_id).await?;
                 // `layer { … }` blocks never truncate; truncated = false.
                 Ok(false)
             })
         });
-        let supplement_populate: crate::verb::SupplementPopulate = Box::new(move |txn, _base| {
-            Box::pin(async move {
-                txn.insert_batch(&supp_batch).await?;
-                Ok(false)
-            })
-        });
+        let supplement_populate: crate::verb::SupplementPopulate =
+            Box::new(move |txn, root, _base| {
+                let batch = std::sync::Arc::clone(&supp_batch);
+                Box::pin(async move {
+                    txn.insert_batch(&batch, root.project_id).await?;
+                    Ok(false)
+                })
+            });
 
         Ok(Some(crate::verb::LayerSpec {
             base_hash,

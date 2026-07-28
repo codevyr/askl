@@ -335,7 +335,7 @@ async fn tree_browser_compact_mode_no_compact_path_when_not_compactable() {
 #[tokio::test]
 async fn list_projects_excludes_canary() {
     // The __canary__ project (id -999999) is a leak-detection fixture created
-    // by the eph_layers migration; it must never appear in project listings.
+    // by the layers migration; it must never appear in project listings.
     let store = shared_test_store().await;
     let projects = store.list_projects().await.unwrap();
 
