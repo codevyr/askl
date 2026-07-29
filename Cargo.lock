@@ -302,6 +302,7 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "rand 0.8.7",
  "reqwest",
  "serde",
  "serde_json",

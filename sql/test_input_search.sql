@@ -20,9 +20,22 @@
 
 SET search_path TO index, public;
 
-INSERT INTO projects (id, project_name, root_path) VALUES
-    (1, 'search_proj_1', '/p1'),
-    (2, 'search_proj_2', '/p2');
+-- Root layers for the fixture projects.  Persistent inserts inherit
+-- layer via the column DEFAULT, switched per project section.
+INSERT INTO layers (id, parent_id, hash, kind, populated)
+OVERRIDING SYSTEM VALUE
+VALUES
+    (1000001, NULL, decode(md5('fixture-root-1'), 'hex'), 'root', TRUE),
+    (1000002, NULL, decode(md5('fixture-root-2'), 'hex'), 'root', TRUE);
+
+INSERT INTO projects (id, project_name, root_path, root_layer_id) VALUES
+    (1, 'search_proj_1', '/p1', 1000001),
+    (2, 'search_proj_2', '/p2', 1000002);
+
+-- Project 1 section: symbols/instances below inherit project 1's root layer.
+ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000001;
 
 INSERT INTO content_store (content_hash, content) VALUES
     ('cs_basic',      E'hello foo world\n'),
@@ -55,11 +68,24 @@ INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, con
 INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope) VALUES
     (10, 'fn_basic',    1, 1, 1),
     (11, 'fn_multi',    1, 1, 1),
-    (12, 'fn_boundary', 1, 1, 1),
-    (13, 'fn_case',     2, 1, 1);
+    (12, 'fn_boundary', 1, 1, 1);
 
 INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
     (110, 10, 1, int4range(0, 16),  1),
     (111, 11, 2, int4range(0, 12),  1),
-    (112, 12, 3, int4range(0, 27),  1),
+    (112, 12, 3, int4range(0, 27),  1);
+
+-- Project 2 section: switch the layer DEFAULT to project 2's root layer.
+ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000002;
+ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000002;
+ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000002;
+
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope) VALUES
+    (13, 'fn_case',     2, 1, 1);
+
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
     (113, 13, 4, int4range(0, 12),  1);
+
+ALTER TABLE symbols          ALTER COLUMN layer DROP DEFAULT;
+ALTER TABLE symbol_instances ALTER COLUMN layer DROP DEFAULT;
+ALTER TABLE symbol_refs      ALTER COLUMN layer DROP DEFAULT;

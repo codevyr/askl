@@ -50,27 +50,43 @@ impl IndexStore {
 
         // Non-positive ids are internal fixtures (the __canary__ project at
         // -999999); they must never be exposed as real projects.
-        let project_row: Option<(i32, String, String, UploadStatus, Option<i32>, Option<i32>)> =
-            index_schema::projects::table
-                .filter(index_schema::projects::id.eq(project_id))
-                .filter(index_schema::projects::id.gt(0))
-                .select((
-                    index_schema::projects::id,
-                    index_schema::projects::project_name,
-                    index_schema::projects::root_path,
-                    index_schema::projects::upload_status,
-                    index_schema::projects::symbol_chunks_total,
-                    index_schema::projects::object_chunks_total,
-                ))
-                .first(&mut conn)
-                .await
-                .optional()?;
+        #[allow(clippy::type_complexity)]
+        let project_row: Option<(
+            i32,
+            String,
+            String,
+            UploadStatus,
+            Option<i32>,
+            Option<i32>,
+            i64,
+        )> = index_schema::projects::table
+            .filter(index_schema::projects::id.eq(project_id))
+            .filter(index_schema::projects::id.gt(0))
+            .select((
+                index_schema::projects::id,
+                index_schema::projects::project_name,
+                index_schema::projects::root_path,
+                index_schema::projects::upload_status,
+                index_schema::projects::symbol_chunks_total,
+                index_schema::projects::object_chunks_total,
+                index_schema::projects::root_layer_id,
+            ))
+            .first(&mut conn)
+            .await
+            .optional()?;
 
-        let (id, project_name, root_path, upload_status, symbol_chunks_total, object_chunks_total) =
-            match project_row {
-                Some(row) => row,
-                None => return Ok(None),
-            };
+        let (
+            id,
+            project_name,
+            root_path,
+            upload_status,
+            symbol_chunks_total,
+            object_chunks_total,
+            root_layer_id,
+        ) = match project_row {
+            Some(row) => row,
+            None => return Ok(None),
+        };
 
         let file_count: i64 = index_schema::objects::table
             .filter(index_schema::objects::project_id.eq(project_id))
@@ -78,11 +94,12 @@ impl IndexStore {
             .get_result(&mut conn)
             .await?;
 
-        // Only persistent symbols count; ephemeral rows from active search()/loc()
-        // layers share the real project_id but carry a non-null eph_layer.
+        // Only persistent symbols count: exactly the project's root layer
+        // (the degenerate explicit layer set — stays correct when versioning
+        // brings multiple roots per project).
         let symbol_count: i64 = index_schema::symbols::table
             .filter(index_schema::symbols::project_id.eq(project_id))
-            .filter(index_schema::symbols::eph_layer.is_null())
+            .filter(index_schema::symbols::layer.eq(root_layer_id))
             .count()
             .get_result(&mut conn)
             .await?;
@@ -134,7 +151,7 @@ impl IndexStore {
     ///    d. Delete the `projects` row.
     ///    e. `purge_eph_cache` — this is a persistent-index mutation, so the invariant
     ///       documented on `finalize_project` applies: without the purge, cached
-    ///       `eph_layers` rows survive with `populated = true` while their data rows
+    ///       `layers` rows survive with `populated = true` while their data rows
     ///       cascade away, and input-only-keyed lookups (`loc`, `search`, `layer {…}`)
     ///       silently serve hollow results for the deleted project.
     pub async fn delete_project(&self, project_id: i32) -> Result<bool, StoreError> {
@@ -207,11 +224,24 @@ impl IndexStore {
             tracing::info!(project_id, rows = n, "delete_project: objects done");
 
             // Deleting the project row cascades any remaining ON DELETE CASCADE children.
-            diesel::delete(
+            let root_layer_id: Option<i64> = diesel::delete(
                 index_schema::projects::table.filter(index_schema::projects::id.eq(project_id)),
             )
-            .execute(&mut *conn)
-            .await?;
+            .returning(index_schema::projects::root_layer_id)
+            .get_result(&mut *conn)
+            .await
+            .optional()?;
+
+            // The root layer goes last: the project FK (which blocks deleting
+            // a live project's root) is gone now, and the layer's ON DELETE
+            // CASCADE sweeps any data rows the range deletes above missed.
+            if let Some(root_id) = root_layer_id {
+                diesel::delete(
+                    index_schema::layers::table.filter(index_schema::layers::id.eq(root_id)),
+                )
+                .execute(&mut *conn)
+                .await?;
+            }
 
             let purged = index::db_diesel::purge_eph_cache(conn).await?;
             tracing::info!(project_id, purged, "delete_project: complete");
@@ -236,17 +266,20 @@ impl IndexStore {
 
         let mut conn = self.get_conn().await?;
 
-        let project_status: Option<UploadStatus> = index_schema::projects::table
+        let project_row: Option<(UploadStatus, i64)> = index_schema::projects::table
             .filter(index_schema::projects::id.eq(project_id))
-            .select(index_schema::projects::upload_status)
-            .first::<UploadStatus>(&mut conn)
+            .select((
+                index_schema::projects::upload_status,
+                index_schema::projects::root_layer_id,
+            ))
+            .first(&mut conn)
             .await
             .optional()?;
-        match project_status {
+        let root_layer_id = match project_row {
             None => return Ok(MultiTreeResult::ProjectNotFound),
-            Some(s) if s != UploadStatus::Complete => return Ok(MultiTreeResult::NotReady),
-            Some(_) => {}
-        }
+            Some((s, _)) if s != UploadStatus::Complete => return Ok(MultiTreeResult::NotReady),
+            Some((_, root)) => root,
+        };
 
         let normalized: Vec<String> = paths.iter().map(|p| normalize_full_path(p)).collect();
 
@@ -259,7 +292,7 @@ impl IndexStore {
         if !non_root.is_empty() {
             let found: std::collections::HashSet<String> = index_schema::symbols::table
                 .filter(index_schema::symbols::project_id.eq(project_id))
-                .filter(index_schema::symbols::eph_layer.is_null())
+                .filter(index_schema::symbols::layer.eq(root_layer_id))
                 .filter(index_schema::symbols::symbol_type.eq(SymbolType::Directory as i32))
                 .filter(index_schema::symbols::name.eq_any(&non_root))
                 .select(index_schema::symbols::name)
@@ -274,7 +307,8 @@ impl IndexStore {
         }
 
         let (dir_rows, file_rows) =
-            load_tree_children_multi(&mut conn, project_id, &normalized, compact).await?;
+            load_tree_children_multi(&mut conn, project_id, root_layer_id, &normalized, compact)
+                .await?;
 
         // Group results by original normalized path using the prefix→path mapping.
         let prefix_to_path: HashMap<String, String> = normalized
@@ -396,6 +430,7 @@ impl IndexStore {
 async fn query_compactable_dirs(
     conn: &mut AsyncPgConnection,
     project_id: i32,
+    root_layer_id: i64,
 ) -> Result<HashMap<String, String>, StoreError> {
     let rows: Vec<CompactableRow> = diesel::sql_query(
         r#"
@@ -411,7 +446,7 @@ async fn query_compactable_dirs(
                 END AS parent_name
             FROM index.symbols s
             WHERE s.project_id = $1
-              AND s.eph_layer IS NULL
+              AND s.layer = $4
               AND (s.symbol_type = $2 OR s.symbol_type = $3)
               AND s.name != '/'
         ) children
@@ -423,6 +458,7 @@ async fn query_compactable_dirs(
     .bind::<diesel::sql_types::Integer, _>(project_id)
     .bind::<diesel::sql_types::Integer, _>(SymbolType::Directory as i32)
     .bind::<diesel::sql_types::Integer, _>(SymbolType::File as i32)
+    .bind::<diesel::sql_types::BigInt, _>(root_layer_id)
     .load(conn)
     .await?;
 
@@ -458,6 +494,7 @@ fn walk_compact_chain(start: &str, map: &HashMap<String, String>) -> Option<Stri
 async fn load_tree_children_multi(
     conn: &mut AsyncPgConnection,
     project_id: i32,
+    root_layer_id: i64,
     paths: &[String],
     compact: bool,
 ) -> Result<(Vec<BatchedDirRow>, Vec<BatchedFileRow>), StoreError> {
@@ -497,7 +534,7 @@ async fn load_tree_children_multi(
             SELECT s.name AS path, p.prefix AS parent_prefix
             FROM prefixes p
             JOIN index.symbols s ON s.project_id = $1
-              AND s.eph_layer IS NULL
+              AND s.layer = $5
               AND s.symbol_type = $3
               AND nlevel(s.symbol_path) = p.children_nlevel
               AND starts_with(s.name, p.prefix)
@@ -508,7 +545,7 @@ async fn load_tree_children_multi(
                 left(c.name, length(c.name) - position('/' IN reverse(c.name))) AS parent_name
             FROM prefixes p
             JOIN index.symbols c ON c.project_id = $1
-              AND c.eph_layer IS NULL
+              AND c.layer = $5
               AND c.symbol_type = $3
               AND nlevel(c.symbol_path) = p.children_nlevel + 1
               AND starts_with(c.name, p.prefix)
@@ -518,7 +555,7 @@ async fn load_tree_children_multi(
                 left(c.name, length(c.name) - position('/' IN reverse(c.name))) AS parent_name
             FROM prefixes p
             JOIN index.symbols c ON c.project_id = $1
-              AND c.eph_layer IS NULL
+              AND c.layer = $5
               AND c.symbol_type = $4
               AND nlevel(c.symbol_path) = p.children_nlevel + 1
               AND starts_with(c.name, p.prefix)
@@ -538,11 +575,12 @@ async fn load_tree_children_multi(
     .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(&prefixes)
     .bind::<diesel::sql_types::Integer, _>(SymbolType::Directory as i32)
     .bind::<diesel::sql_types::Integer, _>(SymbolType::File as i32)
+    .bind::<diesel::sql_types::BigInt, _>(root_layer_id)
     .load(conn)
     .await?;
 
     if compact {
-        let compactable = query_compactable_dirs(conn, project_id).await?;
+        let compactable = query_compactable_dirs(conn, project_id, root_layer_id).await?;
         for row in &mut dir_rows {
             row.compact_path = walk_compact_chain(&row.path, &compactable);
         }
@@ -569,12 +607,12 @@ async fn load_tree_children_multi(
         SELECT DISTINCT o.id, fs.name AS path, o.filetype, p.prefix AS parent_prefix
         FROM prefixes p
         JOIN index.symbols fs ON fs.project_id = $1
-          AND fs.eph_layer IS NULL
+          AND fs.layer = $4
           AND fs.symbol_type = $3
           AND nlevel(fs.symbol_path) = p.file_nlevel
           AND starts_with(fs.name, p.prefix)
         JOIN index.symbol_instances si ON si.symbol = fs.id
-          AND si.eph_layer IS NULL
+          AND si.layer = $4
         JOIN index.objects o ON o.id = si.object_id
         ORDER BY p.prefix, fs.name
         "#,
@@ -582,6 +620,7 @@ async fn load_tree_children_multi(
     .bind::<diesel::sql_types::Integer, _>(project_id)
     .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(&prefixes)
     .bind::<diesel::sql_types::Integer, _>(SymbolType::File as i32)
+    .bind::<diesel::sql_types::BigInt, _>(root_layer_id)
     .load(conn)
     .await?;
 

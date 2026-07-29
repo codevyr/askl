@@ -16,7 +16,9 @@ fn timeout_error_propagates_with_statement_location() {
 
         let query = r#"func("main")"#;
         let ast = parse(query).unwrap();
-        let mut ctx = ExecutionContext::new();
+        // Empty root set: resolving roots through a 1ms-timeout index would
+        // itself time out, and the timeout fires on the query SQL regardless.
+        let mut ctx = ExecutionContext::new(vec![]);
         let result = ast.execute(&mut ctx, &cfg).await;
 
         let err = match result {
@@ -54,7 +56,8 @@ fn multistatement_timeout_identifies_statement() {
 
         let query = "func(\"main\")\nfunc(\"other\")";
         let ast = parse(query).unwrap();
-        let mut ctx = ExecutionContext::new();
+        // Empty root set — see timeout_error_propagates_with_statement_location.
+        let mut ctx = ExecutionContext::new(vec![]);
         let result = ast.execute(&mut ctx, &cfg).await;
 
         let err = match result {

@@ -31,7 +31,7 @@ use super::mixins::{
 };
 use super::selection::{
     is_eph_leak, ChildReference, EphContext, HasChildReference, HasParentReference,
-    ParentReference, Selection, SelectionNode,
+    ParentReference, RootLayer, Selection, SelectionNode,
 };
 
 // ============================================================================
@@ -64,7 +64,7 @@ enum ScopeRole {
 }
 
 /// Build a base CurrentQuery (symbols ⋈ instances ⋈ projects ⋈ objects).
-/// Applies ephemeral visibility filter: only persistent rows (eph_layer IS NULL)
+/// Applies ephemeral visibility filter: only rows in the visible layer set
 /// and rows belonging to the given ephemeral layers are returned.
 fn build_current_query(vis: &EphVisibility) -> CurrentQuery<'static> {
     use crate::schema_diesel::*;
@@ -85,8 +85,8 @@ fn build_current_query(vis: &EphVisibility) -> CurrentQuery<'static> {
 
     // Ephemeral visibility on the selected-row columns, rendered by the
     // partition token (records the columns for the eph-branch guard).
-    query = query.filter(vis.pred("symbols.eph_layer"));
-    query = query.filter(vis.pred("symbol_instances.eph_layer"));
+    query = query.filter(vis.pred("symbols.layer"));
+    query = query.filter(vis.pred("symbol_instances.layer"));
 
     query
 }
@@ -104,16 +104,15 @@ impl Index {
         &self,
         filter: &CompositeFilter,
         role: Option<&ScopeRole>,
-        eph_ids: &[i64],
+        eph: &EphContext,
     ) -> Result<Vec<i64>> {
         use diesel::sql_types::Bool;
 
         let _span =
-            tracing::info_span!("resolve_filter_to_ids", eph_count = eph_ids.len()).entered();
+            tracing::info_span!("resolve_filter_to_ids", has_chain = eph.has_chain()).entered();
         let t0 = std::time::Instant::now();
 
-        let eph = EphContext::from_slice(eph_ids);
-        let vis = EphVisibility::combined(&eph);
+        let vis = EphVisibility::combined(eph);
         let mut query = build_current_query(&vis);
         if let Some(expr) = filter.compose_current(&vis) {
             query = query.filter(expr);
@@ -132,11 +131,11 @@ impl Index {
                                   AND pd.offset_range @> sr.from_offset_range \
                                 WHERE ",
                         )
-                        .eph_visibility("sr.eph_layer", &vis)
+                        .eph_visibility("sr.layer", &vis)
                         .sql(" AND ")
-                        .eph_visibility("si.eph_layer", &vis)
+                        .eph_visibility("si.layer", &vis)
                         .sql(" AND ")
-                        .eph_visibility("pd.eph_layer", &vis)
+                        .eph_visibility("pd.layer", &vis)
                         .sql(" AND pd.id = ANY(")
                         .bind(parent_ids.clone())
                         .sql("))")
@@ -154,11 +153,11 @@ impl Index {
                                 JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
                                 WHERE ",
                         )
-                        .eph_visibility("sr.eph_layer", &vis)
+                        .eph_visibility("sr.layer", &vis)
                         .sql(" AND ")
-                        .eph_visibility("si.eph_layer", &vis)
+                        .eph_visibility("si.layer", &vis)
                         .sql(" AND ")
-                        .eph_visibility("pd.eph_layer", &vis)
+                        .eph_visibility("pd.layer", &vis)
                         .sql(" AND si.id = ANY(")
                         .bind(child_ids.clone())
                         .sql("))")
@@ -189,11 +188,11 @@ impl Index {
         ids: &[i64],
         filter: &Option<CompositeFilter>,
         role: Option<&ScopeRole>,
-        eph_ids: &[i64],
+        eph: &EphContext,
     ) -> Result<Vec<i64>> {
         let mut all_ids = ids.to_vec();
         if let Some(ref f) = filter {
-            all_ids.extend(self.resolve_filter_to_ids(f, role, eph_ids).await?);
+            all_ids.extend(self.resolve_filter_to_ids(f, role, eph).await?);
             all_ids.sort_unstable();
             all_ids.dedup();
         }
@@ -235,11 +234,11 @@ fn build_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ParentsQuer
         .filter(symbol_instances::dsl::id.eq_any(source_ids))
         // Ephemeral visibility — canonical and aliased tables, rendered by
         // the partition token (records columns for the eph-branch guard).
-        .filter(vis.pred("symbol_refs.eph_layer"))
-        .filter(vis.pred("symbols.eph_layer"))
-        .filter(vis.pred("symbol_instances.eph_layer"))
-        .filter(vis.pred("parent_decls.eph_layer"))
-        .filter(vis.pred("parent_symbols.eph_layer"))
+        .filter(vis.pred("symbol_refs.layer"))
+        .filter(vis.pred("symbols.layer"))
+        .filter(vis.pred("symbol_instances.layer"))
+        .filter(vis.pred("parent_decls.layer"))
+        .filter(vis.pred("parent_symbols.layer"))
         .select((
             SymbolRef::as_select(),
             Symbol::as_select(),
@@ -287,11 +286,11 @@ fn build_children_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ChildrenQu
         )
         // Ephemeral visibility — canonical and aliased tables, rendered by
         // the partition token (records columns for the eph-branch guard).
-        .filter(vis.pred("symbol_refs.eph_layer"))
-        .filter(vis.pred("symbols.eph_layer"))
-        .filter(vis.pred("symbol_instances.eph_layer"))
-        .filter(vis.pred("parent_decls.eph_layer"))
-        .filter(vis.pred("parent_symbols.eph_layer"))
+        .filter(vis.pred("symbol_refs.layer"))
+        .filter(vis.pred("symbols.layer"))
+        .filter(vis.pred("symbol_instances.layer"))
+        .filter(vis.pred("parent_decls.layer"))
+        .filter(vis.pred("parent_symbols.layer"))
         .select((
             parent_symbols.fields(crate::schema_diesel::symbols::all_columns),
             Symbol::as_select(),
@@ -346,10 +345,10 @@ fn build_has_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> HasPare
         )
         // Ephemeral visibility — source and aliased (container) tables,
         // rendered by the partition token.
-        .filter(vis.pred("symbols.eph_layer"))
-        .filter(vis.pred("symbol_instances.eph_layer"))
-        .filter(vis.pred("container_symbols.eph_layer"))
-        .filter(vis.pred("container_instances.eph_layer"))
+        .filter(vis.pred("symbols.layer"))
+        .filter(vis.pred("symbol_instances.layer"))
+        .filter(vis.pred("container_symbols.layer"))
+        .filter(vis.pred("container_instances.layer"))
         .select((
             Symbol::as_select(),
             SymbolInstance::as_select(),
@@ -431,13 +430,22 @@ fn explain_eph_insert_err(
     use diesel::result::{DatabaseErrorKind, Error as E};
     if let E::DatabaseError(DatabaseErrorKind::ForeignKeyViolation, info) = &err {
         let constraint = info.constraint_name().unwrap_or("");
+        // Constraint names come in two generations: the historical ones
+        // (Postgres RENAME preserves constraint names, so live DBs keep the
+        // eph_layer-era names) and the ones a regenerated/squashed schema
+        // would auto-derive from the current column names.  Match both so
+        // the diagnostics survive a future baseline regeneration.
         let field = match constraint {
             "symbol_instances_symbol_fkey" => Some(("ephemeral_instance", "symbol_id")),
             "symbol_instances_object_id_fkey" => Some(("ephemeral_instance", "object_id")),
-            "symbol_instances_eph_layer_fkey" => Some(("ephemeral_instance", "eph_layer")),
+            "symbol_instances_eph_layer_fkey" | "symbol_instances_layer_fkey" => {
+                Some(("ephemeral_instance", "layer"))
+            }
             "symbol_refs_to_symbol_fkey" => Some(("ephemeral_ref", "to_symbol")),
-            "symbol_refs_eph_layer_fkey" => Some(("ephemeral_ref", "eph_layer")),
-            "symbols_eph_layer_fkey" => Some(("ephemeral_symbol", "eph_layer")),
+            "symbol_refs_eph_layer_fkey" | "symbol_refs_layer_fkey" => {
+                Some(("ephemeral_ref", "layer"))
+            }
+            "symbols_eph_layer_fkey" | "symbols_layer_fkey" => Some(("ephemeral_symbol", "layer")),
             _ => None,
         };
         if let Some((verb, fname)) = field {
@@ -459,7 +467,7 @@ fn explain_eph_insert_err(
 /// index, so the cache purge and the mutation commit (or roll back)
 /// atomically together.
 ///
-/// `ON DELETE CASCADE` on the `eph_layer` FK cleans up dependent
+/// `ON DELETE CASCADE` on the `layer` FK cleans up dependent
 /// `symbols`, `symbol_instances`, and `symbol_refs` rows.
 ///
 /// Call this any time `index.objects` / `index.symbols` /
@@ -473,7 +481,7 @@ fn explain_eph_insert_err(
 /// Layer cache entries are keyed on inputs only, so a stale entry can
 /// never be evicted by a key change — the purge is the only invalidation.
 /// Under READ COMMITTED a plain DELETE cannot see an *in-flight* layer
-/// transaction's uncommitted `eph_layers` row: the layer would commit
+/// transaction's uncommitted `layers` row: the layer would commit
 /// AFTER the purge with content computed from pre-mutation data and then
 /// be served forever.  `LOCK TABLE … IN EXCLUSIVE MODE` closes the race
 /// in both directions: the lock request queues behind every open layer
@@ -482,17 +490,19 @@ fn explain_eph_insert_err(
 /// layer creations block at `create_eph_layer`'s INSERT until the purging
 /// transaction commits, so post-purge populates read only post-mutation
 /// data.  Reads (`SELECT`) are unaffected.  No deadlock cycle: layer
-/// transactions only ever lock `eph_layers` rows and their own batch
+/// transactions only ever lock `layers` rows and their own batch
 /// tables, never `projects`, so lock ordering is one-directional.
 pub async fn purge_eph_cache(conn: &mut AsyncPgConnection) -> Result<usize, diesel::result::Error> {
-    use crate::schema_diesel::eph_layers;
+    use crate::schema_diesel::layers;
     use diesel_async::RunQueryDsl;
-    diesel::sql_query("LOCK TABLE index.eph_layers IN EXCLUSIVE MODE")
+    diesel::sql_query("LOCK TABLE index.layers IN EXCLUSIVE MODE")
         .execute(&mut *conn)
         .await?;
-    diesel::delete(eph_layers::table.filter(eph_layers::kind.ne(EphLayerKind::Canary.as_str())))
-        .execute(conn)
-        .await
+    diesel::delete(
+        layers::table.filter(layers::kind.ne_all(EphLayerKind::PROTECTED.map(|k| k.as_str()))),
+    )
+    .execute(conn)
+    .await
 }
 
 /// Build the doomed-closure DELETE for targeted eph-layer garbage
@@ -505,8 +515,8 @@ pub async fn purge_eph_cache(conn: &mut AsyncPgConnection) -> Result<usize, dies
 /// `symbol_instances.symbol` / `symbol_refs.to_symbol` cascade to
 /// `symbols.id`, and layers reference symbols ACROSS layer boundaries by
 /// design (a supplement's rows point into upstream layers).  A plain
-/// `DELETE FROM eph_layers WHERE <seed>` therefore cascade-deletes rows out
-/// of OTHER still-cached layers while leaving their `eph_layers` rows
+/// `DELETE FROM layers WHERE <seed>` therefore cascade-deletes rows out
+/// of OTHER still-cached layers while leaving their `layers` rows
 /// `populated = true` — hollow entries whose keys never change, served as
 /// valid cache hits with silently missing results.  The recursive CTE
 /// computes, BEFORE anything cascades, every layer transitively reachable
@@ -515,37 +525,45 @@ pub async fn purge_eph_cache(conn: &mut AsyncPgConnection) -> Result<usize, dies
 /// (`base_id`) — and deletes the whole closure atomically.  A layer is
 /// either fully alive or gone; hollow-but-populated is unconstructible
 /// through GC.  (Postgres allows one recursive self-reference, hence the
-/// edge-list UNION inside a single recursive term.)  The canary sentinel
-/// has no edges and is excluded from the seed.
+/// edge-list UNION inside a single recursive term.)
+///
+/// Root layers and the canary are never garbage: both are excluded from the
+/// seed, the data-row edges are restricted to the negative (ephemeral) id
+/// space so a root can never appear as a dependent, and the final DELETE
+/// excludes them again as defense in depth — a root's death would cascade a
+/// project's whole persistent index away.  (The `projects.root_layer_id` FK
+/// additionally hard-blocks deleting a live project's root.)
 fn doomed_closure_delete_sql(seed_where: &str) -> String {
     format!(
         "WITH RECURSIVE doomed AS ( \
-             SELECT id FROM index.eph_layers \
-             WHERE ({seed}) AND kind <> 'canary' \
+             SELECT id FROM index.layers \
+             WHERE ({seed}) AND kind NOT IN ({protected}) \
            UNION \
              SELECT e.dependent FROM ( \
-                 SELECT si.eph_layer AS dependent, s.eph_layer AS needed \
+                 SELECT si.layer AS dependent, s.layer AS needed \
                    FROM index.symbol_instances si \
                    JOIN index.symbols s ON si.symbol = s.id \
-                  WHERE si.eph_layer IS NOT NULL AND s.eph_layer IS NOT NULL \
-                    AND si.eph_layer <> s.eph_layer \
+                  WHERE si.layer < 0 AND s.layer < 0 \
+                    AND si.layer <> s.layer \
                UNION ALL \
-                 SELECT sr.eph_layer, s.eph_layer \
+                 SELECT sr.layer, s.layer \
                    FROM index.symbol_refs sr \
                    JOIN index.symbols s ON sr.to_symbol = s.id \
-                  WHERE sr.eph_layer IS NOT NULL AND s.eph_layer IS NOT NULL \
-                    AND sr.eph_layer <> s.eph_layer \
+                  WHERE sr.layer < 0 AND s.layer < 0 \
+                    AND sr.layer <> s.layer \
                UNION ALL \
-                 SELECT id, parent_id FROM index.eph_layers \
+                 SELECT id, parent_id FROM index.layers \
                   WHERE parent_id IS NOT NULL \
                UNION ALL \
-                 SELECT id, base_id FROM index.eph_layers \
+                 SELECT id, base_id FROM index.layers \
                   WHERE base_id IS NOT NULL \
              ) e JOIN doomed d ON e.needed = d.id \
          ) \
-         DELETE FROM index.eph_layers \
-         WHERE id IN (SELECT id FROM doomed)",
+         DELETE FROM index.layers \
+         WHERE id IN (SELECT id FROM doomed) \
+           AND kind NOT IN ({protected})",
         seed = seed_where,
+        protected = EphLayerKind::protected_sql_list(),
     )
 }
 
@@ -567,7 +585,7 @@ impl LayerBatch {
 }
 
 /// Discriminator for an ephemeral layer's origin.  Stored in the
-/// `eph_layers.kind` column and bound into the layer's hash chain.
+/// `layers.kind` column and bound into the layer's hash chain.
 ///
 /// `Canary` is reserved for the leak-detection sentinel (see
 /// `migrations/2026-06-06-000001_eph_layers/up.sql:86-109` and
@@ -591,7 +609,7 @@ pub enum EphLayerKind {
     Composite,
     /// `search(query, ...)` cache rows.  The layer holds every byte-range
     /// match across the upstream filters' visible objects, capped by the
-    /// caller's `limit`; truncation sets `eph_layers.truncated = true` so
+    /// caller's `limit`; truncation sets `layers.truncated = true` so
     /// the warning surfaces on both cache miss and cache hit.
     Search,
     /// The eph-chained half of a partitioned cache entry (see
@@ -601,10 +619,33 @@ pub enum EphLayerKind {
     /// Diagnostics: `kind='supplement'` + `parent_id` → the upstream layer
     /// it chains on.
     Supplement,
+    /// A project's root layer: the persistent index data itself.  Positive
+    /// id (ephemeral layers are negative), one per project via
+    /// `projects.root_layer_id`, created with the project — never through
+    /// the hash-upsert cache path, never garbage-collected.
+    Root,
 }
 
 impl EphLayerKind {
-    /// String form stored in `eph_layers.kind` and bound into the hash.
+    /// Layer kinds that garbage collection must NEVER touch: the canary
+    /// sentinel and project root layers (a root's death would cascade a
+    /// project's whole persistent index away).  Single source for every
+    /// purge/TTL/closure exclusion — a future protected kind is added here
+    /// and nowhere else.
+    pub const PROTECTED: [EphLayerKind; 2] = [EphLayerKind::Canary, EphLayerKind::Root];
+
+    /// The protected kinds as a SQL list literal for `kind NOT IN (...)`
+    /// exclusions in raw queries (values come from [`Self::as_str`], not
+    /// user input).
+    pub(crate) fn protected_sql_list() -> String {
+        Self::PROTECTED
+            .iter()
+            .map(|k| format!("'{}'", k.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// String form stored in `layers.kind` and bound into the hash.
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Canary => "canary",
@@ -613,6 +654,7 @@ impl EphLayerKind {
             Self::Composite => "composite",
             Self::Search => "search",
             Self::Supplement => "supplement",
+            Self::Root => "root",
         }
     }
 }
@@ -634,7 +676,7 @@ pub struct BaseLayerRef {
     pub hash: [u8; 32],
 }
 
-/// Outcome of materializing one `eph_layers` row through the cache gate.
+/// Outcome of materializing one `layers` row through the cache gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LayerOutcome {
     pub layer_id: i64,
@@ -646,15 +688,29 @@ pub struct LayerOutcome {
     pub truncated: bool,
 }
 
-/// Result of [`Index::with_partitioned_layers`].
+/// Which half of a root's cache entry a [`MaterialisedLayer`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerRole {
+    /// Root-parented base layer of a partitioned entry — keyed on
+    /// (root identity, verb inputs), reused under any upstream eph context.
+    Base,
+    /// Eph-chained delta layer of a partitioned entry; ordered last within
+    /// its root, so it is what downstream verbs chain on.
+    Supplement,
+}
+
+/// One layer materialised by [`Index::with_partitioned_layers`], in the
+/// exact order the executor records and pushes them: roots ascending;
+/// within a root, base first, then the supplement — which exists iff that
+/// root's upstream chain was non-empty (a chain-topology rule, not an
+/// overlay-emptiness shortcut: under a non-empty chain the supplement row
+/// is always materialized, even when its populate inserts zero rows).
 #[derive(Debug, Clone, Copy)]
-pub struct PartitionedLayerResult {
-    pub base: LayerOutcome,
-    /// `None` iff the upstream eph chain was empty (`parent_id = None`).
-    /// This is a chain-topology rule, not an overlay-emptiness shortcut:
-    /// under a non-empty chain the supplement row is always materialized,
-    /// even when its populate inserts zero rows.
-    pub supplement: Option<LayerOutcome>,
+pub struct MaterialisedLayer {
+    /// The root whose chain this layer joins.
+    pub root_id: i64,
+    pub role: LayerRole,
+    pub outcome: LayerOutcome,
 }
 
 /// Cache key of a supplement layer: parent chain identity + base identity +
@@ -682,7 +738,28 @@ pub fn supplement_hash(parent_id: i64, base_hash: &[u8; 32], extra: &[u8]) -> [u
     h.finalize().into()
 }
 
-/// Metadata of one `eph_layers` row, as read by [`Index::eph_layer_meta`].
+/// Fold ONE root layer's identity hash into a verb's base hash: the cache
+/// key of that root's base layer under per-root materialisation.  Identical
+/// verb inputs against different roots key different bases, and — the
+/// headline property — a root's base key is independent of which other
+/// roots are co-visible, so cached bases are reused across visibility sets.
+/// The domain tag (`v2`) makes all keys disjoint from the pre-per-root
+/// multi-root fold, so no cache purge is needed on upgrade: stale rows
+/// simply never hit again and age out via TTL.
+///
+/// Invariant preserved: the result is a function of (root identity, verb
+/// inputs) only — never ephemeral chain state.
+pub fn root_salted_hash(root: &super::selection::RootLayer, base_hash: &[u8; 32]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"base-rooted-v2");
+    h.update((root.hash.len() as u64).to_le_bytes());
+    h.update(&root.hash);
+    h.update(base_hash);
+    h.finalize().into()
+}
+
+/// Metadata of one `layers` row, as read by [`Index::eph_layer_meta`].
 /// Exposes the cache-state flags (`populated`, `truncated`) so tests can
 /// assert them directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -712,7 +789,7 @@ pub const EPH_POOL_RECYCLING_QUERY: &str = "ROLLBACK";
 /// Server-side backstop for abandoned layer transactions.  The recycling
 /// ROLLBACK above only runs when the abandoned connection is next checked
 /// out — until then the connection sits idle in bb8 with its transaction
-/// open and the `eph_layers` row lock held, blocking every concurrent
+/// open and the `layers` row lock held, blocking every concurrent
 /// identical query.  Deferred populates made this window as long as the
 /// whole content scan, so cap it: Postgres kills a session idle inside a
 /// transaction for longer than this, releasing the lock.  Legitimate
@@ -843,15 +920,16 @@ impl Index {
     /// Instantiates the query template `build` per branch via the
     /// [`EphVisibility`] capability token:
     ///
-    /// - `chain_dependent = false`: a PERSISTENT instantiation (every eph
-    ///   column `IS NULL` — its rendered SQL, hence its cache key, is
-    ///   chain-free, so the expensive branch is shared across all upstream
-    ///   ephemeral contexts) plus an EPH instantiation (legacy visibility +
-    ///   the disjointness guard, chain-keyed).  Results merge with
-    ///   mandatory row-identity dedup: node consumers are
-    ///   duplicate-sensitive, so dedup is a correctness requirement, which
-    ///   also makes a missing guard benign (wasted cache bytes, never wrong
-    ///   results).
+    /// - `chain_dependent = false`: a PERSISTENT instantiation (root-only:
+    ///   every eph column `= ANY($roots)` — its cache key carries the
+    ///   root-id binds, deliberately root-scoped, but stays chain-free, so
+    ///   the expensive branch is shared across all upstream ephemeral
+    ///   contexts under the same visible root set) plus an EPH
+    ///   instantiation (roots ∪ chain visibility + the sign-form
+    ///   disjointness guard, chain-keyed).  Results merge with mandatory
+    ///   row-identity dedup: node consumers are duplicate-sensitive, so
+    ///   dedup is a correctness requirement, which also makes a missing
+    ///   guard benign (wasted cache bytes, never wrong results).
     /// - `chain_dependent = true` (the filter tree contains subquery-level
     ///   chain dependence, [`CompositeFilter::is_chain_dependent`]): the
     ///   partition union would not equal the legacy result, so ONE Combined
@@ -901,15 +979,15 @@ impl Index {
         }
 
         // Loader-level algebraic short-circuit: with an EMPTY chain the
-        // eph branch is `visibility AND guard` = `(col IS NULL OR col =
-        // ANY('{}')) AND NOT(all cols IS NULL)` — a contradiction, so it
-        // provably returns zero rows.  This is a uniform rule of the cache
-        // layer (branch algebra), not per-verb overlay peeking; it saves
-        // one guaranteed-empty roundtrip per family on every plain query
-        // plus the dead cache entry it would store.
-        if eph.as_slice().is_empty() {
+        // eph branch is `visibility AND guard` = `col = ANY($roots) AND
+        // NOT(all cols = ANY($roots))` — a contradiction, so it provably
+        // returns zero rows.  This is a uniform rule of the cache layer
+        // (branch algebra), not per-verb overlay peeking; it saves one
+        // guaranteed-empty roundtrip per family on every plain query plus
+        // the dead cache entry it would store.
+        if !eph.has_chain() {
             let persistent = self
-                .cached_load(build(&EphVisibility::persistent_only()))
+                .cached_load(build(&EphVisibility::root_only(eph)))
                 .await?;
             return Ok(persistent.as_ref().clone());
         }
@@ -923,7 +1001,7 @@ impl Index {
         // The branches are independent (separate pool connections on
         // misses); run them concurrently.
         let (persistent, ephemeral) = tokio::try_join!(
-            self.cached_load(build(&EphVisibility::persistent_only())),
+            self.cached_load(build(&EphVisibility::root_only(eph))),
             self.cached_load(eph_query),
         )?;
 
@@ -935,6 +1013,62 @@ impl Index {
             }
         }
         Ok(merged)
+    }
+
+    /// Load the root layers of all (non-canary) projects — id plus identity
+    /// hash — through the SQL result cache, so per-request resolution is a
+    /// RAM hit and the same epoch clear that index mutations already perform
+    /// invalidates it.  Ids feed visibility binds via [`EphContext::rooted`];
+    /// hashes feed the base-hash salt (see [`root_salted_hash`]).
+    pub async fn load_root_layers(&self) -> Result<Vec<RootLayer>> {
+        use crate::schema_diesel::{layers, projects};
+
+        let rows: std::sync::Arc<Vec<(i64, i32, Vec<u8>)>> = self
+            .cached_load(
+                projects::table
+                    .inner_join(layers::table.on(layers::id.eq(projects::root_layer_id)))
+                    .filter(projects::id.gt(0))
+                    .order(projects::root_layer_id.asc())
+                    .select((projects::root_layer_id, projects::id, layers::hash)),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to load root layers: {}", e))?;
+
+        Ok(rows
+            .iter()
+            .map(|(id, project_id, hash)| RootLayer {
+                id: *id,
+                project_id: *project_id,
+                hash: hash.clone(),
+            })
+            .collect())
+    }
+
+    /// Map object ids to their owning projects.  Used by `layer { … }`
+    /// validation to reject references the scoped inserts would otherwise
+    /// silently drop (the per-root insert SQL filters rows by project, so a
+    /// typo'd object id would commit hollow, input-keyed — i.e. sticky —
+    /// cache layers with no diagnostic).
+    pub async fn load_object_projects(
+        &self,
+        object_ids: &[i32],
+    ) -> Result<std::collections::HashMap<i32, i32>> {
+        use crate::schema_diesel::objects;
+
+        let connection = &mut self
+            .pool
+            .get()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+
+        let rows: Vec<(i32, i32)> = objects::table
+            .filter(objects::id.eq_any(object_ids))
+            .select((objects::id, objects::project_id))
+            .load(&mut *connection)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to load object projects: {}", e))?;
+
+        Ok(rows.into_iter().collect())
     }
 
     fn build_async_manager(database_url: &str) -> AsyncDieselConnectionManager<AsyncPgConnection> {
@@ -972,23 +1106,23 @@ impl Index {
     /// running, just have nothing to catch).  Call this after migrations
     /// have run and the pool is ready.
     pub async fn validate_canary(&self) -> Result<()> {
-        use crate::schema_diesel::eph_layers;
+        use crate::schema_diesel::layers;
         use diesel::dsl::count_star;
         use diesel_async::RunQueryDsl;
         let mut connection = self.pool.get().await.map_err(|e| {
             anyhow::anyhow!("Failed to get connection for canary validation: {}", e)
         })?;
-        let c: i64 = eph_layers::table
-            .filter(eph_layers::id.eq(super::selection::CANARY_LAYER_ID))
-            .filter(eph_layers::kind.eq(EphLayerKind::Canary.as_str()))
+        let c: i64 = layers::table
+            .filter(layers::id.eq(super::selection::CANARY_LAYER_ID))
+            .filter(layers::kind.eq(EphLayerKind::Canary.as_str()))
             .select(count_star())
             .get_result(&mut *connection)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to validate canary row: {}", e))?;
         if c != 1 {
             anyhow::bail!(
-                "canary row missing from index.eph_layers (kind='{}', id={}); \
-                 leak detection is not armed. Re-apply the eph_layers migration.",
+                "canary row missing from index.layers (kind='{}', id={}); \
+                 leak detection is not armed. Re-apply the layers migration.",
                 EphLayerKind::Canary.as_str(),
                 super::selection::CANARY_LAYER_ID,
             );
@@ -1172,7 +1306,8 @@ impl Index {
         children_scope: ScopeContext,
         eph: &EphContext,
     ) -> Result<super::selection::Checked<Selection>> {
-        let eph_ids = eph.as_slice();
+        let visible_ids = eph.visible_ids();
+        let eph_ids: &[i64] = &visible_ids;
         use crate::schema_diesel::*;
 
         // One chain-dependence decision for the whole statement's filter
@@ -1256,7 +1391,7 @@ impl Index {
 
                 let role = ScopeRole::Parents(current_instance_ids.clone());
                 let scope_ids = self
-                    .resolve_scope_ids(ids, scope_filter, Some(&role), eph_ids)
+                    .resolve_scope_ids(ids, scope_filter, Some(&role), eph)
                     .await?;
 
                 let rows: Vec<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)> = self
@@ -1337,7 +1472,7 @@ impl Index {
 
                 let role = ScopeRole::Children(current_instance_ids.clone());
                 let scope_ids = self
-                    .resolve_scope_ids(ids, scope_filter, Some(&role), eph_ids)
+                    .resolve_scope_ids(ids, scope_filter, Some(&role), eph)
                     .await?;
 
                 let rows: Vec<(
@@ -1538,7 +1673,8 @@ impl Index {
         filter: &CompositeFilter,
         eph: &EphContext,
     ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
-        let eph_ids = eph.as_slice();
+        let visible_ids = eph.visible_ids();
+        let eph_ids: &[i64] = &visible_ids;
         let chain_dependent = filter.is_chain_dependent();
 
         // Canonical bind order for cache-key stability (see find_edges_between).
@@ -1583,12 +1719,12 @@ impl Index {
                 "find_child_instance_ids (has) completed",
             );
             for (ps, pi, cs, ci, _) in &results {
-                if is_eph_leak(ps.eph_layer, eph_ids)
-                    || is_eph_leak(pi.eph_layer, eph_ids)
-                    || is_eph_leak(cs.eph_layer, eph_ids)
-                    || is_eph_leak(ci.eph_layer, eph_ids)
+                if is_eph_leak(ps.layer, eph_ids)
+                    || is_eph_leak(pi.layer, eph_ids)
+                    || is_eph_leak(cs.layer, eph_ids)
+                    || is_eph_leak(ci.layer, eph_ids)
                 {
-                    tracing::error!(?eph_ids, "eph_layer leak in find_child_instance_ids (has)");
+                    tracing::error!(?eph_ids, "layer leak in find_child_instance_ids (has)");
                     anyhow::bail!("internal error: ephemeral layer isolation violation");
                 }
             }
@@ -1626,13 +1762,13 @@ impl Index {
                 "find_child_instance_ids (refs) completed",
             );
             for (ps, cs, ci, fi, sr, _) in &results {
-                if is_eph_leak(ps.eph_layer, eph_ids)
-                    || is_eph_leak(cs.eph_layer, eph_ids)
-                    || is_eph_leak(ci.eph_layer, eph_ids)
-                    || is_eph_leak(fi.eph_layer, eph_ids)
-                    || is_eph_leak(sr.eph_layer, eph_ids)
+                if is_eph_leak(ps.layer, eph_ids)
+                    || is_eph_leak(cs.layer, eph_ids)
+                    || is_eph_leak(ci.layer, eph_ids)
+                    || is_eph_leak(fi.layer, eph_ids)
+                    || is_eph_leak(sr.layer, eph_ids)
                 {
-                    tracing::error!(?eph_ids, "eph_layer leak in find_child_instance_ids (refs)");
+                    tracing::error!(?eph_ids, "layer leak in find_child_instance_ids (refs)");
                     anyhow::bail!("internal error: ephemeral layer isolation violation");
                 }
             }
@@ -1660,7 +1796,8 @@ impl Index {
         filter: &CompositeFilter,
         eph: &EphContext,
     ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
-        let eph_ids = eph.as_slice();
+        let visible_ids = eph.visible_ids();
+        let eph_ids: &[i64] = &visible_ids;
         let chain_dependent = filter.is_chain_dependent();
 
         // Canonical bind order for cache-key stability (see find_edges_between).
@@ -1694,15 +1831,12 @@ impl Index {
                 "find_parent_instance_ids (refs) completed",
             );
             for (sr, s, ci, pi) in &results {
-                if is_eph_leak(sr.eph_layer, eph_ids)
-                    || is_eph_leak(s.eph_layer, eph_ids)
-                    || is_eph_leak(ci.eph_layer, eph_ids)
-                    || is_eph_leak(pi.eph_layer, eph_ids)
+                if is_eph_leak(sr.layer, eph_ids)
+                    || is_eph_leak(s.layer, eph_ids)
+                    || is_eph_leak(ci.layer, eph_ids)
+                    || is_eph_leak(pi.layer, eph_ids)
                 {
-                    tracing::error!(
-                        ?eph_ids,
-                        "eph_layer leak in find_parent_instance_ids (refs)"
-                    );
+                    tracing::error!(?eph_ids, "layer leak in find_parent_instance_ids (refs)");
                     anyhow::bail!("internal error: ephemeral layer isolation violation");
                 }
             }
@@ -1733,12 +1867,12 @@ impl Index {
                 "find_parent_instance_ids (has) completed",
             );
             for (cs, ci, ps, pi) in &results {
-                if is_eph_leak(cs.eph_layer, eph_ids)
-                    || is_eph_leak(ci.eph_layer, eph_ids)
-                    || is_eph_leak(ps.eph_layer, eph_ids)
-                    || is_eph_leak(pi.eph_layer, eph_ids)
+                if is_eph_leak(cs.layer, eph_ids)
+                    || is_eph_leak(ci.layer, eph_ids)
+                    || is_eph_leak(ps.layer, eph_ids)
+                    || is_eph_leak(pi.layer, eph_ids)
                 {
-                    tracing::error!(?eph_ids, "eph_layer leak in find_parent_instance_ids (has)");
+                    tracing::error!(?eph_ids, "layer leak in find_parent_instance_ids (has)");
                     anyhow::bail!("internal error: ephemeral layer isolation violation");
                 }
             }
@@ -1763,7 +1897,8 @@ impl Index {
         instance_ids: &[i64],
         eph: &EphContext,
     ) -> Result<Vec<ImplicitEdge>> {
-        let eph_ids = eph.as_slice();
+        let visible_ids = eph.visible_ids();
+        let eph_ids: &[i64] = &visible_ids;
         if instance_ids.is_empty() {
             return Ok(vec![]);
         }
@@ -1799,7 +1934,7 @@ impl Index {
         // `symbol_instances` schema changes automatically.  The outer
         // SELECT's projection is bespoke (DISTINCT ON + custom column
         // aliases) and stays as raw SQL inside `CteFindEdgesBetween`;
-        // its single bind (eph_ids for `sr.eph_layer`) goes through
+        // its single bind (eph_ids for `sr.layer`) goes through
         // `push_bind_param` so the final query has only typed binds.
         // No composite filter reaches this query, so it always partitions.
         // The eph branch's guard is rendered inside CteFindEdgesBetween's
@@ -1832,11 +1967,11 @@ impl Index {
         );
 
         for edge in &results {
-            if is_eph_leak(edge.sr_eph_layer, eph_ids)
-                || is_eph_leak(edge.from_eph_layer, eph_ids)
-                || is_eph_leak(edge.to_eph_layer, eph_ids)
+            if is_eph_leak(edge.sr_layer, eph_ids)
+                || is_eph_leak(edge.from_layer, eph_ids)
+                || is_eph_leak(edge.to_layer, eph_ids)
             {
-                tracing::error!(?eph_ids, "eph_layer leak in find_edges_between");
+                tracing::error!(?eph_ids, "layer leak in find_edges_between");
                 anyhow::bail!("internal error: ephemeral layer isolation violation");
             }
         }
@@ -1850,7 +1985,7 @@ impl Index {
 
     /// Begin a transactional ephemeral layer create-or-find.
     ///
-    /// Opens a database transaction and performs an atomic upsert on `eph_layers`.
+    /// Opens a database transaction and performs an atomic upsert on `layers`.
     /// Returns an `EphTransaction` that holds the connection with an open transaction.
     /// Most callers should use [`Index::with_eph_layer`] instead, which owns
     /// commit/rollback and the 2-phase `populated` flip through a scoped closure.
@@ -1874,12 +2009,12 @@ impl Index {
     /// ## `parent_id` semantics under cache collision
     ///
     /// `parent_id` is recorded only when the row is *first* inserted; the
-    /// `ON CONFLICT DO UPDATE` clause only touches `last_used`.  If a second
-    /// request hits the cache (`created = false`) with a different
-    /// `parent_id` from the original creator, the row's `parent_id`
-    /// remains the original.  Do not read `parent_id` to infer the current
-    /// request's ancestry — it reflects the *first* creator's parent
-    /// chain, not the caller's.
+    /// `ON CONFLICT DO UPDATE` clause only touches `last_used`.  Under
+    /// per-root materialisation this is vacuous rather than a caveat: a
+    /// layer's parent is a pure function of its hash (a base's hash folds
+    /// its root's identity and its parent IS that root; a supplement's hash
+    /// folds its parent id), so a cache hit always carries the same
+    /// `parent_id` the caller would have written.
     pub async fn create_eph_layer(
         &self,
         parent_id: Option<i64>,
@@ -1909,25 +2044,25 @@ impl Index {
         // truncated anything yet); on cache hit we read the value previously
         // written by the layer's original creator so the caller can re-emit
         // the same warning.
-        use crate::schema_diesel::eph_layers;
+        use crate::schema_diesel::layers;
         use diesel::sql_types::Bool;
-        let upsert_result = diesel::insert_into(eph_layers::table)
+        let upsert_result = diesel::insert_into(layers::table)
             .values((
-                eph_layers::parent_id.eq(parent_id),
-                eph_layers::base_id.eq(base_id),
-                eph_layers::hash.eq(hash),
-                eph_layers::kind.eq(kind.as_str()),
-                eph_layers::populated.eq(false),
-                eph_layers::truncated.eq(false),
+                layers::parent_id.eq(parent_id),
+                layers::base_id.eq(base_id),
+                layers::hash.eq(hash),
+                layers::kind.eq(kind.as_str()),
+                layers::populated.eq(false),
+                layers::truncated.eq(false),
             ))
-            .on_conflict(eph_layers::hash)
+            .on_conflict(layers::hash)
             .do_update()
-            .set(eph_layers::last_used.eq(diesel::dsl::now))
+            .set(layers::last_used.eq(diesel::dsl::now))
             .returning((
-                eph_layers::id,
+                layers::id,
                 diesel::dsl::sql::<Bool>("xmax = 0"),
-                eph_layers::populated,
-                eph_layers::truncated,
+                layers::populated,
+                layers::truncated,
             ))
             .get_result::<(i64, bool, bool, bool)>(&mut *conn)
             .await;
@@ -1938,14 +2073,17 @@ impl Index {
                 // A parent/base FK violation here means the referenced layer
                 // was purged between this statement's earlier materialization
                 // steps and this insert (e.g. `purge_eph_cache` won the
-                // eph_layers lock in the gap between a base commit and its
+                // layers lock in the gap between a base commit and its
                 // supplement).  The cache is coherent — this request just
                 // straddled the purge — so tell the user to retry rather
                 // than surfacing a raw constraint error.
                 use diesel::result::{DatabaseErrorKind, Error as E};
                 if let E::DatabaseError(DatabaseErrorKind::ForeignKeyViolation, info) = &e {
                     let constraint = info.constraint_name().unwrap_or("");
-                    if constraint.starts_with("eph_layers_") {
+                    // Both constraint-name generations: historical
+                    // (eph_layers_*, preserved by RENAME on live DBs) and
+                    // regenerated-baseline (layers_*).
+                    if constraint.starts_with("eph_layers_") || constraint.starts_with("layers_") {
                         anyhow::bail!(
                             "ephemeral cache was purged while this statement was \
                              executing (index update or project deletion); \
@@ -1965,7 +2103,7 @@ impl Index {
         if !created && !populated {
             let _ = diesel::sql_query("ROLLBACK").execute(&mut *conn).await;
             anyhow::bail!(
-                "eph_layers row id={} found with populated=false on cache hit; \
+                "layers row id={} found with populated=false on cache hit; \
                  a previous writer committed without running the populate batch \
                  (this would silently return wrong results — see Index::with_eph_layer)",
                 id,
@@ -2060,66 +2198,144 @@ impl Index {
         }
     }
 
-    /// Materialize a verb's partitioned cache entry: a parentless *base*
-    /// layer keyed only on `base_hash` (persistent data only, unmasked —
-    /// masks are composed at read time, never applied here) plus, iff an
-    /// upstream chain exists, a *supplement* layer chained on `parent_id`
-    /// holding the eph-derived delta.  The supplement is always materialized
-    /// under a non-empty chain — even with zero rows — so downstream
-    /// chaining keys stay deterministic.
+    /// Materialize a verb's partitioned cache entries, ONE PER VISIBLE ROOT:
+    /// for each root, a *base* layer parented on the root, keyed on
+    /// `root_salted_hash(root, base_hash)` and holding only that project's
+    /// rows (persistent data only, unmasked — masks are composed at read
+    /// time, never applied here) plus, iff that root's chain is non-empty, a
+    /// *supplement* layer chained on the root's `chain_last` holding the
+    /// eph-derived delta.  The supplement is always materialized under a
+    /// non-empty chain — even with zero rows — so downstream chaining keys
+    /// stay deterministic.  Results are sorted by root id, so activation
+    /// traces are deterministic.
     ///
-    /// Runs as two sequential [`Index::with_eph_layer`] calls (each with the
-    /// full 2-PC populated protocol).  A failure after the base commits
-    /// leaves a valid, reusable base — benign.  Because populate closures
-    /// now run the expensive queries themselves, the work happens while the
-    /// layer's row lock is held: concurrent identical requests serialize on
-    /// the row and the losers get a cache hit instead of duplicating the
+    /// Root-parenting the base means a project's cached chains die with its
+    /// root (`parent_id ON DELETE CASCADE` + the doomed-closure parent
+    /// edge); a base's parent is a pure function of its hash, since the
+    /// hash folds the root's identity.
+    ///
+    /// Each layer runs the full 2-PC populated protocol via
+    /// [`Index::with_eph_layer`].  A failure after some layers commit leaves
+    /// valid, reusable entries — benign.
+    ///
+    /// Accepted limitation (single-user tool, mirrors the torn-read note on
+    /// [`Index::cached_load_partitioned`]): per-root layers commit in
+    /// SEPARATE transactions at different instants, so a purge racing this
+    /// statement can delete an earlier root's just-committed base before a
+    /// later root's is created — the statement then reads a silently
+    /// PARTIAL, mixed-epoch union (the dead layer contributes zero rows).
+    /// The epoch check prevents such reads from being cached, not from
+    /// being returned once.  Because populate closures run the
+    /// expensive queries themselves, the work happens while each layer's row
+    /// lock is held: concurrent identical requests serialize per (root,
+    /// hash) and the losers get cache hits instead of duplicating the
     /// computation.
     pub async fn with_partitioned_layers<'s, FB, FS>(
         &'s self,
-        parent_id: Option<i64>,
+        eph: &'s EphContext,
         base_hash: &[u8; 32],
         base_kind: EphLayerKind,
         supplement_extra: &[u8],
         base_populate: FB,
         supplement_populate: FS,
-    ) -> Result<PartitionedLayerResult>
+    ) -> Result<Vec<MaterialisedLayer>>
     where
-        FB: for<'b> FnOnce(&'b mut EphTransaction<'s>) -> EphScopedFut<'b, bool>,
-        FS: for<'b> FnOnce(&'b mut EphTransaction<'s>, BaseLayerRef) -> EphScopedFut<'b, bool>,
+        FB: for<'b> Fn(&'b mut EphTransaction<'s>, &'b RootLayer) -> EphScopedFut<'b, bool>,
+        FS: for<'b> Fn(
+            &'b mut EphTransaction<'s>,
+            &'b RootLayer,
+            BaseLayerRef,
+        ) -> EphScopedFut<'b, bool>,
     {
-        let base = self
-            .with_eph_layer(None, None, base_hash, base_kind, base_populate)
-            .await?;
+        use futures::stream::StreamExt;
 
-        let supplement = match parent_id {
-            None => None,
-            Some(parent) => {
-                let s_hash = supplement_hash(parent, base_hash, supplement_extra);
-                let base_ref = BaseLayerRef {
-                    layer_id: base.layer_id,
-                    hash: *base_hash,
+        // Roots materialise CONCURRENTLY: their chains, cache rows, and row
+        // locks are disjoint, and each per-root task holds at most one pool
+        // connection at a time (the base commits and returns its connection
+        // before the supplement checkout), so a bounded fan-out cannot
+        // deadlock against the pool — it just queues.  Keep the bound
+        // comfortably under the bb8 pool size (default 10).  Works on a
+        // LocalSet with !Send futures: nothing is spawned, the stream polls
+        // in place.
+        const ROOT_FANOUT: usize = 4;
+
+        // Shared by reference across the per-root futures (`Fn` closures).
+        let base_populate = &base_populate;
+        let supplement_populate = &supplement_populate;
+
+        let results = futures::stream::iter(eph.roots())
+            .map(|root| async move {
+                let salted = root_salted_hash(root, base_hash);
+
+                let base = self
+                    .with_eph_layer(Some(root.id), None, &salted, base_kind, |txn| {
+                        base_populate(txn, root)
+                    })
+                    .await?;
+
+                let supplement = match eph.chain_last(root.id) {
+                    None => None,
+                    Some(parent) => {
+                        let s_hash = supplement_hash(parent, &salted, supplement_extra);
+                        let base_ref = BaseLayerRef {
+                            layer_id: base.layer_id,
+                            hash: salted,
+                        };
+                        // `base_id` couples the supplement's lifetime to its
+                        // base (ON DELETE CASCADE): the base is always the
+                        // older half of the pair, so when it ages out or is
+                        // deleted, the supplement — whose key folds the
+                        // stable base *hash*, not the id — can no longer
+                        // produce a hit against a recreated base of a
+                        // different incarnation.
+                        Some(
+                            self.with_eph_layer(
+                                Some(parent),
+                                Some(base.layer_id),
+                                &s_hash,
+                                EphLayerKind::Supplement,
+                                |txn| supplement_populate(txn, root, base_ref),
+                            )
+                            .await?,
+                        )
+                    }
                 };
-                // `base_id` couples the supplement's lifetime to its base
-                // (ON DELETE CASCADE): the base is always the older half of
-                // the pair, so when it ages out or is deleted, the
-                // supplement — whose key folds the stable base *hash*, not
-                // the id — can no longer produce a hit against a recreated
-                // base of a different incarnation.
-                Some(
-                    self.with_eph_layer(
-                        Some(parent),
-                        Some(base.layer_id),
-                        &s_hash,
-                        EphLayerKind::Supplement,
-                        move |txn| supplement_populate(txn, base_ref),
-                    )
-                    .await?,
-                )
-            }
-        };
 
-        Ok(PartitionedLayerResult { base, supplement })
+                let mut layers = Vec::with_capacity(2);
+                layers.push(MaterialisedLayer {
+                    root_id: root.id,
+                    role: LayerRole::Base,
+                    outcome: base,
+                });
+                if let Some(outcome) = supplement {
+                    layers.push(MaterialisedLayer {
+                        root_id: root.id,
+                        role: LayerRole::Supplement,
+                        outcome,
+                    });
+                }
+                Ok::<_, anyhow::Error>(layers)
+            })
+            .buffer_unordered(ROOT_FANOUT)
+            // Run EVERY per-root future to completion before propagating an
+            // error — never cancel siblings.  A cancelled future would drop
+            // its EphTransaction mid-populate, and Drop cannot ROLLBACK: the
+            // abandoned connection would sit idle-in-transaction holding its
+            // layer's row lock (blocking identical retries on the hash
+            // upsert and any purge's LOCK TABLE) until pool recycling.
+            // Letting each root finish means every transaction reaches its
+            // own commit or explicit rollback; roots that committed before a
+            // sibling's error remain valid, reusable cache entries.
+            .collect::<Vec<Result<Vec<MaterialisedLayer>>>>()
+            .await;
+
+        let mut groups = results.into_iter().collect::<Result<Vec<_>>>()?;
+
+        // Deterministic result (and therefore activation-trace) order
+        // regardless of completion order: roots ascending, base before
+        // supplement within a root (by construction of each group).
+        groups.sort_by_key(|g| g.get(0).map(|l| l.root_id));
+        Ok(groups.into_iter().flatten().collect())
     }
 
     /// Get all instance IDs belonging to any of the given ephemeral layers.
@@ -2136,7 +2352,7 @@ impl Index {
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let ids = symbol_instances::table
-            .filter(symbol_instances::eph_layer.eq_any(layer_ids))
+            .filter(symbol_instances::layer.eq_any(layer_ids))
             .select(symbol_instances::id)
             .load::<i64>(&mut *connection)
             .await
@@ -2164,8 +2380,10 @@ impl Index {
 
         let layers = symbol_instances::table
             .filter(symbol_instances::id.eq(instance_id))
-            .filter(symbol_instances::eph_layer.is_not_null())
-            .select(symbol_instances::eph_layer.assume_not_null())
+            // Ephemeral layers only (negative id space) — a root-layer row
+            // has no "eph layer" in the sense this accessor serves.
+            .filter(symbol_instances::layer.lt(0))
+            .select(symbol_instances::layer)
             .load::<i64>(&mut *connection)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get eph layer for instance: {}", e))?;
@@ -2178,7 +2396,7 @@ impl Index {
     /// cache should leave this count unchanged).  The canary is
     /// excluded so the count reflects only request-driven layers.
     pub async fn eph_layer_count(&self) -> Result<i64> {
-        use crate::schema_diesel::eph_layers;
+        use crate::schema_diesel::layers;
         use diesel::dsl::count_star;
         use diesel_async::RunQueryDsl;
         let connection = &mut self
@@ -2186,8 +2404,8 @@ impl Index {
             .get()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
-        eph_layers::table
-            .filter(eph_layers::kind.ne(EphLayerKind::Canary.as_str()))
+        layers::table
+            .filter(layers::kind.ne_all(EphLayerKind::PROTECTED.map(|k| k.as_str())))
             .select(count_star())
             .get_result::<i64>(&mut *connection)
             .await
@@ -2198,21 +2416,21 @@ impl Index {
     /// assert cache state directly (populated / truncated flags, kind,
     /// parent chaining) instead of inferring it from query results.
     pub async fn eph_layer_meta(&self, layer_id: i64) -> Result<EphLayerMeta> {
-        use crate::schema_diesel::eph_layers;
+        use crate::schema_diesel::layers;
         let connection = &mut self
             .pool
             .get()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
-        let (id, parent_id, kind, populated, truncated) = eph_layers::table
-            .filter(eph_layers::id.eq(layer_id))
+        let (id, parent_id, kind, populated, truncated) = layers::table
+            .filter(layers::id.eq(layer_id))
             .select((
-                eph_layers::id,
-                eph_layers::parent_id,
-                eph_layers::kind,
-                eph_layers::populated,
-                eph_layers::truncated,
+                layers::id,
+                layers::parent_id,
+                layers::kind,
+                layers::populated,
+                layers::truncated,
             ))
             .get_result::<(i64, Option<i64>, String, bool, bool)>(&mut *connection)
             .await
@@ -2240,14 +2458,14 @@ impl Index {
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let symbol_count = symbols::table
-            .filter(symbols::eph_layer.eq(layer_id))
+            .filter(symbols::layer.eq(layer_id))
             .select(count_star())
             .get_result::<i64>(&mut *connection)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to count eph symbols for layer: {}", e))?;
 
         let instance_count = symbol_instances::table
-            .filter(symbol_instances::eph_layer.eq(layer_id))
+            .filter(symbol_instances::layer.eq(layer_id))
             .select(count_star())
             .get_result::<i64>(&mut *connection)
             .await
@@ -2307,7 +2525,7 @@ impl Index {
         if layer_ids.is_empty() {
             return Ok(());
         }
-        use crate::schema_diesel::eph_layers;
+        use crate::schema_diesel::layers;
         use diesel::sql_types::Bool;
         let connection = &mut self
             .pool
@@ -2315,14 +2533,10 @@ impl Index {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
-        diesel::update(
-            eph_layers::table
-                .filter(eph_layers::id.eq_any(layer_ids))
-                .filter(diesel::dsl::sql::<Bool>(
-                    "last_used < now() - interval '1 hour'",
-                )),
-        )
-        .set(eph_layers::last_used.eq(diesel::dsl::now))
+        diesel::update(layers::table.filter(layers::id.eq_any(layer_ids)).filter(
+            diesel::dsl::sql::<Bool>("last_used < now() - interval '1 hour'"),
+        ))
+        .set(layers::last_used.eq(diesel::dsl::now))
         .execute(&mut *connection)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to touch eph layers: {}", e))?;
@@ -2330,7 +2544,7 @@ impl Index {
         Ok(())
     }
 
-    /// Check if a symbol exists in the persistent index or in the given ephemeral layers.
+    /// Check if a symbol exists in the visible layer set (roots ∪ chain).
     pub async fn symbol_exists(&self, symbol_id: i64, eph: &EphContext) -> Result<bool> {
         use crate::schema_diesel::symbols;
 
@@ -2340,14 +2554,9 @@ impl Index {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
-        let eph_ids_owned = eph.as_slice().to_vec();
         let exists = symbols::table
             .filter(symbols::id.eq(symbol_id))
-            .filter(
-                symbols::eph_layer
-                    .is_null()
-                    .or(symbols::eph_layer.eq_any(eph_ids_owned)),
-            )
+            .filter(symbols::layer.eq_any(eph.visible_ids()))
             .select(symbols::id)
             .first::<i64>(&mut *connection)
             .await
@@ -2453,7 +2662,7 @@ fn make_like_pattern(query: &str) -> String {
 /// PostgreSQL 16 rejects prepared statements with unreferenced parameters
 /// ("wrong number of parameters"), so the bind chain — and therefore the
 /// project-filter slot — must match exactly which params the SQL uses.
-fn build_search_sql(whole_word: bool, case_sensitive: bool, with_project_filter: bool) -> String {
+fn build_search_sql(whole_word: bool, case_sensitive: bool) -> String {
     let uses_like_pattern = !(whole_word && !case_sensitive);
 
     // Haystack/needle passed to find_substr_byte_ranges.
@@ -2484,17 +2693,18 @@ fn build_search_sql(whole_word: bool, case_sensitive: bool, with_project_filter:
         ""
     };
 
-    // Project-level scoping.  When the composite filter contributes an
-    // objects_expr (today: ProjectFilterMixin), the caller resolves it to
-    // a Vec<i32> of project_ids and we filter `o.project_id` directly.
-    // Content shared across projects is naturally scoped: for each cs row
-    // the JOIN produces one object per project that references it, and
-    // `o.project_id = ANY($N)` keeps only those in the caller's project
-    // set.  Slot shifts based on whether $3 holds the LIKE pattern.
-    let project_filter = match (with_project_filter, uses_like_pattern) {
-        (false, _) => "",
-        (true, true) => " AND o.project_id = ANY($4)",
-        (true, false) => " AND o.project_id = ANY($3)",
+    // Project-level scoping: ALWAYS present.  Per-root populate scopes
+    // every search to one project; the caller intersects the composite
+    // filter's resolved project set with the root's project and binds the
+    // result (possibly empty — zero rows, the uniform empty base).  Content
+    // shared across projects is naturally scoped: for each cs row the JOIN
+    // produces one object per project that references it, and
+    // `o.project_id = ANY($N)` keeps only the caller's.  Slot shifts based
+    // on whether $3 holds the LIKE pattern.
+    let project_filter = if uses_like_pattern {
+        " AND o.project_id = ANY($4)"
+    } else {
+        " AND o.project_id = ANY($3)"
     };
 
     format!(
@@ -2507,7 +2717,7 @@ fn build_search_sql(whole_word: bool, case_sensitive: bool, with_project_filter:
          JOIN index.objects o ON o.content_hash = cs.content_hash \
          CROSS JOIN LATERAL index.find_substr_byte_ranges({haystack}, {needle}, $2) AS p \
          WHERE {pre_filter}{project_filter}{boundary} \
-         ORDER BY o.project_id, o.id, p.start_byte \
+         ORDER BY o.id, p.start_byte \
          LIMIT $2",
         haystack = haystack_expr,
         needle = needle_expr,
@@ -2530,7 +2740,7 @@ impl Index {
     /// Returns at most `limit` matches.  The fence is enforced via SQL
     /// `LIMIT N+1`: if more than `limit` rows came back, the (limit+1)th is
     /// dropped and `truncated = true` is returned so the caller can persist
-    /// the flag on the eph_layer and surface the warning.
+    /// the flag on the layer and surface the warning.
     ///
     /// Takes a caller-supplied connection: the only caller is search's
     /// deferred populate closure, which runs inside an [`EphTransaction`]
@@ -2544,37 +2754,36 @@ impl Index {
         whole_word: bool,
         composite_filter: &CompositeFilter,
         limit: usize,
+        project_id: i32,
     ) -> Result<(Vec<SearchMatchRow>, bool)> {
         use crate::schema_diesel::objects;
         use diesel::sql_types::{Array, Integer, Text};
 
         let limit_plus_one = (limit as i32).saturating_add(1);
 
-        // Two-step: resolve visible_project_ids via the typed objects_expr
-        // hop when the composite filter constrains objects; pass None
-        // otherwise so the SQL skips the project JOIN entirely.  No special-
-        // casing per filter type — any future FilterLeaf that implements
-        // objects_expr will be picked up automatically.
-        //
-        // We pick out the *distinct project_ids* from the matching objects so
-        // the SQL can JOIN content_store_projects on a tiny int[] (typically
-        // a single project) rather than the 99k-row visible_obj_ids list a
-        // wide project would otherwise emit.
-        let visible_project_ids: Option<Vec<i32>> =
-            if let Some(expr) = composite_filter.compose_objects() {
-                let ids = objects::table
+        // Per-root scoping is computed as bind PREPARATION (not row
+        // filtering): when the composite filter constrains objects (today:
+        // ProjectFilterMixin via objects_expr), a single indexed EXISTS
+        // probe answers the only question asked — "does this root's project
+        // pass the filter" — instead of loading every matching project's
+        // id.  With no filter, the root's project passes through.  The
+        // resulting bind is `[project_id]` or `[]` — an empty array yields
+        // zero rows, the uniform empty base for a filtered-out root.  No
+        // special-casing per filter type — any future FilterLeaf that
+        // implements objects_expr is picked up automatically (the typed
+        // expression is applied verbatim inside the probe).
+        let passes = match composite_filter.compose_objects() {
+            Some(expr) => diesel::select(diesel::dsl::exists(
+                objects::table
                     .filter(expr)
-                    .select(objects::project_id)
-                    .distinct()
-                    .load::<i32>(&mut *connection)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to resolve visible project ids for search: {}", e)
-                    })?;
-                Some(ids)
-            } else {
-                None
-            };
+                    .filter(objects::project_id.eq(project_id)),
+            ))
+            .get_result::<bool>(&mut *connection)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to probe project visibility for search: {}", e))?,
+            None => true,
+        };
+        let project_ids: Vec<i32> = if passes { vec![project_id] } else { Vec::new() };
 
         // Variant 3 (whole_word=true, case_sensitive=false) uses the tsvector
         // pre-filter and does not reference $3; binding the LIKE pattern
@@ -2588,39 +2797,23 @@ impl Index {
             None
         };
 
-        let sql = build_search_sql(whole_word, case_sensitive, visible_project_ids.is_some());
+        let sql = build_search_sql(whole_word, case_sensitive);
 
-        let rows: Vec<SearchMatchRow> = match (like_pattern.as_ref(), visible_project_ids.as_ref())
-        {
-            (Some(pat), Some(ids)) => {
+        let rows: Vec<SearchMatchRow> = match like_pattern.as_ref() {
+            Some(pat) => {
                 diesel::sql_query(&sql)
                     .bind::<Text, _>(query)
                     .bind::<Integer, _>(limit_plus_one)
                     .bind::<Text, _>(pat)
-                    .bind::<Array<Integer>, _>(ids)
+                    .bind::<Array<Integer>, _>(&project_ids)
                     .load::<SearchMatchRow>(&mut *connection)
                     .await
             }
-            (Some(pat), None) => {
+            None => {
                 diesel::sql_query(&sql)
                     .bind::<Text, _>(query)
                     .bind::<Integer, _>(limit_plus_one)
-                    .bind::<Text, _>(pat)
-                    .load::<SearchMatchRow>(&mut *connection)
-                    .await
-            }
-            (None, Some(ids)) => {
-                diesel::sql_query(&sql)
-                    .bind::<Text, _>(query)
-                    .bind::<Integer, _>(limit_plus_one)
-                    .bind::<Array<Integer>, _>(ids)
-                    .load::<SearchMatchRow>(&mut *connection)
-                    .await
-            }
-            (None, None) => {
-                diesel::sql_query(&sql)
-                    .bind::<Text, _>(query)
-                    .bind::<Integer, _>(limit_plus_one)
+                    .bind::<Array<Integer>, _>(&project_ids)
                     .load::<SearchMatchRow>(&mut *connection)
                     .await
             }
@@ -2652,12 +2845,12 @@ pub struct ImplicitEdge {
     pub to_instance_id: i64,
     #[diesel(sql_type = diesel::sql_types::BigInt)]
     pub from_instance_id: i64,
-    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
-    pub sr_eph_layer: Option<i64>,
-    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
-    pub from_eph_layer: Option<i64>,
-    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
-    pub to_eph_layer: Option<i64>,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    pub sr_layer: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    pub from_layer: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    pub to_layer: i64,
 }
 
 /// Holds a pooled connection with an open transaction for atomic ephemeral layer
@@ -2670,7 +2863,7 @@ pub struct EphTransaction<'a> {
     conn: bb8::PooledConnection<'a, AsyncPgConnection>,
     layer_id: i64,
     created: bool,
-    /// Value of `eph_layers.truncated` as observed when the layer was opened.
+    /// Value of `layers.truncated` as observed when the layer was opened.
     /// On a cache hit this is what the layer's original creator wrote.  On a
     /// cache miss it is the freshly-inserted default (false); the populate
     /// callback may flip it via [`mark_truncated`].
@@ -2703,16 +2896,31 @@ impl<'a> EphTransaction<'a> {
         self.truncated_on_open
     }
 
-    /// Insert a batch of rows into this layer within the open transaction.
-    /// Returns the IDs of inserted symbols (in insertion order), empty if no symbols.
-    pub async fn insert_batch(&mut self, batch: &LayerBatch) -> Result<Vec<i64>> {
-        let symbol_ids = self.insert_symbols(&batch.symbols).await?;
-        self.insert_instances(&batch.instances).await?;
-        self.insert_refs(&batch.refs).await?;
+    /// Insert a batch of rows into this layer, scoped to one project: rows
+    /// whose object (or explicit `project_id`, for symbols) does not belong
+    /// to `project_id` are filtered out by the SQL itself — a per-root layer
+    /// contains exactly one project's rows, and the partitioning lives in
+    /// the insert statements, never in Rust.  Note the resulting
+    /// micro-semantic: an instance/ref naming an object outside the project
+    /// is silently dropped by the JOIN rather than raising an FK error
+    /// (only reachable via hand-written `layer {}` ops; these inserts are
+    /// already non-exact via ON CONFLICT DO NOTHING).
+    /// Returns the IDs of inserted symbols (in insertion order).
+    pub async fn insert_batch(&mut self, batch: &LayerBatch, project_id: i32) -> Result<Vec<i64>> {
+        let symbol_ids = self
+            .insert_symbols_scoped(&batch.symbols, project_id)
+            .await?;
+        self.insert_instances_scoped(&batch.instances, project_id)
+            .await?;
+        self.insert_refs_scoped(&batch.refs, project_id).await?;
         Ok(symbol_ids)
     }
 
-    async fn insert_symbols(&mut self, rows: &[EphSymbolRow]) -> Result<Vec<i64>> {
+    async fn insert_symbols_scoped(
+        &mut self,
+        rows: &[EphSymbolRow],
+        project_id: i32,
+    ) -> Result<Vec<i64>> {
         if rows.is_empty() {
             return Ok(Vec::new());
         }
@@ -2729,11 +2937,12 @@ impl<'a> EphTransaction<'a> {
         let leaf_names: Vec<&str> = rows.iter().map(|r| r.leaf_name.as_str()).collect();
 
         let inserted: Vec<IdRow> = diesel::sql_query(
-            "INSERT INTO index.symbols (id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name, eph_layer) \
+            "INSERT INTO index.symbols (id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name, layer) \
              SELECT nextval('index.eph_symbol_id_seq'), \
                     t.name, t.path::ltree, t.project_id, t.symbol_type, t.scope, t.leaf_name, $7 \
              FROM UNNEST($1::text[], $2::text[], $3::int4[], $4::int4[], $5::int4[], $6::text[]) \
              AS t(name, path, project_id, symbol_type, scope, leaf_name) \
+             WHERE t.project_id = $8 \
              RETURNING id"
         )
             .bind::<Array<Text>, _>(&names)
@@ -2743,6 +2952,7 @@ impl<'a> EphTransaction<'a> {
             .bind::<Array<Nullable<Integer>>, _>(&scopes)
             .bind::<Array<Text>, _>(&leaf_names)
             .bind::<BigInt, _>(layer_id)
+            .bind::<Integer, _>(project_id)
             .get_results(conn)
             .await
             .map_err(|e| explain_eph_insert_err("Failed to batch insert eph symbols", e))?;
@@ -2750,7 +2960,11 @@ impl<'a> EphTransaction<'a> {
         Ok(inserted.into_iter().map(|r| r.id).collect())
     }
 
-    async fn insert_instances(&mut self, rows: &[EphInstanceRow]) -> Result<()> {
+    async fn insert_instances_scoped(
+        &mut self,
+        rows: &[EphInstanceRow],
+        project_id: i32,
+    ) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
@@ -2766,11 +2980,12 @@ impl<'a> EphTransaction<'a> {
         let instance_types: Vec<i32> = rows.iter().map(|r| r.instance_type).collect();
 
         diesel::sql_query(
-            "INSERT INTO index.symbol_instances (id, symbol, object_id, offset_range, instance_type, eph_layer) \
+            "INSERT INTO index.symbol_instances (id, symbol, object_id, offset_range, instance_type, layer) \
              SELECT nextval('index.eph_instance_id_seq'), \
                     t.symbol_id, t.object_id, int4range(t.start_off, t.end_off), t.instance_type, $6 \
              FROM UNNEST($1::int8[], $2::int4[], $3::int4[], $4::int4[], $5::int4[]) \
              AS t(symbol_id, object_id, start_off, end_off, instance_type) \
+             JOIN index.objects o ON o.id = t.object_id AND o.project_id = $7 \
              ON CONFLICT DO NOTHING"
         )
             .bind::<Array<BigInt>,  _>(&sym_ids)
@@ -2779,13 +2994,14 @@ impl<'a> EphTransaction<'a> {
             .bind::<Array<Integer>, _>(&ends)
             .bind::<Array<Integer>, _>(&instance_types)
             .bind::<BigInt, _>(layer_id)
+            .bind::<Integer, _>(project_id)
             .execute(conn)
             .await
             .map_err(|e| explain_eph_insert_err("Failed to batch insert eph instances", e))?;
         Ok(())
     }
 
-    async fn insert_refs(&mut self, rows: &[EphRefRow]) -> Result<()> {
+    async fn insert_refs_scoped(&mut self, rows: &[EphRefRow], project_id: i32) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
@@ -2800,21 +3016,23 @@ impl<'a> EphTransaction<'a> {
         let ends: Vec<i32> = try_offsets(rows.iter().map(|r| r.end), "end")?;
 
         diesel::sql_query(
-            "INSERT INTO index.symbol_refs (id, to_symbol, from_object, from_offset_range, eph_layer) \
+            "INSERT INTO index.symbol_refs (id, to_symbol, from_object, from_offset_range, layer) \
              SELECT nextval('index.eph_ref_id_seq'), \
                     t.to_symbol, t.from_object, int4range(t.start_off, t.end_off), $5 \
              FROM UNNEST($1::int8[], $2::int4[], $3::int4[], $4::int4[]) \
              AS t(to_symbol, from_object, start_off, end_off) \
-             ON CONFLICT DO NOTHING"
+             JOIN index.objects o ON o.id = t.from_object AND o.project_id = $6 \
+             ON CONFLICT DO NOTHING",
         )
-            .bind::<Array<BigInt>,  _>(&to_symbols)
-            .bind::<Array<Integer>, _>(&from_objects)
-            .bind::<Array<Integer>, _>(&starts)
-            .bind::<Array<Integer>, _>(&ends)
-            .bind::<BigInt, _>(layer_id)
-            .execute(conn)
-            .await
-            .map_err(|e| explain_eph_insert_err("Failed to batch insert eph refs", e))?;
+        .bind::<Array<BigInt>, _>(&to_symbols)
+        .bind::<Array<Integer>, _>(&from_objects)
+        .bind::<Array<Integer>, _>(&starts)
+        .bind::<Array<Integer>, _>(&ends)
+        .bind::<BigInt, _>(layer_id)
+        .bind::<Integer, _>(project_id)
+        .execute(conn)
+        .await
+        .map_err(|e| explain_eph_insert_err("Failed to batch insert eph refs", e))?;
         Ok(())
     }
 
@@ -2823,9 +3041,9 @@ impl<'a> EphTransaction<'a> {
     /// has succeeded.  Must run inside the same transaction as the populate
     /// inserts so the flag and the rows commit atomically.
     pub async fn mark_populated(&mut self) -> Result<()> {
-        use crate::schema_diesel::eph_layers;
-        diesel::update(eph_layers::table.filter(eph_layers::id.eq(self.layer_id)))
-            .set(eph_layers::populated.eq(true))
+        use crate::schema_diesel::layers;
+        diesel::update(layers::table.filter(layers::id.eq(self.layer_id)))
+            .set(layers::populated.eq(true))
             .execute(&mut *self.conn)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to mark eph layer populated: {}", e))?;
@@ -2837,9 +3055,9 @@ impl<'a> EphTransaction<'a> {
     /// layer (cache miss).  Cache hits do NOT call this — they inherit the
     /// value already on the row (see `truncated_on_open`).
     pub async fn mark_truncated(&mut self, truncated: bool) -> Result<()> {
-        use crate::schema_diesel::eph_layers;
-        diesel::update(eph_layers::table.filter(eph_layers::id.eq(self.layer_id)))
-            .set(eph_layers::truncated.eq(truncated))
+        use crate::schema_diesel::layers;
+        diesel::update(layers::table.filter(layers::id.eq(self.layer_id)))
+            .set(layers::truncated.eq(truncated))
             .execute(&mut *self.conn)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to mark eph layer truncated: {}", e))?;
@@ -2883,40 +3101,92 @@ impl Drop for EphTransaction<'_> {
 mod tests {
     use super::*;
 
+    /// Per-root base-layer identity: identical verb inputs against different
+    /// roots key different bases, the fold is stable per (root, hash), and —
+    /// the reuse property — the v2 domain is disjoint from the multi-root
+    /// v1 fold so upgrades strand (rather than alias) old cache rows.
+    #[test]
+    fn root_salted_hash_scopes_cache_per_root() {
+        let verb_hash = [7u8; 32];
+        let r1 = RootLayer {
+            project_id: 1,
+            id: 1,
+            hash: vec![0x11; 32],
+        };
+        let r2 = RootLayer {
+            project_id: 2,
+            id: 2,
+            hash: vec![0x22; 32],
+        };
+
+        let k1 = root_salted_hash(&r1, &verb_hash);
+        let k2 = root_salted_hash(&r2, &verb_hash);
+        assert_ne!(k1, k2, "different roots must key different bases");
+        assert_ne!(k1, verb_hash, "salting must change the verb hash");
+        assert_eq!(
+            k1,
+            root_salted_hash(&r1, &verb_hash),
+            "same (root, verb hash) must fold deterministically"
+        );
+    }
+
     /// Pins the disjointness property of the partition at the SQL level,
     /// with no database: the eph-branch instantiation must render the
-    /// `NOT (...all recorded columns IS NULL...)` guard over every
+    /// `NOT (...all recorded columns = ANY($roots)...)` guard over every
     /// selected-row eph column, and the persistent instantiation must not
-    /// embed the chain ids anywhere (its rendered SQL is the cache key —
-    /// chain-freedom IS the sharing guarantee).
+    /// embed the chain ids anywhere (its rendered SQL + binds are the cache
+    /// key — chain-freedom IS the sharing guarantee; root ids in the binds
+    /// are by design, they scope the key to the visible projects).
     #[test]
     fn branch_sql_renders_guard_and_stays_chain_free() {
-        let eph = EphContext::from_slice(&[-7]);
+        let mut eph = EphContext::rooted(vec![RootLayer {
+            project_id: 1,
+            id: 424242,
+            hash: vec![0x42; 32],
+        }]);
+        eph.push_round(&[(424242, -7)]);
 
         let evis = EphVisibility::eph_touching(&eph);
         let eq = build_parents_query(vec![1, 2], &evis).filter(evis.guard());
         let esql = format!("{:?}", diesel::debug_query::<Pg, _>(&eq));
+        for col in [
+            "symbol_refs.layer",
+            "symbols.layer",
+            "symbol_instances.layer",
+            "parent_decls.layer",
+            "parent_symbols.layer",
+        ] {
+            assert!(
+                esql.contains(&format!("{col} = ANY(")),
+                "eph branch must render visibility for {col}, got: {esql}"
+            );
+        }
         assert!(
             esql.contains(
-                "NOT (symbol_refs.eph_layer IS NULL AND symbols.eph_layer IS NULL \
-                 AND symbol_instances.eph_layer IS NULL AND parent_decls.eph_layer IS NULL \
-                 AND parent_symbols.eph_layer IS NULL)"
+                "NOT (symbol_refs.layer > 0 AND symbols.layer > 0 AND \
+                 symbol_instances.layer > 0 AND parent_decls.layer > 0 AND \
+                 parent_symbols.layer > 0)"
             ),
-            "eph branch must render the disjointness guard over all five \
-             recorded columns, got: {esql}"
+            "eph branch must render the bind-free sign-form disjointness guard \
+             over all five recorded columns, got: {esql}"
         );
 
-        let pvis = EphVisibility::persistent_only();
+        let pvis = EphVisibility::root_only(&eph);
         let pq = build_parents_query(vec![1, 2], &pvis).filter(pvis.guard());
         let psql = format!("{:?}", diesel::debug_query::<Pg, _>(&pq));
         assert!(
-            psql.contains("symbols.eph_layer IS NULL"),
-            "persistent branch pins columns to IS NULL, got: {psql}"
+            psql.contains("symbols.layer = ANY("),
+            "persistent branch pins columns to the root set, got: {psql}"
         );
         assert!(
-            !psql.contains("-7") && !psql.contains("eph_layer = ANY"),
-            "persistent branch must not embed chain ids or chain-visibility \
-             binds — its rendered SQL is the chain-free cache key, got: {psql}"
+            psql.contains("424242"),
+            "persistent branch binds the root ids — they scope the cache key \
+             to the visible projects, got: {psql}"
+        );
+        assert!(
+            !psql.contains("-7"),
+            "persistent branch must not embed chain ids — its rendered SQL is \
+             the chain-free cache key, got: {psql}"
         );
     }
 }

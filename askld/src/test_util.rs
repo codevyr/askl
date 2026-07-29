@@ -217,12 +217,26 @@ pub async fn run_query_traced_on(
     index: Index,
     askl_query: &str,
 ) -> Result<(ExecutionResult, Vec<crate::command::LayerActivation>)> {
+    // Same per-request root resolution as the API entry point.
+    let roots = index.load_root_layers().await?;
+    run_query_traced_with_roots(index, roots, askl_query).await
+}
+
+/// Like [`run_query_traced_on`], but with an explicit visible root set —
+/// the hook for per-root cache-reuse tests: request-level root narrowing
+/// (multitenancy, versioning) does not exist yet, so tests construct the
+/// narrowed set directly, exactly as a narrowing entry point would.
+pub async fn run_query_traced_with_roots(
+    index: Index,
+    roots: Vec<index::db_diesel::RootLayer>,
+    askl_query: &str,
+) -> Result<(ExecutionResult, Vec<crate::command::LayerActivation>)> {
     let cfg = ControlFlowGraph::from_symbols(index);
 
     let ast = parse(askl_query)?;
     println!("{:#?}", ast);
 
-    let mut ctx = ExecutionContext::new();
+    let mut ctx = ExecutionContext::new(roots);
     let res = ast.execute(&mut ctx, &cfg).await?;
     Ok((res, ctx.layer_activations))
 }

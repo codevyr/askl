@@ -25,7 +25,7 @@ diesel::table! {
         object_id -> Integer,
         offset_range -> Int4range,
         instance_type -> Integer,
-        eph_layer -> Nullable<BigInt>,
+        layer -> BigInt,
     }
 }
 
@@ -71,6 +71,7 @@ diesel::table! {
         upload_status -> Text,
         symbol_chunks_total -> Nullable<Integer>,
         object_chunks_total -> Nullable<Integer>,
+        root_layer_id -> BigInt,
     }
 }
 
@@ -96,7 +97,7 @@ diesel::table! {
         to_symbol -> BigInt,
         from_object -> Integer,
         from_offset_range -> Int4range,
-        eph_layer -> Nullable<BigInt>,
+        layer -> BigInt,
     }
 }
 
@@ -112,12 +113,12 @@ diesel::table! {
         symbol_type -> Integer,
         symbol_scope -> Nullable<Integer>,
         leaf_name -> Text,
-        eph_layer -> Nullable<BigInt>,
+        layer -> BigInt,
     }
 }
 
 diesel::table! {
-    index.eph_layers (id) {
+    index.layers (id) {
         id -> BigInt,
         parent_id -> Nullable<BigInt>,
         hash -> Binary,
@@ -140,7 +141,7 @@ diesel::joinable!(symbol_refs -> symbols (to_symbol));
 diesel::joinable!(symbols -> projects (project_id));
 diesel::joinable!(symbols -> symbol_types (symbol_type));
 diesel::allow_tables_to_appear_in_same_query!(
-    eph_layers,
+    layers,
     instance_types,
     symbol_instances,
     symbol_types,

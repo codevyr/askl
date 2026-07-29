@@ -98,7 +98,7 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
             &empty_filter,
             ScopeContext::Skip,
             ScopeContext::Skip,
-            &EphContext::new(),
+            &EphContext::rooted(index.load_root_layers().await?),
         )
         .await?
         .into_inner();
@@ -116,7 +116,7 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
             &a_filter,
             ScopeContext::Skip,
             ScopeContext::Skip,
-            &EphContext::new(),
+            &EphContext::rooted(index.load_root_layers().await?),
         )
         .await?
         .into_inner();
@@ -132,7 +132,7 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
             &main_filter,
             ScopeContext::Skip,
             ScopeContext::Skip,
-            &EphContext::new(),
+            &EphContext::rooted(index.load_root_layers().await?),
         )
         .await?
         .into_inner();
@@ -158,7 +158,7 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
             &compound_filter,
             ScopeContext::Skip,
             ScopeContext::Skip,
-            &EphContext::new(),
+            &EphContext::rooted(index.load_root_layers().await?),
         )
         .await?
         .into_inner();
@@ -190,7 +190,7 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
             &filter1,
             ScopeContext::Skip,
             ScopeContext::Skip,
-            &EphContext::new(),
+            &EphContext::rooted(index.load_root_layers().await?),
         )
         .await?
         .into_inner();
@@ -214,7 +214,7 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
             &filter2,
             ScopeContext::Skip,
             ScopeContext::Skip,
-            &EphContext::new(),
+            &EphContext::rooted(index.load_root_layers().await?),
         )
         .await?
         .into_inner();
@@ -237,7 +237,7 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
             &filter3,
             ScopeContext::Skip,
             ScopeContext::Skip,
-            &EphContext::new(),
+            &EphContext::rooted(index.load_root_layers().await?),
         )
         .await?
         .into_inner();

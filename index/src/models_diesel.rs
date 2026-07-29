@@ -23,7 +23,7 @@ pub struct SymbolInstance {
     pub object_id: i32,
     pub offset_range: (Bound<i32>, Bound<i32>),
     pub instance_type: i32,
-    pub eph_layer: Option<i64>,
+    pub layer: i64,
 }
 
 #[derive(Clone, Queryable, Selectable, Identifiable, Associations, Debug, PartialEq, Eq, Hash)]
@@ -48,6 +48,7 @@ pub struct Project {
     pub project_name: String,
     pub root_path: String,
     pub upload_status: String,
+    pub root_layer_id: i64,
 }
 
 #[derive(
@@ -73,7 +74,7 @@ pub struct Symbol {
     pub symbol_type: i32,
     pub symbol_scope: Option<i32>,
     pub leaf_name: String,
-    pub eph_layer: Option<i64>,
+    pub layer: i64,
 }
 
 #[derive(Debug, QueryableByName)]
@@ -90,13 +91,13 @@ pub struct SymbolRef {
     pub to_symbol: i64,
     pub from_object: i32,
     pub from_offset_range: (Bound<i32>, Bound<i32>),
-    pub eph_layer: Option<i64>,
+    pub layer: i64,
 }
 
 #[derive(Clone, Queryable, Selectable, Identifiable, Debug, PartialEq)]
-#[diesel(table_name = crate::schema_diesel::eph_layers)]
+#[diesel(table_name = crate::schema_diesel::layers)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct EphLayer {
+pub struct Layer {
     pub id: i64,
     pub parent_id: Option<i64>,
     pub hash: Vec<u8>,
@@ -105,8 +106,8 @@ pub struct EphLayer {
 }
 
 #[derive(Insertable, Debug)]
-#[diesel(table_name = crate::schema_diesel::eph_layers)]
-pub struct NewEphLayer<'a> {
+#[diesel(table_name = crate::schema_diesel::layers)]
+pub struct NewLayer<'a> {
     pub parent_id: Option<i64>,
     pub hash: &'a [u8],
     pub kind: &'a str,

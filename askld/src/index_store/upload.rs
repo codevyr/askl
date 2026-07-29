@@ -108,7 +108,8 @@ impl IndexStore {
                 return Ok(());
             }
 
-            let symbol_rows = build_symbols(project_id, &symbols)?;
+            let root_layer_id = root_layer_of(conn, project_id).await?;
+            let symbol_rows = build_symbols(project_id, root_layer_id, &symbols)?;
             for chunk in symbol_rows.chunks(MAX_SYMBOL_INSERT_ROWS) {
                 let chunk_vec: Vec<NewSymbol> = chunk.to_vec();
                 diesel::insert_into(index_schema::symbols::table)
@@ -307,19 +308,20 @@ async fn create_project(
     symbol_chunks_total: Option<i32>,
     object_chunks_total: Option<i32>,
 ) -> Result<(i32, bool), UploadError> {
-    let existing: Option<(i32, UploadStatus, Option<i32>)> = index_schema::projects::table
+    let existing: Option<(i32, UploadStatus, Option<i32>, i64)> = index_schema::projects::table
         .filter(index_schema::projects::project_name.eq(&project_name))
         .select((
             index_schema::projects::id,
             index_schema::projects::upload_status,
             index_schema::projects::symbol_chunks_total,
+            index_schema::projects::root_layer_id,
         ))
         .for_update()
         .first(conn)
         .await
         .optional()?;
 
-    if let Some((existing_id, existing_status, stored_sym_total)) = existing {
+    if let Some((existing_id, existing_status, stored_sym_total, existing_root)) = existing {
         match existing_status {
             UploadStatus::Uploading => {
                 // Validate chunk totals match so we don't silently resume a stale upload.
@@ -349,6 +351,15 @@ async fn create_project(
                 )
                 .execute(conn)
                 .await?;
+                // The zombie's root layer follows its project (project row
+                // first — its FK blocks deleting the root of a live
+                // project).  The layer's ON DELETE CASCADE sweeps any of
+                // the zombie's remaining data rows.
+                diesel::delete(
+                    index_schema::layers::table.filter(index_schema::layers::id.eq(existing_root)),
+                )
+                .execute(conn)
+                .await?;
                 // This cascade-deletes the zombie's persistent rows — a
                 // persistent-index mutation like any other, so the eph
                 // cache must be purged in the same transaction (the
@@ -368,6 +379,38 @@ async fn create_project(
         }
     }
 
+    // Create the project's root layer in the same transaction, before the
+    // project row (its NOT NULL FK requires the layer to exist).  Positive
+    // id from the dedicated root sequence — ephemeral layers are negative —
+    // via a plain insert, never the hash-upsert cache path: roots are not
+    // cache entries.  The hash is 32 uniform random bytes of identity for
+    // now; when project versioning lands this becomes the content/version
+    // digest.  (The migration's one-shot backfill uses gen_random_uuid()
+    // concatenation instead — an intentional, documented divergence.)
+    let root_hash: Vec<u8> = {
+        use rand::RngCore;
+        let mut h = vec![0u8; 32];
+        rand::thread_rng().fill_bytes(&mut h);
+        h
+    };
+    #[derive(diesel::QueryableByName)]
+    struct RootIdRow {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        id: i64,
+    }
+    let root_layer_id: i64 = diesel::sql_query(
+        "INSERT INTO index.layers (id, parent_id, hash, kind, populated) \
+         OVERRIDING SYSTEM VALUE \
+         VALUES (nextval('index.root_layer_id_seq'), NULL, $1, $2, TRUE) \
+         RETURNING id",
+    )
+    .bind::<diesel::sql_types::Binary, _>(root_hash)
+    .bind::<diesel::sql_types::Text, _>(index::db_diesel::EphLayerKind::Root.as_str())
+    .get_result::<RootIdRow>(conn)
+    .await
+    .map_err(|e| UploadError::Storage(e.to_string()))?
+    .id;
+
     let insert_result: Result<i32, DieselError> =
         diesel::insert_into(index_schema::projects::table)
             .values(NewProject {
@@ -376,6 +419,7 @@ async fn create_project(
                 upload_status: UploadStatus::Uploading,
                 symbol_chunks_total,
                 object_chunks_total,
+                root_layer_id,
             })
             .returning(index_schema::projects::id)
             .get_result(conn)
@@ -435,7 +479,9 @@ async fn do_upload_objects(
     let object_map = insert_objects(conn, &mut object_inserts).await?;
     tracing::info!(inserted = object_map.len(), "upload_objects: objects done");
 
-    let instance_rows = build_symbol_instances(project_id, &upload.objects, &object_map)?;
+    let root_layer_id = root_layer_of(conn, project_id).await?;
+    let instance_rows =
+        build_symbol_instances(project_id, root_layer_id, &upload.objects, &object_map)?;
     tracing::info!(
         count = instance_rows.len(),
         "upload_objects: inserting instances"
@@ -443,12 +489,23 @@ async fn do_upload_objects(
     insert_symbol_instances(conn, &instance_rows).await?;
     tracing::info!("upload_objects: instances done");
 
-    let ref_rows = build_symbol_refs(project_id, &upload.objects, &object_map)?;
+    let ref_rows = build_symbol_refs(project_id, root_layer_id, &upload.objects, &object_map)?;
     tracing::info!(count = ref_rows.len(), "upload_objects: inserting refs");
     insert_symbol_refs(conn, &ref_rows).await?;
     tracing::info!("upload_objects: refs done");
 
     Ok(())
+}
+
+/// The project's root layer id — every persistent row inserted for the
+/// project is tagged with it (fetched once per chunk).
+async fn root_layer_of(conn: &mut AsyncPgConnection, project_id: i32) -> Result<i64, UploadError> {
+    index_schema::projects::table
+        .filter(index_schema::projects::id.eq(project_id))
+        .select(index_schema::projects::root_layer_id)
+        .first(conn)
+        .await
+        .map_err(|e| UploadError::Storage(e.to_string()))
 }
 
 fn resolve_object_id(map: &HashMap<i64, i32>, local_id: i64) -> Result<i32, UploadError> {
@@ -640,7 +697,11 @@ async fn insert_objects(
     Ok(object_map)
 }
 
-fn build_symbols(project_id: i32, symbols: &[UploadSymbol]) -> Result<Vec<NewSymbol>, UploadError> {
+fn build_symbols(
+    project_id: i32,
+    root_layer_id: i64,
+    symbols: &[UploadSymbol],
+) -> Result<Vec<NewSymbol>, UploadError> {
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
     for symbol in symbols {
@@ -666,6 +727,7 @@ fn build_symbols(project_id: i32, symbols: &[UploadSymbol]) -> Result<Vec<NewSym
             symbol_type,
             symbol_scope,
             leaf_name,
+            layer: root_layer_id,
         });
     }
     Ok(rows)
@@ -673,6 +735,7 @@ fn build_symbols(project_id: i32, symbols: &[UploadSymbol]) -> Result<Vec<NewSym
 
 fn build_symbol_instances(
     project_id: i32,
+    root_layer_id: i64,
     objects: &[UploadObject],
     object_map: &HashMap<i64, i32>,
 ) -> Result<Vec<NewSymbolInstance>, UploadError> {
@@ -691,6 +754,7 @@ fn build_symbol_instances(
                 object_id,
                 offset_range: instance.start_offset..instance.end_offset,
                 instance_type,
+                layer: root_layer_id,
             });
         }
     }
@@ -699,6 +763,7 @@ fn build_symbol_instances(
 
 fn build_symbol_refs(
     project_id: i32,
+    root_layer_id: i64,
     objects: &[UploadObject],
     object_map: &HashMap<i64, i32>,
 ) -> Result<Vec<NewSymbolRef>, UploadError> {
@@ -711,6 +776,7 @@ fn build_symbol_refs(
                 to_symbol: symbol_id,
                 from_object: object_id,
                 from_offset_range: reference.from_offset_start..reference.from_offset_end,
+                layer: root_layer_id,
             });
         }
     }
@@ -728,6 +794,7 @@ async fn insert_symbol_instances(
                 index_schema::symbol_instances::symbol,
                 index_schema::symbol_instances::object_id,
                 index_schema::symbol_instances::offset_range,
+                index_schema::symbol_instances::layer,
             ))
             .do_nothing()
             .execute(conn)
@@ -747,6 +814,7 @@ async fn insert_symbol_refs(
                 index_schema::symbol_refs::to_symbol,
                 index_schema::symbol_refs::from_object,
                 index_schema::symbol_refs::from_offset_range,
+                index_schema::symbol_refs::layer,
             ))
             .do_nothing()
             .execute(conn)
@@ -876,7 +944,7 @@ mod tests {
 
     #[test]
     fn build_symbols_basic_fields() {
-        let result = build_symbols(100, &[sym(1, "foo::bar", 1, 0)]).unwrap();
+        let result = build_symbols(100, 1000001, &[sym(1, "foo::bar", 1, 0)]).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, (100i64 << 32) | 1);
         assert_eq!(result[0].name, "foo::bar");
@@ -886,24 +954,24 @@ mod tests {
 
     #[test]
     fn build_symbols_zero_scope_maps_to_none() {
-        let result = build_symbols(1, &[sym(1, "x", 1, 0)]).unwrap();
+        let result = build_symbols(1, 1000001, &[sym(1, "x", 1, 0)]).unwrap();
         assert_eq!(result[0].symbol_scope, None);
     }
 
     #[test]
     fn build_symbols_nonzero_scope_maps_to_some() {
-        let result = build_symbols(1, &[sym(1, "x", 1, 2)]).unwrap();
+        let result = build_symbols(1, 1000001, &[sym(1, "x", 1, 2)]).unwrap();
         assert_eq!(result[0].symbol_scope, Some(2));
     }
 
     #[test]
     fn build_symbols_duplicate_local_id_is_err() {
-        assert!(build_symbols(1, &[sym(1, "a", 1, 0), sym(1, "b", 1, 0)]).is_err());
+        assert!(build_symbols(1, 1000001, &[sym(1, "a", 1, 0), sym(1, "b", 1, 0)]).is_err());
     }
 
     #[test]
     fn build_symbols_invalid_type_is_err() {
-        assert!(build_symbols(1, &[sym(1, "a", 99, 0)]).is_err());
+        assert!(build_symbols(1, 1000001, &[sym(1, "a", 99, 0)]).is_err());
     }
 
     // --- build_objects ---
@@ -982,7 +1050,7 @@ mod tests {
             ..Default::default()
         };
         let obj_map = HashMap::from([(1i64, 100i32)]);
-        let rows = build_symbol_instances(7, &[object], &obj_map).unwrap();
+        let rows = build_symbol_instances(7, 1000001, &[object], &obj_map).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].symbol, (7i64 << 32) | 10);
         assert_eq!(rows[0].object_id, 100);
@@ -998,7 +1066,7 @@ mod tests {
             ..Default::default()
         };
         let obj_map = HashMap::from([(1i64, 1i32)]);
-        let rows = build_symbol_instances(1, &[object], &obj_map).unwrap();
+        let rows = build_symbol_instances(1, 1000001, &[object], &obj_map).unwrap();
         assert_eq!(
             rows[0].instance_type,
             index::db_diesel::INSTANCE_TYPE_DEFINITION
@@ -1012,7 +1080,7 @@ mod tests {
             symbol_instances: vec![inst(1, 1, 0, 1)],
             ..Default::default()
         };
-        assert!(build_symbol_instances(1, &[object], &HashMap::new()).is_err());
+        assert!(build_symbol_instances(1, 1000001, &[object], &HashMap::new()).is_err());
     }
 
     #[test]
@@ -1023,7 +1091,7 @@ mod tests {
             ..Default::default()
         };
         let obj_map = HashMap::from([(1i64, 1i32)]);
-        assert!(build_symbol_instances(1, &[object], &obj_map).is_err());
+        assert!(build_symbol_instances(1, 1000001, &[object], &obj_map).is_err());
     }
 
     // --- build_symbol_refs ---
@@ -1044,7 +1112,7 @@ mod tests {
             ..Default::default()
         };
         let obj_map = HashMap::from([(1i64, 50i32)]);
-        let rows = build_symbol_refs(3, &[object], &obj_map).unwrap();
+        let rows = build_symbol_refs(3, 1000001, &[object], &obj_map).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].to_symbol, (3i64 << 32) | 20);
         assert_eq!(rows[0].from_object, 50);
@@ -1058,7 +1126,7 @@ mod tests {
             refs: vec![sref(1, 0, 1)],
             ..Default::default()
         };
-        assert!(build_symbol_refs(1, &[object], &HashMap::new()).is_err());
+        assert!(build_symbol_refs(1, 1000001, &[object], &HashMap::new()).is_err());
     }
 
     #[test]
@@ -1069,6 +1137,6 @@ mod tests {
             ..Default::default()
         };
         let obj_map = HashMap::from([(1i64, 1i32)]);
-        assert!(build_symbol_refs(1, &[object], &obj_map).is_err());
+        assert!(build_symbol_refs(1, 1000001, &[object], &obj_map).is_err());
     }
 }

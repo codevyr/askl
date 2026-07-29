@@ -21,28 +21,25 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// Which half of a statement's cache entry a [`LayerActivation`] refers to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LayerRole {
-    /// Parentless base layer of a partitioned entry — keyed only on verb
-    /// inputs, reused under any upstream eph context.
-    Base,
-    /// Eph-chained delta layer of a partitioned entry; pushed last, so it
-    /// is what downstream verbs chain on.
-    Supplement,
-}
+/// Which half of a root's cache entry a [`LayerActivation`] refers to —
+/// re-exported from the index crate, which produces the layers in this
+/// exact role order.
+pub use index::db_diesel::LayerRole;
 
 /// One ephemeral-layer touch by a statement: either the layer was freshly
 /// created and populated in this call (`created = true`), or the statement
 /// hit an existing cache row (`created = false`).  `truncated` mirrors the
-/// persistent `eph_layers.truncated` flag as observed by this call.
+/// persistent `layers.truncated` flag as observed by this call.
 ///
 /// Recorded on [`ExecutionContext::layer_activations`] so tests can assert
 /// cache behaviour (populate vs reuse) directly instead of inferring it
-/// from eph instance IDs.  A partitioned statement records two activations
-/// (base first, then supplement).
+/// from eph instance IDs.  A layer-creating statement records activations
+/// per visible root, roots ascending; within a root, base first, then
+/// supplement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LayerActivation {
+    /// The root whose chain this layer joined.
+    pub root_id: i64,
     pub layer_id: i64,
     pub created: bool,
     pub truncated: bool,
@@ -53,7 +50,6 @@ pub struct LayerActivation {
 pub struct ComputeResult {
     pub selections: Vec<(SelectorId, Option<Selection>)>,
     pub warnings: Vec<pest::error::Error<Rule>>,
-    pub new_eph_ids: Vec<i64>,
     pub layer_activations: Vec<LayerActivation>,
 }
 
@@ -63,7 +59,17 @@ impl ComputeResult {
             ctx.registry.add_by_id(id, selection);
         }
         statement.get_state_mut().warnings.extend(self.warnings);
-        ctx.eph.extend(self.new_eph_ids);
+        // Activations are the single source of truth for chain growth: one
+        // statement's layers join the chains as ONE atomic round (lockstep
+        // by construction — see EphContext::push_round).
+        if !self.layer_activations.is_empty() {
+            let round: Vec<(i64, i64)> = self
+                .layer_activations
+                .iter()
+                .map(|a| (a.root_id, a.layer_id))
+                .collect();
+            ctx.eph.push_round(&round);
+        }
         ctx.layer_activations.extend(self.layer_activations);
     }
 }
@@ -299,20 +305,28 @@ impl Command {
             supplement_populates.push(p.supplement_populate);
         }
 
-        let base_populate: LayerPopulate = Box::new(move |txn| {
+        // `Fn` closures run once per root; the parts are shared across those
+        // runs via `Arc` (the returned future cannot borrow the closure's
+        // environment under the HRTB, so each call clones the handle in).
+        let base_populates = std::sync::Arc::new(base_populates);
+        let supplement_populates = std::sync::Arc::new(supplement_populates);
+
+        let base_populate: LayerPopulate = Box::new(move |txn, root| {
+            let populates = std::sync::Arc::clone(&base_populates);
             Box::pin(async move {
                 let mut truncated = false;
-                for populate in base_populates {
-                    truncated |= populate(txn).await?;
+                for populate in populates.iter() {
+                    truncated |= populate(&mut *txn, root).await?;
                 }
                 Ok(truncated)
             })
         });
-        let supplement_populate: SupplementPopulate = Box::new(move |txn, base_ref| {
+        let supplement_populate: SupplementPopulate = Box::new(move |txn, root, base_ref| {
+            let populates = std::sync::Arc::clone(&supplement_populates);
             Box::pin(async move {
                 let mut truncated = false;
-                for populate in supplement_populates {
-                    truncated |= populate(txn, base_ref).await?;
+                for populate in populates.iter() {
+                    truncated |= populate(&mut *txn, root, base_ref).await?;
                 }
                 Ok(truncated)
             })
@@ -558,14 +572,12 @@ impl Command {
             return Ok(ComputeResult {
                 selections: Vec::new(),
                 warnings: Vec::new(),
-                new_eph_ids: Vec::new(),
                 layer_activations: Vec::new(),
             });
         }
 
         let mut warnings = vec![];
         let mut selections = vec![];
-        let mut new_eph_ids = vec![];
         let mut layer_activations = vec![];
 
         // Validate: each selector that requires a name constraint must have one
@@ -623,20 +635,23 @@ impl Command {
                 // materialize — those rows would be silently dropped.  The
                 // verb-side guards (with better spans) should have caught
                 // this; reaching here is an internal invariant violation.
-                if local_eph.last().is_none() && !spec.supplement_extra.is_empty() {
+                if !local_eph.has_chain() && !spec.supplement_extra.is_empty() {
                     return Err(to_pest(anyhow::anyhow!(
                         "internal error: layer spec carries supplement inputs \
                          but no ephemeral context exists before this statement"
                     )));
                 }
 
-                // Chain topology is decided here, not by the verb: the base
-                // is always parentless; the supplement (created iff the
-                // upstream chain is non-empty) chains on `eph.last()`.
-                let result = cfg
+                // Chain topology is decided here, not by the verb: per
+                // visible root, the base parents on the root and the
+                // supplement (created iff that root's chain is non-empty)
+                // chains on the root's `chain_last`.  The base hash is
+                // salted per root (`root_salted_hash`), so each root's
+                // cache entry is independent of co-visible projects.
+                let results = cfg
                     .index
                     .with_partitioned_layers(
-                        local_eph.last(),
+                        &local_eph,
                         &spec.base_hash,
                         spec.base_kind,
                         &spec.supplement_extra,
@@ -646,35 +661,34 @@ impl Command {
                     .await
                     .map_err(to_pest)?;
 
-                // Push order matters: base first, supplement last, so
-                // `eph.last()` is the supplement and downstream chaining
-                // keys keep depending on the full upstream chain.
-                let outcomes = std::iter::once((result.base, LayerRole::Base)).chain(
-                    result
-                        .supplement
-                        .into_iter()
-                        .map(|s| (s, LayerRole::Supplement)),
-                );
-
-                let mut ids = Vec::with_capacity(2);
-                let mut hit_ids = Vec::with_capacity(2);
+                let mut ids = Vec::with_capacity(results.len());
+                let mut hit_ids = Vec::with_capacity(results.len());
+                let mut round = Vec::with_capacity(results.len());
                 let mut truncated_any = false;
-                for (outcome, role) in outcomes {
-                    if !outcome.created {
-                        hit_ids.push(outcome.layer_id);
+                // Results arrive in recording order (roots ascending; base
+                // before supplement within a root), so the root's
+                // `chain_last` ends up the supplement and downstream
+                // chaining keys keep depending on that root's full
+                // upstream chain.
+                for layer in results {
+                    if !layer.outcome.created {
+                        hit_ids.push(layer.outcome.layer_id);
                     }
                     layer_activations.push(LayerActivation {
-                        layer_id: outcome.layer_id,
-                        created: outcome.created,
-                        truncated: outcome.truncated,
-                        role,
+                        root_id: layer.root_id,
+                        layer_id: layer.outcome.layer_id,
+                        created: layer.outcome.created,
+                        truncated: layer.outcome.truncated,
+                        role: layer.role,
                     });
-                    truncated_any |= outcome.truncated;
-                    new_eph_ids.push(outcome.layer_id);
-                    local_eph.push(outcome.layer_id);
-                    ids.push(outcome.layer_id);
+                    truncated_any |= layer.outcome.truncated;
+                    round.push((layer.root_id, layer.outcome.layer_id));
+                    ids.push(layer.outcome.layer_id);
                 }
-                // One LRU touch round trip for the whole pair.
+                // One atomic round: this statement's layers join every
+                // root's chain together (Phase 2 below reads via local_eph).
+                local_eph.push_round(&round);
+                // One LRU touch round trip for all roots' hits.
                 let _ = cfg.index.touch_eph_layers(&hit_ids).await;
                 (ids, truncated_any)
             }
@@ -683,7 +697,7 @@ impl Command {
         // Surface truncation warnings.  Each layer-creating selector
         // contributes a warning shaped by its own span; cache hits and
         // misses both surface the warning since the persistent
-        // `eph_layers.truncated` flag is read on both paths (for a
+        // `layers.truncated` flag is read on both paths (for a
         // partitioned entry, on either of its rows).
         if any_truncated {
             for selector in self.selectors() {
@@ -714,13 +728,31 @@ impl Command {
                 // behaviour).  For multi-verb statements every layer-aware
                 // selector returns the same combined view — the command-level
                 // OR across selectors dedupes the union into one selection.
-                // Union read across the statement's materialised layer(s):
-                // for a partitioned entry this is base ∪ supplement — the
-                // composition point where future mask rows will subtract.
-                assert!(
-                    !materialised_layer_ids.is_empty(),
-                    "has_layer_spec=true implies aggregate_layer_spec returned Some"
-                );
+                // Union read across the statement's materialised layers
+                // (all roots' bases ∪ supplements) — the composition point
+                // where future mask rows will subtract.  Empty only under a
+                // zero-root context (no project exists for ephemeral rows
+                // to attach to): nothing was materialised, so the selector
+                // contributes nothing.
+                if materialised_layer_ids.is_empty() {
+                    // Zero-root context: the per-root loop ran no populate,
+                    // so the verb's own user-facing errors (loc's "no file
+                    // matching", …) never had a chance to fire.  Surface an
+                    // explicit warning instead of an empty result that is
+                    // indistinguishable from a successful non-match.
+                    warnings.push(pest::error::Error::new_from_span(
+                        pest::error::ErrorVariant::CustomError {
+                            message: format!(
+                                "'{}' produced no layers: no projects are visible \
+                                 (is the index empty?)",
+                                selector.name()
+                            ),
+                        },
+                        selector.span(),
+                    ));
+                    selections.push((selector.id(), None));
+                    continue;
+                }
                 let instance_ids = cfg
                     .index
                     .get_eph_instance_ids_for_layers(&materialised_layer_ids)
@@ -785,7 +817,6 @@ impl Command {
         Ok(ComputeResult {
             selections,
             warnings,
-            new_eph_ids,
             layer_activations,
         })
     }

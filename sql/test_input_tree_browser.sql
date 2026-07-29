@@ -1,8 +1,18 @@
 SET search_path TO index, public;
 
+-- Root layer for the fixture project.  Persistent inserts below inherit it
+-- via the layer column DEFAULT.
+INSERT INTO layers (id, parent_id, hash, kind, populated)
+OVERRIDING SYSTEM VALUE
+VALUES (1000001, NULL, decode(md5('fixture-root-1'), 'hex'), 'root', TRUE);
+
 -- Project setup
-INSERT INTO projects (id, project_name, root_path)
-VALUES (1, 'test_project', '/test_project');
+INSERT INTO projects (id, project_name, root_path, root_layer_id)
+VALUES (1, 'test_project', '/test_project', 1000001);
+
+ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000001;
 
 -- File content objects
 INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, content_hash)
@@ -101,3 +111,7 @@ INSERT INTO symbol_refs(to_symbol, from_object, from_offset_range) VALUES
 -- list_project_tree("/src") -> ["/src/util" (dir), "/src/config" (dir), "/src/main.go" (file)]
 -- list_project_tree("/src/util") -> ["/src/util/util.go" (file), "/src/util/helper.go" (file)]
 -- list_project_tree("/docs") -> ["/docs/readme.md" (file)]
+
+ALTER TABLE symbols          ALTER COLUMN layer DROP DEFAULT;
+ALTER TABLE symbol_instances ALTER COLUMN layer DROP DEFAULT;
+ALTER TABLE symbol_refs      ALTER COLUMN layer DROP DEFAULT;

@@ -12,7 +12,7 @@ mod sql_cache;
 pub use index_impl::{
     eph_pool_manager_config, purge_eph_cache, supplement_hash, BaseLayerRef, EphInstanceRow,
     EphLayerKind, EphLayerMeta, EphRefRow, EphScopedFut, EphSymbolRow, EphTransaction,
-    ImplicitEdge, Index, LayerBatch, LayerOutcome, PartitionedLayerResult, ScopeContext,
+    ImplicitEdge, Index, LayerBatch, LayerOutcome, LayerRole, MaterialisedLayer, ScopeContext,
     SearchMatchRow, DEFAULT_SQL_CACHE_BYTES, EPH_POOL_IDLE_IN_TXN_TIMEOUT,
     EPH_POOL_RECYCLING_QUERY,
 };
@@ -30,7 +30,7 @@ pub use mixins::{
 pub use selection::{
     Checked, ChildReference, EphContext, HasChildReference, HasEphLeak, HasParentReference,
     ObjectFullDiesel, ParentReference, QueryStatementRange, ReferenceFullDiesel, ReferenceResult,
-    Selection, SelectionNode, SymbolInstanceFullDiesel, CANARY_LAYER_ID,
+    RootLayer, Selection, SelectionNode, SymbolInstanceFullDiesel, CANARY_LAYER_ID,
 };
 pub use sql_cache::{
     vec_weight, CacheKey, CacheStats, CacheWeight, ClearOnDrop, RowKey, SqlResultCache,

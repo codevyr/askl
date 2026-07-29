@@ -37,7 +37,7 @@ async fn test_select_matching_name() {
                 index::db_diesel::CompositeFilter::And(vec![]),
                 index::db_diesel::ScopeContext::Skip,
                 index::db_diesel::ScopeContext::Skip,
-                &index::db_diesel::EphContext::new(),
+                &index::db_diesel::EphContext::rooted(cfg.index.load_root_layers().await.unwrap()),
             )
             .await
             .unwrap();

@@ -219,7 +219,12 @@ impl Selector for ForcedVerb {
                         to_symbol: child_node.symbol.id,
                         from_object: parent_node.object.id,
                         from_offset_range: parent_node.symbol_instance.offset_range.clone(),
-                        eph_layer: None,
+                        // Synthetic in-memory ref: the layer follows the
+                        // FROM side like real refs' does (from_object/
+                        // from_offset_range come from the parent).  The
+                        // parent is from a Checked selection, so the id is
+                        // visible to the leak check either way.
+                        layer: parent_node.symbol_instance.layer,
                     },
                 };
                 fake_parent_references.push(reference);
