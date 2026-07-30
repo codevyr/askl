@@ -57,6 +57,18 @@ impl Node {
             query_statements,
         }
     }
+
+    pub fn id(&self) -> SymbolId {
+        self.id
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn instances(&self) -> &[NodeSymbolInstance] {
+        &self.symbol_instances
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -90,6 +102,14 @@ impl Edge {
             from_offset_end: range.map(|r| r.1),
         }
     }
+
+    pub fn from(&self) -> SymbolId {
+        self.from
+    }
+
+    pub fn to(&self) -> SymbolId {
+        self.to
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -120,6 +140,14 @@ impl HasEdge {
             parent_instance: parent_instance.to_string(),
             child_instance: child_instance.to_string(),
         }
+    }
+
+    pub fn parent(&self) -> SymbolId {
+        self.parent
+    }
+
+    pub fn child(&self) -> SymbolId {
+        self.child
     }
 }
 
