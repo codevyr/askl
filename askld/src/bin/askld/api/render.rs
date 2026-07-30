@@ -75,13 +75,32 @@ pub fn render_markdown(
     let ctx = RenderCtx::new(graph, sources);
 
     let mut out = String::new();
-    out.push_str(&format!("# askl · {query}\n"));
-    out.push_str(&ctx.counts_line(graph));
-    out.push('\n'); // blank line between header and body
 
+    // Query section — fenced so a multi-line query renders verbatim instead of
+    // bleeding past the heading.
+    out.push_str("# Query\n```askl\n");
+    out.push_str(query.trim());
+    out.push_str("\n```\n\n");
+
+    // Stats section.
+    out.push_str("# Stats\n");
+    out.push_str(&ctx.counts_line(graph));
+    out.push('\n');
+
+    // Warnings section — only when present, and before results so caveats
+    // (e.g. truncation) are seen first.
+    if !graph.warnings.is_empty() {
+        out.push_str("# Warnings\n");
+        for w in &graph.warnings {
+            out.push_str(&format!("- {}\n", w.message.trim()));
+        }
+        out.push('\n');
+    }
+
+    // Results section.
+    out.push_str("# Results\n");
     if graph.nodes.is_empty() {
         out.push_str("_no results_\n");
-        ctx.append_warnings(graph, &mut out);
         return out;
     }
 
@@ -106,13 +125,20 @@ pub fn render_markdown(
 
     // Top-level nodes: any source of an edge, plus any node that is not a
     // target of one (isolated selections, definitions, search hits). A node
-    // that is only a target is shown under its parent(s).
-    for node in &graph.nodes {
-        let id = node.id();
-        if !(is_source.contains(&id) || !is_target.contains(&id)) {
-            continue;
-        }
+    // that is only a target is shown under its parent(s). Sorted by file:line
+    // so output is deterministic and same-file symbols group together.
+    let mut top_level: Vec<&Node> = graph
+        .nodes
+        .iter()
+        .filter(|n| {
+            let id = n.id();
+            is_source.contains(&id) || !is_target.contains(&id)
+        })
+        .collect();
+    top_level.sort_by(|a, b| ctx.sort_key(a).cmp(&ctx.sort_key(b)));
 
+    for node in top_level {
+        let id = node.id();
         if ctx.is_content(node) {
             ctx.render_content_node(node, projection, &mut out);
             continue;
@@ -122,14 +148,19 @@ pub fn render_markdown(
         out.push('\n');
 
         if let Some(kids) = children.get(&id) {
+            let mut kids = kids.clone();
+            kids.sort_by(|(a, ka), (b, kb)| {
+                kind_rank(*ka)
+                    .cmp(&kind_rank(*kb))
+                    .then_with(|| ctx.target_sort_key(*a).cmp(&ctx.target_sort_key(*b)))
+            });
             for (target, kind) in kids {
-                out.push_str(&ctx.child_line(*target, *kind));
+                out.push_str(&ctx.child_line(target, kind));
                 out.push('\n');
             }
         }
     }
 
-    ctx.append_warnings(graph, &mut out);
     out
 }
 
@@ -164,7 +195,24 @@ impl<'a> RenderCtx<'a> {
     }
 
     fn counts_line(&self, graph: &Graph) -> String {
-        let mut parts = vec![format!("{} symbols", graph.nodes.len())];
+        // `search()`/`loc()` produce content nodes each holding many match
+        // instances, so those count as "matches"; everything else is a symbol.
+        let mut symbols = 0usize;
+        let mut matches = 0usize;
+        for node in &graph.nodes {
+            if self.is_content(node) {
+                matches += node.instances().len();
+            } else {
+                symbols += 1;
+            }
+        }
+        let mut parts = Vec::new();
+        if symbols > 0 || matches == 0 {
+            parts.push(format!("{symbols} symbols"));
+        }
+        if matches > 0 {
+            parts.push(format!("{matches} matches"));
+        }
         if !graph.edges.is_empty() {
             parts.push(format!("{} refs", graph.edges.len()));
         }
@@ -172,6 +220,31 @@ impl<'a> RenderCtx<'a> {
             parts.push(format!("{} contains", graph.has_edges.len()));
         }
         format!("{}\n", parts.join(" · "))
+    }
+
+    /// Deterministic ordering key for a node: (path, line, label).
+    fn sort_key(&self, node: &Node) -> (String, usize, String) {
+        match self.primary(node) {
+            Some(inst) => {
+                let oid = inst.object_id.as_str();
+                let path = self.paths.get(oid).copied().unwrap_or("").to_string();
+                let line = self
+                    .lines
+                    .get(oid)
+                    .map(|li| li.line_of(inst.start_offset as usize))
+                    .unwrap_or(0);
+                (path, line, node.label().to_string())
+            }
+            None => (String::new(), 0, node.label().to_string()),
+        }
+    }
+
+    /// Owned ordering key for an edge target (looked up by id).
+    fn target_sort_key(&self, target: SymbolId) -> (String, usize, String) {
+        match self.nodes_by_id.get(&target) {
+            Some(node) => self.sort_key(node),
+            None => (String::new(), 0, format!("#{}", target.0)),
+        }
     }
 
     fn is_content(&self, node: &Node) -> bool {
@@ -217,6 +290,29 @@ impl<'a> RenderCtx<'a> {
         Some(String::from_utf8_lossy(first).trim_end().to_string())
     }
 
+    /// The full source line containing the match, grep-style. A `search()` match
+    /// instance spans only the matched token, so its first line is just the
+    /// query text; agents want the surrounding line for context.
+    fn match_line(&self, inst: &NodeSymbolInstance) -> Option<String> {
+        let content = self.sources.get(&inst.object_id)?;
+        let off = (inst.start_offset.max(0) as usize).min(content.len());
+        let start = content[..off]
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let end = content[off..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map(|i| off + i)
+            .unwrap_or(content.len());
+        Some(
+            String::from_utf8_lossy(&content[start..end])
+                .trim()
+                .to_string(),
+        )
+    }
+
     fn node_line(&self, node: &Node, projection: Projection) -> String {
         let Some(inst) = self.primary(node) else {
             return node.label().to_string();
@@ -233,15 +329,53 @@ impl<'a> RenderCtx<'a> {
             }
         }
         if projection == Projection::Body {
-            if let Some(bytes) = self.slice(inst) {
-                let lang = fence_lang(self.paths.get(inst.object_id.as_str()).copied());
-                line.push_str(&format!(
-                    "\n```{lang}\n{}\n```",
-                    String::from_utf8_lossy(bytes)
-                ));
+            if let Some((lang, body)) = self.body_text(node) {
+                line.push_str(&format!("\n```{lang}\n{body}\n```"));
             }
         }
         line
+    }
+
+    /// The fenced body: `Documentation` + `Definition` instances stitched in
+    /// file order (so a doc comment precedes its code). Macro `Expansion`
+    /// instances are deliberately excluded — a widely-used macro has hundreds
+    /// of them. Falls back to the primary instance when neither is present.
+    fn body_text(&self, node: &Node) -> Option<(&'static str, String)> {
+        let mut parts: Vec<&NodeSymbolInstance> = node
+            .instances()
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i.instance_type,
+                    InstanceType::Definition | InstanceType::Documentation
+                )
+            })
+            .collect();
+        if parts.is_empty() {
+            parts = self.primary(node).into_iter().collect();
+        }
+        parts.sort_by_key(|i| {
+            (
+                self.paths.get(i.object_id.as_str()).copied().unwrap_or(""),
+                i.start_offset,
+            )
+        });
+
+        let mut lang = "";
+        let mut body = String::new();
+        for inst in parts {
+            let Some(bytes) = self.slice(inst) else {
+                continue;
+            };
+            if lang.is_empty() {
+                lang = fence_lang(self.paths.get(inst.object_id.as_str()).copied());
+            }
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str(&String::from_utf8_lossy(bytes));
+        }
+        (!body.is_empty()).then_some((lang, body))
     }
 
     fn child_line(&self, target: SymbolId, kind: EdgeKind) -> String {
@@ -262,25 +396,30 @@ impl<'a> RenderCtx<'a> {
     /// A `search()`/`loc()` result is one content symbol holding many byte-range
     /// instances; render one line per match rather than collapsing to one.
     fn render_content_node(&self, node: &Node, projection: Projection, out: &mut String) {
-        for inst in node.instances() {
+        let mut insts: Vec<&NodeSymbolInstance> = node.instances().iter().collect();
+        insts.sort_by_key(|i| {
+            (
+                self.paths.get(i.object_id.as_str()).copied().unwrap_or(""),
+                i.start_offset,
+            )
+        });
+        for inst in insts {
             let loc = self.location(inst);
             match projection {
                 Projection::Names => out.push_str(&format!("{loc}\n")),
                 Projection::Signature | Projection::Body => {
-                    let matched = self.signature(inst).unwrap_or_default();
+                    let matched = self.match_line(inst).unwrap_or_default();
                     out.push_str(&format!("{loc}   {matched}\n"));
                 }
             }
         }
     }
+}
 
-    fn append_warnings(&self, graph: &Graph, out: &mut String) {
-        for w in &graph.warnings {
-            out.push_str(&format!("\n> warning: {}", w.message.trim()));
-        }
-        if !graph.warnings.is_empty() {
-            out.push('\n');
-        }
+fn kind_rank(kind: EdgeKind) -> u8 {
+    match kind {
+        EdgeKind::Ref => 0,
+        EdgeKind::Has => 1,
     }
 }
 
@@ -384,13 +523,19 @@ mod tests {
         ));
 
         let md = render_markdown("\"f\"", &g, &src, Projection::Signature);
-        assert!(md.contains("# askl · \"f\""), "{md}");
+        // sectioned document with the query fenced verbatim
+        assert!(md.contains("# Query"), "{md}");
+        assert!(md.contains("```askl\n\"f\"\n```"), "{md}");
+        assert!(md.contains("# Stats"), "{md}");
         assert!(md.contains("1 symbols"), "{md}");
+        assert!(md.contains("# Results"), "{md}");
+        // no warnings section when there are none
+        assert!(!md.contains("# Warnings"), "{md}");
         // definition starts on line 2 of the file
         assert!(md.contains("f  (func)  /linux/fs/read_write.c:2"), "{md}");
         assert!(md.contains("    ssize_t f(int x)"), "{md}");
-        // signature projection does not fence the body
-        assert!(!md.contains("```"), "{md}");
+        // signature projection does not fence the *body* (the query fence is ```askl)
+        assert!(!md.contains("```c"), "{md}");
     }
 
     #[test]
@@ -486,6 +631,39 @@ mod tests {
     }
 
     #[test]
+    fn body_stitches_documentation_before_definition_and_skips_expansions() {
+        //          0                16 17                          42 43
+        let text = b"/** doc for f */\nint f(void) { return 1; }\nf();\n".to_vec();
+        let mut src = SourceMap::new();
+        src.insert("10".into(), text);
+        let mut g = Graph::new();
+        obj(&mut g, "10", "/x.c");
+        g.add_node(node(
+            1,
+            "f",
+            vec![
+                inst("10", 17, 42, SymbolType::Function, InstanceType::Definition),
+                inst(
+                    "10",
+                    0,
+                    16,
+                    SymbolType::Function,
+                    InstanceType::Documentation,
+                ),
+                inst("10", 43, 47, SymbolType::Function, InstanceType::Expansion),
+            ],
+        ));
+
+        let md = render_markdown("\"f\"", &g, &src, Projection::Body);
+        let body = md.split("```c").nth(1).expect("fenced body");
+        let doc_pos = body.find("doc for f").expect("doc present");
+        let def_pos = body.find("int f(void)").expect("def present");
+        assert!(doc_pos < def_pos, "doc must precede def:\n{md}");
+        // the macro expansion site must not be stitched in
+        assert!(!body.contains("f();"), "expansion must be excluded:\n{md}");
+    }
+
+    #[test]
     fn search_content_node_renders_one_line_per_instance() {
         let mut src = SourceMap::new();
         // two matches of "foo" on lines 1 and 3
@@ -506,6 +684,9 @@ mod tests {
         assert!(md.contains("/c.c:3"), "{md}");
         // each match is its own line (per-instance, not collapsed)
         assert_eq!(md.matches("/c.c:").count(), 2, "{md}");
+        // the match renders its full source line (grep-style), not just the token
+        assert!(md.contains("/c.c:1   foo bar"), "{md}");
+        assert!(md.contains("/c.c:3   qux foo end"), "{md}");
     }
 
     #[test]
