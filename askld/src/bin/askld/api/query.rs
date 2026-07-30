@@ -8,6 +8,7 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use tokio::time::timeout;
 
+use super::render::{render_markdown, Projection, SourceMap};
 use super::types::{
     AsklData, Edge, ErrorResponse, Graph, GraphObjectEntry, HasEdge, Node, NodeSymbolInstance,
     QueryStatement,
@@ -23,8 +24,35 @@ fn is_statement_timeout(err: &pest::error::Error<askld::parser::Rule>) -> bool {
 }
 
 #[post("/query")]
-pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responder {
+pub async fn query(
+    data: web::Data<AsklData>,
+    opts: web::Query<QueryOpts>,
+    req_body: String,
+) -> impl Responder {
     let _query = tracing::info_span!("query").entered();
+
+    // Output-shape options are parsed up front so a bad value fails fast,
+    // before we run the query. `format=json` (default) is unchanged.
+    let want_markdown = match opts.format.as_deref() {
+        None | Some("json") => false,
+        Some("markdown") | Some("md") => true,
+        Some(other) => {
+            return HttpResponse::BadRequest().body(format!(
+                "unknown format '{other}'; expected 'json' or 'markdown'"
+            ));
+        }
+    };
+    let projection = match opts.projection.as_deref() {
+        None => Projection::default(),
+        Some(name) => match Projection::from_name(name) {
+            Some(p) => p,
+            None => {
+                return HttpResponse::BadRequest().body(format!(
+                    "unknown projection '{name}'; expected 'names', 'signature', or 'body'"
+                ));
+            }
+        },
+    };
 
     debug!("Received query: {}", req_body);
     let ast = match parse(&req_body) {
@@ -179,11 +207,56 @@ pub async fn query(data: web::Data<AsklData>, req_body: String) -> impl Responde
     result_graph.objects = result_objects.into_iter().map(|(_, value)| value).collect();
     result_graph.add_warnings(res.warnings);
 
+    if want_markdown {
+        return render_markdown_response(&data, &req_body, &result_graph, projection).await;
+    }
+
     let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();
     if json_graph.len() > MAX_RESPONSE_BYTES {
         return HttpResponse::PayloadTooLarge().body("Response too large");
     }
     HttpResponse::Ok().body(json_graph)
+}
+
+/// Fetch the raw bytes of every file the graph references, then render the
+/// graph as markdown. Raw bytes (not the lossy `String` accessor) keep byte
+/// offsets aligned so `file:line` locations are exact.
+async fn render_markdown_response(
+    data: &web::Data<AsklData>,
+    query_text: &str,
+    graph: &Graph,
+    projection: Projection,
+) -> HttpResponse {
+    let mut sources = SourceMap::new();
+    for obj in &graph.objects {
+        let Ok(id) = obj.object_id.parse::<i32>() else {
+            continue;
+        };
+        match data
+            .cfg
+            .index
+            .get_file_contents_bytes(FileId::new(id))
+            .await
+        {
+            Ok(bytes) => {
+                sources.insert(obj.object_id.clone(), bytes);
+            }
+            Err(err) => debug!("markdown: no content for object {}: {}", obj.object_id, err),
+        }
+    }
+
+    let md = render_markdown(query_text, graph, &sources, projection);
+    HttpResponse::Ok()
+        .content_type("text/markdown; charset=utf-8")
+        .body(md)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueryOpts {
+    /// `json` (default) or `markdown`.
+    format: Option<String>,
+    /// `names` | `signature` | `body` (default `signature`), markdown only.
+    projection: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
