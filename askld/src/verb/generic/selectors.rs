@@ -1,6 +1,8 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
 use crate::execution_state::{DependencyKind, DependencyRole};
+use crate::name_pattern::NamePattern;
+use crate::parser::Value;
 use crate::parser_context::{
     ParserContext, SYMBOL_TYPE_DATA, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FIELD, SYMBOL_TYPE_FILE,
     SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MACRO, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
@@ -24,7 +26,7 @@ use super::name_filter;
 #[derive(Debug)]
 pub struct NameSelector {
     span: Span,
-    pub name: String,
+    pub pattern: NamePattern,
 }
 
 impl NameSelector {
@@ -32,13 +34,13 @@ impl NameSelector {
 
     pub fn new(
         span: Span,
-        _positional: &Vec<String>,
-        named: &HashMap<String, String>,
+        _positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         if let Some(name) = named.get("name") {
             Ok(Arc::new(Self {
                 span,
-                name: name.clone(),
+                pattern: NamePattern::from_value(name)?,
             }))
         } else {
             bail!("Must contain name field");
@@ -71,7 +73,7 @@ impl Selector for NameSelector {
             .filters()
             .filter_map(|f| f.get_composite_filter(eph))
             .collect();
-        parts.push(name_filter(&self.name));
+        parts.push(name_filter(&self.pattern));
         Some(CompositeFilter::and(parts))
     }
 
@@ -83,7 +85,7 @@ impl Selector for NameSelector {
         children_scope: ScopeContext,
         eph: &EphContext,
     ) -> Result<Option<Selection>> {
-        let combined = CompositeFilter::and(vec![filter, name_filter(&self.name)]);
+        let combined = CompositeFilter::and(vec![filter, name_filter(&self.pattern)]);
         let selection = cfg
             .index
             .find_symbol(&combined, parent_scope, children_scope, eph)
@@ -96,7 +98,7 @@ impl Selector for NameSelector {
 #[derive(Debug)]
 pub(in crate::verb) struct ForcedVerb {
     span: Span,
-    name: String,
+    pattern: NamePattern,
     selection: Arc<OnceLock<Selection>>,
 }
 
@@ -105,13 +107,13 @@ impl ForcedVerb {
 
     pub fn new(
         span: Span,
-        _positional: &Vec<String>,
-        named: &HashMap<String, String>,
+        _positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         if let Some(name) = named.get("name") {
             Ok(Arc::new(Self {
                 span,
-                name: name.clone(),
+                pattern: NamePattern::from_value(name)?,
                 selection: Arc::new(OnceLock::new()),
             }))
         } else {
@@ -145,7 +147,7 @@ impl Selector for ForcedVerb {
             .filters()
             .filter_map(|f| f.get_composite_filter(eph))
             .collect();
-        parts.push(name_filter(&self.name));
+        parts.push(name_filter(&self.pattern));
         Some(CompositeFilter::and(parts))
     }
 
@@ -165,7 +167,7 @@ impl Selector for ForcedVerb {
         children_scope: ScopeContext,
         eph: &EphContext,
     ) -> Result<Option<Selection>> {
-        let combined = CompositeFilter::and(vec![filter, name_filter(&self.name)]);
+        let combined = CompositeFilter::and(vec![filter, name_filter(&self.pattern)]);
         let selection = cfg
             .index
             .find_symbol(&combined, parent_scope, children_scope, eph)
@@ -239,7 +241,7 @@ impl Selector for ForcedVerb {
 
 impl Display for ForcedVerb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ForcedVerb(name={})", self.name)
+        write!(f, "ForcedVerb(name={})", self.pattern)
     }
 }
 
@@ -330,7 +332,7 @@ impl Display for UnitVerb {
 pub(in crate::verb) struct TypeSelector {
     span: Span,
     symbol_type_id: i32,
-    name_pattern: Option<String>,
+    name_pattern: Option<NamePattern>,
     /// If true, don't select from all - only act as a filter when deriving from parent.
     /// This is much more efficient for queries like `file has { func }`.
     filter_only: bool,
@@ -355,14 +357,20 @@ impl TypeSelector {
 
     pub fn new(
         span: Span,
-        positional: &Vec<String>,
-        named: &HashMap<String, String>,
+        positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
         symbol_type_id: i32,
     ) -> Result<Arc<dyn Verb>> {
-        let name_pattern = positional.first().cloned();
+        let name_pattern = positional
+            .first()
+            .map(NamePattern::from_value)
+            .transpose()?;
 
         // Check for explicit filter argument (true or false)
-        let explicit_filter = named.get("filter").map(|v| v.eq_ignore_ascii_case("true"));
+        let explicit_filter = match named.get("filter") {
+            Some(v) => Some(v.as_plain()?.eq_ignore_ascii_case("true")),
+            None => None,
+        };
 
         // Default: filter mode if no name pattern, selector mode if name provided
         // Can be overridden with explicit filter="true" or filter="false"
@@ -374,14 +382,16 @@ impl TypeSelector {
 
         // Bare type selectors (no name) inherit by default so they propagate
         // the type filter into child scopes. Named type selectors don't inherit.
-        let inherit = named
-            .get("inherit")
-            .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(name_pattern.is_none());
+        let inherit = match named.get("inherit") {
+            Some(v) => v.as_plain()?.eq_ignore_ascii_case("true"),
+            None => name_pattern.is_none(),
+        };
 
-        let leaf_anchored = match named.get("match").map(|v| v.as_str()) {
+        let leaf_anchored = match crate::parser::named_plain(named, "match")? {
             Some("contains") => false,
-            _ => matches!(symbol_type_id, SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE),
+            // Files and directories anchor to the leaf by default; code
+            // symbols (where '.' separates labels) do not.
+            _ => !index::symbols::dot_is_separator(symbol_type_id),
         };
 
         Ok(Arc::new(Self {
@@ -394,8 +404,21 @@ impl TypeSelector {
         }))
     }
 
-    /// Returns the appropriate name filter for the given name and symbol type.
-    fn name_filter_leaf(name: &str, symbol_type_id: i32, leaf_anchored: bool) -> CompositeFilter {
+    /// Returns the appropriate name filter for the given pattern and symbol type.
+    fn name_filter_leaf(
+        pattern: &NamePattern,
+        symbol_type_id: i32,
+        leaf_anchored: bool,
+    ) -> CompositeFilter {
+        let name = match pattern {
+            NamePattern::Exact(name) => name,
+            NamePattern::Glob(glob) => {
+                return glob.filter(
+                    index::symbols::dot_is_separator(symbol_type_id),
+                    leaf_anchored,
+                );
+            }
+        };
         match symbol_type_id {
             SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE if name.starts_with('/') => {
                 CompositeFilter::leaf(ExactNameMixin::new(name))
@@ -551,16 +574,13 @@ impl Filter for TypeSelector {
         if self.filter_only && self.name_pattern.is_some() {
             // When used as a namespace filter (e.g., mod("test", filter="true")),
             // only constrain by name pattern, not by type.
-            let name = self.name_pattern.as_ref().unwrap();
-            let dot_is_separator = !matches!(
-                self.symbol_type_id,
-                SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE
-            );
-            Some(CompositeFilter::leaf(CompoundNameMixin::with_options(
-                name,
-                false,
-                dot_is_separator,
-            )))
+            let dot_is_separator = index::symbols::dot_is_separator(self.symbol_type_id);
+            match self.name_pattern.as_ref().unwrap() {
+                NamePattern::Exact(name) => Some(CompositeFilter::leaf(
+                    CompoundNameMixin::with_options(name, false, dot_is_separator),
+                )),
+                NamePattern::Glob(glob) => Some(glob.filter(dot_is_separator, true)),
+            }
         } else {
             Some(CompositeFilter::and(self.build_filter_parts()))
         }
@@ -640,8 +660,8 @@ impl GenericSelector {
 
     pub fn new(
         span: Span,
-        _positional: &Vec<String>,
-        _named: &HashMap<String, String>,
+        _positional: &Vec<Value>,
+        _named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         Ok(Arc::new(Self { span }))
     }

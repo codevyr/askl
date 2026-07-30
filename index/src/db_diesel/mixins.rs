@@ -16,7 +16,8 @@ use crate::ltree::Ltree;
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::schema_diesel as index_schema;
 use crate::symbols::{
-    build_lquery, normalize_symbol_tokens, symbol_name_to_path, SymbolInstanceId,
+    build_lquery, normalize_leaf_fragment, normalize_symbol_tokens, smart_case_sensitive,
+    symbol_name_to_path, SymbolInstanceId,
 };
 
 diesel::alias! {
@@ -1048,6 +1049,166 @@ impl FilterLeaf for LeafNameMixin {
     }
 }
 
+/// Push `c` onto `out`, escaping the three LIKE metacharacters (`\`, `%`,
+/// `_`) with a backslash so they match literally when bound to LIKE/ILIKE.
+pub(crate) fn push_like_escaped(out: &mut String, c: char) {
+    match c {
+        '\\' | '%' | '_' => {
+            out.push('\\');
+            out.push(c);
+        }
+        _ => out.push(c),
+    }
+}
+
+/// LIKE-escape a whole string (see [`push_like_escaped`]).
+pub(crate) fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        push_like_escaped(&mut out, c);
+    }
+    out
+}
+
+/// One piece of a leaf-name glob pattern.  Separator-free by construction:
+/// patterns containing compound separators route to [`FullNameGlobMixin`]
+/// instead, so invalid states are unrepresentable here.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GlobPiece {
+    /// A literal run of characters.
+    Lit(String),
+    /// The '*' glob wildcard: any run of characters, including empty.
+    Star,
+}
+
+/// GlobNameMixin - filters symbols by a glob pattern over leaf_name.
+/// Literals are normalized with the same pipeline as indexed leaf names
+/// (see `normalize_leaf_fragment`), so the query side cannot disagree with
+/// the index side.
+#[derive(Debug, Clone)]
+pub struct GlobNameMixin {
+    /// LIKE pattern built from pieces: literals normalized and escaped,
+    /// Star -> '%'.  Constructor-enforced invariant: always safe to bind.
+    sql_pattern: String,
+    /// Smart case: true iff any literal contains an uppercase letter.
+    case_sensitive: bool,
+}
+
+impl GlobNameMixin {
+    pub fn new(pieces: &[GlobPiece], dot_is_separator: bool, anchored: bool) -> Self {
+        let mut sql_pattern = String::new();
+        let mut case_sensitive = false;
+        // Collapse adjacent wildcards so semantically identical patterns
+        // produce identical SQL (and identical filter hashes).
+        let mut last_was_wildcard = false;
+        if !anchored {
+            sql_pattern.push('%');
+            last_was_wildcard = true;
+        }
+        for piece in pieces {
+            match piece {
+                GlobPiece::Star => {
+                    if !last_was_wildcard {
+                        sql_pattern.push('%');
+                        last_was_wildcard = true;
+                    }
+                }
+                GlobPiece::Lit(text) => {
+                    // Smart case is decided by the characters that actually
+                    // participate in matching — normalization may strip an
+                    // uppercase char (e.g. non-ASCII) from both sides.
+                    let normalized = normalize_leaf_fragment(text, dot_is_separator);
+                    case_sensitive |= smart_case_sensitive(&normalized);
+                    if !normalized.is_empty() {
+                        last_was_wildcard = false;
+                    }
+                    for c in normalized.chars() {
+                        push_like_escaped(&mut sql_pattern, c);
+                    }
+                }
+            }
+        }
+        if !anchored && !last_was_wildcard {
+            sql_pattern.push('%');
+        }
+        Self {
+            sql_pattern,
+            case_sensitive,
+        }
+    }
+}
+
+impl FilterLeaf for GlobNameMixin {
+    fn current_expr(&self, _vis: &EphVisibility) -> Option<CurrentBoolExpr> {
+        let pattern = self.sql_pattern.clone();
+        Some(if self.case_sensitive {
+            Box::new(index_schema::symbols::dsl::leaf_name.like(pattern))
+        } else {
+            Box::new(index_schema::symbols::dsl::leaf_name.ilike(pattern))
+        })
+    }
+
+    fn hash_into(&self, h: &mut Sha256) {
+        h.update(b"GlobName");
+        h.update((self.sql_pattern.len() as u32).to_le_bytes());
+        h.update(self.sql_pattern.as_bytes());
+        h.update([self.case_sensitive as u8]);
+    }
+}
+
+/// FullNameGlobMixin - glob over the full symbols.name column.  Used for
+/// patterns mixing wildcards with compound separators and for absolute-path
+/// globs: literals match the raw stored name verbatim (no normalization),
+/// '*' becomes '%'.  The pattern is anchored — the whole name must match;
+/// "contains" is expressed with explicit wildcards (g"*foo*").
+#[derive(Debug, Clone)]
+pub struct FullNameGlobMixin {
+    sql_pattern: String,
+    case_sensitive: bool,
+}
+
+impl FullNameGlobMixin {
+    pub fn new(pattern: &str) -> Self {
+        let mut sql_pattern = String::with_capacity(pattern.len());
+        // Collapse adjacent wildcards so semantically identical patterns
+        // produce identical SQL (and identical filter hashes).
+        let mut last_was_wildcard = false;
+        for c in pattern.chars() {
+            if c == '*' {
+                if !last_was_wildcard {
+                    sql_pattern.push('%');
+                    last_was_wildcard = true;
+                }
+            } else {
+                push_like_escaped(&mut sql_pattern, c);
+                last_was_wildcard = false;
+            }
+        }
+        Self {
+            sql_pattern,
+            case_sensitive: smart_case_sensitive(pattern),
+        }
+    }
+}
+
+impl FilterLeaf for FullNameGlobMixin {
+    fn current_expr(&self, _vis: &EphVisibility) -> Option<CurrentBoolExpr> {
+        let pattern = self.sql_pattern.clone();
+        Some(if self.case_sensitive {
+            Box::new(index_schema::symbols::dsl::name.like(pattern))
+        } else {
+            Box::new(index_schema::symbols::dsl::name.ilike(pattern))
+        })
+    }
+
+    fn hash_into(&self, h: &mut Sha256) {
+        h.update(b"FullNameGlob");
+        h.update((self.sql_pattern.len() as u32).to_le_bytes());
+        h.update(self.sql_pattern.as_bytes());
+        h.update([self.case_sensitive as u8]);
+    }
+}
+
 /// ExactNameMixin - filters symbols by exact name match.
 #[derive(Debug, Clone)]
 pub struct ExactNameMixin {
@@ -1453,3 +1614,120 @@ pub const INSTANCE_TYPE_HEADER: i32 = 7;
 pub const INSTANCE_TYPE_BUILD: i32 = 8;
 pub const INSTANCE_TYPE_FILE: i32 = 9;
 pub const INSTANCE_TYPE_DOCUMENTATION: i32 = 10;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lit(s: &str) -> GlobPiece {
+        GlobPiece::Lit(s.to_string())
+    }
+
+    #[test]
+    fn glob_translates_wildcards_to_percent() {
+        let mixin = GlobNameMixin::new(
+            &[
+                GlobPiece::Star,
+                lit("func"),
+                GlobPiece::Star,
+                lit("bar"),
+                GlobPiece::Star,
+            ],
+            true,
+            true,
+        );
+        assert_eq!(mixin.sql_pattern, "%func%bar%");
+    }
+
+    #[test]
+    fn glob_normalizes_literals_like_indexed_leaf_names() {
+        // '-' and other stripped chars are removed at index time; the glob
+        // literal must go through the same pipeline or it can never match.
+        let mixin = GlobNameMixin::new(&[lit("my-app"), GlobPiece::Star], false, true);
+        assert_eq!(mixin.sql_pattern, "myapp%");
+
+        let mixin = GlobNameMixin::new(&[lit("O'Brien"), GlobPiece::Star], true, true);
+        assert_eq!(mixin.sql_pattern, "OBrien%");
+
+        // '_' survives normalization and is LIKE-escaped.
+        let mixin = GlobNameMixin::new(&[lit("do_run")], true, true);
+        assert_eq!(mixin.sql_pattern, r"do\_run");
+    }
+
+    #[test]
+    fn glob_dot_matches_normalized_underscore_for_files() {
+        // askld folds Separator('.') into a literal "." for files/dirs.
+        let mixin = GlobNameMixin::new(&[GlobPiece::Star, lit("."), lit("go")], false, true);
+        assert_eq!(mixin.sql_pattern, r"%\_go");
+    }
+
+    #[test]
+    fn glob_unanchored_wraps_and_collapses_wildcards() {
+        // match="contains" (anchored = false) wraps in implicit wildcards,
+        // and adjacent wildcards collapse so the pattern stays minimal.
+        let mixin = GlobNameMixin::new(&[lit("run")], true, false);
+        assert_eq!(mixin.sql_pattern, "%run%");
+
+        // A leading '*' next to the implicit prefix '%' must not double up.
+        let mixin = GlobNameMixin::new(&[GlobPiece::Star, lit("run")], true, false);
+        assert_eq!(mixin.sql_pattern, "%run%");
+    }
+
+    #[test]
+    fn glob_smart_case_uses_normalized_literal() {
+        let sensitive = GlobNameMixin::new(&[lit("Foo"), GlobPiece::Star], true, true);
+        assert!(sensitive.case_sensitive);
+
+        let insensitive = GlobNameMixin::new(&[lit("foo"), GlobPiece::Star], true, true);
+        assert!(!insensitive.case_sensitive);
+
+        // An uppercase character stripped by normalization (non-ASCII) must
+        // not force case-sensitivity on the surviving lowercase pattern.
+        let mixin = GlobNameMixin::new(&[lit("Öfoo"), GlobPiece::Star], true, true);
+        assert_eq!(mixin.sql_pattern, "foo%");
+        assert!(!mixin.case_sensitive);
+    }
+
+    #[test]
+    fn glob_hash_distinct_from_leaf_name() {
+        let mut glob_hash = Sha256::new();
+        GlobNameMixin::new(&[lit("foo")], true, true).hash_into(&mut glob_hash);
+
+        let mut leaf_hash = Sha256::new();
+        LeafNameMixin::new("foo", true).hash_into(&mut leaf_hash);
+
+        assert_ne!(glob_hash.finalize(), leaf_hash.finalize());
+    }
+
+    #[test]
+    fn full_name_glob_is_anchored() {
+        // Anchored: no implicit surrounding wildcards. A trailing '*'
+        // becomes a trailing '%'; a name lacking it must not match.
+        let mixin = FullNameGlobMixin::new("fmt.Print*");
+        assert_eq!(mixin.sql_pattern, "fmt.Print%");
+        assert!(mixin.case_sensitive);
+
+        // Literals match the raw stored name verbatim — '(' passes through,
+        // '*' is a wildcard, so a pasted Go name still matches its source.
+        let mixin = FullNameGlobMixin::new("(*Kubelet).Run");
+        assert_eq!(mixin.sql_pattern, "(%Kubelet).Run");
+    }
+
+    #[test]
+    fn full_name_glob_collapses_and_escapes() {
+        // Adjacent wildcards collapse; LIKE metacharacters are escaped.
+        let mixin = FullNameGlobMixin::new(r"*50%_\done*");
+        assert_eq!(mixin.sql_pattern, r"%50\%\_\\done%");
+    }
+
+    #[test]
+    fn full_name_glob_hash_distinct_from_leaf_glob() {
+        let mut full_hash = Sha256::new();
+        FullNameGlobMixin::new("foo").hash_into(&mut full_hash);
+
+        let mut leaf_hash = Sha256::new();
+        GlobNameMixin::new(&[lit("foo")], true, true).hash_into(&mut leaf_hash);
+
+        assert_ne!(full_hash.finalize(), leaf_hash.finalize());
+    }
+}

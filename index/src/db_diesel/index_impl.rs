@@ -2579,10 +2579,7 @@ impl Index {
     ) -> Result<Vec<(FileId, crate::symbols::ProjectId)>> {
         use crate::schema_diesel::*;
 
-        let escaped = path
-            .replace('\\', r"\\")
-            .replace('%', r"\%")
-            .replace('_', r"\_");
+        let escaped = super::mixins::escape_like(path);
         let mut query = objects::table
             .inner_join(projects::table.on(projects::id.eq(objects::project_id)))
             .filter(objects::filesystem_path.like(format!("%{}", escaped)))
@@ -2632,11 +2629,7 @@ pub struct SearchMatchRow {
 /// wildcard, ballooning the pg_trgm recheck candidate set by an order of
 /// magnitude — see the EXPLAIN ANALYZE numbers in the plan.
 fn make_like_pattern(query: &str) -> String {
-    let escaped = query
-        .replace('\\', r"\\")
-        .replace('%', r"\%")
-        .replace('_', r"\_");
-    format!("%{}%", escaped)
+    format!("%{}%", super::mixins::escape_like(query))
 }
 
 /// Build one of the four search SQL variants.  Each variant uses the same

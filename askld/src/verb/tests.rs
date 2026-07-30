@@ -2,6 +2,7 @@ use index::symbols::SymbolInstanceId;
 
 use crate::{
     cfg::ControlFlowGraph,
+    parser::Value,
     span::Span,
     test_util::{get_shared_index, run_query, VERB_TEST},
     verb::*,
@@ -26,7 +27,7 @@ async fn test_select_matching_name() {
 
     for (name, expected_ids) in test_cases {
         let fake_span = Span::synthetic(name);
-        let named_args = HashMap::from([("name".to_string(), name.to_string())]);
+        let named_args = HashMap::from([("name".to_string(), Value::plain(name))]);
         let selector = NameSelector::new(fake_span, &vec![], &named_args).unwrap();
 
         let result = selector
@@ -64,6 +65,71 @@ async fn test_select_matching_name() {
 }
 
 #[test]
+fn test_glob_name_selector_construction() {
+    use crate::parser::StringKind;
+
+    let named = |name: &str, kind| {
+        HashMap::from([(
+            "name".to_string(),
+            Value::Str {
+                kind,
+                text: name.to_string(),
+            },
+        )])
+    };
+
+    // Globs are opt-in via g"..."; compound globs are valid too.
+    for pattern in ["*ab*", "a.*b", "(*Kubelet).Run", "/src/*"] {
+        NameSelector::new(
+            Span::synthetic(pattern),
+            &vec![],
+            &named(pattern, StringKind::Glob),
+        )
+        .unwrap();
+    }
+
+    // A glob without any literal would select every symbol.
+    let err = NameSelector::new(Span::synthetic("*"), &vec![], &named("*", StringKind::Glob))
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("literal"),
+        "unexpected error: {err}"
+    );
+
+    // Plain strings are never globs — '*' passes through to exact matching
+    // (stripped by normalization, restoring pre-glob behavior).
+    NameSelector::new(
+        Span::synthetic("(*Kubelet).Run"),
+        &vec![],
+        &named("(*Kubelet).Run", StringKind::Plain),
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_glob_type_selector_construction() {
+    use crate::parser::StringKind;
+    use crate::parser_context::SYMBOL_TYPE_FILE;
+    use crate::verb::generic::TypeSelector;
+
+    let build = |name: &str, kind, symbol_type_id| {
+        TypeSelector::new(
+            Span::synthetic(name),
+            &vec![Value::Str {
+                kind,
+                text: name.to_string(),
+            }],
+            &HashMap::new(),
+            symbol_type_id,
+        )
+    };
+
+    build("*.go", StringKind::Glob, SYMBOL_TYPE_FILE).unwrap();
+    build("/src/*", StringKind::Glob, SYMBOL_TYPE_FILE).unwrap();
+    assert!(build("*", StringKind::Glob, SYMBOL_TYPE_FILE).is_err());
+}
+
+#[test]
 fn test_ignore_package_filter() {
     let query = r#"preamble {
     ignore(package="foo")
@@ -84,6 +150,65 @@ fn test_ignore_package_filter() {
             SymbolInstanceId::new(94),
         ]
     );
+}
+
+#[test]
+fn test_glob_smart_case_insensitive() {
+    // All-lowercase glob matches case-insensitively: g"is*" finds sort.IsSorted.
+    let res = run_query("verb_test.sql", r#"g"is*""#);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(95)]);
+}
+
+#[test]
+fn test_glob_compound_anchored() {
+    // Compound globs match the full symbol name, anchored: g"sort.*" requires
+    // the name to start with "sort." — "contains" needs explicit wildcards.
+    let res = run_query("verb_test.sql", r#"g"sort.*""#);
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![SymbolInstanceId::new(95), SymbolInstanceId::new(96)]
+    );
+
+    // A trailing literal without a leading wildcard does not match names that
+    // merely contain it: g"ort.*" is anchored and matches nothing.
+    let res = run_query("verb_test.sql", r#"g"ort.*""#);
+    assert_eq!(res.nodes.as_vec(), vec![]);
+}
+
+#[test]
+fn test_glob_contains_match_mode() {
+    // match="contains" wraps a leaf glob in implicit wildcards.
+    let res = run_query("verb_test.sql", r#"func(g"oo*", match="contains")"#);
+    // Matches foo(91), foo.bar(92 leaf bar? no), foobar(93): leaves foo, bar,
+    // foobar — "%oo%" matches foo and foobar.
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(93)]
+    );
+}
+
+#[test]
+fn test_glob_ignore_filter() {
+    // ignore() shares glob semantics with selectors.
+    let query = r#"preamble { ignore(g"foob*") }
+"foo"
+"foobar"
+"#;
+    let res = run_query("verb_test.sql", query);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(91)]);
+}
+
+#[test]
+fn test_glob_filter_mode_namespace() {
+    // Filter-mode type selectors apply glob semantics too: the compound glob
+    // g"sort.*" constrains the selection to symbols under sort.
+    let query = r#"mod(g"sort.*", filter="true") "IsSorted""#;
+    let res = run_query("verb_test.sql", query);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(95)]);
+
+    let query = r#"mod(g"nomatch.*", filter="true") "IsSorted""#;
+    let res = run_query("verb_test.sql", query);
+    assert_eq!(res.nodes.as_vec(), vec![]);
 }
 
 #[test]

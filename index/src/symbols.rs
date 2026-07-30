@@ -583,14 +583,20 @@ pub fn clean_and_split_string(input: &str) -> Vec<String> {
         .collect()
 }
 
+/// The per-label allowlist: characters that survive in a normalized symbol
+/// path label / leaf name.  Single source of truth for both index-side
+/// normalization ([`normalize_symbol_tokens`]) and query-side glob-literal
+/// normalization ([`normalize_leaf_fragment`]).  Keep in sync with the DB
+/// trigger — see [`symbol_path_and_leaf`].
+pub fn is_leaf_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
 pub fn normalize_symbol_tokens(input: &str) -> Vec<String> {
     clean_and_split_string(input)
         .into_iter()
         .filter_map(|token| {
-            let cleaned: String = token
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
+            let cleaned: String = token.chars().filter(|c| is_leaf_char(*c)).collect();
             if cleaned.is_empty() {
                 None
             } else {
@@ -625,9 +631,13 @@ pub fn normalize_symbol_tokens(input: &str) -> Vec<String> {
 ///
 /// The DB trigger regex for stripping is `E'[\\*\\[\\]\\{\\},@\\- \\(\\)]'` — verify that
 /// any future changes to `chars_to_remove` in [`clean_and_split_string`] are reflected there.
+///
+/// The per-label allowlist is also applied query-side by
+/// [`normalize_leaf_fragment`] (glob selector literals), so a change here must
+/// be mirrored there too or globs will match against differently-normalized
+/// leaf names.
 pub fn symbol_path_and_leaf(name: &str, symbol_type: i32) -> (String, String) {
-    let dot_is_sep =
-        symbol_type != SymbolType::File as i32 && symbol_type != SymbolType::Directory as i32;
+    let dot_is_sep = dot_is_separator(symbol_type);
     let path = if dot_is_sep {
         symbol_name_to_path(name)
     } else {
@@ -635,6 +645,34 @@ pub fn symbol_path_and_leaf(name: &str, symbol_type: i32) -> (String, String) {
     };
     let leaf = path.rsplit('.').next().unwrap_or(&path).to_string();
     (path, leaf)
+}
+
+/// Whether `.` separates path labels for this symbol type.  Files and
+/// directories treat dots as part of the name (replaced with `_`).
+/// Keep in sync with the DB trigger — see [`symbol_path_and_leaf`].
+pub fn dot_is_separator(symbol_type: i32) -> bool {
+    symbol_type != SymbolType::File as i32 && symbol_type != SymbolType::Directory as i32
+}
+
+/// Smart-case rule shared by `search()` and glob selectors: a pattern is
+/// case-sensitive iff it contains an uppercase character.
+pub fn smart_case_sensitive(pattern: &str) -> bool {
+    pattern.chars().any(|c| c.is_uppercase())
+}
+
+/// Normalize one separator-free fragment of a glob literal the same way
+/// indexed leaf names are normalized: for file/directory names dots become
+/// `_`, then only ASCII alphanumerics and `_` survive (the per-label
+/// allowlist documented at [`symbol_path_and_leaf`]).  Without this, a glob
+/// literal containing a stripped character (e.g. `-`) could never match any
+/// stored leaf name.
+pub fn normalize_leaf_fragment(input: &str, dot_is_separator: bool) -> String {
+    let base: std::borrow::Cow<str> = if dot_is_separator {
+        std::borrow::Cow::Borrowed(input)
+    } else {
+        std::borrow::Cow::Owned(input.replace('.', "_"))
+    };
+    base.chars().filter(|c| is_leaf_char(*c)).collect()
 }
 
 pub fn symbol_name_to_path(input: &str) -> String {

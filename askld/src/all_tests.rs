@@ -20,6 +20,110 @@ fn single_node_query() {
 }
 
 #[test]
+fn glob_selector_matches_leaf_names() {
+    const QUERY: &str = r#"g"m*n""#;
+    let res = run_query(TEST_INPUT_A, QUERY);
+
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(942)]);
+}
+
+#[test]
+fn glob_selector_smart_case_uppercase_is_sensitive() {
+    const QUERY: &str = r#"g"M*N""#;
+    let res = run_query(TEST_INPUT_A, QUERY);
+
+    assert_eq!(res.nodes.as_vec(), vec![]);
+}
+
+#[test]
+fn plain_star_selector_keeps_exact_semantics() {
+    // '*' in a plain string is not a wildcard: normalization strips it on
+    // both sides, so "m*ain" exact-matches the symbol main.
+    const QUERY: &str = r#""m*ain""#;
+    let res = run_query(TEST_INPUT_A, QUERY);
+
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(942)]);
+}
+
+#[test]
+fn glob_selector_rejects_bare_wildcard() {
+    const QUERY: &str = r#"g"*""#;
+    let res = run_query_err(TEST_INPUT_A, QUERY);
+
+    assert_eq!(res.is_err(), true);
+    if let Err(e) = res {
+        println!("{:#?}", e);
+        assert!(e.to_string().contains("literal"));
+    }
+}
+
+#[test]
+fn glob_selector_rejects_normalization_erased_literals() {
+    // '-' is stripped from leaf names at index time; a pattern whose only
+    // literal is '-' would compile to a bare '%' full scan, so it is rejected
+    // at construction rather than silently matching everything.
+    const QUERY: &str = r#"g"-*""#;
+    let res = run_query_err(TEST_INPUT_A, QUERY);
+
+    assert_eq!(res.is_err(), true);
+    if let Err(e) = res {
+        println!("{:#?}", e);
+        assert!(e.to_string().contains("literal"));
+    }
+}
+
+#[test]
+fn glob_argument_reserved_prefix_does_not_panic() {
+    // A reserved/unknown prefix inside verb arguments must surface as a parse
+    // error, not panic the parser (regression: Value::build was unwrapped).
+    let res = run_query_err(TEST_INPUT_A, r#"func(re"foo")"#);
+    assert!(res.is_err());
+    if let Err(e) = res {
+        assert!(e.to_string().contains("reserved"));
+    }
+
+    let res = run_query_err(TEST_INPUT_A, r#"func(x"foo")"#);
+    assert!(res.is_err());
+    if let Err(e) = res {
+        assert!(e.to_string().contains("unknown string prefix"));
+    }
+}
+
+#[test]
+fn unknown_string_prefix_is_rejected() {
+    const QUERY: &str = r#"x"foo""#;
+    let res = run_query_err(TEST_INPUT_A, QUERY);
+
+    assert_eq!(res.is_err(), true);
+    if let Err(e) = res {
+        println!("{:#?}", e);
+        assert!(e.to_string().contains("unknown string prefix"));
+    }
+}
+
+#[test]
+fn regex_string_prefix_is_reserved() {
+    const QUERY: &str = r#"re"foo.*""#;
+    let res = run_query_err(TEST_INPUT_A, QUERY);
+
+    assert_eq!(res.is_err(), true);
+    if let Err(e) = res {
+        println!("{:#?}", e);
+        assert!(e.to_string().contains("reserved"));
+    }
+}
+
+#[test]
+fn glob_file_selector_matches_normalized_dots() {
+    // /main.c is stored with leaf_name main_c; g"*.c" must match through the
+    // same dot normalization.
+    const QUERY: &str = r#"file(g"*.c")"#;
+    let res = run_query(TEST_INPUT_A, QUERY);
+
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(1001)]);
+}
+
+#[test]
 fn single_child_query() {
     const QUERY: &str = r#""a"{}"#;
     let res = run_query(TEST_INPUT_A, QUERY);
