@@ -3,6 +3,7 @@ use actix_web::{get, web, HttpResponse, Responder};
 pub mod auth;
 pub mod index;
 pub mod query;
+pub mod render;
 pub mod types;
 
 #[get("/version")]
