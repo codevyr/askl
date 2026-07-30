@@ -1,4 +1,5 @@
 use crate::cfg::ControlFlowGraph;
+use crate::line_index::{line_to_offset, next_line_offset};
 use crate::parser::Value;
 use crate::span::Span;
 use crate::verb::LayerSpec;
@@ -317,88 +318,5 @@ impl Display for LocSelector {
             "LocSelector(file={}, line={})",
             self.file_path, self.line
         )
-    }
-}
-
-/// Convert a 1-based line number to a byte offset (start of line).
-fn line_to_offset(content: &[u8], line: usize) -> Option<i64> {
-    if line == 0 {
-        return None;
-    }
-    if line == 1 {
-        return Some(0);
-    }
-
-    let mut current_line = 1usize;
-    for (idx, byte) in content.iter().enumerate() {
-        if *byte == b'\n' {
-            current_line += 1;
-            if current_line == line {
-                return Some((idx + 1) as i64);
-            }
-        }
-    }
-    None
-}
-
-/// Find the byte offset of the next newline after `start`, or end of content.
-fn next_line_offset(content: &[u8], start: i64) -> i64 {
-    let start = start as usize;
-    for idx in start..content.len() {
-        if content[idx] == b'\n' {
-            return idx as i64;
-        }
-    }
-    content.len() as i64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn line_to_offset_line_1() {
-        assert_eq!(line_to_offset(b"hello\nworld\n", 1), Some(0));
-    }
-
-    #[test]
-    fn line_to_offset_line_2() {
-        assert_eq!(line_to_offset(b"hello\nworld\n", 2), Some(6));
-    }
-
-    #[test]
-    fn line_to_offset_line_3() {
-        assert_eq!(line_to_offset(b"hello\nworld\n", 3), Some(12));
-    }
-
-    #[test]
-    fn line_to_offset_line_0_returns_none() {
-        assert_eq!(line_to_offset(b"hello\n", 0), None);
-    }
-
-    #[test]
-    fn line_to_offset_past_end_returns_none() {
-        assert_eq!(line_to_offset(b"hello\n", 3), None);
-    }
-
-    #[test]
-    fn line_to_offset_empty_content() {
-        assert_eq!(line_to_offset(b"", 1), Some(0));
-        assert_eq!(line_to_offset(b"", 2), None);
-    }
-
-    #[test]
-    fn next_line_offset_finds_newline() {
-        assert_eq!(next_line_offset(b"hello\nworld\n", 0), 5);
-    }
-
-    #[test]
-    fn next_line_offset_at_end_of_content() {
-        assert_eq!(next_line_offset(b"hello", 0), 5);
-    }
-
-    #[test]
-    fn next_line_offset_from_mid_line() {
-        assert_eq!(next_line_offset(b"hello\nworld\n", 6), 11);
     }
 }
