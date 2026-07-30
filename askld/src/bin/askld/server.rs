@@ -163,6 +163,7 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
     let askl_data = web::Data::new(AsklData {
         cfg: ControlFlowGraph::from_symbols(index_query),
         query_timeout: std::time::Duration::from_secs(query_timeout_secs),
+        max_result_symbols: serve_args.max_result_symbols,
     });
 
     // Background GC: periodically purge ephemeral layers idle past the TTL.

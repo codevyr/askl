@@ -119,23 +119,43 @@ pub async fn query(
     let _build_response = tracing::debug_span!("build_response").entered();
     let mut result_graph = Graph::new();
 
+    // Pass 1: distinct symbols with a representative (path, offset) sort key,
+    // plus the object→project map used for edge attribution.
     let mut all_symbols = HashSet::new();
     let mut object_projects = HashMap::new();
-    let mut result_objects = HashMap::new();
+    let mut sym_key: HashMap<i64, (String, i32)> = HashMap::new();
     for node in res.nodes.0.iter() {
         all_symbols.insert(node.symbol.clone());
         let object_id = FileId::new(node.object.id);
         object_projects
             .entry(object_id)
             .or_insert(node.object.project_id);
-        result_objects.entry(object_id).or_insert(GraphObjectEntry {
-            object_id: object_id.to_string(),
-            path: node.object.filesystem_path.clone(),
-            project_id: node.object.project_id.to_string(),
-        });
+        let start = range_bounds_to_offsets(&node.symbol_instance.offset_range)
+            .map(|(s, _)| s)
+            .unwrap_or(0);
+        let key = (node.object.filesystem_path.clone(), start);
+        sym_key
+            .entry(node.symbol.id)
+            .and_modify(|k| {
+                if key < *k {
+                    *k = key.clone();
+                }
+            })
+            .or_insert(key);
     }
 
+    // E1 cap: keep the first `cap` distinct symbols (by path, offset, id) and
+    // prune edges/has_edges to that set so the subgraph stays referentially
+    // valid. `limit=0` (or a 0 default) means unlimited.
+    let cap = opts.limit.unwrap_or(data.max_result_symbols);
+    result_graph.total_symbols = all_symbols.len();
+    let (kept, truncated) = select_kept(&sym_key, cap);
+    result_graph.truncated = truncated;
+
     for (from, to, loc) in res.edges.0 {
+        if !(kept.contains(&from.symbol_id.0) && kept.contains(&to.symbol_id.0)) {
+            continue;
+        }
         let from_project_id = loc.as_ref().and_then(|occurrence| {
             object_projects
                 .get(&occurrence.file)
@@ -150,6 +170,9 @@ pub async fn query(
     }
 
     for has_edge in res.has_edges.0 {
+        if !(kept.contains(&has_edge.parent.0) && kept.contains(&has_edge.child.0)) {
+            continue;
+        }
         result_graph.add_has_edge(HasEdge::new(
             has_edge.parent,
             has_edge.child,
@@ -158,7 +181,11 @@ pub async fn query(
         ));
     }
 
+    let mut result_objects = HashMap::new();
     for symbol in all_symbols {
+        if !kept.contains(&symbol.id) {
+            continue;
+        }
         let mut seen_stmts = HashSet::new();
         let mut query_stmts = Vec::new();
         let mut symbol_instances = Vec::new();
@@ -178,6 +205,12 @@ pub async fn query(
                     });
                 }
             }
+            let object_id = FileId::new(n.object.id);
+            result_objects.entry(object_id).or_insert(GraphObjectEntry {
+                object_id: object_id.to_string(),
+                path: n.object.filesystem_path.clone(),
+                project_id: n.object.project_id.to_string(),
+            });
             let (start_offset, end_offset) =
                 range_bounds_to_offsets(&n.symbol_instance.offset_range).unwrap();
             symbol_instances.push(NodeSymbolInstance {
@@ -192,10 +225,6 @@ pub async fn query(
             });
         }
 
-        debug!(
-            "Symbol instances for symbol {}: {:?}",
-            symbol.id, symbol_instances
-        );
         result_graph.add_node(Node::new(
             SymbolId(symbol.id),
             symbol.name.clone(),
@@ -204,7 +233,7 @@ pub async fn query(
         ));
     }
 
-    result_graph.objects = result_objects.into_iter().map(|(_, value)| value).collect();
+    result_graph.objects = result_objects.into_values().collect();
     result_graph.add_warnings(res.warnings);
 
     if want_markdown {
@@ -257,6 +286,64 @@ pub struct QueryOpts {
     format: Option<String>,
     /// `names` | `signature` | `body` (default `signature`), markdown only.
     projection: Option<String>,
+    /// Max distinct symbols in the result; `0` = unlimited. Defaults to the
+    /// server's `max_result_symbols`.
+    limit: Option<usize>,
+}
+
+/// Choose which symbols survive the E1 cap, deterministically keeping the first
+/// `cap` by `(path, offset, symbol id)`. `cap == 0` means unlimited. Returns the
+/// kept id set and whether truncation occurred.
+fn select_kept(sym_key: &HashMap<i64, (String, i32)>, cap: usize) -> (HashSet<i64>, bool) {
+    if cap == 0 || sym_key.len() <= cap {
+        return (sym_key.keys().copied().collect(), false);
+    }
+    let mut ids: Vec<i64> = sym_key.keys().copied().collect();
+    ids.sort_by(|a, b| {
+        let ka = &sym_key[a];
+        let kb = &sym_key[b];
+        (ka.0.as_str(), ka.1, *a).cmp(&(kb.0.as_str(), kb.1, *b))
+    });
+    ids.truncate(cap);
+    (ids.into_iter().collect(), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(path: &str, off: i32) -> (String, i32) {
+        (path.to_string(), off)
+    }
+
+    #[test]
+    fn select_kept_unlimited_and_under_cap() {
+        let mut m = HashMap::new();
+        m.insert(1i64, key("/a", 0));
+        m.insert(2, key("/b", 0));
+
+        let (kept, trunc) = select_kept(&m, 0); // 0 = unlimited
+        assert!(!trunc);
+        assert_eq!(kept.len(), 2);
+
+        let (kept, trunc) = select_kept(&m, 5); // total <= cap
+        assert!(!trunc);
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn select_kept_caps_by_path_offset_id() {
+        let mut m = HashMap::new();
+        m.insert(10i64, key("/b", 0)); // 3rd by (path, offset)
+        m.insert(11, key("/a", 50)); // 2nd
+        m.insert(12, key("/a", 10)); // 1st
+
+        let (kept, trunc) = select_kept(&m, 2);
+        assert!(trunc);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.contains(&12) && kept.contains(&11));
+        assert!(!kept.contains(&10));
+    }
 }
 
 #[derive(Debug, Deserialize)]

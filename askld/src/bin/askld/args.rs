@@ -40,6 +40,10 @@ pub struct ServeArgs {
     /// In-RAM SQL result cache budget in bytes (0 disables the cache)
     #[clap(long, default_value = "268435456", env = "ASKL_SQL_CACHE_BYTES")]
     pub sql_cache_bytes: usize,
+
+    /// Max distinct symbols per query result (0 = unlimited); per-request `?limit=` overrides
+    #[clap(long, default_value = "100", env = "ASKL_MAX_RESULT_SYMBOLS")]
+    pub max_result_symbols: usize,
 }
 
 #[derive(ClapArgs, Debug)]

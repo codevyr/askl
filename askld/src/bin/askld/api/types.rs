@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize, Serializer};
 pub struct AsklData {
     pub cfg: ControlFlowGraph,
     pub query_timeout: std::time::Duration,
+    /// Default cap on distinct symbols per result (0 = unlimited).
+    pub max_result_symbols: usize,
 }
 
 fn symbolid_as_string<S>(x: &SymbolId, s: S) -> Result<S::Ok, S::Error>
@@ -165,6 +167,10 @@ pub struct Graph {
     pub has_edges: Vec<HasEdge>,
     pub objects: Vec<GraphObjectEntry>,
     pub warnings: Vec<ErrorResponse>,
+    /// True when the result was capped to `max_result_symbols`.
+    pub truncated: bool,
+    /// Distinct symbol count before capping (== `nodes.len()` when not truncated).
+    pub total_symbols: usize,
 }
 
 impl Graph {
@@ -175,6 +181,8 @@ impl Graph {
             has_edges: vec![],
             objects: vec![],
             warnings: vec![],
+            truncated: false,
+            total_symbols: 0,
         }
     }
 
