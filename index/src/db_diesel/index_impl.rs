@@ -1265,6 +1265,19 @@ impl Index {
         Self::get_file_contents_on(&mut *connection, object_id).await
     }
 
+    /// Raw file bytes, exactly as indexed — no lossy UTF-8 conversion, so byte
+    /// offsets stored in the index line up with the returned content. Preferred
+    /// when offsets must stay exact (e.g. rendering `file:line` locations).
+    pub async fn get_file_contents_bytes(&self, object_id: FileId) -> Result<Vec<u8>> {
+        let connection = &mut self
+            .pool
+            .get()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+
+        Self::get_file_contents_bytes_on(&mut *connection, object_id).await
+    }
+
     /// Same as [`Index::get_file_contents`], but on a caller-supplied
     /// connection — for deferred populate closures running inside an
     /// [`EphTransaction`] (see [`Index::search_content_matches_on`]).
@@ -1272,6 +1285,16 @@ impl Index {
         connection: &mut AsyncPgConnection,
         object_id: FileId,
     ) -> Result<String> {
+        let content = Self::get_file_contents_bytes_on(connection, object_id).await?;
+        Ok(String::from_utf8_lossy(&content).to_string())
+    }
+
+    /// Raw file bytes on a caller-supplied connection. The `String` variants are
+    /// lossy on non-UTF-8 content and must not be used where byte offsets matter.
+    pub async fn get_file_contents_bytes_on(
+        connection: &mut AsyncPgConnection,
+        object_id: FileId,
+    ) -> Result<Vec<u8>> {
         let object_id: i32 = object_id.into();
         let result: Option<Vec<u8>> = diesel::sql_query(
             r#"
@@ -1291,7 +1314,7 @@ impl Index {
         .map(|row| row.content);
 
         match result {
-            Some(content) => Ok(String::from_utf8_lossy(&content).to_string()),
+            Some(content) => Ok(content),
             None => Err(anyhow::anyhow!(
                 "File contents not found for object_id {}",
                 object_id
