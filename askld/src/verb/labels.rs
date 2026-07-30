@@ -1,7 +1,7 @@
 use crate::{
     execution_context::{selector_state_with, SelectorRegistry},
     execution_state::{DependencyKind, DependencyRole, RelationshipType},
-    parser::Rule,
+    parser::{Rule, Value},
     span::Span,
 };
 use anyhow::{bail, Result};
@@ -37,11 +37,11 @@ impl LabelVerb {
 
     pub(super) fn new(
         span: Span,
-        positional: &Vec<String>,
-        named: &HashMap<String, String>,
+        positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         let inherit = if let Some(val) = named.get("inherit") {
-            match val.as_str() {
+            match val.as_plain()? {
                 "true" => true,
                 "false" => false,
                 other => bail!("Unexpected value for inherit parameter: {}", other),
@@ -59,7 +59,7 @@ impl LabelVerb {
         if let Some(label) = positional.iter().next() {
             Ok(Arc::new(Self {
                 span,
-                label: label.clone(),
+                label: label.as_plain()?.to_string(),
                 inherit,
             }))
         } else {
@@ -110,10 +110,11 @@ impl UserVerb {
 
     pub(super) fn new(
         span: Span,
-        positional: &Vec<String>,
-        named: &HashMap<String, String>,
+        positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         let forced = if let Some(forced) = named.get("forced") {
+            let forced = forced.as_plain()?;
             if forced == "true" {
                 true
             } else if forced == "false" {
@@ -128,7 +129,7 @@ impl UserVerb {
         if let Some(label) = positional.iter().next() {
             Ok(Arc::new(Self {
                 span,
-                label: label.clone(),
+                label: label.as_plain()?.to_string(),
                 forced,
                 selection: Arc::new(OnceLock::new()),
             }))

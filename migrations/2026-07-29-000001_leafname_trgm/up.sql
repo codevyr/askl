@@ -1,0 +1,12 @@
+-- Trigram index for glob selectors (g"..."): leaf-name globs compile to
+-- leaf_name LIKE/ILIKE with wildcards that plain btree indexes cannot serve
+-- (leading '%', case-insensitive).  Compound globs use the existing
+-- symbols_name_trgm_idx on name.
+--
+-- Built non-CONCURRENTLY on purpose: diesel runs migrations inside a
+-- transaction (CONCURRENTLY is not allowed there), matching the existing
+-- symbols_name_trgm_idx build in root_layers.  The GIN build takes a
+-- ShareLock on index.symbols, briefly blocking indexer writes at deploy —
+-- expected to be shorter than that prior rebuild since leaf_name is narrower
+-- than name.
+CREATE INDEX symbols_leafname_trgm_idx ON index.symbols USING gin (leaf_name gin_trgm_ops);

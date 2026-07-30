@@ -1,4 +1,4 @@
-use crate::{parser_context::ParserContext, span::Span};
+use crate::{parser::Value, parser_context::ParserContext, span::Span};
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,8 +15,8 @@ impl PreambleVerb {
 
     pub(super) fn new(
         span: Span,
-        positional: &Vec<String>,
-        named: &HashMap<String, String>,
+        positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         if !positional.is_empty() {
             bail!("Unexpected positional arguments");

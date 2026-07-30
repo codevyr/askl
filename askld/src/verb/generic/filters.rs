@@ -1,3 +1,5 @@
+use crate::name_pattern::NamePattern;
+use crate::parser::Value;
 use crate::parser_context::{
     ParserContext, SYMBOL_TYPE_DATA, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FIELD, SYMBOL_TYPE_FILE,
     SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MACRO, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
@@ -18,7 +20,7 @@ use super::selectors::TypeSelector;
 #[derive(Debug)]
 pub(in crate::verb) struct IgnoreVerb {
     span: Span,
-    name: Option<String>,
+    name: Option<NamePattern>,
     package: Option<String>,
 }
 
@@ -27,8 +29,8 @@ impl IgnoreVerb {
 
     pub fn new(
         span: Span,
-        positional: &Vec<String>,
-        named: &HashMap<String, String>,
+        positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         let mut verb = Self {
             span,
@@ -38,12 +40,12 @@ impl IgnoreVerb {
         let mut empty = true;
 
         if let Some(name) = positional.iter().next() {
-            verb.name = Some(name.clone());
+            verb.name = Some(NamePattern::from_value(name)?);
             empty = false;
         }
 
         if let Some(package) = named.get("package") {
-            verb.package = Some(package.clone());
+            verb.package = Some(package.as_plain()?.to_string());
             empty = false;
         }
 
@@ -76,10 +78,15 @@ impl Verb for IgnoreVerb {
 impl Filter for IgnoreVerb {
     fn get_composite_filter(&self, _eph: &index::db_diesel::EphContext) -> Option<CompositeFilter> {
         let mut parts = vec![];
-        if let Some(ref name) = self.name {
+        match &self.name {
             // Same CompoundNameMixin the positive name filter uses — replaces
             // the old in-memory partial_name_match with an equivalent SQL lquery.
-            parts.push(CompositeFilter::leaf(CompoundNameMixin::new(name)));
+            Some(NamePattern::Exact(name)) => {
+                parts.push(CompositeFilter::leaf(CompoundNameMixin::new(name)));
+            }
+            // Same glob semantics the positive name filter uses.
+            Some(NamePattern::Glob(glob)) => parts.push(glob.filter(true, true)),
+            None => {}
         }
         if let Some(ref package) = self.package {
             if let Some(leaf) = PackageDescendantLeaf::new(package) {
@@ -114,13 +121,13 @@ impl ProjectFilter {
 
     pub fn new(
         span: Span,
-        positional: &Vec<String>,
-        _named: &HashMap<String, String>,
+        positional: &Vec<Value>,
+        _named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         if let Some(project) = positional.iter().next() {
             Ok(Arc::new(Self {
                 span,
-                project: project.clone(),
+                project: project.as_plain()?.to_string(),
             }))
         } else {
             bail!("Expected a positional argument");
@@ -294,21 +301,21 @@ pub(in crate::verb) fn parse_symbol_types(s: &str) -> Result<Vec<i32>> {
 #[derive(Debug, Clone)]
 pub(in crate::verb) enum FilterKind {
     Type { symbol_type_ids: Vec<i32> },
-    ExactName { value: String },
-    CompoundName { value: String },
+    ExactName { pattern: NamePattern },
+    CompoundName { pattern: NamePattern },
 }
 
 impl FilterKind {
-    fn parse(kind: &str, value: &str) -> Result<Self> {
+    fn parse(kind: &str, value: &Value) -> Result<Self> {
         match kind {
             "type" => Ok(FilterKind::Type {
-                symbol_type_ids: parse_symbol_types(value)?,
+                symbol_type_ids: parse_symbol_types(value.as_plain()?)?,
             }),
             "exact_name" => Ok(FilterKind::ExactName {
-                value: value.to_string(),
+                pattern: NamePattern::from_value(value)?,
             }),
             "compound_name" => Ok(FilterKind::CompoundName {
-                value: value.to_string(),
+                pattern: NamePattern::from_value(value)?,
             }),
             other => bail!(
                 "Unknown filter kind: '{}'. Expected 'type', 'exact_name', or 'compound_name'",
@@ -349,12 +356,19 @@ impl FilterKind {
                     )))
                 }
             }
-            FilterKind::ExactName { value } => {
-                Some(CompositeFilter::leaf(ExactNameMixin::new(value)))
-            }
-            FilterKind::CompoundName { value } => {
-                Some(CompositeFilter::leaf(CompoundNameMixin::new(value)))
-            }
+            FilterKind::ExactName { pattern } => match pattern {
+                NamePattern::Exact(value) => {
+                    Some(CompositeFilter::leaf(ExactNameMixin::new(value)))
+                }
+                // Anchored full-name glob: the whole name must match.
+                NamePattern::Glob(glob) => Some(glob.full_name_filter()),
+            },
+            FilterKind::CompoundName { pattern } => match pattern {
+                NamePattern::Exact(value) => {
+                    Some(CompositeFilter::leaf(CompoundNameMixin::new(value)))
+                }
+                NamePattern::Glob(glob) => Some(glob.filter(true, true)),
+            },
         }
     }
 
@@ -375,8 +389,8 @@ impl std::fmt::Display for FilterKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FilterKind::Type { symbol_type_ids } => write!(f, "type={:?}", symbol_type_ids),
-            FilterKind::ExactName { value } => write!(f, "exact_name={}", value),
-            FilterKind::CompoundName { value } => write!(f, "compound_name={}", value),
+            FilterKind::ExactName { pattern } => write!(f, "exact_name={}", pattern),
+            FilterKind::CompoundName { pattern } => write!(f, "compound_name={}", pattern),
         }
     }
 }
@@ -393,12 +407,13 @@ impl GenericFilter {
 
     pub fn new(
         span: Span,
-        positional: &Vec<String>,
-        named: &HashMap<String, String>,
+        positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         let kind_str = positional
             .first()
-            .ok_or_else(|| anyhow!("filter requires a kind as first argument"))?;
+            .ok_or_else(|| anyhow!("filter requires a kind as first argument"))?
+            .as_plain()?;
 
         let value = positional
             .get(1)
@@ -406,10 +421,10 @@ impl GenericFilter {
 
         let kind = FilterKind::parse(kind_str, value)?;
 
-        let inherit = named
-            .get("inherit")
-            .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        let inherit = match named.get("inherit") {
+            Some(v) => v.as_plain()?.eq_ignore_ascii_case("true"),
+            None => false,
+        };
 
         Ok(Arc::new(Self {
             span,

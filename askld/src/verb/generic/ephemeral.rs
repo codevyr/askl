@@ -1,4 +1,5 @@
 use crate::cfg::ControlFlowGraph;
+use crate::parser::Value;
 use crate::parser_context::ParserContext;
 use crate::span::Span;
 use anyhow::{bail, Result};
@@ -122,6 +123,7 @@ macro_rules! parse_required {
         $named
             .get($key)
             .ok_or_else(|| anyhow::anyhow!("requires '{}' parameter", $key))?
+            .as_plain()?
             .parse::<$t>()
             .map_err(|_| anyhow::anyhow!("'{}' must be a valid {}", $key, stringify!($t)))?
     };
@@ -142,7 +144,7 @@ pub(in crate::verb) struct EphemeralSymbolVerb {
 impl EphemeralSymbolVerb {
     pub(in crate::verb) const NAME: &'static str = "ephemeral_symbol";
 
-    fn create(_positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Self> {
+    fn create(_positional: &Vec<Value>, named: &HashMap<String, Value>) -> Result<Self> {
         let name: String = parse_required!(named, "name", String);
         let project_id: i32 = parse_required!(named, "project_id", i32);
         let symbol_type: i32 = parse_required!(named, "symbol_type", i32);
@@ -156,6 +158,8 @@ impl EphemeralSymbolVerb {
         }
         let scope: Option<i32> = named
             .get("scope")
+            .map(|s| s.as_plain())
+            .transpose()?
             .map(|s| s.parse())
             .transpose()
             .map_err(|_| anyhow::anyhow!("'scope' must be a valid i32"))?;
@@ -170,8 +174,8 @@ impl EphemeralSymbolVerb {
 
     pub(crate) fn new_op(
         _span: Span,
-        positional: &Vec<String>,
-        named: &HashMap<String, String>,
+        positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn EphemeralOp>> {
         Ok(Arc::new(Self::create(positional, named)?))
     }
@@ -287,10 +291,11 @@ pub(in crate::verb) struct EphemeralInstanceVerb {
 impl EphemeralInstanceVerb {
     pub(in crate::verb) const NAME: &'static str = "ephemeral_instance";
 
-    fn create(_positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Self> {
+    fn create(_positional: &Vec<Value>, named: &HashMap<String, Value>) -> Result<Self> {
         let symbol_raw = named
             .get("symbol_id")
-            .ok_or_else(|| anyhow::anyhow!("requires 'symbol_id' parameter"))?;
+            .ok_or_else(|| anyhow::anyhow!("requires 'symbol_id' parameter"))?
+            .as_plain()?;
         let symbol = SymbolRef::parse(symbol_raw, "symbol_id")?;
         let object_id: i32 = parse_required!(named, "object_id", i32);
         let start: i64 = parse_required!(named, "start", i64);
@@ -316,8 +321,8 @@ impl EphemeralInstanceVerb {
 
     pub(crate) fn new_op(
         _span: Span,
-        positional: &Vec<String>,
-        named: &HashMap<String, String>,
+        positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn EphemeralOp>> {
         Ok(Arc::new(Self::create(positional, named)?))
     }
@@ -382,10 +387,11 @@ pub(in crate::verb) struct EphemeralRefVerb {
 impl EphemeralRefVerb {
     pub(in crate::verb) const NAME: &'static str = "ephemeral_ref";
 
-    fn create(_positional: &Vec<String>, named: &HashMap<String, String>) -> Result<Self> {
+    fn create(_positional: &Vec<Value>, named: &HashMap<String, Value>) -> Result<Self> {
         let to_symbol_raw = named
             .get("to_symbol")
-            .ok_or_else(|| anyhow::anyhow!("requires 'to_symbol' parameter"))?;
+            .ok_or_else(|| anyhow::anyhow!("requires 'to_symbol' parameter"))?
+            .as_plain()?;
         let to_symbol = SymbolRef::parse(to_symbol_raw, "to_symbol")?;
         let from_object: i32 = parse_required!(named, "from_object", i32);
         let start: i64 = parse_required!(named, "start", i64);
@@ -401,8 +407,8 @@ impl EphemeralRefVerb {
 
     pub(crate) fn new_op(
         _span: Span,
-        positional: &Vec<String>,
-        named: &HashMap<String, String>,
+        positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn EphemeralOp>> {
         Ok(Arc::new(Self::create(positional, named)?))
     }
@@ -467,8 +473,8 @@ impl LayerVerb {
 
     pub(in crate::verb) fn new(
         span: Span,
-        _positional: &Vec<String>,
-        _named: &HashMap<String, String>,
+        _positional: &Vec<Value>,
+        _named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         Ok(Arc::new(Self {
             span,

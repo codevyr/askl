@@ -4,19 +4,29 @@ nl = _{ NEWLINE* }
 ident = @{ ("_" | XID_START) ~ XID_CONTINUE* }
 string = @{(!"\"" ~ ANY)*}
 quoted_string = _{ "\"" ~ string  ~ "\""}
-named_argument = ${ident ~ "=" ~ quoted_string}
+// Typed strings: a prefix glued to the opening quote selects the string
+// type (g"..." = glob; re"..." reserved for regex).  Unknown prefixes are
+// rejected in the parser with a span error, so new types are non-breaking.
+string_prefix = @{ ASCII_ALPHA+ }
+prefixed_string = ${ string_prefix ~ "\"" ~ string ~ "\"" }
+// Typed argument value.  Groundwork for a richer type system: future
+// alternatives (bool, number, list) slot in here.
+value = _{ prefixed_string | quoted_string }
+named_argument = ${ident ~ "=" ~ value}
 named_arguments = _{named_argument ~ (nl ~ "," ~ nl ~ named_argument)*}
-positional_argument = { quoted_string }
+positional_argument = { value }
 positional_arguments = _{positional_argument ~ (nl ~ "," ~ nl ~ positional_argument)* }
 verb_arguments = _{ nl ~ ((positional_arguments ~ nl ~ "," ~ nl ~ named_arguments) | positional_arguments | named_arguments) ~ nl }
 generic_verb = { ident ~ ("(" ~ verb_arguments ~ ")")?}
 inherit_label_shortcut = ${ "@@" ~ ident }
 label_shortcut = ${ "@" ~ ident }
 use_shortcut = ${ "#" ~ ident }
-plain_filter = { quoted_string }
-forced_verb = { "!" ~ quoted_string }
+plain_filter = { value }
+forced_verb = { "!" ~ value }
 special_verb = _{ plain_filter | forced_verb }
-verb = { inherit_label_shortcut | label_shortcut | use_shortcut | generic_verb | special_verb }
+// special_verb must precede generic_verb so a prefixed string like g"foo"
+// parses as a filter rather than as verb ident `g` followed by a string.
+verb = { inherit_label_shortcut | label_shortcut | use_shortcut | special_verb | generic_verb }
 scope = { "{" ~ statements ~ "}" }
 statement = { (verb* ~ scope) | (verb+) | (scope)}
 statement_terminator = _{";" | NEWLINE}

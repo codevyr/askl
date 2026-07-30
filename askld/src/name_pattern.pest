@@ -1,0 +1,9 @@
+// Grammar for reparsing the raw string extracted from a quoted selector
+// (the content between the quotes of "..."). Total over selector strings:
+// every input tokenizes into wildcards, separators and literal runs.
+
+wildcard  = { "*" }
+separator = { "." | "/" | ":" }
+literal   = @{ (!("*" | "." | "/" | ":") ~ ANY)+ }
+token     = _{ wildcard | separator | literal }
+pattern   = { SOI ~ token* ~ EOI }

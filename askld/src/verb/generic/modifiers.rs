@@ -1,5 +1,6 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_state::RelationshipType;
+use crate::parser::Value;
 use crate::parser_context::ParserContext;
 use crate::span::Span;
 use anyhow::{anyhow, bail, Result};
@@ -22,14 +23,15 @@ impl IsolatedScope {
 
     pub fn new(
         span: Span,
-        positional: &Vec<String>,
-        named: &HashMap<String, String>,
+        positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         if !positional.is_empty() {
             bail!("Unexpected positional arguments");
         }
 
         let isolated = if let Some(isolated_str) = named.get("isolated") {
+            let isolated_str = isolated_str.as_plain()?;
             if isolated_str == "true" {
                 true
             } else if isolated_str == "false" {
@@ -97,8 +99,8 @@ impl HasModifier {
 
     pub fn new(
         span: Span,
-        _positional: &Vec<String>,
-        _named: &HashMap<String, String>,
+        _positional: &Vec<Value>,
+        _named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         Ok(Arc::new(Self { span }))
     }
@@ -142,8 +144,8 @@ impl RefsModifier {
 
     pub fn new(
         span: Span,
-        _positional: &Vec<String>,
-        _named: &HashMap<String, String>,
+        _positional: &Vec<Value>,
+        _named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         Ok(Arc::new(Self { span }))
     }
@@ -192,12 +194,13 @@ impl DeriveModifier {
 
     pub fn new(
         span: Span,
-        _positional: &Vec<String>,
-        named: &HashMap<String, String>,
+        _positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         let type_str = named
             .get("type")
-            .ok_or_else(|| anyhow!("derive requires a 'type' parameter"))?;
+            .ok_or_else(|| anyhow!("derive requires a 'type' parameter"))?
+            .as_plain()?;
 
         let mut rel_type = RelationshipType::EMPTY;
         for part in type_str.split(',') {
@@ -215,10 +218,10 @@ impl DeriveModifier {
             bail!("derive type parameter must contain at least one of 'refs', 'has'");
         }
 
-        let inherit = named
-            .get("inherit")
-            .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(true);
+        let inherit = match named.get("inherit") {
+            Some(v) => v.as_plain()?.eq_ignore_ascii_case("true"),
+            None => true,
+        };
 
         Ok(Arc::new(Self {
             span,
@@ -267,8 +270,8 @@ impl UnnestModifier {
 
     pub fn new(
         span: Span,
-        _positional: &Vec<String>,
-        _named: &HashMap<String, String>,
+        _positional: &Vec<Value>,
+        _named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         Ok(Arc::new(Self { span }))
     }
@@ -311,8 +314,8 @@ impl AnyModifier {
 
     pub fn new(
         span: Span,
-        _positional: &Vec<String>,
-        _named: &HashMap<String, String>,
+        _positional: &Vec<Value>,
+        _named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         Ok(Arc::new(Self { span }))
     }

@@ -18,14 +18,14 @@ pub use index_impl::{
 };
 pub use mixins::{
     CompositeFilter, CompoundNameMixin, CurrentQuery, DefaultSymbolTypeMixin, DirectOnlyMixin,
-    ExactNameMixin, FilterLeaf, InnermostOnlyMixin, LeafNameMixin, OuterParentFilterMixin,
-    PackageDescendantLeaf, ProjectFilterMixin, SymbolInstanceIdMixin, SymbolTypeMixin,
-    INSTANCE_TYPE_BUILD, INSTANCE_TYPE_CONTAINMENT, INSTANCE_TYPE_DECLARATION,
-    INSTANCE_TYPE_DEFINITION, INSTANCE_TYPE_DOCUMENTATION, INSTANCE_TYPE_EXPANSION,
-    INSTANCE_TYPE_FILE, INSTANCE_TYPE_HEADER, INSTANCE_TYPE_SENTINEL, INSTANCE_TYPE_SOURCE,
-    SYMBOL_TYPE_CONTENT, SYMBOL_TYPE_DATA, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FIELD,
-    SYMBOL_TYPE_FILE, SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MACRO, SYMBOL_TYPE_MODULE,
-    SYMBOL_TYPE_TYPE,
+    ExactNameMixin, FilterLeaf, FullNameGlobMixin, GlobNameMixin, GlobPiece, InnermostOnlyMixin,
+    LeafNameMixin, OuterParentFilterMixin, PackageDescendantLeaf, ProjectFilterMixin,
+    SymbolInstanceIdMixin, SymbolTypeMixin, INSTANCE_TYPE_BUILD, INSTANCE_TYPE_CONTAINMENT,
+    INSTANCE_TYPE_DECLARATION, INSTANCE_TYPE_DEFINITION, INSTANCE_TYPE_DOCUMENTATION,
+    INSTANCE_TYPE_EXPANSION, INSTANCE_TYPE_FILE, INSTANCE_TYPE_HEADER, INSTANCE_TYPE_SENTINEL,
+    INSTANCE_TYPE_SOURCE, SYMBOL_TYPE_CONTENT, SYMBOL_TYPE_DATA, SYMBOL_TYPE_DIRECTORY,
+    SYMBOL_TYPE_FIELD, SYMBOL_TYPE_FILE, SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MACRO,
+    SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
 };
 pub use selection::{
     Checked, ChildReference, EphContext, HasChildReference, HasEphLeak, HasParentReference,

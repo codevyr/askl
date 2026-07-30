@@ -23,6 +23,7 @@
 //! `whole_word=`, `limit=`) and the truncation warning.
 
 use crate::cfg::ControlFlowGraph;
+use crate::parser::Value;
 use crate::span::Span;
 use crate::verb::LayerSpec;
 use anyhow::{bail, Result};
@@ -31,7 +32,7 @@ use index::db_diesel::{
     CompositeFilter, EphContext, EphInstanceRow, EphLayerKind, EphSymbolRow, Index, LayerBatch,
     INSTANCE_TYPE_DEFINITION, SYMBOL_TYPE_CONTENT,
 };
-use index::symbols::symbol_path_and_leaf;
+use index::symbols::{smart_case_sensitive, symbol_path_and_leaf};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -62,13 +63,13 @@ impl SearchSelector {
 
     pub fn new(
         span: Span,
-        positional: &Vec<String>,
-        named: &HashMap<String, String>,
+        positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         if positional.len() != 1 {
             bail!("search requires exactly one positional argument: query");
         }
-        let query = positional[0].clone();
+        let query = positional[0].as_plain()?.to_string();
         if query.trim().is_empty() {
             bail!("search: query must be non-empty");
         }
@@ -79,8 +80,8 @@ impl SearchSelector {
         // Smart-case is resolved at parse time so the hash and the SQL
         // variant choice see a concrete bool — different `case=` values
         // that resolve to the same bool share the cache.
-        let case_sensitive = match named.get("case").map(String::as_str) {
-            None | Some("smart") => query.chars().any(|c| c.is_uppercase()),
+        let case_sensitive = match crate::parser::named_plain(named, "case")? {
+            None | Some("smart") => smart_case_sensitive(&query),
             Some("sensitive") => true,
             Some("insensitive") => false,
             Some(other) => bail!(
@@ -89,7 +90,7 @@ impl SearchSelector {
             ),
         };
 
-        let whole_word = match named.get("whole_word").map(String::as_str) {
+        let whole_word = match crate::parser::named_plain(named, "whole_word")? {
             None | Some("false") => false,
             Some("true") => true,
             Some(other) => bail!(
@@ -101,6 +102,7 @@ impl SearchSelector {
         let limit = match named.get("limit") {
             None => DEFAULT_LIMIT,
             Some(s) => {
+                let s = s.as_plain()?;
                 let n: usize = s.parse().map_err(|_| {
                     anyhow::anyhow!("search: limit must be a positive integer, got: {:?}", s,)
                 })?;

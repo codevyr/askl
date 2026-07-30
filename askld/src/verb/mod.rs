@@ -1,7 +1,7 @@
 use crate::cfg::ControlFlowGraph;
 use crate::execution_context::{selector_state_with, ExecutionContext, SelectorRegistry};
 use crate::execution_state::{DependencyKind, DependencyRole, RelationshipType};
-use crate::parser::Rule;
+use crate::parser::{Rule, Value};
 use crate::parser_context::ParserContext;
 use crate::span::Span;
 use crate::statement::Statement;
@@ -172,33 +172,33 @@ pub fn build_verb(
         match verb.as_rule() {
             Rule::label_shortcut => {
                 let label_ident = verb.into_inner().next().unwrap();
-                let positional = vec![label_ident.as_str().to_string()];
+                let positional = vec![Value::plain(label_ident.as_str())];
                 LabelVerb::new(verb_span.clone(), &positional, &HashMap::new())
             }
             Rule::inherit_label_shortcut => {
                 let label_ident = verb.into_inner().next().unwrap();
-                let positional = vec![label_ident.as_str().to_string()];
+                let positional = vec![Value::plain(label_ident.as_str())];
                 let mut named = HashMap::new();
-                named.insert("inherit".to_string(), "true".to_string());
+                named.insert("inherit".to_string(), Value::plain("true"));
                 LabelVerb::new(verb_span.clone(), &positional, &named)
             }
             Rule::use_shortcut => {
                 let label_ident = verb.into_inner().next().unwrap();
-                let positional = vec![label_ident.as_str().to_string()];
+                let positional = vec![Value::plain(label_ident.as_str())];
                 UserVerb::new(verb_span.clone(), &positional, &HashMap::new())
             }
             Rule::plain_filter => {
-                let ident = verb.into_inner().next().unwrap();
+                let value = Value::build(verb.into_inner().next().unwrap())?;
                 let positional = vec![];
                 let mut named = HashMap::new();
-                named.insert("name".into(), ident.as_str().into());
+                named.insert("name".to_string(), value);
                 NameSelector::new(verb_span.clone(), &positional, &named)
             }
             Rule::forced_verb => {
-                let ident = verb.into_inner().next().unwrap();
+                let value = Value::build(verb.into_inner().next().unwrap())?;
                 let positional = vec![];
                 let mut named = HashMap::new();
-                named.insert("name".into(), ident.as_str().into());
+                named.insert("name".to_string(), value);
                 ForcedVerb::new(verb_span.clone(), &positional, &named)
             }
             _ => {

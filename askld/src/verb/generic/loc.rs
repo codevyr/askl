@@ -1,4 +1,5 @@
 use crate::cfg::ControlFlowGraph;
+use crate::parser::Value;
 use crate::span::Span;
 use crate::verb::LayerSpec;
 use anyhow::{bail, Result};
@@ -43,20 +44,24 @@ impl LocSelector {
 
     pub fn new(
         span: Span,
-        positional: &Vec<String>,
-        named: &HashMap<String, String>,
+        positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
     ) -> Result<Arc<dyn Verb>> {
         if positional.len() < 2 {
             bail!("loc requires two positional arguments: file path and line number");
         }
-        let file_path = positional[0].clone();
+        let file_path = positional[0].as_plain()?.to_string();
         let line: usize = positional[1]
+            .as_plain()?
             .parse()
             .map_err(|_| anyhow::anyhow!("loc line number must be an integer"))?;
         if line == 0 {
             bail!("loc line number must be >= 1");
         }
-        let project = named.get("project").cloned();
+        let project = named
+            .get("project")
+            .map(|v| v.as_plain().map(str::to_string))
+            .transpose()?;
 
         Ok(Arc::new(Self {
             span,

@@ -35,17 +35,100 @@ impl Identifier {
     }
 }
 
-#[derive(Debug)]
-pub struct Value(pub String);
+/// The type of a quoted string, selected by an optional prefix glued to the
+/// opening quote (`g"..."` = glob; `re"..."` reserved for regex).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringKind {
+    Plain,
+    Glob,
+}
+
+/// A typed argument value.  Today only strings exist; this enum is the
+/// groundwork for a richer type system (bool, numbers, lists).
+#[derive(Debug, Clone)]
+pub enum Value {
+    Str { kind: StringKind, text: String },
+}
 
 impl Value {
-    pub fn build(pair: pest::iterators::Pair<Rule>) -> Result<Value, Error<Rule>> {
-        let string = match pair.as_rule() {
-            Rule::string => pair.as_str(),
-            _ => unreachable!("Unknown rule: {:#?}", pair.as_rule()),
-        };
-        Ok(Value(string.into()))
+    /// Construct a plain string value (used for synthetic arguments built
+    /// from shortcuts like `@label`).
+    pub fn plain(text: impl Into<String>) -> Value {
+        Value::Str {
+            kind: StringKind::Plain,
+            text: text.into(),
+        }
     }
+
+    /// The string content, requiring a plain (unprefixed) string.  Use for
+    /// arguments where pattern types make no sense (flags, search queries).
+    pub fn as_plain(&self) -> anyhow::Result<&str> {
+        match self {
+            Value::Str {
+                kind: StringKind::Plain,
+                text,
+            } => Ok(text),
+            Value::Str {
+                kind: StringKind::Glob,
+                text,
+            } => anyhow::bail!("expected a plain string, found glob string g\"{}\"", text),
+        }
+    }
+
+    pub fn build(pair: pest::iterators::Pair<Rule>) -> Result<Value, Error<Rule>> {
+        match pair.as_rule() {
+            Rule::string => Ok(Value::Str {
+                kind: StringKind::Plain,
+                text: pair.as_str().into(),
+            }),
+            Rule::prefixed_string => {
+                let span = pair.as_span();
+                let mut inner = pair.into_inner();
+                let prefix = inner.next().unwrap();
+                let string = inner.next().unwrap();
+                let kind = match prefix.as_str() {
+                    "g" => StringKind::Glob,
+                    "re" => {
+                        return Err(Error::new_from_span(
+                            pest::error::ErrorVariant::CustomError {
+                                message: "regex strings (re\"...\") are reserved but not \
+                                          supported yet"
+                                    .into(),
+                            },
+                            span,
+                        ))
+                    }
+                    other => {
+                        return Err(Error::new_from_span(
+                            pest::error::ErrorVariant::CustomError {
+                                message: format!(
+                                    "unknown string prefix '{}' (supported: g\"...\" for glob \
+                                     patterns)",
+                                    other
+                                ),
+                            },
+                            span,
+                        ))
+                    }
+                };
+                Ok(Value::Str {
+                    kind,
+                    text: string.as_str().into(),
+                })
+            }
+            _ => unreachable!("Unknown rule: {:#?}", pair.as_rule()),
+        }
+    }
+}
+
+/// Look up an optional named argument and require it to be a plain string.
+/// Collapses the `named.get(k).map(|v| v.as_plain()).transpose()?` pattern
+/// that verb constructors would otherwise repeat.
+pub fn named_plain<'a>(
+    named: &'a std::collections::HashMap<String, Value>,
+    key: &str,
+) -> anyhow::Result<Option<&'a str>> {
+    named.get(key).map(|v| v.as_plain()).transpose()
 }
 
 #[derive(Debug)]
@@ -58,9 +141,9 @@ impl NamedArgument {
     pub fn build(pair: pest::iterators::Pair<Rule>) -> Result<NamedArgument, Error<Rule>> {
         let mut pair = pair.into_inner();
         let ident = pair.next().unwrap();
-        let ident = Identifier::build(ident).unwrap();
+        let ident = Identifier::build(ident)?;
         let value = pair.next().unwrap();
-        let value = Value::build(value).unwrap();
+        let value = Value::build(value)?;
         Ok(NamedArgument {
             name: ident,
             value: value,
@@ -77,7 +160,7 @@ impl PositionalArgument {
     pub fn build(pair: pest::iterators::Pair<Rule>) -> Result<Self, Error<Rule>> {
         let mut pair = pair.into_inner();
         let value = pair.next().unwrap();
-        let value = Value::build(value).unwrap();
+        let value = Value::build(value)?;
         Ok(Self { value })
     }
 }

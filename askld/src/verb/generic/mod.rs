@@ -1,4 +1,5 @@
-use crate::parser::{Identifier, NamedArgument, PositionalArgument, Rule};
+use crate::name_pattern::NamePattern;
+use crate::parser::{Identifier, NamedArgument, PositionalArgument, Rule, Value};
 use crate::parser_context::{
     SYMBOL_TYPE_DATA, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FIELD, SYMBOL_TYPE_FILE,
     SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MACRO, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
@@ -44,17 +45,17 @@ pub(crate) fn build_generic_verb(
     let verb_span = Span::from_pest(pair.as_span(), ctx.source());
     let mut pair = pair.into_inner();
     let ident = pair.next().unwrap();
-    let mut positional = vec![];
-    let mut named = HashMap::new();
+    let mut positional: Vec<Value> = vec![];
+    let mut named: HashMap<String, Value> = HashMap::new();
     pair.map(|pair| match pair.as_rule() {
         Rule::positional_argument => {
             let arg = PositionalArgument::build(pair)?;
-            positional.push(arg.value.0);
+            positional.push(arg.value);
             Ok(())
         }
         Rule::named_argument => {
             let arg = NamedArgument::build(pair)?;
-            named.insert(arg.name.0, arg.value.0);
+            named.insert(arg.name.0, arg.value);
             Ok(())
         }
         rule => Err(Error::new_from_span(
@@ -174,11 +175,16 @@ pub(crate) fn build_generic_verb(
 
 /// Returns a name filter for the type-agnostic case (bare selectors).
 /// Treats '.' as a separator (code symbol convention).
-fn name_filter(name: &str) -> CompositeFilter {
-    let is_compound = name.contains('.') || name.contains('/') || name.contains(':');
-    if is_compound {
-        CompositeFilter::leaf(CompoundNameMixin::new(name))
-    } else {
-        CompositeFilter::leaf(LeafNameMixin::new(name, true))
+fn name_filter(pattern: &NamePattern) -> CompositeFilter {
+    match pattern {
+        NamePattern::Exact(name) => {
+            let is_compound = name.contains('.') || name.contains('/') || name.contains(':');
+            if is_compound {
+                CompositeFilter::leaf(CompoundNameMixin::new(name))
+            } else {
+                CompositeFilter::leaf(LeafNameMixin::new(name, true))
+            }
+        }
+        NamePattern::Glob(glob) => glob.filter(true, true),
     }
 }
