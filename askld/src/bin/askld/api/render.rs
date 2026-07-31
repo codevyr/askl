@@ -87,10 +87,18 @@ pub fn render_markdown(
     out.push_str(&ctx.counts_line(graph));
     out.push('\n');
 
-    // Warnings section — only when present, and before results so caveats
-    // (e.g. truncation) are seen first.
-    if !graph.warnings.is_empty() {
+    // Warnings section — truncation notice + any engine warnings, before
+    // results so caveats are seen first. Omitted when there are none.
+    if graph.truncated || !graph.warnings.is_empty() {
         out.push_str("# Warnings\n");
+        if graph.truncated {
+            out.push_str(&format!(
+                "- Result truncated to {} of {} symbols — narrow with a type filter \
+                 (`{{ func }}`), `ignore(...)`, `project(...)`, or fewer hops.\n",
+                graph.nodes.len(),
+                graph.total_symbols,
+            ));
+        }
         for w in &graph.warnings {
             out.push_str(&format!("- {}\n", w.message.trim()));
         }
@@ -208,7 +216,11 @@ impl<'a> RenderCtx<'a> {
         }
         let mut parts = Vec::new();
         if symbols > 0 || matches == 0 {
-            parts.push(format!("{symbols} symbols"));
+            if graph.truncated {
+                parts.push(format!("{symbols} of {} symbols", graph.total_symbols));
+            } else {
+                parts.push(format!("{symbols} symbols"));
+            }
         }
         if matches > 0 {
             parts.push(format!("{matches} matches"));
@@ -628,6 +640,31 @@ mod tests {
         // g should not also appear as its own top-level line
         let top_level_g = md.lines().any(|l| l.starts_with("g  (func)"));
         assert!(!top_level_g, "g should only appear as a child:\n{md}");
+    }
+
+    #[test]
+    fn truncation_surfaces_in_stats_and_warnings() {
+        let (src, start, end) = body_source();
+        let mut g = Graph::new();
+        obj(&mut g, "10", "/x.c");
+        g.add_node(node(
+            1,
+            "f",
+            vec![inst(
+                "10",
+                start,
+                end,
+                SymbolType::Function,
+                InstanceType::Definition,
+            )],
+        ));
+        g.truncated = true;
+        g.total_symbols = 42;
+
+        let md = render_markdown("\"f\"", &g, &src, Projection::Names);
+        assert!(md.contains("1 of 42 symbols"), "{md}");
+        assert!(md.contains("# Warnings"), "{md}");
+        assert!(md.contains("truncated to 1 of 42 symbols"), "{md}");
     }
 
     #[test]
