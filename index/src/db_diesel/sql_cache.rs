@@ -158,6 +158,12 @@ tuple_weight!(A: 0, B: 1, C: 2, D: 3);
 tuple_weight!(A: 0, B: 1, C: 2, D: 3, E: 4);
 tuple_weight!(A: 0, B: 1, C: 2, D: 3, E: 4, F: 5);
 
+impl CacheWeight for crate::db_diesel::NameSuggestionRow {
+    fn heap_bytes(&self) -> usize {
+        self.name.capacity()
+    }
+}
+
 impl CacheWeight for crate::models_diesel::Symbol {
     fn heap_bytes(&self) -> usize {
         self.name.capacity() + self.symbol_path.capacity() + self.leaf_name.capacity()

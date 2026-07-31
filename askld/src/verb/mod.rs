@@ -1,4 +1,5 @@
 use crate::cfg::ControlFlowGraph;
+use crate::diagnostic::Diagnostic;
 use crate::execution_context::{selector_state_with, ExecutionContext, SelectorRegistry};
 use crate::execution_state::{DependencyKind, DependencyRole, RelationshipType};
 use crate::parser::{Rule, Value};
@@ -133,10 +134,10 @@ mod generic;
 mod labels;
 mod preamble;
 
+pub(crate) use self::generic::{name_filter, EphemeralOps, LabelResolutions};
 pub use self::generic::{
     DefaultTypeFilter, DirectOnlyFilter, GenericFilter, GenericSelector, NameSelector, UnitVerb,
 };
-pub(crate) use self::generic::{EphemeralOps, LabelResolutions};
 
 use self::generic::{build_generic_verb, ForcedVerb};
 use self::labels::{LabelVerb, UserVerb};
@@ -334,6 +335,13 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
         panic!("Verb does not have a span")
     }
 
+    /// The bare typed name for a plain-name selector (e.g. `vfs_rea`), used to
+    /// offer "did you mean?" suggestions when it matches nothing. `None` for
+    /// globs and non-name verbs — suggestions don't apply there.
+    fn matched_token(&self) -> Option<String> {
+        None
+    }
+
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
         bail!("Not a selector verb")
     }
@@ -491,23 +499,21 @@ impl SelectorState {
         dependency: &Selection,
         role: &DependencyRole,
         rel_type: RelationshipType,
-        span: pest::Span<'_>,
+        span: Span,
         context: &str,
-    ) -> (bool, bool, Vec<Error<Rule>>) {
+    ) -> (bool, bool, Vec<Diagnostic>) {
         if self.selection.is_none() {
             return (false, false, vec![]);
         }
         let changed = self.constrain_selection(dependency, role, rel_type);
         let mut warnings = vec![];
         if changed && self.selection.as_ref().unwrap().nodes.is_empty() {
-            warnings.push(Error::new_from_span(
-                CustomError {
-                    message: format!(
-                        "Statement did not match any symbols after applying constraints from {}.",
-                        context,
-                    ),
-                },
+            warnings.push(Diagnostic::note(
                 span,
+                format!(
+                    "Statement did not match any symbols after applying constraints from {}.",
+                    context,
+                ),
             ));
         }
         (true, changed, warnings)
@@ -531,7 +537,7 @@ pub enum ConstraintAction {
     /// Selector should be skipped (e.g., weak statement already has selection).
     Skip,
     /// Selection was constrained. Contains (changed, warnings).
-    Constrained(bool, Vec<pest::error::Error<Rule>>),
+    Constrained(bool, Vec<Diagnostic>),
     /// No existing selection to constrain; proceed to derive.
     Derive,
 }
@@ -594,7 +600,7 @@ pub trait Selector: std::fmt::Debug + Verb {
             }
         }
 
-        let span = self.span();
+        let span = Span::from_pest(self.span(), notifier.command().span().input());
         let context = format!("{}", notifier.command().span());
         let (constrained, changed, warnings) = selector_state_with(registry, self, |state| {
             state.constrain_with_warning(
@@ -657,7 +663,7 @@ pub trait Selector: std::fmt::Debug + Verb {
     ///
     /// Default: `None` — selectors that have no notion of truncation never
     /// emit a warning.
-    fn make_truncation_warning(&self) -> Option<pest::error::Error<crate::parser::Rule>> {
+    fn make_truncation_warning(&self) -> Option<Diagnostic> {
         None
     }
 

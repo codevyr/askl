@@ -307,17 +307,15 @@ impl Selector for SearchSelector {
     /// `layers.truncated` is read on both paths.  The verb owns the
     /// wording and uses its own span, so the warning UX is identical
     /// across calls.
-    fn make_truncation_warning(&self) -> Option<pest::error::Error<crate::parser::Rule>> {
-        Some(pest::error::Error::new_from_span(
-            pest::error::ErrorVariant::CustomError {
-                message: format!(
-                    "search({:?}): result truncated at {} matches in at least one \
-                     project; narrow the query (more specific text, \
-                     project(\"name\"), whole_word=\"true\")",
-                    self.query, self.limit,
-                ),
-            },
-            self.span.as_pest_span(),
+    fn make_truncation_warning(&self) -> Option<crate::diagnostic::Diagnostic> {
+        Some(crate::diagnostic::Diagnostic::note(
+            self.span.clone(),
+            format!(
+                "search({:?}): result truncated at {} matches in at least one \
+                 project; narrow the query (more specific text, \
+                 project(\"name\"), whole_word=\"true\")",
+                self.query, self.limit,
+            ),
         ))
     }
 }

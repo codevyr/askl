@@ -1,4 +1,5 @@
 use crate::cfg::ControlFlowGraph;
+use crate::diagnostic::Diagnostic;
 use crate::execution_context::{selector_state_with, ExecutionContext};
 use crate::execution_state::{DependencyRole, RelationshipType};
 use crate::parser::Rule;
@@ -49,7 +50,7 @@ pub struct LayerActivation {
 /// Result of computing initial selections for a statement's selectors.
 pub struct ComputeResult {
     pub selections: Vec<(SelectorId, Option<Selection>)>,
-    pub warnings: Vec<pest::error::Error<Rule>>,
+    pub warnings: Vec<Diagnostic>,
     pub layer_activations: Vec<LayerActivation>,
 }
 
@@ -76,11 +77,11 @@ impl ComputeResult {
 
 pub struct NotificationResult {
     pub changed: bool,
-    pub warnings: Vec<pest::error::Error<Rule>>,
+    pub warnings: Vec<Diagnostic>,
 }
 
 impl NotificationResult {
-    pub fn new(changed: bool, warnings: Vec<pest::error::Error<Rule>>) -> Self {
+    pub fn new(changed: bool, warnings: Vec<Diagnostic>) -> Self {
         Self { changed, warnings }
     }
 }
@@ -359,7 +360,7 @@ impl Command {
         let selector_filters: Vec<&dyn Filter> = self.filters().collect();
         let mut derivation_ids = None;
         for selector in self.selectors() {
-            let span = selector.span();
+            let span = Span::from_pest(selector.span(), self.span().input());
             let (constrained, sel_changed, sel_warnings) =
                 selector_state_with(&mut ctx.registry, selector, |state| {
                     state.constrain_with_warning(dependency, &role, rel_type, span, "children")
@@ -588,11 +589,9 @@ impl Command {
             }
             let has_name = self.verbs.iter().any(|v| v.has_name_constraint());
             if !has_name {
-                warnings.push(pest::error::Error::new_from_span(
-                    pest::error::ErrorVariant::CustomError {
-                        message: "select requires at least one name filter (filter(\"compound_name\", ...) or filter(\"exact_name\", ...))".to_string(),
-                    },
-                    selector.span(),
+                warnings.push(Diagnostic::note(
+                    Span::from_pest(selector.span(), self.span().input()),
+                    "select requires at least one name filter (filter(\"compound_name\", ...) or filter(\"exact_name\", ...))",
                 ));
             }
         }
@@ -740,15 +739,13 @@ impl Command {
                     // matching", …) never had a chance to fire.  Surface an
                     // explicit warning instead of an empty result that is
                     // indistinguishable from a successful non-match.
-                    warnings.push(pest::error::Error::new_from_span(
-                        pest::error::ErrorVariant::CustomError {
-                            message: format!(
-                                "'{}' produced no layers: no projects are visible \
-                                 (is the index empty?)",
-                                selector.name()
-                            ),
-                        },
-                        selector.span(),
+                    warnings.push(Diagnostic::note(
+                        Span::from_pest(selector.span(), self.span().input()),
+                        format!(
+                            "'{}' produced no layers: no projects are visible \
+                             (is the index empty?)",
+                            selector.name()
+                        ),
                     ));
                     selections.push((selector.id(), None));
                     continue;
@@ -801,14 +798,9 @@ impl Command {
             if let Some(selection) = &mut current_selection {
                 self.filter(selection);
                 if selection.is_empty() {
-                    warnings.push(pest::error::Error::new_from_span(
-                        pest::error::ErrorVariant::CustomError {
-                            message: format!(
-                                "Selector '{}' did not match any symbols",
-                                selector.name()
-                            ),
-                        },
-                        selector.span(),
+                    warnings.push(Diagnostic::no_match(
+                        Span::from_pest(selector.span(), self.span().input()),
+                        selector.matched_token(),
                     ));
                 }
             }
