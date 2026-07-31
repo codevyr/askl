@@ -52,6 +52,24 @@ impl Span {
         self.input.clone()
     }
 
+    /// The source text this span covers.
+    pub fn as_str(&self) -> &str {
+        &self.input[self.start..self.end]
+    }
+
+    /// The full source line containing the span's start.
+    pub fn line_text(&self) -> &str {
+        let line_start = self.input[..self.start]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let line_end = self.input[self.start..]
+            .find('\n')
+            .map(|i| self.start + i)
+            .unwrap_or(self.input.len());
+        &self.input[line_start..line_end]
+    }
+
     pub fn sub_span(&self, start: usize, end: usize) -> Self {
         Self {
             input: self.input.clone(),

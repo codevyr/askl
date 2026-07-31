@@ -175,7 +175,7 @@ pub(crate) fn build_generic_verb(
 
 /// Returns a name filter for the type-agnostic case (bare selectors).
 /// Treats '.' as a separator (code symbol convention).
-fn name_filter(pattern: &NamePattern) -> CompositeFilter {
+pub(crate) fn name_filter(pattern: &NamePattern) -> CompositeFilter {
     match pattern {
         NamePattern::Exact(name) => {
             let is_compound = name.contains('.') || name.contains('/') || name.contains(':');

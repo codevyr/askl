@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::{parser::Rule, statement::Statement};
+use crate::{diagnostic::Diagnostic, statement::Statement};
 
 /// The role of a dependency in the execution state.
 ///
@@ -147,7 +147,7 @@ pub struct ExecutionState {
     /// Weak unit statements do not constrain the selection of their dependencies.
     pub weak: bool,
     /// Warnings that occurred during the execution of this state.
-    pub warnings: Vec<pest::error::Error<Rule>>,
+    pub warnings: Vec<Diagnostic>,
 }
 
 impl ExecutionState {

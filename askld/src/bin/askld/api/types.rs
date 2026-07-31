@@ -1,4 +1,5 @@
 use askld::cfg::ControlFlowGraph;
+use askld::diagnostic::Diagnostic;
 use askld::parser::Rule;
 use index::symbols::{FileId, InstanceType, SymbolId, SymbolInstanceId, SymbolType};
 use serde::{Deserialize, Serialize, Serializer};
@@ -198,9 +199,9 @@ impl Graph {
         self.has_edges.push(edge);
     }
 
-    pub fn add_warnings(&mut self, warnings: Vec<pest::error::Error<Rule>>) {
+    pub fn add_warnings(&mut self, warnings: Vec<Diagnostic>) {
         for warning in &warnings {
-            self.warnings.push(ErrorResponse::from_pest(warning));
+            self.warnings.push(ErrorResponse::from_diagnostic(warning));
         }
     }
 }
@@ -248,9 +249,21 @@ pub struct ErrorResponse {
     pub line_col: LineColLocation,
     pub path: Option<String>,
     pub line: String,
+    /// The typed token this diagnostic is about (e.g. `vfs_rea`), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// Nearest existing symbol names for a no-match diagnostic.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<String>,
+    /// True when the typed name exists but was excluded by a filter/scope
+    /// (so it is not a typo). Mutually exclusive with `suggestions`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub name_exists: bool,
 }
 
 impl ErrorResponse {
+    /// For a fatal parse/exec error: keep the pest rendering (with its `^---`
+    /// caret) as the message — the caret is the right presentation there.
     pub fn from_pest(err: &pest::error::Error<Rule>) -> Self {
         Self {
             message: err.to_string(),
@@ -258,6 +271,27 @@ impl ErrorResponse {
             line_col: err.line_col.clone().into(),
             path: err.path().map(|p| p.to_string()),
             line: err.line().to_string(),
+            token: None,
+            suggestions: Vec::new(),
+            name_exists: false,
+        }
+    }
+
+    /// For a runtime warning: a clean semantic message (no caret art) plus the
+    /// structured token/suggestions, derived from the diagnostic's [`Span`].
+    pub fn from_diagnostic(d: &Diagnostic) -> Self {
+        let pest_span = d.span.as_pest_span();
+        let start = pest_span.start_pos().line_col();
+        let end = pest_span.end_pos().line_col();
+        Self {
+            message: d.message.clone(),
+            location: InputLocation::Span((d.span.start(), d.span.end())),
+            line_col: LineColLocation::Span(start, end),
+            path: None,
+            line: d.span.line_text().to_string(),
+            token: d.token.clone(),
+            suggestions: d.suggestions.clone(),
+            name_exists: d.name_exists,
         }
     }
 }

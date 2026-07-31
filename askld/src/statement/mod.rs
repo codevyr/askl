@@ -1,19 +1,20 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, HasEdge, HasEdgeList, NodeList, SymbolNodeId};
 use crate::command::{Command, ComputeResult, LabeledStatements};
+use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::execution_context::ExecutionContext;
 use crate::execution_state::{
     DependencyRole, ExecutionState, RelationshipType, StatementDependency, StatementDependent,
 };
 use crate::hierarchy::Hierarchy;
+use crate::name_pattern::NamePattern;
 use crate::offset_range::range_bounds_to_offsets;
 use crate::parser::Rule;
 use crate::scope::{Scope, StatementIter};
-use crate::verb::{LabelResolutions, NotificationContext};
+use crate::verb::{name_filter, LabelResolutions, NotificationContext};
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::{ScopeContext, Selection};
 use index::symbols::{FileId, Occurrence, SymbolId, SymbolInstanceId};
-use pest::error::Error;
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -32,7 +33,7 @@ pub struct ExecutionResult {
     pub nodes: NodeList,
     pub edges: EdgeList,
     pub has_edges: HasEdgeList,
-    pub warnings: Vec<pest::error::Error<Rule>>,
+    pub warnings: Vec<Diagnostic>,
 }
 
 impl ExecutionResult {
@@ -40,7 +41,7 @@ impl ExecutionResult {
         nodes: NodeList,
         edges: EdgeList,
         has_edges: HasEdgeList,
-        warnings: Vec<pest::error::Error<Rule>>,
+        warnings: Vec<Diagnostic>,
     ) -> ExecutionResult {
         ExecutionResult {
             nodes,
@@ -53,6 +54,68 @@ impl ExecutionResult {
 
 pub struct PropagationResult {
     pub changed: bool,
+}
+
+/// Statement-level enrichment: for each `NoMatch` warning that carries a typed
+/// name, decide whether it's a real typo (offer "did you mean?" suggestions) or a
+/// name that exists somewhere but was excluded by a filter/scope. Done here,
+/// once, after all statements have executed — the index and visible projects are
+/// available, and it keeps the DB side-effect out of the selector's compute.
+///
+/// The check is deliberately **name-only**: "does this name exist *anywhere
+/// visible*, ignoring type/project/relationship filters?" We build just the name
+/// predicate (`name_filter`, so its case/leaf/compound routing mirrors the
+/// selector) and probe with `has_symbol_matching`. If it exists, the empty
+/// selection is due to some other filter (not spelling), so we set `name_exists`
+/// (the renderer phrases it and points at type/project/relationship) instead of
+/// suggesting. Only when the name exists nowhere do we offer fuzzy suggestions.
+async fn enrich_no_match_suggestions(
+    warnings: &mut [Diagnostic],
+    ctx: &ExecutionContext,
+    cfg: &ControlFlowGraph,
+) {
+    const MAX_SUGGESTIONS: usize = 5;
+    let project_ids: Vec<i32> = ctx.eph.roots().iter().map(|r| r.project_id).collect();
+    if project_ids.is_empty() {
+        return;
+    }
+    let visible_ids = ctx.eph.visible_ids();
+    for w in warnings.iter_mut() {
+        if w.kind != DiagnosticKind::NoMatch {
+            continue;
+        }
+        let Some(token) = w.token.clone() else {
+            continue;
+        };
+
+        // Name-only existence: does the name exist anywhere visible, ignoring
+        // the type/project/relationship filters? Reuse the selector's own name
+        // predicate so case/leaf/compound routing matches exactly; the lean
+        // `has_symbol_matching` probe is current-query-only + LIMIT 1.
+        let filter = name_filter(&NamePattern::Exact(token.clone()));
+        let exists = match cfg.index.has_symbol_matching(&filter, &ctx.eph).await {
+            Ok(exists) => exists,
+            Err(e) => {
+                tracing::debug!("existence check for {:?} failed: {}", token, e);
+                continue;
+            }
+        };
+
+        if exists {
+            // The name is real; an excluding filter (type/project/relationship)
+            // emptied the selection. Structured flag → the renderer phrases it.
+            w.name_exists = true;
+        } else {
+            match cfg
+                .index
+                .suggest_symbol_names(&token, &project_ids, &visible_ids, MAX_SUGGESTIONS)
+                .await
+            {
+                Ok(names) => w.suggestions = names,
+                Err(e) => tracing::debug!("name suggestions for {:?} failed: {}", token, e),
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -531,41 +594,45 @@ impl Statement {
         Ok(statements)
     }
 
-    /// Gather all warnings from the statement and its scope. If some warnings
-    /// have overlapping spans, include only the innermost ones.
-    pub fn gather_warnings(
-        &self,
-        statements: &Vec<Rc<Statement>>,
-    ) -> Vec<pest::error::Error<Rule>> {
+    /// Gather all warnings from the statement and its scope, collapsing
+    /// span-overlapping ones to a single warning per region (keeps the
+    /// earliest by start position). Dedup is **kind-aware**: a bare `Note`
+    /// must not shadow a `NoMatch` at the same/overlapping span, since the
+    /// `NoMatch` carries the enriched suggestions/`name_exists` — so a
+    /// `NoMatch` always wins over an overlapping `Note`.
+    pub fn gather_warnings(&self, statements: &Vec<Rc<Statement>>) -> Vec<Diagnostic> {
         let mut all_warnings = vec![];
         for statement in statements.iter() {
             let state = statement.get_state();
             all_warnings.extend(state.warnings.clone());
         }
 
-        all_warnings.sort_by_key(|e| match e.location {
-            pest::error::InputLocation::Pos(pos) => pos,
-            pest::error::InputLocation::Span((start, _end)) => start,
-        });
-        let mut filtered_warnings: Vec<Error<Rule>> = vec![];
-        for warning in all_warnings.iter() {
-            if let Some(last) = filtered_warnings.last() {
-                let last_end_pos = match last.location {
-                    pest::error::InputLocation::Pos(pos) => pos,
-                    pest::error::InputLocation::Span((_, end)) => end,
-                };
-                let cur_start_pos = match warning.location {
-                    pest::error::InputLocation::Pos(pos) => pos,
-                    pest::error::InputLocation::Span((start, _)) => start,
-                };
-                if last_end_pos >= cur_start_pos {
+        // Order by start; among equal starts, NoMatch before Note so it is the
+        // one kept when spans coincide.
+        let kind_rank = |d: &Diagnostic| match d.kind {
+            DiagnosticKind::NoMatch => 0u8,
+            DiagnosticKind::Note => 1u8,
+        };
+        all_warnings.sort_by_key(|d| (d.start(), kind_rank(d)));
+
+        let mut filtered: Vec<Diagnostic> = vec![];
+        for warning in all_warnings {
+            if let Some(last) = filtered.last() {
+                if last.end() >= warning.start() {
+                    // Overlaps the previous kept warning. A NoMatch may still
+                    // displace a kept Note (it carries the useful payload);
+                    // otherwise drop the overlapping warning.
+                    if warning.kind == DiagnosticKind::NoMatch && last.kind == DiagnosticKind::Note
+                    {
+                        *filtered.last_mut().unwrap() = warning;
+                    }
                     continue;
                 }
             }
-            filtered_warnings.push(warning.clone());
+            filtered.push(warning);
         }
 
-        filtered_warnings
+        filtered
     }
 
     /// Collect reference edges between all selected symbols.
@@ -860,7 +927,8 @@ impl Statement {
     ) -> Result<ExecutionResult, pest::error::Error<Rule>> {
         let statements = self.compute_nodes(ctx, cfg).await?;
 
-        let warnings = self.gather_warnings(&statements);
+        let mut warnings = self.gather_warnings(&statements);
+        enrich_no_match_suggestions(&mut warnings, ctx, cfg).await;
 
         let _collect_results = tracing::debug_span!("collect_results").entered();
         let mut node_map: HashMap<i64, index::db_diesel::SelectionNode> = HashMap::new();

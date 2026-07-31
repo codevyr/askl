@@ -60,6 +60,15 @@ impl Verb for NameSelector {
     fn name(&self) -> &str {
         NameSelector::NAME
     }
+
+    fn matched_token(&self) -> Option<String> {
+        // Only plain names get "did you mean?" — a glob matching nothing is a
+        // different situation and fuzzy-matching its raw pattern is meaningless.
+        match &self.pattern {
+            NamePattern::Exact(name) => Some(name.clone()),
+            NamePattern::Glob(_) => None,
+        }
+    }
 }
 
 #[async_trait(?Send)]
@@ -483,6 +492,16 @@ impl Verb for TypeSelector {
 
     fn span(&self) -> pest::Span<'_> {
         self.span.as_pest_span()
+    }
+
+    fn matched_token(&self) -> Option<String> {
+        // A typed selector like `func "vfs_read"` carries the name here; expose
+        // it so no-match diagnostics offer suggestions for these too, not just
+        // bare NameSelector. Globs don't get suggestions (see NameSelector).
+        match &self.name_pattern {
+            Some(NamePattern::Exact(name)) => Some(name.clone()),
+            _ => None,
+        }
     }
 
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {

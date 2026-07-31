@@ -1265,6 +1265,69 @@ impl Index {
         Self::get_file_contents_on(&mut *connection, object_id).await
     }
 
+    /// Suggest indexed symbol names close to `query`, for "did you mean?" when a
+    /// name selector matched nothing. Uses pg_trgm `word_similarity` (GIN-indexed
+    /// via `<%`) against both the full `name` and the normalized `leaf_name`, so a
+    /// typed leaf token (`allocateNode`) can still surface a compound symbol
+    /// (`(*cache).allocateNode`). Scoped to the visible projects; empty scope or a
+    /// blank query returns nothing.
+    ///
+    /// Routed through [`Index::cached_load`] so repeated bad-name probes hit the
+    /// RAM result cache; the cache is keyed on the rendered SQL+binds (query text,
+    /// project ids, limit) and cleared on index mutation, so suggestions stay
+    /// consistent after a reindex. Binds are owned so the query is `'static`.
+    /// `visible_ids` = the visible layer set (`eph.visible_ids()`); suggestions
+    /// are restricted to it via `s.layer = ANY(...)`, so they agree with the
+    /// `has_symbol_matching` existence probe (which applies the same visibility)
+    /// rather than returning names from hidden/superseded layers.
+    ///
+    /// Uses pg_trgm `word_similarity` via `<%` (GIN-accelerated). The match floor
+    /// is the session `pg_trgm.word_similarity_threshold` default (0.6); we never
+    /// `SET` it, so it is deterministic. Lowering it for more short-typo recall
+    /// would need a txn-scoped `SET LOCAL` (the GIN `<%` operator is threshold-
+    /// bound) and is deferred.
+    pub async fn suggest_symbol_names(
+        &self,
+        query: &str,
+        project_ids: &[i32],
+        visible_ids: &[i64],
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        use diesel::sql_types::{Array, BigInt, Integer, Text};
+
+        if query.trim().is_empty() || project_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let sql = r#"
+            SELECT name, MAX(score)::float8 AS score
+            FROM (
+                SELECT s.name AS name,
+                       GREATEST(
+                           word_similarity($1, s.name),
+                           word_similarity($1, s.leaf_name)
+                       ) AS score
+                FROM index.symbols s
+                WHERE s.project_id = ANY($2)
+                  AND s.layer = ANY($3)
+                  AND ($1 <% s.name OR $1 <% s.leaf_name)
+            ) t
+            GROUP BY name
+            ORDER BY score DESC, char_length(name) ASC, name ASC
+            LIMIT $4
+        "#;
+
+        let sql_query = diesel::sql_query(sql)
+            .bind::<Text, _>(query.to_string())
+            .bind::<Array<Integer>, _>(project_ids.to_vec())
+            .bind::<Array<BigInt>, _>(visible_ids.to_vec())
+            .bind::<Integer, _>(limit as i32);
+
+        let rows: std::sync::Arc<Vec<NameSuggestionRow>> = self.cached_load(sql_query).await?;
+
+        Ok(rows.iter().map(|r| r.name.clone()).collect())
+    }
+
     /// Raw file bytes, exactly as indexed — no lossy UTF-8 conversion, so byte
     /// offsets stored in the index line up with the returned content. Preferred
     /// when offsets must stay exact (e.g. rendering `file:line` locations).
@@ -1320,6 +1383,30 @@ impl Index {
                 object_id
             )),
         }
+    }
+
+    /// Does any symbol match `filter` under the current visibility? A lean
+    /// existence probe: the *current* query only (no parents/children joins,
+    /// unlike `find_symbol`) with `LIMIT 1`, so it never materialises the full
+    /// match set. Reuses the same visibility + composite-filter machinery, so a
+    /// name filter here matches exactly what a selector would. Cache-integrated.
+    pub async fn has_symbol_matching(
+        &self,
+        filter: &CompositeFilter,
+        eph: &EphContext,
+    ) -> Result<bool> {
+        let chain_dependent = filter.is_chain_dependent();
+        let rows: Vec<(Symbol, SymbolInstance, Object, Project)> = self
+            .cached_load_partitioned(eph, chain_dependent, |vis| {
+                let mut q = build_current_query(vis);
+                if let Some(expr) = filter.compose_current(vis) {
+                    q = q.filter(expr);
+                }
+                q.filter(vis.guard()).limit(1)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to probe symbol existence: {}", e))?;
+        Ok(!rows.is_empty())
     }
 
     pub async fn find_symbol(
@@ -2643,6 +2730,15 @@ pub struct SearchMatchRow {
     pub start_byte: i32,
     #[diesel(sql_type = diesel::sql_types::Integer)]
     pub end_byte: i32,
+}
+
+/// One "did you mean?" suggestion from [`Index::suggest_symbol_names`].
+/// `QueryableByName` maps only the columns it declares, so the query's
+/// `score` (used for `ORDER BY` only) is intentionally not a field here.
+#[derive(diesel::QueryableByName, Debug, Clone, PartialEq)]
+pub struct NameSuggestionRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    pub name: String,
 }
 
 /// LIKE-escape a raw user query and wrap with the surrounding wildcards.  The

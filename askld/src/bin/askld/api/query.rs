@@ -1,3 +1,4 @@
+use actix_web::http::StatusCode;
 use actix_web::{get, post, web, HttpResponse, Responder};
 use askld::execution_context::ExecutionContext;
 use askld::offset_range::range_bounds_to_offsets;
@@ -20,6 +21,39 @@ fn is_statement_timeout(err: &pest::error::Error<askld::parser::Rule>) -> bool {
     match &err.variant {
         pest::error::ErrorVariant::CustomError { message } => message.contains("statement timeout"),
         _ => false,
+    }
+}
+
+/// One-line hint appended to markdown parse/exec errors so the agent can
+/// self-correct rather than fall back to grep.
+const SYNTAX_HINT: &str = "Check query syntax: selectors `\"name\"`, callees `\"x\" { }`, \
+callers `{ \"x\" }`, filters like `func`/`file(\"p\")`, scope `project(\"p\")`.";
+
+/// Build an error response in the caller's requested format. JSON mode is
+/// unchanged (the serialized `ErrorResponse`); markdown mode fences the pest
+/// error (which already renders the `^---` caret) and appends `hint` when given.
+/// `hint` is `Some(SYNTAX_HINT)` only for *parse* errors — a timeout is not a
+/// syntax problem, so passing `None` there avoids steering the agent to rewrite
+/// correct syntax instead of narrowing scope.
+fn error_response(
+    want_markdown: bool,
+    status: StatusCode,
+    err: &pest::error::Error<askld::parser::Rule>,
+    hint: Option<&str>,
+) -> HttpResponse {
+    if want_markdown {
+        let mut md = format!("# Error\n```text\n{}\n```\n", err);
+        if let Some(hint) = hint {
+            md.push_str(&format!("\n{}\n", hint));
+        }
+        HttpResponse::build(status)
+            .content_type("text/markdown; charset=utf-8")
+            .body(md)
+    } else {
+        let json_err = serde_json::to_string(&ErrorResponse::from_pest(err)).unwrap();
+        HttpResponse::build(status)
+            .content_type("application/json")
+            .body(json_err)
     }
 }
 
@@ -59,8 +93,12 @@ pub async fn query(
         Ok(ast) => ast,
         Err(err) => {
             info!("Parse error: {}", err);
-            let json_err = serde_json::to_string(&ErrorResponse::from_pest(&err)).unwrap();
-            return HttpResponse::BadRequest().body(json_err);
+            return error_response(
+                want_markdown,
+                StatusCode::BAD_REQUEST,
+                &err,
+                Some(SYNTAX_HINT),
+            );
         }
     };
     debug!("Global scope: {:#?}", ast);
@@ -81,12 +119,18 @@ pub async fn query(
         let execute_future = ast.execute(&mut ctx, &data.cfg);
         match timeout(data.query_timeout, execute_future).await {
             Ok(Err(err)) => {
-                let json_err = serde_json::to_string(&ErrorResponse::from_pest(&err)).unwrap();
                 if is_statement_timeout(&err) {
                     warn!("Query timed out (PG statement_timeout)");
-                    return HttpResponse::GatewayTimeout().body(json_err);
+                    // Timeout, not a syntax problem → no syntax hint.
+                    return error_response(want_markdown, StatusCode::GATEWAY_TIMEOUT, &err, None);
                 }
-                return HttpResponse::BadRequest().body(json_err);
+                // A usage error (unknown verb, bad params …) — the syntax hint helps.
+                return error_response(
+                    want_markdown,
+                    StatusCode::BAD_REQUEST,
+                    &err,
+                    Some(SYNTAX_HINT),
+                );
             }
             Ok(Ok(res)) => res,
             Err(_) => {
@@ -94,20 +138,20 @@ pub async fn query(
                     "Query timed out (tokio timeout after {:?})",
                     data.query_timeout
                 );
-                if let Some(span) = &ctx.current_statement_span {
-                    let err = pest::error::Error::<askld::parser::Rule>::new_from_span(
-                        pest::error::ErrorVariant::CustomError {
-                            message: format!(
-                                "Query exceeded the {:?} time limit while executing this statement",
-                                data.query_timeout
-                            ),
-                        },
-                        span.as_pest_span(),
-                    );
-                    let json_err = serde_json::to_string(&ErrorResponse::from_pest(&err)).unwrap();
-                    return HttpResponse::GatewayTimeout().body(json_err);
-                }
-                return HttpResponse::GatewayTimeout().body("Query timed out");
+                let span = ctx
+                    .current_statement_span
+                    .clone()
+                    .unwrap_or_else(|| askld::span::Span::synthetic(&req_body));
+                let err = pest::error::Error::<askld::parser::Rule>::new_from_span(
+                    pest::error::ErrorVariant::CustomError {
+                        message: format!(
+                            "Query exceeded the {:?} time limit while executing this statement",
+                            data.query_timeout
+                        ),
+                    },
+                    span.as_pest_span(),
+                );
+                return error_response(want_markdown, StatusCode::GATEWAY_TIMEOUT, &err, None);
             }
         }
     };

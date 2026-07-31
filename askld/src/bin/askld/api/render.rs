@@ -14,7 +14,7 @@ use askld::line_index::LineIndex;
 use index::symbols::{InstanceType, SymbolId, SymbolType};
 use std::collections::{HashMap, HashSet};
 
-use super::types::{Graph, Node, NodeSymbolInstance};
+use super::types::{ErrorResponse, Graph, LineColLocation, Node, NodeSymbolInstance};
 
 /// How much source text to render alongside each focused symbol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -100,7 +100,7 @@ pub fn render_markdown(
             ));
         }
         for w in &graph.warnings {
-            out.push_str(&format!("- {}\n", w.message.trim()));
+            out.push_str(&format!("- {}\n", warning_bullet(w)));
         }
         out.push('\n');
     }
@@ -428,6 +428,26 @@ impl<'a> RenderCtx<'a> {
     }
 }
 
+/// One clean markdown bullet for a runtime warning: the semantic message, its
+/// query line, and any name suggestions inline — no pest caret art.
+fn warning_bullet(w: &ErrorResponse) -> String {
+    let mut out = w.message.trim().to_string();
+    if let LineColLocation::Span((line, _), _) = &w.line_col {
+        out.push_str(&format!(" (line {line})"));
+    }
+    // Presentation of the no-match outcome lives here, not in the engine.
+    if !w.suggestions.is_empty() {
+        let names: Vec<String> = w.suggestions.iter().map(|n| format!("`{n}`")).collect();
+        out.push_str(&format!(". Did you mean: {}?", names.join(", ")));
+    } else if w.name_exists {
+        out.push_str(
+            ". The name exists but wasn't matched here — check the type, `project(...)`, \
+             or relationship (caller/callee) filters.",
+        );
+    }
+    out
+}
+
 fn kind_rank(kind: EdgeKind) -> u8 {
     match kind {
         EdgeKind::Ref => 0,
@@ -744,5 +764,67 @@ mod tests {
         let src = SourceMap::new();
         let md = render_markdown("\"nope\"", &g, &src, Projection::Signature);
         assert!(md.contains("_no results_"), "{md}");
+    }
+
+    fn warning(
+        message: &str,
+        line: usize,
+        token: Option<&str>,
+        suggestions: &[&str],
+    ) -> ErrorResponse {
+        use super::super::types::InputLocation;
+        ErrorResponse {
+            message: message.into(),
+            location: InputLocation::Span((0, 1)),
+            line_col: LineColLocation::Span((line, 1), (line, 2)),
+            path: None,
+            line: String::new(),
+            token: token.map(str::to_string),
+            suggestions: suggestions.iter().map(|s| s.to_string()).collect(),
+            name_exists: false,
+        }
+    }
+
+    #[test]
+    fn warning_bullet_is_clean_with_line_and_suggestions() {
+        let w = warning(
+            "`\"vfs_rea\"` matched no symbols",
+            10,
+            Some("vfs_rea"),
+            &["vfs_read", "vfs_readv"],
+        );
+        let bullet = warning_bullet(&w);
+        // no pest caret art
+        assert!(!bullet.contains("^"), "{bullet}");
+        assert!(!bullet.contains("-->"), "{bullet}");
+        assert_eq!(
+            bullet,
+            "`\"vfs_rea\"` matched no symbols (line 10). Did you mean: `vfs_read`, `vfs_readv`?"
+        );
+    }
+
+    #[test]
+    fn warning_bullet_name_exists_phrases_not_a_typo() {
+        let mut w = warning(
+            "`\"vfs_read\"` matched no symbols",
+            5,
+            Some("vfs_read"),
+            &[],
+        );
+        w.name_exists = true;
+        let bullet = warning_bullet(&w);
+        assert!(
+            bullet.contains("name exists but wasn't matched here"),
+            "{bullet}"
+        );
+        assert!(bullet.contains("type"), "{bullet}");
+        assert!(!bullet.contains("Did you mean"), "{bullet}");
+    }
+
+    #[test]
+    fn warning_bullet_without_suggestions_omits_did_you_mean() {
+        let w = warning("something advisory", 3, None, &[]);
+        let bullet = warning_bullet(&w);
+        assert_eq!(bullet, "something advisory (line 3)");
     }
 }
