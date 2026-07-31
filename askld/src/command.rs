@@ -693,19 +693,21 @@ impl Command {
             }
         };
 
-        // Surface truncation warnings.  Each layer-creating selector
-        // contributes a warning shaped by its own span; cache hits and
-        // misses both surface the warning since the persistent
-        // `layers.truncated` flag is read on both paths (for a
-        // partitioned entry, on either of its rows).
+        // Surface truncation as a single warning per statement.  All
+        // layer-creating selectors in a statement are aggregated into ONE
+        // merged layer (`aggregate_layer_spec`) with ONE `truncated` flag, so
+        // truncation can't be attributed to a specific selector — emitting one
+        // warning per layer-spec selector would over-report a single event.
+        // Use the first layer-spec selector's warning (its span/wording); cache
+        // hits and misses both surface it since the persistent
+        // `layers.truncated` flag is read on both paths.
         if any_truncated {
-            for selector in self.selectors() {
-                if !selector.has_layer_spec() {
-                    continue;
-                }
-                if let Some(w) = selector.make_truncation_warning() {
-                    warnings.push(w);
-                }
+            if let Some(w) = self
+                .selectors()
+                .filter(|s| s.has_layer_spec())
+                .find_map(|s| s.make_truncation_warning())
+            {
+                warnings.push(w);
             }
         }
 
