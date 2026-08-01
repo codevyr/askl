@@ -1,0 +1,1 @@
+DROP INDEX index.objects_filesystem_path_trgm_idx;

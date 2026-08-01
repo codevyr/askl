@@ -57,6 +57,55 @@ fn error_response(
     }
 }
 
+/// Error surfaced while turning a query string into a result graph. Carries the
+/// pest error (which renders its own `^---` caret) so the HTTP handler and the
+/// MCP tool present the same message. `Storage` is a plain string for infra
+/// failures that have no source span.
+pub enum QueryError {
+    Parse(pest::error::Error<askld::parser::Rule>),
+    Exec(pest::error::Error<askld::parser::Rule>),
+    Timeout(pest::error::Error<askld::parser::Rule>),
+    Storage(String),
+}
+
+impl QueryError {
+    /// Render as an HTTP response in the caller's requested format, matching the
+    /// original `/query` error behavior exactly.
+    fn into_http_response(self, want_markdown: bool) -> HttpResponse {
+        match self {
+            QueryError::Parse(err) => error_response(
+                want_markdown,
+                StatusCode::BAD_REQUEST,
+                &err,
+                Some(SYNTAX_HINT),
+            ),
+            QueryError::Exec(err) => error_response(
+                want_markdown,
+                StatusCode::BAD_REQUEST,
+                &err,
+                Some(SYNTAX_HINT),
+            ),
+            QueryError::Timeout(err) => {
+                error_response(want_markdown, StatusCode::GATEWAY_TIMEOUT, &err, None)
+            }
+            QueryError::Storage(msg) => HttpResponse::InternalServerError().body(msg),
+        }
+    }
+
+    /// Render as markdown for the MCP tool surface — the same `# Error` fence the
+    /// HTTP handler emits for `format=markdown`, with the syntax hint on
+    /// parse/exec errors (a timeout isn't a syntax problem, so it gets none).
+    pub fn to_markdown(&self) -> String {
+        match self {
+            QueryError::Parse(err) | QueryError::Exec(err) => {
+                format!("# Error\n```text\n{}\n```\n\n{}\n", err, SYNTAX_HINT)
+            }
+            QueryError::Timeout(err) => format!("# Error\n```text\n{}\n```\n", err),
+            QueryError::Storage(msg) => format!("# Error\n{}\n", msg),
+        }
+    }
+}
+
 #[post("/query")]
 pub async fn query(
     data: web::Data<AsklData>,
@@ -88,30 +137,47 @@ pub async fn query(
         },
     };
 
-    debug!("Received query: {}", req_body);
-    let ast = match parse(&req_body) {
-        Ok(ast) => ast,
-        Err(err) => {
-            info!("Parse error: {}", err);
-            return error_response(
-                want_markdown,
-                StatusCode::BAD_REQUEST,
-                &err,
-                Some(SYNTAX_HINT),
-            );
-        }
+    let result_graph = match build_result_graph(&data, &req_body, opts.limit).await {
+        Ok(graph) => graph,
+        Err(err) => return err.into_http_response(want_markdown),
     };
+
+    if want_markdown {
+        let md = render_graph_markdown(&data, &req_body, &result_graph, projection).await;
+        return HttpResponse::Ok()
+            .content_type("text/markdown; charset=utf-8")
+            .body(md);
+    }
+
+    let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();
+    if json_graph.len() > MAX_RESPONSE_BYTES {
+        return HttpResponse::PayloadTooLarge().body("Response too large");
+    }
+    HttpResponse::Ok().body(json_graph)
+}
+
+/// Parse, execute, and assemble the capped result graph for `query_text`. Shared
+/// by the `/query` HTTP handler and the MCP `askl_run` tool so both produce the
+/// same graph (and thus the same markdown). `limit` overrides the server's
+/// default symbol cap (`None` → `data.max_result_symbols`; `0` → unlimited).
+pub async fn build_result_graph(
+    data: &AsklData,
+    query_text: &str,
+    limit: Option<usize>,
+) -> Result<Graph, QueryError> {
+    debug!("Received query: {}", query_text);
+    let ast = parse(query_text).map_err(|err| {
+        info!("Parse error: {}", err);
+        QueryError::Parse(err)
+    })?;
     debug!("Global scope: {:#?}", ast);
 
     // Resolve the visible root layers (all projects today; a narrower,
-    // per-tenant set later).  RAM-cached via the SQL result cache.
-    let roots = match data.cfg.index.load_root_layers().await {
-        Ok(roots) => roots,
-        Err(err) => {
-            warn!("Failed to resolve root layers: {}", err);
-            return HttpResponse::InternalServerError().body("Failed to resolve root layers");
-        }
-    };
+    // per-tenant set later). RAM-cached via the SQL result cache.
+    let roots = data.cfg.index.load_root_layers().await.map_err(|err| {
+        warn!("Failed to resolve root layers: {}", err);
+        QueryError::Storage("Failed to resolve root layers".to_string())
+    })?;
     let mut ctx = ExecutionContext::new(roots);
 
     let res = {
@@ -121,16 +187,10 @@ pub async fn query(
             Ok(Err(err)) => {
                 if is_statement_timeout(&err) {
                     warn!("Query timed out (PG statement_timeout)");
-                    // Timeout, not a syntax problem → no syntax hint.
-                    return error_response(want_markdown, StatusCode::GATEWAY_TIMEOUT, &err, None);
+                    return Err(QueryError::Timeout(err));
                 }
-                // A usage error (unknown verb, bad params …) — the syntax hint helps.
-                return error_response(
-                    want_markdown,
-                    StatusCode::BAD_REQUEST,
-                    &err,
-                    Some(SYNTAX_HINT),
-                );
+                // A usage error (unknown verb, bad params …).
+                return Err(QueryError::Exec(err));
             }
             Ok(Ok(res)) => res,
             Err(_) => {
@@ -141,7 +201,7 @@ pub async fn query(
                 let span = ctx
                     .current_statement_span
                     .clone()
-                    .unwrap_or_else(|| askld::span::Span::synthetic(&req_body));
+                    .unwrap_or_else(|| askld::span::Span::synthetic(query_text));
                 let err = pest::error::Error::<askld::parser::Rule>::new_from_span(
                     pest::error::ErrorVariant::CustomError {
                         message: format!(
@@ -151,7 +211,7 @@ pub async fn query(
                     },
                     span.as_pest_span(),
                 );
-                return error_response(want_markdown, StatusCode::GATEWAY_TIMEOUT, &err, None);
+                return Err(QueryError::Timeout(err));
             }
         }
     };
@@ -191,7 +251,7 @@ pub async fn query(
     // E1 cap: keep the first `cap` distinct symbols (by path, offset, id) and
     // prune edges/has_edges to that set so the subgraph stays referentially
     // valid. `limit=0` (or a 0 default) means unlimited.
-    let cap = opts.limit.unwrap_or(data.max_result_symbols);
+    let cap = limit.unwrap_or(data.max_result_symbols);
     result_graph.total_symbols = all_symbols.len();
     let (kept, truncated) = select_kept(&sym_key, cap);
     result_graph.truncated = truncated;
@@ -280,26 +340,19 @@ pub async fn query(
     result_graph.objects = result_objects.into_values().collect();
     result_graph.add_warnings(res.warnings);
 
-    if want_markdown {
-        return render_markdown_response(&data, &req_body, &result_graph, projection).await;
-    }
-
-    let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();
-    if json_graph.len() > MAX_RESPONSE_BYTES {
-        return HttpResponse::PayloadTooLarge().body("Response too large");
-    }
-    HttpResponse::Ok().body(json_graph)
+    Ok(result_graph)
 }
 
-/// Fetch the raw bytes of every file the graph references, then render the
-/// graph as markdown. Raw bytes (not the lossy `String` accessor) keep byte
-/// offsets aligned so `file:line` locations are exact.
-async fn render_markdown_response(
-    data: &web::Data<AsklData>,
+/// Fetch the raw bytes of every file the graph references, then render the graph
+/// as markdown. Raw bytes (not the lossy `String` accessor) keep byte offsets
+/// aligned so `file:line` locations are exact. Shared by `/query?format=markdown`
+/// and the MCP `askl_run` tool.
+pub async fn render_graph_markdown(
+    data: &AsklData,
     query_text: &str,
     graph: &Graph,
     projection: Projection,
-) -> HttpResponse {
+) -> String {
     let mut sources = SourceMap::new();
     for obj in &graph.objects {
         let Ok(id) = obj.object_id.parse::<i32>() else {
@@ -318,10 +371,7 @@ async fn render_markdown_response(
         }
     }
 
-    let md = render_markdown(query_text, graph, &sources, projection);
-    HttpResponse::Ok()
-        .content_type("text/markdown; charset=utf-8")
-        .body(md)
+    render_markdown(query_text, graph, &sources, projection)
 }
 
 #[derive(Debug, Deserialize)]
