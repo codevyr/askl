@@ -17,8 +17,11 @@ separate statements; a `{` must be on the same line as its verb to attach.
 - Typed selectors: `func("n")`, `type("n")`, `data("n")`, `macro("n")`,
   `field("n")`/`method("n")`, `mod("n")`, `file("n")`, `dir("n")`.
 - `search("literal")` — full-text over raw source bytes; one result symbol per
-  match. **Literal only — no regex.** `>=3` chars, smart-case, options
-  `whole_word="true"`, `case="sensitive"|"insensitive"`, `limit=500`.
+  match. **Literal only — no regex** (`search("a|b")` matches the text `a|b`; to OR
+  several literals use separate statements: `search("a"); search("b")`). To find a
+  **symbol by name, prefer a glob `g"*name*"`** (indexed, cheaper) — use `search()`
+  only for non-symbol text. `>=3` chars, smart-case, options `whole_word="true"`,
+  `case="sensitive"|"insensitive"`, `limit=500`.
 - Several selectors in one statement are **ORed** (union): `"a" "b"` (or
   `func("a") func("b")`) selects symbols matching *either*.
 
