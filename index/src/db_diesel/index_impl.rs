@@ -2676,11 +2676,12 @@ impl Index {
         Ok(exists.is_some())
     }
 
-    /// Find file objects matching the given path suffix, optionally filtered
-    /// by project name.  Takes a caller-supplied connection: the only caller
-    /// is loc's deferred populate closure, which runs inside an
-    /// [`EphTransaction`] and must not check out a second pool connection
-    /// while the layer's row lock is held (see
+    /// Find file objects whose `filesystem_path` equals `path` or ends with it on
+    /// a **segment boundary** (`fs/read_write.c` matches `/p/fs/read_write.c`, not
+    /// `/p/ecryptfs/read_write.c`), optionally filtered by project name.  Takes a
+    /// caller-supplied connection: the only caller is loc's deferred populate
+    /// closure, which runs inside an [`EphTransaction`] and must not check out a
+    /// second pool connection while the layer's row lock is held (see
     /// [`Index::search_content_matches_on`]).
     pub async fn find_objects_by_path_on(
         connection: &mut AsyncPgConnection,
@@ -2692,7 +2693,13 @@ impl Index {
         let escaped = super::mixins::escape_like(path);
         let mut query = objects::table
             .inner_join(projects::table.on(projects::id.eq(objects::project_id)))
-            .filter(objects::filesystem_path.like(format!("%{}", escaped)))
+            // Exact path, or a suffix on a segment boundary ("…/<path>"); the
+            // leading-slash guard is what keeps `fs/x` off `.../ecryptfs/x`.
+            .filter(
+                objects::filesystem_path
+                    .eq(path)
+                    .or(objects::filesystem_path.like(format!("%/{}", escaped))),
+            )
             .select((objects::id, projects::id))
             .into_boxed::<Pg>();
 
