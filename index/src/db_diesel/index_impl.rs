@@ -2710,7 +2710,88 @@ impl Index {
             .map(|(obj_id, proj_id)| (FileId::new(obj_id), crate::symbols::ProjectId::new(proj_id)))
             .collect())
     }
+
+    /// Resolve a source file by exact path or by a path *suffix on a segment
+    /// boundary*, optionally within one project — `fs/read_write.c` resolves
+    /// `/proj/fs/read_write.c` but not `/proj/fs/ecryptfs/read_write.c` (where the
+    /// suffix would fall mid-segment). Built with the query DSL (no raw SQL) and
+    /// routed through [`Index::cached_load`], so repeated `askl_read`s hit the RAM
+    /// cache; index mutations purge it. Results are exact-first then shortest-path,
+    /// so the best candidate leads. The `filesystem_path LIKE '%/…'` predicate is
+    /// served by the `objects_filesystem_path_trgm_idx` GIN index.
+    pub async fn resolve_source_file(
+        &self,
+        path: &str,
+        project_name: Option<&str>,
+    ) -> Result<Vec<ResolvedSourceFile>> {
+        use crate::schema_diesel::*;
+
+        // Segment-boundary suffix: exact path, or "…/<path>". LIKE wildcards in
+        // the path are escaped so `_`/`%` stay literal.
+        let exact = path.to_string();
+        let boundary = format!("%/{}", super::mixins::escape_like(path));
+
+        let mut query = objects::table
+            .inner_join(projects::table.on(projects::id.eq(objects::project_id)))
+            .filter(projects::id.gt(0))
+            .filter(
+                objects::filesystem_path
+                    .eq(exact.clone())
+                    .or(objects::filesystem_path.like(boundary)),
+            )
+            .select((
+                objects::id,
+                projects::project_name,
+                objects::filesystem_path,
+            ))
+            // Exact matches first so the LIMIT never drops them; the full
+            // exact-then-shortest ordering is finalized in Rust below.
+            .order(objects::filesystem_path.eq(exact.clone()).desc())
+            .limit(RESOLVE_SOURCE_FILE_LIMIT)
+            .into_boxed::<Pg>();
+
+        if let Some(name) = project_name {
+            query = query.filter(projects::project_name.eq(name.to_string()));
+        }
+
+        let rows: std::sync::Arc<Vec<(i32, String, String)>> = self.cached_load(query).await?;
+
+        let mut resolved: Vec<ResolvedSourceFile> = rows
+            .iter()
+            .map(
+                |(object_id, project_name, filesystem_path)| ResolvedSourceFile {
+                    object_id: FileId::new(*object_id),
+                    project_name: project_name.clone(),
+                    filesystem_path: filesystem_path.clone(),
+                },
+            )
+            .collect();
+        // Best candidate first: exact match, then shortest path, then name.
+        resolved.sort_by(|a, b| {
+            let a_exact = a.filesystem_path == exact;
+            let b_exact = b.filesystem_path == exact;
+            b_exact
+                .cmp(&a_exact)
+                .then_with(|| a.filesystem_path.len().cmp(&b.filesystem_path.len()))
+                .then_with(|| a.filesystem_path.cmp(&b.filesystem_path))
+        });
+        Ok(resolved)
+    }
 }
+
+/// One source file resolved by [`Index::resolve_source_file`] from a (possibly
+/// partial) path — carries the canonical `filesystem_path` so `askl_read` can
+/// show it and disambiguate multiple matches.
+#[derive(Debug, Clone)]
+pub struct ResolvedSourceFile {
+    pub object_id: FileId,
+    pub project_name: String,
+    pub filesystem_path: String,
+}
+
+/// Cap on candidates returned by [`Index::resolve_source_file`]; exact matches
+/// are ordered first so the cap can only drop surplus boundary matches.
+const RESOLVE_SOURCE_FILE_LIMIT: i64 = 50;
 
 /// Helper for `RETURNING id` on BigInt columns.
 #[derive(diesel::QueryableByName)]

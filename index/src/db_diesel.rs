@@ -13,8 +13,8 @@ pub use index_impl::{
     eph_pool_manager_config, purge_eph_cache, supplement_hash, BaseLayerRef, EphInstanceRow,
     EphLayerKind, EphLayerMeta, EphRefRow, EphScopedFut, EphSymbolRow, EphTransaction,
     ImplicitEdge, Index, LayerBatch, LayerOutcome, LayerRole, MaterialisedLayer, NameSuggestionRow,
-    ScopeContext, SearchMatchRow, DEFAULT_SQL_CACHE_BYTES, EPH_POOL_IDLE_IN_TXN_TIMEOUT,
-    EPH_POOL_RECYCLING_QUERY,
+    ResolvedSourceFile, ScopeContext, SearchMatchRow, DEFAULT_SQL_CACHE_BYTES,
+    EPH_POOL_IDLE_IN_TXN_TIMEOUT, EPH_POOL_RECYCLING_QUERY,
 };
 pub use mixins::{
     CompositeFilter, CompoundNameMixin, CurrentQuery, DefaultSymbolTypeMixin, DirectOnlyMixin,
