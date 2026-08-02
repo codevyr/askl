@@ -1,4 +1,4 @@
-use actix_web::{post, web, HttpRequest, HttpResponse, Responder};
+use actix_web::{post, web, HttpResponse, Responder};
 use askld::auth;
 use askld::auth::{
     AuthStore, CreateApiKeyRequest, CreateApiKeyResponse, ListApiKeysRequest, ListApiKeysResponse,
@@ -6,16 +6,12 @@ use askld::auth::{
 };
 use log::error;
 
-#[post("/auth/local/create-api-key")]
+#[post("/create-api-key")]
 pub async fn create_api_key(
-    req: HttpRequest,
     auth_store: web::Data<AuthStore>,
     payload: web::Json<CreateApiKeyRequest>,
 ) -> impl Responder {
-    if !auth::is_loopback(&req) {
-        return HttpResponse::Forbidden().body("Loopback connections only");
-    }
-
+    // Loopback-only is enforced by the `/admin/local` scope guard.
     if !auth::bootstrap_allowed() {
         return HttpResponse::Forbidden().body("Bootstrap mode disabled");
     }
@@ -58,16 +54,12 @@ pub async fn create_api_key(
     }
 }
 
-#[post("/auth/local/revoke-api-key")]
+#[post("/revoke-api-key")]
 pub async fn revoke_api_key(
-    req: HttpRequest,
     auth_store: web::Data<AuthStore>,
     payload: web::Json<RevokeApiKeyRequest>,
 ) -> impl Responder {
-    if !auth::is_loopback(&req) {
-        return HttpResponse::Forbidden().body("Loopback connections only");
-    }
-
+    // Loopback-only is enforced by the `/admin/local` scope guard.
     if !auth::bootstrap_allowed() {
         return HttpResponse::Forbidden().body("Bootstrap mode disabled");
     }
@@ -94,16 +86,12 @@ pub async fn revoke_api_key(
     }
 }
 
-#[post("/auth/local/list-api-keys")]
+#[post("/list-api-keys")]
 pub async fn list_api_keys(
-    req: HttpRequest,
     auth_store: web::Data<AuthStore>,
     payload: web::Json<ListApiKeysRequest>,
 ) -> impl Responder {
-    if !auth::is_loopback(&req) {
-        return HttpResponse::Forbidden().body("Loopback connections only");
-    }
-
+    // Loopback-only is enforced by the `/admin/local` scope guard.
     if !auth::bootstrap_allowed() {
         return HttpResponse::Forbidden().body("Bootstrap mode disabled");
     }

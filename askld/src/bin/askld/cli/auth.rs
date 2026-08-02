@@ -33,7 +33,7 @@ pub async fn run_auth_command(port: u16, command: AuthCommand) -> Result<()> {
             json,
             expires_at,
         } => {
-            let url = format!("http://127.0.0.1:{}/auth/local/create-api-key", port);
+            let url = format!("http://127.0.0.1:{}/admin/local/create-api-key", port);
             let response = client
                 .post(url)
                 .json(&CreateApiKeyRequest {
@@ -66,7 +66,7 @@ pub async fn run_auth_command(port: u16, command: AuthCommand) -> Result<()> {
             }
         }
         AuthCommand::RevokeApiKey { token_id, json } => {
-            let url = format!("http://127.0.0.1:{}/auth/local/revoke-api-key", port);
+            let url = format!("http://127.0.0.1:{}/admin/local/revoke-api-key", port);
             let response = client
                 .post(url)
                 .json(&RevokeApiKeyRequest { token_id })
@@ -93,7 +93,7 @@ pub async fn run_auth_command(port: u16, command: AuthCommand) -> Result<()> {
             }
         }
         AuthCommand::ListApiKeys { email, json } => {
-            let url = format!("http://127.0.0.1:{}/auth/local/list-api-keys", port);
+            let url = format!("http://127.0.0.1:{}/admin/local/list-api-keys", port);
             let response = client
                 .post(url)
                 .json(&ListApiKeysRequest { email })
