@@ -3,6 +3,7 @@
 Definitions and location
 - Define a symbol:            `"vfs_read"`
 - Only functions named X:     `func("vfs_read")`
+- Fuzzy symbol name (glob):   `g"*color*"`  (indexed, returns symbols — prefer this over `search()` to find a symbol by name)
 - Several names at once (OR): `"vfs_read" "vfs_write"`
 - Functions in a file:        `file("/proj/fs/read_write.c") { func }`
 - Files in a directory:       `dir("/proj/fs") { file }`
@@ -11,6 +12,7 @@ Call graph
 - What X calls (callees):     `"vfs_read" { }`
 - Who calls X (callers):      `{ "vfs_read" }`
 - Typed, less noisy callers:  `func { "vfs_read" }`
+- Indirect calls (fn pointer):`func { method "color_adjust" { func } }`  (calls that dispatch through a struct fn-pointer field to its implementations; `method` = `field`, a type filter)
 - Two levels of callees:      `"vfs_read" { { } }`
 - Transitive callees:         `"vfs_read" unnest { func }`
 
@@ -19,9 +21,10 @@ Containment
 - Fields of a struct:         `type("file_operations") has { field }`
 - Dispatch through a field:   `{ field("file_operations.read") }`
 
-Full-text
+Full-text (raw source bytes — for text that is NOT a symbol name; to find a symbol prefer `g"*foo*"`)
 - Find a literal:             `search("mmap_lock")`
 - Whole word, scoped:         `project("linux") search("EXPORT_SYMBOL", whole_word="true")`
+- Several literals (OR):      `search("foo"); search("bar")`  (separate statements; `search()` is literal — `search("a|b")` matches the text `a|b`, not a regex)
 - Children of each hit:       `search("kmalloc") { }`
 
 Scope and hygiene
