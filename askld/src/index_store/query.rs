@@ -15,6 +15,25 @@ use super::{
 };
 
 impl IndexStore {
+    /// Clear both caches so the next query measures cold latency: the in-RAM SQL
+    /// result cache (shared with the query-side `Index`) and the DB-side
+    /// ephemeral-layer cache (`purge_eph_cache` deletes all non-protected
+    /// `layers` rows, so `search()`/`loc()` re-materialise). For the perf harness
+    /// via the loopback `/admin/clear-cache` endpoint — no restart needed.
+    /// Returns the number of ephemeral layer rows purged.
+    pub async fn clear_caches(&self) -> Result<usize, StoreError> {
+        self.sql_cache.clear();
+        let mut conn = self.get_conn().await?;
+        // `purge_eph_cache` takes an EXCLUSIVE table lock, so it must run inside a
+        // transaction (mirrors delete_project / finalize_project).
+        let purged = conn
+            .transaction::<usize, StoreError, _>(async move |conn| {
+                Ok(index::db_diesel::purge_eph_cache(conn).await?)
+            })
+            .await?;
+        Ok(purged)
+    }
+
     pub async fn list_projects(&self) -> Result<Vec<ProjectInfo>, StoreError> {
         let mut conn = self.get_conn().await?;
         // Persistent projects have positive SERIAL ids; non-positive ids are

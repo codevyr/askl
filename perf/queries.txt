@@ -1,0 +1,25 @@
+# askl perf corpus — one query per line, '#' comments ignored.
+# Ordered fast → slow; the search() offenders (from the M6 eval timeouts) are last.
+
+# --- symbol lookups (should be fast: indexed) ---
+"vfs_read"
+func("vfs_read")
+g"*color*"
+project("linux") g"*color_adjust*"
+
+# --- call graph ---
+func { "vfs_read" }
+"vfs_read" { func }
+"vfs_read" unnest { func }
+func { method "color_adjust" { func } }
+
+# --- containment / larger fan-out ---
+file("/linux/fs/read_write.c") { func }
+func { "ibv_cmd_reg_mr" }
+
+# --- full-text search (the slow ones; search("color") is the eval timeout culprit) ---
+search("mmap_lock")
+project("linux") search("EXPORT_SYMBOL", whole_word="true")
+search("color") file("drm_mm.c")
+search("color_adjust")
+search("color")
