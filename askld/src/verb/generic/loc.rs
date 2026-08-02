@@ -6,8 +6,8 @@ use crate::verb::LayerSpec;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    EphContext, EphInstanceRow, EphLayerKind, EphSymbolRow, Index, LayerBatch,
-    INSTANCE_TYPE_DEFINITION, SYMBOL_TYPE_CONTENT,
+    EphContext, EphInstanceRow, EphSymbolRow, Index, LayerBatch, INSTANCE_TYPE_DEFINITION,
+    SYMBOL_TYPE_CONTENT,
 };
 use index::symbols::symbol_path_and_leaf;
 use sha2::{Digest, Sha256};
@@ -126,7 +126,10 @@ impl Selector for LocSelector {
     ) -> Result<Option<LayerSpec>> {
         // 1. Base cache key from inputs only — never the eph chain.
         let mut hasher = Sha256::new();
-        hasher.update(EphLayerKind::Loc.as_str().as_bytes());
+        // Explicit per-verb domain tag (byte-identical to the former
+        // `EphLayerKind::Loc.as_str()`) so loc's hashes stay disjoint even
+        // though the layer kind is now the coarse `Ephemeral`.
+        hasher.update(b"loc");
         hasher.update((self.file_path.len() as u64).to_le_bytes());
         hasher.update(self.file_path.as_bytes());
         hasher.update((self.line as u64).to_le_bytes());
@@ -180,32 +183,30 @@ impl Selector for LocSelector {
             sym_name: String,
             sym_path: String,
             sym_leaf: String,
-            /// Layer sets for the two shards, captured at `layer_spec` time:
-            /// the persistent branch (root ids) for the base and the full
-            /// visibility chain for the supplement.
+            /// Root-layer id set — the persistent base shard, captured at
+            /// `layer_spec` time.  Per-layer atoms bind their own singleton
+            /// `[L_j]`, so no chain-wide eph set is needed here.
             root_visible: Vec<i64>,
-            eph_visible: Vec<i64>,
-            /// Per-shard GLOBAL path/line resolutions, each shared across the
-            /// per-root populates of ONE materialisation: the first root to
-            /// run its shard resolves (path query + content reads + line
-            /// offsets) and memoises; siblings await the cell instead of
-            /// re-reading every matching file's contents once per root.  Two
-            /// cells because the two shards scan disjoint layer sets and must
-            /// not share a memoised result.  The bails stay inside the
-            /// initialiser, so error semantics — functions of global data,
-            /// uniform across roots — are unchanged, and cache hits still
-            /// skip resolution entirely (populates only run on a miss).
+            /// GLOBAL path/line resolution for the base shard, shared across
+            /// its per-root populates: the first root to run resolves (path
+            /// query + content reads + line offsets) and memoises; siblings
+            /// await the cell instead of re-reading every matching file once
+            /// per root.  The "no file" bail lives inside the initialiser, so
+            /// error semantics stay uniform across roots, and cache hits skip
+            /// resolution entirely.  Per-layer atoms resolve their own `[L_j]`
+            /// fresh (distinct sets ⇒ no shared memo).
             base_resolved: tokio::sync::OnceCell<Vec<FileMatch>>,
-            supp_resolved: tokio::sync::OnceCell<Vec<FileMatch>>,
         }
 
         /// GLOBAL path/line resolution for one shard.  Identical body to the
-        /// previous single-cell resolution, with ONE difference: the "no
-        /// file" bail fires only on the base shard (`!eph_branch`).  An empty
-        /// supplement shard is normal (no ephemeral objects today), so it
-        /// returns `Ok(vec![])` instead of bailing.  The "line out of range"
-        /// bail is unconditional: if a file matched but the line is out of
-        /// range for every match, that is a user error on either shard.
+        /// previous single-cell resolution, with ONE difference: BOTH bails —
+        /// "no file" and "line out of range" — fire only on the base shard
+        /// (`!eph_branch`).  On an eph shard an empty resolution is normal: a
+        /// layer may simply not carry this path, or may carry a shorter copy
+        /// where the line is out of range — in either case the layer just
+        /// contributes nothing, so `resolve` returns `Ok(vec![])` rather than
+        /// failing the whole statement.  On the base shard both remain hard
+        /// user errors against the file the user actually named.
         async fn resolve(
             txn: &mut index::db_diesel::EphTransaction<'_>,
             inputs: &LocInputs,
@@ -269,11 +270,17 @@ impl Selector for LocSelector {
             }
 
             if file_matches.is_empty() {
-                bail!(
-                    "loc: line {} out of range for all files matching '{}'",
-                    line,
-                    file_path
-                );
+                // Only the base shard treats an out-of-range line as a user
+                // error; on an eph shard the layer may hold a shorter copy of
+                // the file, which just means this layer contributes no match.
+                if !eph_branch {
+                    bail!(
+                        "loc: line {} out of range for all files matching '{}'",
+                        line,
+                        file_path
+                    );
+                }
+                return Ok(Vec::new());
             }
             Ok(file_matches)
         }
@@ -336,9 +343,7 @@ impl Selector for LocSelector {
             sym_path,
             sym_leaf,
             root_visible: eph.root_ids(),
-            eph_visible: eph.visible_ids(),
             base_resolved: tokio::sync::OnceCell::new(),
-            supp_resolved: tokio::sync::OnceCell::new(),
         });
 
         let base_inputs = std::sync::Arc::clone(&inputs);
@@ -355,33 +360,40 @@ impl Selector for LocSelector {
             })
         });
 
-        let supp_inputs = std::sync::Arc::clone(&inputs);
+        // The fused eph supplement is a NO-OP: the per-layer atoms below carry
+        // every eph content layer's matches, so a scanning supplement would
+        // double-count.  It survives empty as the chain-continuation marker.
         let supplement_populate: crate::verb::SupplementPopulate =
-            Box::new(move |txn, root, _base_ref| {
-                let inputs = std::sync::Arc::clone(&supp_inputs);
+            Box::new(|_txn, _root, _base_ref| Box::pin(async { Ok(false) }));
+
+        let per_layer_inputs = std::sync::Arc::clone(&inputs);
+        let per_layer_populate: crate::verb::PerLayerPopulate =
+            Box::new(move |txn, root, layer_id, _base_ref| {
+                let inputs = std::sync::Arc::clone(&per_layer_inputs);
                 Box::pin(async move {
-                    let file_matches: &Vec<FileMatch> = inputs
-                        .supp_resolved
-                        .get_or_try_init(|| resolve(txn, &inputs, &inputs.eph_visible, true))
-                        .await?;
-                    build_instances(txn, &inputs, file_matches, root).await?;
+                    // N-way: each atom resolves ONE eph content layer.  No
+                    // OnceCell — per-layer shards are distinct sets, so resolve
+                    // fresh per `L_j` (cheap; empty until eph content exists).
+                    let file_matches = resolve(txn, &inputs, &[layer_id], true).await?;
+                    build_instances(txn, &inputs, &file_matches, root).await?;
                     // loc never truncates; truncated = false.
                     Ok(false)
                 })
             });
 
         // loc is layer-sharded: the base scans root layers (persistent) and
-        // the supplement scans eph-layer content (`objects.layer < 0`).  With
-        // no ephemeral objects today the supplement resolves empty, so this is
-        // behaviourally identical to the old persistent-only spec — but the
-        // shape is uniform with search and future ephemeral objects flow
-        // through automatically.  `supplement_extra` stays empty: the delta is
-        // fully determined by (parent chain, base).
+        // each per-layer atom scans ONE eph content layer (`objects.layer < 0`);
+        // the fused supplement is an empty chain marker.  With no ephemeral
+        // objects today the eph shards resolve empty, so this is behaviourally
+        // identical to the old persistent-only spec — but the shape is uniform
+        // with search and future ephemeral objects flow through automatically.
+        // `supplement_extra` stays empty: the delta is fully determined by
+        // (parent chain, base).
         Ok(Some(LayerSpec {
             base_hash: hash,
-            base_kind: EphLayerKind::Loc,
             base_populate,
             supplement_populate,
+            per_layer_populate: Some(per_layer_populate),
             supplement_extra: Vec::new(),
         }))
     }

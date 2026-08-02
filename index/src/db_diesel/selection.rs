@@ -71,11 +71,13 @@ impl EphContext {
         self.roots.binary_search_by_key(&root_id, |r| r.id).ok()
     }
 
-    /// Append one statement's freshly materialised layers — for EVERY
-    /// visible root, in (root, base-then-supplement) order — to the chains.
-    /// This is the ONLY growth path, so lockstep is enforced at the source:
-    /// a round that misses a root or names an unknown one is a programming
-    /// error and panics.
+    /// Append one statement's freshly materialised layers — for EVERY visible
+    /// root, in (root, base → per-layer atoms → supplement) order — to the
+    /// chains.  A round contributes one OR MORE layers per root (a base, zero
+    /// or more per-layer content atoms, then a supplement iff the chain was
+    /// non-empty).  This is the ONLY growth path, so lockstep is enforced at
+    /// the source: a round that misses a root entirely, or names an unknown
+    /// one, is a programming error and panics.
     pub fn push_round(&mut self, layers: &[(i64, i64)]) {
         for r in &self.roots {
             assert!(

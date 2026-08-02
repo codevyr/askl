@@ -3930,7 +3930,7 @@ fn eph_layer_rollback_prevents_poisoned_cache() {
         // Attempt 1: create layer, then rollback (simulate failure).
         {
             let txn = index
-                .create_eph_layer(None, None, &hash, index::db_diesel::EphLayerKind::Layer)
+                .create_eph_layer(None, None, &hash, index::db_diesel::EphLayerKind::Ephemeral)
                 .await
                 .unwrap();
             assert!(txn.created(), "first create should return created=true");
@@ -3940,7 +3940,7 @@ fn eph_layer_rollback_prevents_poisoned_cache() {
         // Attempt 2: same hash — must get created=true (layer was rolled back).
         {
             let txn = index
-                .create_eph_layer(None, None, &hash, index::db_diesel::EphLayerKind::Layer)
+                .create_eph_layer(None, None, &hash, index::db_diesel::EphLayerKind::Ephemeral)
                 .await
                 .unwrap();
             assert!(txn.created(), "after rollback, retry must get created=true");
@@ -5142,7 +5142,7 @@ fn search_first_call_reports_created_and_populated() {
     for act in &acts {
         let (meta, (symbols, instances)) = eph_layer_state(TEST_INPUT_SEARCH, act.layer_id);
         assert_eq!(
-            meta.kind, "search",
+            meta.kind, "ephemeral",
             "layer kind must be 'search', got {:?}",
             meta
         );
@@ -5310,8 +5310,9 @@ const R2: i64 = 1000002;
 
 /// Assert an activation trace's (root, role) pairs match `expected`.
 /// Statement order: each statement materialises per visible root
-/// (ascending); within a root, base first, then — under a non-empty chain
-/// for that root — its supplement.
+/// (ascending); within a root, base first, then zero or more per-layer
+/// content atoms, then — under a non-empty chain for that root — its
+/// supplement.
 fn assert_root_roles(
     acts: &[crate::command::LayerActivation],
     expected: &[(i64, crate::command::LayerRole)],
@@ -5429,7 +5430,7 @@ fn search_without_upstream_creates_only_base() {
 
     for act in &acts1 {
         let (meta, _) = eph_layer_state(TEST_INPUT_SEARCH, act.layer_id);
-        assert_eq!(meta.kind, "search", "got {:?}", meta);
+        assert_eq!(meta.kind, "ephemeral", "got {:?}", meta);
         assert_eq!(
             meta.parent_id,
             Some(act.root_id),
@@ -5484,7 +5485,7 @@ fn search_supplement_empty_but_materialized() {
         let root_id = layer_block.root_id;
 
         let (layer_meta, _) = eph_layer_state(TEST_INPUT_SEARCH, layer_block.layer_id);
-        assert_eq!(layer_meta.kind, "layer", "got {:?}", layer_meta);
+        assert_eq!(layer_meta.kind, "ephemeral", "got {:?}", layer_meta);
         assert_eq!(
             layer_meta.parent_id,
             Some(root_id),
@@ -5494,7 +5495,7 @@ fn search_supplement_empty_but_materialized() {
 
         let (base_meta, (base_symbols, base_instances)) =
             eph_layer_state(TEST_INPUT_SEARCH, base.layer_id);
-        assert_eq!(base_meta.kind, "search", "got {:?}", base_meta);
+        assert_eq!(base_meta.kind, "ephemeral", "got {:?}", base_meta);
         assert_eq!(base_meta.parent_id, Some(root_id), "got {:?}", base_meta);
         assert!(base_meta.populated, "got {:?}", base_meta);
         assert!(
@@ -5508,7 +5509,7 @@ fn search_supplement_empty_but_materialized() {
 
         let (supp_meta, (supp_symbols, supp_instances)) =
             eph_layer_state(TEST_INPUT_SEARCH, supp.layer_id);
-        assert_eq!(supp_meta.kind, "supplement", "got {:?}", supp_meta);
+        assert_eq!(supp_meta.kind, "ephemeral", "got {:?}", supp_meta);
         assert_eq!(
             supp_meta.parent_id,
             Some(layer_block.layer_id),
@@ -5724,7 +5725,7 @@ fn loc_base_reused_across_eph_prefix_change() {
 
     for act in [loc_base_a_r1, loc_base_a_r2] {
         let (loc_meta, _) = eph_layer_state(VERB_TEST, act.layer_id);
-        assert_eq!(loc_meta.kind, "loc", "got {:?}", loc_meta);
+        assert_eq!(loc_meta.kind, "ephemeral", "got {:?}", loc_meta);
         assert_eq!(
             loc_meta.parent_id,
             Some(act.root_id),
@@ -5869,7 +5870,7 @@ fn layer_block_eph_ops_split_into_supplement() {
 
     let (supp_meta, (supp_symbols, supp_instances)) =
         eph_layer_state(TEST_INPUT_SEARCH, mixed_supp_r1.layer_id);
-    assert_eq!(supp_meta.kind, "supplement", "got {:?}", supp_meta);
+    assert_eq!(supp_meta.kind, "ephemeral", "got {:?}", supp_meta);
     assert_eq!(
         supp_symbols, 0,
         "the eph-referencing op creates no symbols, got {:?}",
@@ -5884,7 +5885,7 @@ fn layer_block_eph_ops_split_into_supplement() {
     );
 
     let (r2_supp_meta, r2_supp_counts) = eph_layer_state(TEST_INPUT_SEARCH, mixed_supp_r2.layer_id);
-    assert_eq!(r2_supp_meta.kind, "supplement", "got {:?}", r2_supp_meta);
+    assert_eq!(r2_supp_meta.kind, "ephemeral", "got {:?}", r2_supp_meta);
     assert_eq!(
         r2_supp_counts,
         (0, 0),
@@ -6565,7 +6566,7 @@ fn purge_blocks_on_inflight_layer_txn() {
         // Open a layer transaction and hold it (simulates an in-flight
         // populate running its expensive SQL).
         let txn = index
-            .create_eph_layer(None, None, &hash, index::db_diesel::EphLayerKind::Layer)
+            .create_eph_layer(None, None, &hash, index::db_diesel::EphLayerKind::Ephemeral)
             .await
             .unwrap();
         assert!(txn.created());

@@ -584,45 +584,26 @@ impl LayerBatch {
     }
 }
 
-/// Discriminator for an ephemeral layer's origin.  Stored in the
-/// `layers.kind` column and bound into the layer's hash chain.
+/// The kind stored in the `layers.kind` column.
 ///
-/// `Canary` is reserved for the leak-detection sentinel (see
-/// `migrations/2026-06-06-000001_eph_layers/up.sql:86-109` and
-/// [`Index::validate_canary`]); only `Layer` and `Loc` are created at
-/// query time.
+/// Coarse by design: a layer's kind records only what drives behaviour —
+/// whether GC may touch it — not which verb produced it. The producing verb
+/// lives in the layer's hash (each verb folds its own domain tag) and the
+/// layer's role lives in `parent_id` + the executor's `LayerRole`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EphLayerKind {
-    /// The leak-detection sentinel layer.  Never created at runtime;
-    /// inserted once by migration and preserved across
-    /// `purge_eph_cache` / `purge_old_eph_layers`.
+    /// The leak-detection sentinel layer.  Never created at runtime; inserted
+    /// once by migration and preserved across `purge_eph_cache` /
+    /// `purge_old_eph_layers`.  Loaded by `kind='canary'`.
     Canary,
-    /// User-created `layer { … }` blocks bundling ephemeral verbs.
-    Layer,
-    /// `loc(path, line)` cache rows.
-    Loc,
-    /// Synthesised by `Command::layer_spec` when a single statement
-    /// contains multiple layer-creating verbs.  The composite's hash
-    /// chains the per-verb specs in source order; the populate batch
-    /// runs each verb's contribution in turn.  Single-verb statements
-    /// keep their original `Layer`/`Loc` kind for cache continuity.
-    Composite,
-    /// `search(query, ...)` cache rows.  The layer holds every byte-range
-    /// match across the upstream filters' visible objects, capped by the
-    /// caller's `limit`; truncation sets `layers.truncated = true` so
-    /// the warning surfaces on both cache miss and cache hit.
-    Search,
-    /// The eph-chained half of a partitioned cache entry (see
-    /// [`Index::with_partitioned_layers`]).  Holds only the eph-derived
-    /// delta of a base layer; the kind is generic because the supplement's
-    /// hash folds the base hash, which already encodes the verb identity.
-    /// Diagnostics: `kind='supplement'` + `parent_id` → the upstream layer
-    /// it chains on.
-    Supplement,
-    /// A project's root layer: the persistent index data itself.  Positive
-    /// id (ephemeral layers are negative), one per project via
-    /// `projects.root_layer_id`, created with the project — never through
-    /// the hash-upsert cache path, never garbage-collected.
+    /// Any query-time ephemeral cache layer — a base, a `layer { … }` block, a
+    /// composite, the fused supplement, or a per-layer content atom.  All are
+    /// GC-able; none of these are distinguished by kind (their identity and
+    /// role live in the hash, `parent_id`, and `LayerRole`).
+    Ephemeral,
+    /// A project's root layer: the persistent index data itself.  One per
+    /// project via `projects.root_layer_id`, created with the project — never
+    /// through the hash-upsert cache path, never garbage-collected.
     Root,
 }
 
@@ -645,15 +626,13 @@ impl EphLayerKind {
             .join(", ")
     }
 
-    /// String form stored in `layers.kind` and bound into the hash.
+    /// String form stored in `layers.kind`.  NOT folded into any cache hash:
+    /// each verb folds its own explicit domain tag in its `layer_spec`, so the
+    /// kind can stay coarse without weakening key disjointness.
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Canary => "canary",
-            Self::Layer => "layer",
-            Self::Loc => "loc",
-            Self::Composite => "composite",
-            Self::Search => "search",
-            Self::Supplement => "supplement",
+            Self::Ephemeral => "ephemeral",
             Self::Root => "root",
         }
     }
@@ -688,7 +667,7 @@ pub struct LayerOutcome {
     pub truncated: bool,
 }
 
-/// Which half of a root's cache entry a [`MaterialisedLayer`] is.
+/// Which part of a root's cache entry a [`MaterialisedLayer`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayerRole {
     /// Root-parented base layer of a partitioned entry — keyed on
@@ -697,14 +676,25 @@ pub enum LayerRole {
     /// Eph-chained delta layer of a partitioned entry; ordered last within
     /// its root, so it is what downstream verbs chain on.
     Supplement,
+    /// N-way per-layer content atom `V(L_j)`: a content verb's contribution
+    /// restricted to ONE ephemeral content layer, keyed `per_layer_hash(L_j,
+    /// base_hash, extra)` and parented on `L_j` (its lifetime tracks the layer
+    /// it shards).  Additive to base+supplement; zero of these exist until an
+    /// ephemeral layer carries content.
+    PerLayer,
 }
 
 /// One layer materialised by [`Index::with_partitioned_layers`], in the
-/// exact order the executor records and pushes them: roots ascending;
-/// within a root, base first, then the supplement — which exists iff that
-/// root's upstream chain was non-empty (a chain-topology rule, not an
-/// overlay-emptiness shortcut: under a non-empty chain the supplement row
-/// is always materialized, even when its populate inserts zero rows).
+/// exact order the executor records and pushes them: roots ascending; within a
+/// root, base first, then zero or more N-way per-layer content atoms
+/// (`LayerRole::PerLayer`, one per visible eph content layer, none until eph
+/// content exists), then the supplement LAST — which exists iff that root's
+/// upstream chain was non-empty (a chain-topology rule, not an
+/// overlay-emptiness shortcut: under a non-empty chain the supplement row is
+/// always materialized, even when its populate inserts zero rows).  The
+/// supplement is last so IT is the root's deterministic `chain_last`, never a
+/// nondeterministically-ordered atom — keeping downstream `supplement_hash`
+/// keys stable when atoms churn.
 #[derive(Debug, Clone, Copy)]
 pub struct MaterialisedLayer {
     /// The root whose chain this layer joins.
@@ -735,6 +725,30 @@ pub fn supplement_hash(parent_id: i64, base_hash: &[u8; 32], extra: &[u8]) -> [u
     h.update(base_hash);
     h.update((extra.len() as u64).to_le_bytes());
     h.update(extra);
+    h.finalize().into()
+}
+
+/// Cache key of an N-way per-layer content atom `V(L_j)`: the sharded layer's
+/// id folded with the (already root-salted) base identity.  Unlike
+/// [`supplement_hash`] (which folds the runtime chain tip `chain_last`, so the
+/// fused delta is bound to one chain), this folds only `layer_id` — so for a
+/// single content verb the atom key is a function of `(L_j, verb inputs)`, is
+/// reused by ANY chain containing `L_j`, and adding a new tip re-materialises
+/// only the tip's atoms.  It deliberately carries **no** extra key material: a
+/// content scan reads nothing beyond its layer and its own inputs, so folding a
+/// supplement's `extra` here would only fragment the cache (the source of an
+/// earlier over-keying bug).  Caveat for composites: the `base_hash` passed in
+/// is the *composite* base hash, which folds every part's inputs — so a
+/// `search() layer{}` statement's atoms key on the whole statement, i.e. reuse
+/// across composites is conservative; standalone verbs are keyed tightly.  Its
+/// own domain tag keeps per-layer keys disjoint from fused-supplement and
+/// verb-computed hashes; old keys age out via TTL (no purge on upgrade).
+pub fn per_layer_hash(layer_id: i64, base_hash: &[u8; 32]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"eph-perlayer-v1");
+    h.update(layer_id.to_le_bytes());
+    h.update(base_hash);
     h.finalize().into()
 }
 
@@ -2308,6 +2322,45 @@ impl Index {
         }
     }
 
+    /// The ephemeral *content* layers visible in this request that carry
+    /// `objects` rows, grouped by project.  This is the N-way shard set: the
+    /// logical content layers (root is the always-present base atom, handled
+    /// separately), NOT the derived per-layer atoms — atoms hold instances,
+    /// never `objects`, so they are visible-for-read but never re-sharded,
+    /// which is what keeps the shard set from growing multiplicatively.
+    /// Filters `layer < 0` (ephemeral) and groups by project so each root
+    /// shards only over its own content.  Returns `{}` today (no eph layer
+    /// carries content) ⇒ zero atoms ⇒ production byte-identical.
+    async fn eph_content_layers_grouped(
+        &self,
+        visible: &[i64],
+    ) -> Result<std::collections::HashMap<i32, Vec<i64>>> {
+        use crate::schema_diesel::objects;
+        let connection = &mut self
+            .pool
+            .get()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+        // ORDER BY makes the per-project layer order deterministic (SELECT
+        // DISTINCT alone does not), so the resulting atom materialisation and
+        // activation-trace order are stable across runs.
+        let rows = objects::table
+            .filter(objects::layer.eq_any(visible))
+            .filter(objects::layer.lt(0))
+            .select((objects::project_id, objects::layer))
+            .distinct()
+            .order((objects::project_id.asc(), objects::layer.asc()))
+            .load::<(i32, i64)>(&mut *connection)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to enumerate eph content layers: {}", e))?;
+        let mut grouped: std::collections::HashMap<i32, Vec<i64>> =
+            std::collections::HashMap::new();
+        for (project_id, layer) in rows {
+            grouped.entry(project_id).or_default().push(layer);
+        }
+        Ok(grouped)
+    }
+
     /// Materialize a verb's partitioned cache entries, ONE PER VISIBLE ROOT:
     /// for each root, a *base* layer parented on the root, keyed on
     /// `root_salted_hash(root, base_hash)` and holding only that project's
@@ -2340,20 +2393,26 @@ impl Index {
     /// lock is held: concurrent identical requests serialize per (root,
     /// hash) and the losers get cache hits instead of duplicating the
     /// computation.
-    pub async fn with_partitioned_layers<'s, FB, FS>(
+    pub async fn with_partitioned_layers<'s, FB, FS, FP>(
         &'s self,
         eph: &'s EphContext,
         base_hash: &[u8; 32],
-        base_kind: EphLayerKind,
         supplement_extra: &[u8],
         base_populate: FB,
         supplement_populate: FS,
+        per_layer_populate: Option<FP>,
     ) -> Result<Vec<MaterialisedLayer>>
     where
         FB: for<'b> Fn(&'b mut EphTransaction<'s>, &'b RootLayer) -> EphScopedFut<'b, bool>,
         FS: for<'b> Fn(
             &'b mut EphTransaction<'s>,
             &'b RootLayer,
+            BaseLayerRef,
+        ) -> EphScopedFut<'b, bool>,
+        FP: for<'b> Fn(
+            &'b mut EphTransaction<'s>,
+            &'b RootLayer,
+            i64,
             BaseLayerRef,
         ) -> EphScopedFut<'b, bool>,
     {
@@ -2372,38 +2431,56 @@ impl Index {
         // Shared by reference across the per-root futures (`Fn` closures).
         let base_populate = &base_populate;
         let supplement_populate = &supplement_populate;
+        let per_layer_populate = per_layer_populate.as_ref();
+
+        // N-way shard set, computed ONCE (a function of the visible set, not
+        // the root): the eph content layers grouped by project.  Skipped
+        // entirely when the verb exposes no per-layer scan (`layer { … }`) or
+        // when there is no eph chain at all — with only root layers visible
+        // the set is necessarily empty (roots are positive), so a bare
+        // `search()` does zero extra work and stays byte-identical.
+        let content_by_project = if per_layer_populate.is_some() && eph.has_chain() {
+            self.eph_content_layers_grouped(&eph.visible_ids()).await?
+        } else {
+            std::collections::HashMap::new()
+        };
+        let content_by_project = &content_by_project;
 
         let results = futures::stream::iter(eph.roots())
             .map(|root| async move {
                 let salted = root_salted_hash(root, base_hash);
 
                 let base = self
-                    .with_eph_layer(Some(root.id), None, &salted, base_kind, |txn| {
-                        base_populate(txn, root)
-                    })
+                    .with_eph_layer(
+                        Some(root.id),
+                        None,
+                        &salted,
+                        EphLayerKind::Ephemeral,
+                        |txn| base_populate(txn, root),
+                    )
                     .await?;
+
+                // `base_id` couples a delta layer's lifetime to its base (ON
+                // DELETE CASCADE): the base is always the older half, so when
+                // it ages out the delta — whose key folds the stable base
+                // *hash*, not the id — can no longer hit against a recreated
+                // base of a different incarnation.  Shared by the fused
+                // supplement and every per-layer atom.
+                let base_ref = BaseLayerRef {
+                    layer_id: base.layer_id,
+                    hash: salted,
+                };
 
                 let supplement = match eph.chain_last(root.id) {
                     None => None,
                     Some(parent) => {
                         let s_hash = supplement_hash(parent, &salted, supplement_extra);
-                        let base_ref = BaseLayerRef {
-                            layer_id: base.layer_id,
-                            hash: salted,
-                        };
-                        // `base_id` couples the supplement's lifetime to its
-                        // base (ON DELETE CASCADE): the base is always the
-                        // older half of the pair, so when it ages out or is
-                        // deleted, the supplement — whose key folds the
-                        // stable base *hash*, not the id — can no longer
-                        // produce a hit against a recreated base of a
-                        // different incarnation.
                         Some(
                             self.with_eph_layer(
                                 Some(parent),
                                 Some(base.layer_id),
                                 &s_hash,
-                                EphLayerKind::Supplement,
+                                EphLayerKind::Ephemeral,
                                 |txn| supplement_populate(txn, root, base_ref),
                             )
                             .await?,
@@ -2411,12 +2488,51 @@ impl Index {
                     }
                 };
 
-                let mut layers = Vec::with_capacity(2);
+                // N-way per-layer content atoms (additive to base+supplement).
+                // One atom per visible eph content layer for THIS root's
+                // project, keyed `per_layer_hash(L_j, …)` and parented on the
+                // layer it shards (so the atom dies with `L_j`).  The layer is
+                // already committed (it is an earlier round's content), so no
+                // intra-statement ordering constraint applies.  Empty content
+                // set ⇒ no atoms.
+                let mut atoms = Vec::new();
+                if let Some(per_layer) = per_layer_populate {
+                    if let Some(layer_ids) = content_by_project.get(&root.project_id) {
+                        for &lj in layer_ids {
+                            let a_hash = per_layer_hash(lj, &salted);
+                            let atom = self
+                                .with_eph_layer(
+                                    Some(lj),
+                                    Some(base.layer_id),
+                                    &a_hash,
+                                    EphLayerKind::Ephemeral,
+                                    |txn| per_layer(txn, root, lj, base_ref),
+                                )
+                                .await?;
+                            atoms.push(atom);
+                        }
+                    }
+                }
+
+                // Order within a root: base → per-layer atoms → supplement.
+                // The (empty) supplement goes LAST so IT — not a
+                // nondeterministically-ordered atom — is the root's
+                // `chain_last`, keeping downstream `supplement_hash` keys stable
+                // and atom-order-independent.  Atoms stay visible in the chain
+                // (their content is read), just never the tip.
+                let mut layers = Vec::with_capacity(2 + atoms.len());
                 layers.push(MaterialisedLayer {
                     root_id: root.id,
                     role: LayerRole::Base,
                     outcome: base,
                 });
+                for outcome in atoms {
+                    layers.push(MaterialisedLayer {
+                        root_id: root.id,
+                        role: LayerRole::PerLayer,
+                        outcome,
+                    });
+                }
                 if let Some(outcome) = supplement {
                     layers.push(MaterialisedLayer {
                         root_id: root.id,
@@ -2442,8 +2558,9 @@ impl Index {
         let mut groups = results.into_iter().collect::<Result<Vec<_>>>()?;
 
         // Deterministic result (and therefore activation-trace) order
-        // regardless of completion order: roots ascending, base before
-        // supplement within a root (by construction of each group).
+        // regardless of completion order: roots ascending, and within a root
+        // base → per-layer atoms → supplement (by construction of each group;
+        // the stable sort preserves that intra-group order).
         groups.sort_by_key(|g| g.get(0).map(|l| l.root_id));
         Ok(groups.into_iter().flatten().collect())
     }
@@ -3358,6 +3475,39 @@ mod tests {
         );
     }
 
+    /// Per-layer atom keys: distinct per (layer, base), deterministic, and
+    /// disjoint from the fused-supplement key family and the raw base hash —
+    /// the property the `eph-perlayer-v1` domain tag exists to guarantee.
+    #[test]
+    fn per_layer_hash_is_layer_scoped_and_disjoint() {
+        let base = [9u8; 32];
+        let k1 = per_layer_hash(-1001, &base);
+        let k2 = per_layer_hash(-1002, &base);
+        assert_ne!(k1, k2, "different layers must key different atoms");
+        assert_eq!(
+            k1,
+            per_layer_hash(-1001, &base),
+            "same (layer, base) must fold deterministically"
+        );
+        // Different base (different verb inputs) ⇒ different atom key.
+        assert_ne!(
+            k1,
+            per_layer_hash(-1001, &[1u8; 32]),
+            "different base hash must key a different atom"
+        );
+        // Disjoint from the fused-supplement key over the SAME ids — the domain
+        // tags (`eph-perlayer-v1` vs `eph-supplement-v1`) keep them apart.
+        assert_ne!(
+            k1,
+            supplement_hash(-1001, &base, &[]),
+            "per-layer and fused-supplement keys must never collide"
+        );
+        assert_ne!(
+            k1, base,
+            "an atom key must differ from the base hash it folds"
+        );
+    }
+
     /// Pins the disjointness property of the partition at the SQL level,
     /// with no database: the eph-branch instantiation must render the
     /// `NOT (...all recorded columns = ANY($roots)...)` guard over every
@@ -3416,5 +3566,490 @@ mod tests {
             "persistent branch must not embed chain ids — its rendered SQL is \
              the chain-free cache key, got: {psql}"
         );
+    }
+
+    // ===================================================================
+    // N-way per-layer sharding.
+    //
+    // Nothing in production writes ephemeral CONTENT (objects/content_store
+    // on a negative layer), so N-way is byte-identical to 2-way until such a
+    // feature exists.  These tests hand-seed synthetic eph content — the only
+    // way to make `V(L_k)` non-empty — to prove: (a) the shard-set
+    // enumeration, (b) the content scan is a union-homomorphism over layers
+    // `V([L1,L2]) = V(L1) ∪ V(L2)`, and (c) the headline caching property —
+    // extending the chain re-materialises ONLY the new layer's atom while
+    // every prior atom (and the base) is a cache hit.
+    // ===================================================================
+
+    /// Seed a positive root layer plus two ephemeral CONTENT layers (-1001,
+    /// -1002) chained under it, each carrying one object whose content holds
+    /// the literal "NWAYNEEDLE".  The sign check `(id>0)=(layer>0)` is honoured:
+    /// negative object ids live on negative layers.
+    async fn seed_nway_content(index: &Index) -> Result<()> {
+        use diesel_async::RunQueryDsl;
+        let conn = &mut index
+            .pool
+            .get()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+        diesel::sql_query(
+            "INSERT INTO index.layers (id, parent_id, hash, kind, populated) \
+             OVERRIDING SYSTEM VALUE VALUES \
+             (1000001, NULL, decode(md5('nway-root'),'hex'), 'root', TRUE), \
+             (-1001, 1000001, decode(md5('nway-eph-1'),'hex'), 'layer', TRUE), \
+             (-1002, -1001, decode(md5('nway-eph-2'),'hex'), 'layer', TRUE)",
+        )
+        .execute(&mut *conn)
+        .await?;
+        diesel::sql_query(
+            "INSERT INTO index.projects (id, project_name, root_path, root_layer_id) \
+             VALUES (1, 'nway_proj', '/p1', 1000001)",
+        )
+        .execute(&mut *conn)
+        .await?;
+        diesel::sql_query(
+            "INSERT INTO index.content_store (content_hash, content) VALUES \
+             ('nway_cs_1', E'NWAYNEEDLE alpha'), \
+             ('nway_cs_2', E'NWAYNEEDLE beta')",
+        )
+        .execute(&mut *conn)
+        .await?;
+        diesel::sql_query(
+            "INSERT INTO index.objects \
+             (id, project_id, module_path, filesystem_path, filetype, content_hash, layer) \
+             VALUES \
+             (-2001, 1, 'nway1.c', '/p1/nway1.c', 'cc', 'nway_cs_1', -1001), \
+             (-2002, 1, 'nway2.c', '/p1/nway2.c', 'cc', 'nway_cs_2', -1002)",
+        )
+        .execute(&mut *conn)
+        .await?;
+        Ok(())
+    }
+
+    fn nway_root() -> RootLayer {
+        RootLayer {
+            project_id: 1,
+            id: 1000001,
+            hash: vec![0x11; 32],
+        }
+    }
+
+    // No-op populates: the cache-reuse property is a function of the atom's
+    // KEY and layer row, not its contents, so these tests need no real scan.
+    fn nway_noop_base<'b>(
+        _txn: &'b mut EphTransaction<'_>,
+        _root: &'b RootLayer,
+    ) -> EphScopedFut<'b, bool> {
+        Box::pin(async { Ok(false) })
+    }
+    fn nway_noop_supp<'b>(
+        _txn: &'b mut EphTransaction<'_>,
+        _root: &'b RootLayer,
+        _base: BaseLayerRef,
+    ) -> EphScopedFut<'b, bool> {
+        Box::pin(async { Ok(false) })
+    }
+    fn nway_noop_per_layer<'b>(
+        _txn: &'b mut EphTransaction<'_>,
+        _root: &'b RootLayer,
+        _layer_id: i64,
+        _base: BaseLayerRef,
+    ) -> EphScopedFut<'b, bool> {
+        Box::pin(async { Ok(false) })
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn nway_shard_scan_unions_per_layer_and_enumerates_content() -> Result<()> {
+        let docker = testcontainers::clients::Cli::default();
+        let (_node, url) = crate::symbols_test::start_postgres(&docker);
+        crate::symbols_test::wait_for_postgres(&url).await?;
+        let index = Index::connect(&url).await?;
+        seed_nway_content(&index).await?;
+
+        // (a) Shard set: content-bearing eph layers, grouped by project,
+        //     filtered to layer<0.  Root-only visibility yields none (roots
+        //     are positive), which is exactly why production stays 2-way.
+        let grouped = index
+            .eph_content_layers_grouped(&[1000001, -1001, -1002])
+            .await?;
+        let mut got = grouped.get(&1).cloned().unwrap_or_default();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![-1002, -1001],
+            "both eph content layers of project 1 must be enumerated"
+        );
+        assert!(
+            index
+                .eph_content_layers_grouped(&[1000001])
+                .await?
+                .is_empty(),
+            "root-only visibility ⇒ empty shard set (no eph content) ⇒ prod byte-identical"
+        );
+
+        // (b) The content scan is a union-homomorphism over layers: each
+        //     single-layer shard is a disjoint singleton, and the two-layer
+        //     shard is exactly their union.
+        let conn = &mut index.pool.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let filter = CompositeFilter::and(vec![]);
+        let (m1, _) = Index::search_content_matches_on(
+            &mut *conn,
+            "NWAYNEEDLE",
+            false,
+            false,
+            &filter,
+            500,
+            1,
+            &[-1001],
+            true,
+        )
+        .await?;
+        assert_eq!(
+            m1.iter().map(|m| m.object_id).collect::<Vec<_>>(),
+            vec![-2001],
+            "V(L=-1001) = the object on that layer"
+        );
+        let (m2, _) = Index::search_content_matches_on(
+            &mut *conn,
+            "NWAYNEEDLE",
+            false,
+            false,
+            &filter,
+            500,
+            1,
+            &[-1002],
+            true,
+        )
+        .await?;
+        assert_eq!(
+            m2.iter().map(|m| m.object_id).collect::<Vec<_>>(),
+            vec![-2002],
+            "V(L=-1002) = the object on that layer"
+        );
+        let (m12, _) = Index::search_content_matches_on(
+            &mut *conn,
+            "NWAYNEEDLE",
+            false,
+            false,
+            &filter,
+            500,
+            1,
+            &[-1001, -1002],
+            true,
+        )
+        .await?;
+        let mut ids: Vec<i32> = m12.iter().map(|m| m.object_id).collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![-2002, -2001],
+            "V([L1,L2]) must equal V(L1) ∪ V(L2)"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn nway_perlayer_atoms_reuse_across_chain_extension() -> Result<()> {
+        let docker = testcontainers::clients::Cli::default();
+        let (_node, url) = crate::symbols_test::start_postgres(&docker);
+        crate::symbols_test::wait_for_postgres(&url).await?;
+        let index = Index::connect(&url).await?;
+        seed_nway_content(&index).await?;
+
+        let base_hash = [42u8; 32];
+
+        // Run A: chain = [L=-1001].
+        let mut eph_a = EphContext::rooted(vec![nway_root()]);
+        eph_a.push_round(&[(1000001, -1001)]);
+        let a = index
+            .with_partitioned_layers(
+                &eph_a,
+                &base_hash,
+                &[],
+                nway_noop_base,
+                nway_noop_supp,
+                Some(nway_noop_per_layer),
+            )
+            .await?;
+
+        let base_a = a
+            .iter()
+            .find(|l| l.role == LayerRole::Base)
+            .expect("a base layer");
+        assert!(base_a.outcome.created, "base is cold on first run");
+        let atoms_a: Vec<_> = a.iter().filter(|l| l.role == LayerRole::PerLayer).collect();
+        assert_eq!(
+            atoms_a.len(),
+            1,
+            "one visible content layer ⇒ one atom, got {:?}",
+            a
+        );
+        assert!(atoms_a[0].outcome.created, "the atom is cold on first run");
+        assert_eq!(
+            index
+                .eph_layer_meta(atoms_a[0].outcome.layer_id)
+                .await?
+                .parent_id,
+            Some(-1001),
+            "the atom parents on the layer it shards"
+        );
+        let atom_a_id = atoms_a[0].outcome.layer_id;
+        let base_a_id = base_a.outcome.layer_id;
+
+        // Ordering even for a single-atom run: base → atom → supplement, so the
+        // supplement is the deterministic chain_last (not the atom).
+        assert_eq!(
+            a.get(0).map(|l| l.role),
+            Some(LayerRole::Base),
+            "base must be first, got {:?}",
+            a
+        );
+        assert_eq!(
+            a.last().map(|l| l.role),
+            Some(LayerRole::Supplement),
+            "supplement must be last (chain_last) on run A, got {:?}",
+            a
+        );
+
+        // Run B: chain = [L=-1001, L=-1002] — a new tip appended.
+        let mut eph_b = EphContext::rooted(vec![nway_root()]);
+        eph_b.push_round(&[(1000001, -1001)]);
+        eph_b.push_round(&[(1000001, -1002)]);
+        let b = index
+            .with_partitioned_layers(
+                &eph_b,
+                &base_hash,
+                &[],
+                nway_noop_base,
+                nway_noop_supp,
+                Some(nway_noop_per_layer),
+            )
+            .await?;
+
+        // The base is chain-independent, so it is reused unchanged.
+        let base_b = b
+            .iter()
+            .find(|l| l.role == LayerRole::Base)
+            .expect("a base layer");
+        assert!(
+            !base_b.outcome.created,
+            "base must be reused across the chain extension"
+        );
+        assert_eq!(base_b.outcome.layer_id, base_a_id, "same base row");
+
+        // The headline: the -1001 atom reappears by the SAME layer_id as a
+        // cache hit; only the newly-appended -1002 layer's atom is cold.
+        // Under 2-way the whole fused supplement went cold here.
+        let atoms_b: Vec<_> = b.iter().filter(|l| l.role == LayerRole::PerLayer).collect();
+        assert_eq!(
+            atoms_b.len(),
+            2,
+            "two visible content layers ⇒ two atoms, got {:?}",
+            b
+        );
+        let reused = atoms_b
+            .iter()
+            .find(|l| l.outcome.layer_id == atom_a_id)
+            .expect("the L=-1001 atom must reappear by the same layer_id");
+        assert!(
+            !reused.outcome.created,
+            "the non-tip atom must be a cache HIT — the core N-way property"
+        );
+        assert_eq!(
+            index
+                .eph_layer_meta(reused.outcome.layer_id)
+                .await?
+                .parent_id,
+            Some(-1001),
+        );
+        let fresh: Vec<_> = atoms_b
+            .iter()
+            .filter(|l| l.outcome.layer_id != atom_a_id)
+            .collect();
+        assert_eq!(fresh.len(), 1, "exactly one new atom");
+        assert!(
+            fresh[0].outcome.created,
+            "only the new tip layer's atom is materialised cold"
+        );
+        assert_eq!(
+            index
+                .eph_layer_meta(fresh[0].outcome.layer_id)
+                .await?
+                .parent_id,
+            Some(-1002),
+            "the fresh atom shards the newly-appended tip L=-1002"
+        );
+
+        // Ordering / chain_last: the (empty) supplement is emitted LAST, so it
+        // — not a nondeterministically-ordered atom — is the root's
+        // chain_last, keeping downstream supplement keys stable.
+        assert_eq!(
+            b.last().map(|l| l.role),
+            Some(LayerRole::Supplement),
+            "the supplement must be the last (chain_last) layer, got {:?}",
+            b
+        );
+        assert!(
+            b.iter()
+                .rposition(|l| l.role == LayerRole::PerLayer)
+                .unwrap()
+                < b.iter()
+                    .rposition(|l| l.role == LayerRole::Supplement)
+                    .unwrap(),
+            "every per-layer atom must precede the supplement, got {:?}",
+            b
+        );
+        Ok(())
+    }
+
+    // A per-layer populate that materialises the atom's real content: it finds
+    // the object seeded on `L_j` and inserts one instance for it, mirroring
+    // what `sharded_scan`'s scan does.  Used to prove that with the fused
+    // supplement a no-op, reading across base+atoms+supplement returns each
+    // match exactly ONCE (no double-count).
+    fn nway_content_per_layer<'b>(
+        txn: &'b mut EphTransaction<'_>,
+        root: &'b RootLayer,
+        layer_id: i64,
+        _base: BaseLayerRef,
+    ) -> EphScopedFut<'b, bool> {
+        Box::pin(async move {
+            let filter = CompositeFilter::and(vec![]);
+            let (matches, _) = Index::search_content_matches_on(
+                txn.connection(),
+                "NWAYNEEDLE",
+                false,
+                false,
+                &filter,
+                500,
+                root.project_id,
+                &[layer_id],
+                true,
+            )
+            .await?;
+            if matches.is_empty() {
+                return Ok(false);
+            }
+            // `path` is an ltree, so it must be a valid label (no `:`/`-`).
+            let label = format!("nway_{}", layer_id.unsigned_abs());
+            let mut sym_batch = LayerBatch::new();
+            sym_batch.symbols.push(EphSymbolRow {
+                name: format!("nway:{layer_id}"),
+                path: label.clone(),
+                project_id: root.project_id,
+                symbol_type: crate::db_diesel::SYMBOL_TYPE_CONTENT,
+                scope: None,
+                leaf_name: label,
+            });
+            let symbol_ids = txn.insert_batch(&sym_batch, root.project_id).await?;
+            let mut inst_batch = LayerBatch::new();
+            for m in &matches {
+                inst_batch.instances.push(EphInstanceRow {
+                    symbol_id: symbol_ids[0],
+                    object_id: m.object_id,
+                    start: m.start_byte as i64,
+                    end: m.end_byte as i64,
+                    instance_type: crate::db_diesel::INSTANCE_TYPE_DEFINITION,
+                });
+            }
+            txn.insert_batch(&inst_batch, root.project_id).await?;
+            Ok(false)
+        })
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn nway_fused_supplement_is_noop_so_no_double_count() -> Result<()> {
+        let docker = testcontainers::clients::Cli::default();
+        let (_node, url) = crate::symbols_test::start_postgres(&docker);
+        crate::symbols_test::wait_for_postgres(&url).await?;
+        let index = Index::connect(&url).await?;
+        seed_nway_content(&index).await?;
+
+        // Chain over both content layers; atoms carry the content, supplement
+        // is the no-op marker.
+        let mut eph = EphContext::rooted(vec![nway_root()]);
+        eph.push_round(&[(1000001, -1001)]);
+        eph.push_round(&[(1000001, -1002)]);
+        let layers = index
+            .with_partitioned_layers(
+                &eph,
+                &[7u8; 32],
+                &[],
+                nway_noop_base,
+                nway_noop_supp,
+                Some(nway_content_per_layer),
+            )
+            .await?;
+
+        // The supplement holds ZERO rows (no-op) while each atom holds its
+        // layer's single match.
+        let supp = layers
+            .iter()
+            .find(|l| l.role == LayerRole::Supplement)
+            .expect("a supplement marker");
+        assert_eq!(
+            index
+                .count_eph_rows_for_layer(supp.outcome.layer_id)
+                .await?,
+            (0, 0),
+            "the fused supplement must stay empty — content lives in the atoms"
+        );
+        let atoms: Vec<_> = layers
+            .iter()
+            .filter(|l| l.role == LayerRole::PerLayer)
+            .collect();
+        assert_eq!(atoms.len(), 2, "one atom per content layer");
+        for atom in &atoms {
+            let (_syms, insts) = index
+                .count_eph_rows_for_layer(atom.outcome.layer_id)
+                .await?;
+            assert_eq!(insts, 1, "each atom holds its layer's single match");
+        }
+
+        // The union read across ALL of this statement's layers returns each
+        // match exactly once — no supplement/atom double-count.
+        let all_ids: Vec<i64> = layers.iter().map(|l| l.outcome.layer_id).collect();
+        let instance_ids = index.get_eph_instance_ids_for_layers(&all_ids).await?;
+        assert_eq!(
+            instance_ids.len(),
+            2,
+            "exactly two instances (one per content layer), no duplicates; got {:?}",
+            instance_ids
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn nway_loc_shard_scan_resolves_eph_content_per_layer() -> Result<()> {
+        let docker = testcontainers::clients::Cli::default();
+        let (_node, url) = crate::symbols_test::start_postgres(&docker);
+        crate::symbols_test::wait_for_postgres(&url).await?;
+        let index = Index::connect(&url).await?;
+        seed_nway_content(&index).await?;
+
+        let conn = &mut index.pool.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        // loc's path lookup (`find_objects_by_path_on`) shards the same way as
+        // search: bound to `[L_j]` with `eph_branch`, each eph content layer
+        // resolves only its OWN object, and a layer never resolves a path that
+        // lives on a different layer.
+        let m1 =
+            Index::find_objects_by_path_on(&mut *conn, "/p1/nway1.c", None, &[-1001], true).await?;
+        let ids1: Vec<i32> = m1.iter().map(|(fid, _)| (*fid).into()).collect();
+        assert_eq!(ids1, vec![-2001], "loc on L=-1001 resolves its object");
+
+        let m2 =
+            Index::find_objects_by_path_on(&mut *conn, "/p1/nway2.c", None, &[-1002], true).await?;
+        let ids2: Vec<i32> = m2.iter().map(|(fid, _)| (*fid).into()).collect();
+        assert_eq!(ids2, vec![-2002], "loc on L=-1002 resolves its object");
+
+        // Cross-shard isolation: nway1.c lives on -1001, not on -1002.
+        let none =
+            Index::find_objects_by_path_on(&mut *conn, "/p1/nway1.c", None, &[-1002], true).await?;
+        assert!(
+            none.is_empty(),
+            "a path must not resolve on a layer it doesn't live on, got {:?}",
+            none
+        );
+        Ok(())
     }
 }

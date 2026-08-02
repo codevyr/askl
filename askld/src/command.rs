@@ -7,13 +7,13 @@ use crate::span::Span;
 use crate::statement::Statement;
 use crate::verb::{
     add_verb, find_symbol_by_instance_id, ConstraintAction, DeriveMethod, Filter, LabelResolutions,
-    Labeler, LayerPopulate, LayerSpec, NotificationContext, Selector, SelectorId,
+    Labeler, LayerPopulate, LayerSpec, NotificationContext, PerLayerPopulate, Selector, SelectorId,
     SupplementPopulate, Verb, VerbTag,
 };
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::{
-    CompositeFilter, EphContext, EphLayerKind, Index, InnermostOnlyMixin, ScopeContext, Selection,
+    CompositeFilter, EphContext, Index, InnermostOnlyMixin, ScopeContext, Selection,
     SymbolInstanceIdMixin,
 };
 use index::symbols::SymbolInstanceId;
@@ -283,7 +283,7 @@ impl Command {
             composite_base_hash = ?&base_hash[..8],
             parts = ?parts
                 .iter()
-                .map(|p| (p.base_kind, &p.base_hash[..8]))
+                .map(|p| &p.base_hash[..8])
                 .collect::<Vec<_>>(),
             "partitioned composite layer synthesised",
         );
@@ -313,9 +313,16 @@ impl Command {
 
         let mut base_populates = Vec::with_capacity(parts.len());
         let mut supplement_populates = Vec::with_capacity(parts.len());
+        // Only content-scan parts (search, loc) expose a per-layer populate;
+        // a `layer { … }` part contributes none.  Collect just the present
+        // ones so the composite atom is the union of the content scans.
+        let mut per_layer_populates = Vec::with_capacity(parts.len());
         for p in parts {
             base_populates.push(p.base_populate);
             supplement_populates.push(p.supplement_populate);
+            if let Some(pl) = p.per_layer_populate {
+                per_layer_populates.push(pl);
+            }
         }
 
         // `Fn` closures run once per root; the parts are shared across those
@@ -345,11 +352,31 @@ impl Command {
             })
         });
 
+        // Composite per-layer scan: union every content-scan part at each
+        // shard layer `L_j`.  `None` iff no part is a content scan (e.g. a
+        // lone `layer { … }` block), so the executor materialises no atoms.
+        let per_layer_populate: Option<PerLayerPopulate> = if per_layer_populates.is_empty() {
+            None
+        } else {
+            let per_layer_populates = std::sync::Arc::new(per_layer_populates);
+            let closure: PerLayerPopulate = Box::new(move |txn, root, layer_id, base_ref| {
+                let populates = std::sync::Arc::clone(&per_layer_populates);
+                Box::pin(async move {
+                    let mut truncated = false;
+                    for populate in populates.iter() {
+                        truncated |= populate(&mut *txn, root, layer_id, base_ref).await?;
+                    }
+                    Ok(truncated)
+                })
+            });
+            Some(closure)
+        };
+
         LayerSpec {
             base_hash,
-            base_kind: EphLayerKind::Composite,
             base_populate,
             supplement_populate,
+            per_layer_populate,
             supplement_extra,
         }
     }
@@ -664,10 +691,10 @@ impl Command {
                     .with_partitioned_layers(
                         &local_eph,
                         &spec.base_hash,
-                        spec.base_kind,
                         &spec.supplement_extra,
                         spec.base_populate,
                         spec.supplement_populate,
+                        spec.per_layer_populate,
                     )
                     .await
                     .map_err(to_pest)?;
@@ -676,11 +703,10 @@ impl Command {
                 let mut hit_ids = Vec::with_capacity(results.len());
                 let mut round = Vec::with_capacity(results.len());
                 let mut truncated_any = false;
-                // Results arrive in recording order (roots ascending; base
-                // before supplement within a root), so the root's
-                // `chain_last` ends up the supplement and downstream
-                // chaining keys keep depending on that root's full
-                // upstream chain.
+                // Results arrive in recording order (roots ascending; within a
+                // root: base → per-layer atoms → supplement), so the root's
+                // `chain_last` ends up the supplement and downstream chaining
+                // keys keep depending on that root's full upstream chain.
                 for layer in results {
                     if !layer.outcome.created {
                         hit_ids.push(layer.outcome.layer_id);
@@ -865,13 +891,16 @@ mod tests {
         Box::new(|_txn, _root, _base| Box::pin(async { Ok(false) }))
     }
 
-    /// A persistent-only part (empty `supplement_extra`), like `search()`.
+    /// A content-scan-less part with an empty `supplement_extra` and no
+    /// per-layer populate (`None`) — the shape a lone `layer { … }` with only
+    /// base ops produces. (A real `search()` differs: it sets
+    /// `per_layer_populate: Some(..)` via `LayerSpec::sharded_scan`.)
     fn empty_part() -> LayerSpec {
         LayerSpec {
             base_hash: [0u8; 32],
-            base_kind: EphLayerKind::Search,
             base_populate: noop_base(),
             supplement_populate: noop_supplement(),
+            per_layer_populate: None,
             supplement_extra: Vec::new(),
         }
     }
@@ -881,9 +910,9 @@ mod tests {
     fn part_with_supplement(extra: Vec<u8>) -> LayerSpec {
         LayerSpec {
             base_hash: [0u8; 32],
-            base_kind: EphLayerKind::Layer,
             base_populate: noop_base(),
             supplement_populate: noop_supplement(),
+            per_layer_populate: None,
             supplement_extra: extra,
         }
     }
@@ -899,7 +928,6 @@ mod tests {
             composite.supplement_extra.is_empty(),
             "two persistent-only parts must not fabricate a supplement"
         );
-        assert_eq!(composite.base_kind, EphLayerKind::Composite);
     }
 
     #[test]
