@@ -290,14 +290,26 @@ impl Command {
 
         // Composite supplement key: fold every part's extra (length-prefixed,
         // source order) so parts that differ only in their supplement inputs
-        // produce distinct composite supplements.
-        let mut he = Sha256::new();
-        he.update(b"composite-extra-v1");
-        for p in &parts {
-            he.update((p.supplement_extra.len() as u64).to_le_bytes());
-            he.update(&p.supplement_extra);
-        }
-        let supplement_extra: Vec<u8> = he.finalize().to_vec();
+        // produce distinct composite supplements.  `supplement_extra` is the
+        // extra cache-key material a part's chain-dependent delta reads beyond
+        // (parent, base); a part whose delta is fully determined by (parent,
+        // base) — search, loc today — contributes nothing to key on.  When
+        // *every* part is empty the composite has no extra either, but
+        // `finalize()` is unconditionally 32 bytes, so hashing here would
+        // fabricate a key the guard in `compute_selected` then rejects on an
+        // empty chain ("supplement inputs but no ephemeral context").  Stay
+        // empty so the parts just union.
+        let supplement_extra: Vec<u8> = if parts.iter().all(|p| p.supplement_extra.is_empty()) {
+            Vec::new()
+        } else {
+            let mut he = Sha256::new();
+            he.update(b"composite-extra-v1");
+            for p in &parts {
+                he.update((p.supplement_extra.len() as u64).to_le_bytes());
+                he.update(&p.supplement_extra);
+            }
+            he.finalize().to_vec()
+        };
 
         let mut base_populates = Vec::with_capacity(parts.len());
         let mut supplement_populates = Vec::with_capacity(parts.len());
@@ -838,5 +850,71 @@ impl LabeledStatements {
 
     pub fn get_statements(&self, label: &str) -> Option<&Vec<Rc<Statement>>> {
         self.0.get(label)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn noop_base() -> LayerPopulate {
+        Box::new(|_txn, _root| Box::pin(async { Ok(false) }))
+    }
+
+    fn noop_supplement() -> SupplementPopulate {
+        Box::new(|_txn, _root, _base| Box::pin(async { Ok(false) }))
+    }
+
+    /// A persistent-only part (empty `supplement_extra`), like `search()`.
+    fn empty_part() -> LayerSpec {
+        LayerSpec {
+            base_hash: [0u8; 32],
+            base_kind: EphLayerKind::Search,
+            base_populate: noop_base(),
+            supplement_populate: noop_supplement(),
+            supplement_extra: Vec::new(),
+        }
+    }
+
+    /// A part carrying real supplement inputs, like a `layer { … }` that
+    /// references ephemeral ids.
+    fn part_with_supplement(extra: Vec<u8>) -> LayerSpec {
+        LayerSpec {
+            base_hash: [0u8; 32],
+            base_kind: EphLayerKind::Layer,
+            base_populate: noop_base(),
+            supplement_populate: noop_supplement(),
+            supplement_extra: extra,
+        }
+    }
+
+    #[test]
+    fn composite_of_empty_supplements_stays_empty() {
+        // `search("A") search("B")`: both parts are persistent-only, so the
+        // composite must carry NO supplement — otherwise the empty-chain guard
+        // in `compute_selected` rejects it as "supplement inputs but no
+        // ephemeral context". Regression test for that internal error.
+        let composite = Command::partitioned_composite(vec![empty_part(), empty_part()]);
+        assert!(
+            composite.supplement_extra.is_empty(),
+            "two persistent-only parts must not fabricate a supplement"
+        );
+        assert_eq!(composite.base_kind, EphLayerKind::Composite);
+    }
+
+    #[test]
+    fn composite_with_a_real_supplement_is_nonempty_and_order_distinct() {
+        // If any part has supplement inputs, the composite keeps a (32-byte)
+        // supplement key that still distinguishes source order.
+        let a =
+            Command::partitioned_composite(vec![empty_part(), part_with_supplement(vec![1, 2, 3])]);
+        assert!(!a.supplement_extra.is_empty());
+        let b =
+            Command::partitioned_composite(vec![part_with_supplement(vec![1, 2, 3]), empty_part()]);
+        assert!(!b.supplement_extra.is_empty());
+        assert_ne!(
+            a.supplement_extra, b.supplement_extra,
+            "supplement key must fold parts in source order"
+        );
     }
 }

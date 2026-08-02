@@ -20,3 +20,6 @@ perf.data.old
 .claude
 .codex
 perf/REPORT.md
+
+# SDD (subagent-driven-development) scratch workspace
+.superpowers/

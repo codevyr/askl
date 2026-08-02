@@ -341,7 +341,9 @@ impl Selection {
         let visible = eph.visible_ids();
         let eph_ids: &[i64] = &visible;
         for n in &self.nodes {
-            if is_eph_leak(n.symbol.layer, eph_ids) || is_eph_leak(n.symbol_instance.layer, eph_ids)
+            if is_eph_leak(n.symbol.layer, eph_ids)
+                || is_eph_leak(n.symbol_instance.layer, eph_ids)
+                || is_eph_leak(n.object.layer, eph_ids)
             {
                 return true;
             }
@@ -361,6 +363,7 @@ impl Selection {
                 || is_eph_leak(c.symbol_instance.layer, eph_ids)
                 || is_eph_leak(c.from_instance.layer, eph_ids)
                 || is_eph_leak(c.symbol_ref.layer, eph_ids)
+                || is_eph_leak(c.from_object.layer, eph_ids)
             {
                 return true;
             }
@@ -379,6 +382,7 @@ impl Selection {
                 || is_eph_leak(hc.parent_instance.layer, eph_ids)
                 || is_eph_leak(hc.child_symbol.layer, eph_ids)
                 || is_eph_leak(hc.child_instance.layer, eph_ids)
+                || is_eph_leak(hc.parent_object.layer, eph_ids)
             {
                 return true;
             }
@@ -436,6 +440,7 @@ mod tests {
             filesystem_path: "/test".into(),
             filetype: "c".into(),
             content_hash: "".into(),
+            layer: TEST_ROOT,
         }
     }
 
@@ -524,6 +529,25 @@ mod tests {
     #[test]
     fn instance_leak_only() {
         let s = selection_with_node(TEST_ROOT, -1);
+        assert!(s.has_eph_leak(&test_root_ctx()));
+    }
+
+    #[test]
+    fn object_layer_leak_detected() {
+        // Build a node where symbol and instance are in the visible root layer
+        // but the object's layer is NOT visible (a negative eph id not in visible_ids).
+        // has_eph_leak must return true.
+        let mut s = Selection::new();
+        s.nodes.push(SelectionNode {
+            symbol: test_symbol(TEST_ROOT),
+            symbol_instance: test_instance(TEST_ROOT),
+            object: Object {
+                layer: -42, // not in visible_ids
+                ..test_object()
+            },
+            project: test_project(),
+            query_statements: vec![],
+        });
         assert!(s.has_eph_leak(&test_root_ctx()));
     }
 

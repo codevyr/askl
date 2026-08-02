@@ -4060,6 +4060,7 @@ fn canary_leak_detected_by_has_eph_leak() {
             filesystem_path: "/__canary__".into(),
             filetype: "canary".into(),
             content_hash: "".into(),
+            layer: CANARY_LAYER_ID,
         },
         project: Project {
             id: -999999,
@@ -4153,6 +4154,7 @@ fn canary_leak_in_each_relationship_field_detected() {
             filesystem_path: "/__canary__".into(),
             filetype: "canary".into(),
             content_hash: "".into(),
+            layer: CANARY_LAYER_ID,
         }
     }
     fn canary_ref() -> SymbolRef {

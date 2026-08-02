@@ -16,6 +16,7 @@ VALUES
 ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000001;
 ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000001;
 ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE objects          ALTER COLUMN layer SET DEFAULT 1000001;
 
 -- directories table has been removed - directories are now symbols
 
@@ -151,6 +152,7 @@ VALUES
 ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000002;
 ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000002;
 ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000002;
+ALTER TABLE objects          ALTER COLUMN layer SET DEFAULT 1000002;
 
 INSERT INTO projects (id, project_name, root_path, root_layer_id)
 VALUES (2, 'test_project_2', '/test_project_2', 1000002);
@@ -177,6 +179,7 @@ VALUES
 ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000001;
 ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000001;
 ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE objects          ALTER COLUMN layer SET DEFAULT 1000001;
 
 -- ============================================================================
 -- wrap_loc test fixture
@@ -196,3 +199,4 @@ VALUES (99, 9, 1, int4range(0, 50), 1);
 ALTER TABLE symbols          ALTER COLUMN layer DROP DEFAULT;
 ALTER TABLE symbol_instances ALTER COLUMN layer DROP DEFAULT;
 ALTER TABLE symbol_refs      ALTER COLUMN layer DROP DEFAULT;
+ALTER TABLE objects          ALTER COLUMN layer DROP DEFAULT;

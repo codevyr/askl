@@ -120,7 +120,7 @@ impl Selector for LocSelector {
     async fn layer_spec(
         &self,
         _cfg: &ControlFlowGraph,
-        _eph: &EphContext,
+        eph: &EphContext,
         _composite_filter: &index::db_diesel::CompositeFilter,
         _resolved: &crate::verb::LabelResolutions,
     ) -> Result<Option<LayerSpec>> {
@@ -141,20 +141,32 @@ impl Selector for LocSelector {
         }
         let hash: [u8; 32] = hasher.finalize().into();
 
-        // 2. Everything else is deferred into the populate so it runs only
+        // 2. Everything else is deferred into the populates so it runs only
         //    on a cache miss.  The queries read `objects`/`object_contents`
-        //    (persistent only, no layer columns) on the layer
-        //    transaction's own connection.  The user-facing bail!s on "no
-        //    file" / "line out of range" move with them: the transaction
-        //    rolls back, the error surfaces identically, and failed runs
-        //    never commit a layer (errors stay uncached, as before).
+        //    on the layer transaction's own connection.  The user-facing
+        //    bail!s on "no file" / "line out of range" move with them: the
+        //    transaction rolls back, the error surfaces identically, and
+        //    failed runs never commit a layer (errors stay uncached, as
+        //    before).
         //
-        //    The populate runs once PER ROOT (`Fn`, Arc-shared inputs).
-        //    The path/line resolution deliberately stays GLOBAL so the
-        //    bails are functions of global data and behave uniformly
-        //    across roots: either every root's populate bails (file
-        //    matches nowhere) or none does.  Only the batch built from the
-        //    resolved matches is scoped to the root's project.
+        //    loc is layer-SHARDED (like search), but its resolution is
+        //    GLOBAL across roots on each shard's layer set — NOT per-root
+        //    `[root.id]` — so the path/line bails stay functions of global
+        //    data and behave uniformly across roots: either every root's
+        //    base populate bails (file matches nowhere on the root layers)
+        //    or none does.  Only the batch built from the resolved matches
+        //    is scoped to the root's project.
+        //
+        //    Base shard  = GLOBAL resolution over `eph.root_ids()` (persistent
+        //    branch, `eph_branch=false`): every persistent object lives on a
+        //    root layer and loc had no layer filter before, so the same
+        //    objects resolve → the same "no file" bail and the same
+        //    instances.
+        //    Supplement shard = GLOBAL resolution over `eph.visible_ids()`
+        //    with the eph-disjointness guard (`objects.layer < 0`,
+        //    `eph_branch=true`): there are no ephemeral objects today, so it
+        //    resolves empty — and an empty eph resolution is NORMAL, so it
+        //    must NOT bail (only the base bails "no file"; see `resolve`).
         struct FileMatch {
             file_id: i32,
             project_id: i32,
@@ -168,17 +180,152 @@ impl Selector for LocSelector {
             sym_name: String,
             sym_path: String,
             sym_leaf: String,
-            /// Global path/line resolution, shared across the per-root
-            /// populates of ONE materialisation: the first root to run
-            /// resolves (path query + content reads + line offsets) and
-            /// memoises; siblings await the cell instead of re-reading
-            /// every matching file's contents once per root.  The bails
-            /// stay inside the initialiser, so error semantics — functions
-            /// of global data, uniform across roots — are unchanged, and
-            /// cache hits still skip resolution entirely (populates only
-            /// run on a miss).
-            resolved: tokio::sync::OnceCell<Vec<FileMatch>>,
+            /// Layer sets for the two shards, captured at `layer_spec` time:
+            /// the persistent branch (root ids) for the base and the full
+            /// visibility chain for the supplement.
+            root_visible: Vec<i64>,
+            eph_visible: Vec<i64>,
+            /// Per-shard GLOBAL path/line resolutions, each shared across the
+            /// per-root populates of ONE materialisation: the first root to
+            /// run its shard resolves (path query + content reads + line
+            /// offsets) and memoises; siblings await the cell instead of
+            /// re-reading every matching file's contents once per root.  Two
+            /// cells because the two shards scan disjoint layer sets and must
+            /// not share a memoised result.  The bails stay inside the
+            /// initialiser, so error semantics — functions of global data,
+            /// uniform across roots — are unchanged, and cache hits still
+            /// skip resolution entirely (populates only run on a miss).
+            base_resolved: tokio::sync::OnceCell<Vec<FileMatch>>,
+            supp_resolved: tokio::sync::OnceCell<Vec<FileMatch>>,
         }
+
+        /// GLOBAL path/line resolution for one shard.  Identical body to the
+        /// previous single-cell resolution, with ONE difference: the "no
+        /// file" bail fires only on the base shard (`!eph_branch`).  An empty
+        /// supplement shard is normal (no ephemeral objects today), so it
+        /// returns `Ok(vec![])` instead of bailing.  The "line out of range"
+        /// bail is unconditional: if a file matched but the line is out of
+        /// range for every match, that is a user error on either shard.
+        async fn resolve(
+            txn: &mut index::db_diesel::EphTransaction<'_>,
+            inputs: &LocInputs,
+            visible_layers: &[i64],
+            eph_branch: bool,
+        ) -> Result<Vec<FileMatch>> {
+            let file_path = &inputs.file_path;
+            let line = inputs.line;
+            let matches = Index::find_objects_by_path_on(
+                txn.connection(),
+                file_path,
+                inputs.project.as_deref(),
+                visible_layers,
+                eph_branch,
+            )
+            .await?;
+
+            if matches.is_empty() {
+                // Only the base shard bails "no file": an empty eph
+                // resolution is normal (there are no ephemeral objects
+                // today), so the supplement returns empty instead.
+                if !eph_branch {
+                    bail!("loc: no file matching '{}' found in index", file_path);
+                }
+                return Ok(Vec::new());
+            }
+
+            let mut file_matches = Vec::new();
+            for (file_id, project_id) in &matches {
+                let content = Index::get_file_contents_on(txn.connection(), *file_id).await?;
+                let content_bytes = content.as_bytes();
+
+                // CRLF detection: `line_to_offset` recognises only `\n`, so
+                // on CRLF files the resolved offset includes the preceding
+                // `\r` in the line above.  Emit a one-shot warning per
+                // affected file so operators can spot the discrepancy; offset
+                // semantics stay LF-based.
+                if content_bytes.contains(&b'\r') {
+                    let fid: i32 = (*file_id).into();
+                    let first_seen = CRLF_WARNED.lock().unwrap().insert(fid);
+                    if first_seen {
+                        tracing::warn!(
+                            file_id = fid,
+                            "loc: file contains CR bytes; line offsets are LF-based and may be off by one per CRLF"
+                        );
+                    }
+                }
+
+                let line_start = match line_to_offset(content_bytes, line) {
+                    Some(offset) => offset,
+                    None => continue,
+                };
+                let line_end = next_line_offset(content_bytes, line_start);
+
+                file_matches.push(FileMatch {
+                    file_id: (*file_id).into(),
+                    project_id: (*project_id).into(),
+                    line_start,
+                    line_end,
+                });
+            }
+
+            if file_matches.is_empty() {
+                bail!(
+                    "loc: line {} out of range for all files matching '{}'",
+                    line,
+                    file_path
+                );
+            }
+            Ok(file_matches)
+        }
+
+        /// Build the per-root symbol + instance batches from a shard's
+        /// GLOBAL resolution.  Shared by both shards: identical instance
+        /// construction, scoped to this root's project.
+        async fn build_instances(
+            txn: &mut index::db_diesel::EphTransaction<'_>,
+            inputs: &LocInputs,
+            file_matches: &[FileMatch],
+            root: &index::db_diesel::RootLayer,
+        ) -> Result<()> {
+            // This root's share of the resolved matches.  Constructed (not
+            // post-filtered) per root so the returned symbol ids stay 1:1
+            // with the instance rows built from them; the scoped insert's SQL
+            // filter is then a consistency no-op.  An empty share is the
+            // uniform empty share for this root on this shard.
+            let root_matches: Vec<&FileMatch> = file_matches
+                .iter()
+                .filter(|fm| fm.project_id == root.project_id)
+                .collect();
+
+            // Symbol IDs are only known after insertion, so insert symbols
+            // first, then build the instance batch from the returned IDs.
+            let mut sym_batch = LayerBatch::new();
+            for fm in &root_matches {
+                sym_batch.symbols.push(EphSymbolRow {
+                    name: inputs.sym_name.clone(),
+                    path: inputs.sym_path.clone(),
+                    project_id: fm.project_id,
+                    symbol_type: SYMBOL_TYPE_CONTENT,
+                    scope: None,
+                    leaf_name: inputs.sym_leaf.clone(),
+                });
+            }
+            let symbol_ids = txn.insert_batch(&sym_batch, root.project_id).await?;
+
+            let mut inst_batch = LayerBatch::new();
+            for (fm, symbol_id) in root_matches.iter().zip(symbol_ids.iter()) {
+                inst_batch.instances.push(EphInstanceRow {
+                    symbol_id: *symbol_id,
+                    object_id: fm.file_id,
+                    start: fm.line_start,
+                    end: fm.line_end,
+                    instance_type: INSTANCE_TYPE_DEFINITION,
+                });
+            }
+            txn.insert_batch(&inst_batch, root.project_id).await?;
+            Ok(())
+        }
+
         let sym_name = format!("loc:{}:{}", self.file_path, self.line);
         let (sym_path, sym_leaf) = symbol_path_and_leaf(&sym_name, SYMBOL_TYPE_CONTENT);
         let inputs = std::sync::Arc::new(LocInputs {
@@ -188,126 +335,55 @@ impl Selector for LocSelector {
             sym_name,
             sym_path,
             sym_leaf,
-            resolved: tokio::sync::OnceCell::new(),
+            root_visible: eph.root_ids(),
+            eph_visible: eph.visible_ids(),
+            base_resolved: tokio::sync::OnceCell::new(),
+            supp_resolved: tokio::sync::OnceCell::new(),
         });
 
+        let base_inputs = std::sync::Arc::clone(&inputs);
         let base_populate: crate::verb::LayerPopulate = Box::new(move |txn, root| {
-            let inputs = std::sync::Arc::clone(&inputs);
+            let inputs = std::sync::Arc::clone(&base_inputs);
             Box::pin(async move {
-                let file_path = &inputs.file_path;
-                let line = inputs.line;
                 let file_matches: &Vec<FileMatch> = inputs
-                    .resolved
-                    .get_or_try_init(|| async {
-                        let matches = Index::find_objects_by_path_on(
-                            txn.connection(),
-                            file_path,
-                            inputs.project.as_deref(),
-                        )
-                        .await?;
-
-                        if matches.is_empty() {
-                            bail!("loc: no file matching '{}' found in index", file_path);
-                        }
-
-                        let mut file_matches = Vec::new();
-                        for (file_id, project_id) in &matches {
-                            let content =
-                                Index::get_file_contents_on(txn.connection(), *file_id).await?;
-                            let content_bytes = content.as_bytes();
-
-                            // CRLF detection: `line_to_offset` recognises
-                            // only `\n`, so on CRLF files the resolved
-                            // offset includes the preceding `\r` in the line
-                            // above.  Emit a one-shot warning per affected
-                            // file so operators can spot the discrepancy;
-                            // offset semantics stay LF-based.
-                            if content_bytes.contains(&b'\r') {
-                                let fid: i32 = (*file_id).into();
-                                let first_seen = CRLF_WARNED.lock().unwrap().insert(fid);
-                                if first_seen {
-                                    tracing::warn!(
-                                        file_id = fid,
-                                        "loc: file contains CR bytes; line offsets are LF-based and may be off by one per CRLF"
-                                    );
-                                }
-                            }
-
-                            let line_start = match line_to_offset(content_bytes, line) {
-                                Some(offset) => offset,
-                                None => continue,
-                            };
-                            let line_end = next_line_offset(content_bytes, line_start);
-
-                            file_matches.push(FileMatch {
-                                file_id: (*file_id).into(),
-                                project_id: (*project_id).into(),
-                                line_start,
-                                line_end,
-                            });
-                        }
-
-                        if file_matches.is_empty() {
-                            bail!(
-                                "loc: line {} out of range for all files matching '{}'",
-                                line,
-                                file_path
-                            );
-                        }
-                        Ok::<_, anyhow::Error>(file_matches)
-                    })
+                    .base_resolved
+                    .get_or_try_init(|| resolve(txn, &inputs, &inputs.root_visible, false))
                     .await?;
-
-                // This root's share of the resolved matches.  Constructed
-                // (not post-filtered) per root so the returned symbol ids
-                // stay 1:1 with the instance rows built from them; the
-                // scoped insert's SQL filter is then a consistency no-op.
-                // An empty share is the uniform empty base for this root.
-                let root_matches: Vec<&FileMatch> = file_matches
-                    .iter()
-                    .filter(|fm| fm.project_id == root.project_id)
-                    .collect();
-
-                // Symbol IDs are only known after insertion, so insert
-                // symbols first, then build the instance batch from the
-                // returned IDs.
-                let mut sym_batch = LayerBatch::new();
-                for fm in &root_matches {
-                    sym_batch.symbols.push(EphSymbolRow {
-                        name: inputs.sym_name.clone(),
-                        path: inputs.sym_path.clone(),
-                        project_id: fm.project_id,
-                        symbol_type: SYMBOL_TYPE_CONTENT,
-                        scope: None,
-                        leaf_name: inputs.sym_leaf.clone(),
-                    });
-                }
-                let symbol_ids = txn.insert_batch(&sym_batch, root.project_id).await?;
-
-                let mut inst_batch = LayerBatch::new();
-                for (fm, symbol_id) in root_matches.iter().zip(symbol_ids.iter()) {
-                    inst_batch.instances.push(EphInstanceRow {
-                        symbol_id: *symbol_id,
-                        object_id: fm.file_id,
-                        start: fm.line_start,
-                        end: fm.line_end,
-                        instance_type: INSTANCE_TYPE_DEFINITION,
-                    });
-                }
-                txn.insert_batch(&inst_batch, root.project_id).await?;
+                build_instances(txn, &inputs, file_matches, root).await?;
                 // loc never truncates; truncated = false.
                 Ok(false)
             })
         });
 
-        // Same shape as search: loc reads only persistent data
-        // (`objects`/`object_contents`), so the eph-derived delta is
-        // structurally empty and fully determined by (parent chain, base).
-        Ok(Some(LayerSpec::persistent_only(
-            hash,
-            EphLayerKind::Loc,
+        let supp_inputs = std::sync::Arc::clone(&inputs);
+        let supplement_populate: crate::verb::SupplementPopulate =
+            Box::new(move |txn, root, _base_ref| {
+                let inputs = std::sync::Arc::clone(&supp_inputs);
+                Box::pin(async move {
+                    let file_matches: &Vec<FileMatch> = inputs
+                        .supp_resolved
+                        .get_or_try_init(|| resolve(txn, &inputs, &inputs.eph_visible, true))
+                        .await?;
+                    build_instances(txn, &inputs, file_matches, root).await?;
+                    // loc never truncates; truncated = false.
+                    Ok(false)
+                })
+            });
+
+        // loc is layer-sharded: the base scans root layers (persistent) and
+        // the supplement scans eph-layer content (`objects.layer < 0`).  With
+        // no ephemeral objects today the supplement resolves empty, so this is
+        // behaviourally identical to the old persistent-only spec — but the
+        // shape is uniform with search and future ephemeral objects flow
+        // through automatically.  `supplement_extra` stays empty: the delta is
+        // fully determined by (parent chain, base).
+        Ok(Some(LayerSpec {
+            base_hash: hash,
+            base_kind: EphLayerKind::Loc,
             base_populate,
-        )))
+            supplement_populate,
+            supplement_extra: Vec::new(),
+        }))
     }
 }
 

@@ -36,6 +36,7 @@ INSERT INTO projects (id, project_name, root_path, root_layer_id) VALUES
 ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000001;
 ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000001;
 ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE objects          ALTER COLUMN layer SET DEFAULT 1000001;
 
 INSERT INTO content_store (content_hash, content) VALUES
     ('cs_basic',      E'hello foo world\n'),
@@ -50,19 +51,16 @@ INSERT INTO content_store (content_hash, content) VALUES
     -- scoped results.
     ('cs_shared',     E'shared_token across projects\n');
 
+-- Project 1 objects (layer DEFAULT = 1000001 set above).
 INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, content_hash) VALUES
     (1, 1, 'basic.c',    '/p1/basic.c',    'cc', 'cs_basic'),
     (2, 1, 'multi.c',    '/p1/multi.c',    'cc', 'cs_multi'),
     (3, 1, 'boundary.c', '/p1/boundary.c', 'cc', 'cs_boundary'),
-    (4, 2, 'case.c',     '/p2/case.c',     'cc', 'cs_mixedcase'),
-    (5, 2, 'README.md',  '/p2/README.md',  'md', 'cs_docless'),
-    (6, 2, 'data.bin',   '/p2/data.bin',   'bin', 'cs_binary'),
     -- Same cs_shared content_hash in both projects; the per-project search
     -- must return only the project's object.
-    (7, 1, 'shared.h',   '/p1/shared.h',   'cc', 'cs_shared'),
-    (8, 2, 'shared.h',   '/p2/shared.h',   'cc', 'cs_shared');
+    (7, 1, 'shared.h',   '/p1/shared.h',   'cc', 'cs_shared');
 
--- Sentinel function symbols for objects 1-4 just so composite-filter tests
+-- Sentinel function symbols for objects 1-3 just so composite-filter tests
 -- have somewhere to attach.  Object 5 is intentionally left symbol-less to
 -- prove search() reaches it through the content_store ⋈ objects skeleton.
 INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope) VALUES
@@ -79,6 +77,14 @@ INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type
 ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000002;
 ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000002;
 ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000002;
+ALTER TABLE objects          ALTER COLUMN layer SET DEFAULT 1000002;
+
+-- Project 2 objects (layer DEFAULT = 1000002 set above).
+INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, content_hash) VALUES
+    (4, 2, 'case.c',     '/p2/case.c',     'cc', 'cs_mixedcase'),
+    (5, 2, 'README.md',  '/p2/README.md',  'md', 'cs_docless'),
+    (6, 2, 'data.bin',   '/p2/data.bin',   'bin', 'cs_binary'),
+    (8, 2, 'shared.h',   '/p2/shared.h',   'cc', 'cs_shared');
 
 INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope) VALUES
     (13, 'fn_case',     2, 1, 1);
@@ -89,3 +95,4 @@ INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type
 ALTER TABLE symbols          ALTER COLUMN layer DROP DEFAULT;
 ALTER TABLE symbol_instances ALTER COLUMN layer DROP DEFAULT;
 ALTER TABLE symbol_refs      ALTER COLUMN layer DROP DEFAULT;
+ALTER TABLE objects          ALTER COLUMN layer DROP DEFAULT;

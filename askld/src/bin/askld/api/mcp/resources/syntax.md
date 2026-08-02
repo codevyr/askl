@@ -18,7 +18,7 @@ separate statements; a `{` must be on the same line as its verb to attach.
   `field("n")`/`method("n")`, `mod("n")`, `file("n")`, `dir("n")`.
 - `search("literal")` — full-text over raw source bytes; one result symbol per
   match. **Literal only — no regex** (`search("a|b")` matches the text `a|b`; to OR
-  several literals use separate statements: `search("a"); search("b")`). To find a
+  literals, `search("a") search("b")` or `search("a"); search("b")` — both union). To find a
   **symbol by name, prefer a glob `g"*name*"`** (indexed, cheaper) — use `search()`
   only for non-symbol text. `>=3` chars, smart-case, options `whole_word="true"`,
   `case="sensitive"|"insensitive"`, `limit=500`.

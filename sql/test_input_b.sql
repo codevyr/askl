@@ -12,6 +12,7 @@ VALUES (1, 'test_project', '/test_project', 1000001);
 ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000001;
 ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000001;
 ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE objects          ALTER COLUMN layer SET DEFAULT 1000001;
 
 -- directories table has been removed - directories are now symbols
 
@@ -130,3 +131,4 @@ INSERT INTO symbol_refs (to_symbol, from_object, from_offset_range) VALUES
 ALTER TABLE symbols          ALTER COLUMN layer DROP DEFAULT;
 ALTER TABLE symbol_instances ALTER COLUMN layer DROP DEFAULT;
 ALTER TABLE symbol_refs      ALTER COLUMN layer DROP DEFAULT;
+ALTER TABLE objects          ALTER COLUMN layer DROP DEFAULT;

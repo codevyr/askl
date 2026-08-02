@@ -24,7 +24,7 @@ Containment
 Full-text (raw source bytes — for text that is NOT a symbol name; to find a symbol prefer `g"*foo*"`)
 - Find a literal:             `search("mmap_lock")`
 - Whole word, scoped:         `project("linux") search("EXPORT_SYMBOL", whole_word="true")`
-- Several literals (OR):      `search("foo"); search("bar")`  (separate statements; `search()` is literal — `search("a|b")` matches the text `a|b`, not a regex)
+- Several literals (OR):      `search("foo") search("bar")`  (or `;`-separated — both union; `search()` is literal, `search("a|b")` matches the text `a|b`, not a regex)
 - Children of each hit:       `search("kmalloc") { }`
 
 Scope and hygiene
