@@ -440,7 +440,8 @@ async fn do_upload_objects(
     project_id: i32,
     upload: UploadProject,
 ) -> Result<(), UploadError> {
-    let mut object_inserts = build_objects(project_id, &upload.objects)?;
+    let root_layer_id = root_layer_of(conn, project_id).await?;
+    let mut object_inserts = build_objects(project_id, root_layer_id, &upload.objects)?;
     tracing::info!(
         objects = object_inserts.len(),
         "upload_objects: built inserts"
@@ -478,8 +479,6 @@ async fn do_upload_objects(
     tracing::info!("upload_objects: inserting objects");
     let object_map = insert_objects(conn, &mut object_inserts).await?;
     tracing::info!(inserted = object_map.len(), "upload_objects: objects done");
-
-    let root_layer_id = root_layer_of(conn, project_id).await?;
     let instance_rows =
         build_symbol_instances(project_id, root_layer_id, &upload.objects, &object_map)?;
     tracing::info!(
@@ -588,6 +587,7 @@ fn validate_instance_type(proto_type: i32) -> Result<i32, UploadError> {
 
 fn build_objects(
     project_id: i32,
+    root_layer_id: i64,
     objects: &[UploadObject],
 ) -> Result<Vec<ObjectInsert>, UploadError> {
     let mut seen = HashSet::new();
@@ -636,6 +636,7 @@ fn build_objects(
                 filesystem_path,
                 filetype: object.filetype.clone(),
                 content_hash,
+                layer: root_layer_id,
             },
         });
     }
@@ -668,6 +669,8 @@ async fn insert_objects(
                     .eq(diesel::upsert::excluded(index_schema::objects::filetype)),
                 index_schema::objects::module_path
                     .eq(diesel::upsert::excluded(index_schema::objects::module_path)),
+                index_schema::objects::layer
+                    .eq(diesel::upsert::excluded(index_schema::objects::layer)),
             ))
             .returning(index_schema::objects::id)
             .get_results(conn)
@@ -988,23 +991,27 @@ mod tests {
         }
     }
 
+    const TEST_ROOT_LAYER_ID: i64 = 1000001;
+
     #[test]
     fn build_objects_inline_content_computes_hash() {
-        let result = build_objects(1, &[obj(1, "/a/b.c", b"hello", "")]).unwrap();
+        let result =
+            build_objects(1, TEST_ROOT_LAYER_ID, &[obj(1, "/a/b.c", b"hello", "")]).unwrap();
         assert!(result[0].content.is_some());
         assert!(!result[0].row.content_hash.is_empty());
     }
 
     #[test]
     fn build_objects_hash_only_no_inline_content() {
-        let result = build_objects(1, &[obj(1, "/a/b.c", b"", "deadbeef")]).unwrap();
+        let result =
+            build_objects(1, TEST_ROOT_LAYER_ID, &[obj(1, "/a/b.c", b"", "deadbeef")]).unwrap();
         assert!(result[0].content.is_none());
         assert_eq!(result[0].row.content_hash, "deadbeef");
     }
 
     #[test]
     fn build_objects_client_hash_must_match_computed() {
-        assert!(build_objects(1, &[obj(1, "/a.c", b"real", "wrong")]).is_err());
+        assert!(build_objects(1, TEST_ROOT_LAYER_ID, &[obj(1, "/a.c", b"real", "wrong")]).is_err());
     }
 
     #[test]
@@ -1012,23 +1019,53 @@ mod tests {
         use super::super::hash_bytes;
         let content = b"data";
         let correct_hash = hash_bytes(content);
-        assert!(build_objects(1, &[obj(1, "/a.c", content, &correct_hash)]).is_ok());
+        assert!(build_objects(
+            1,
+            TEST_ROOT_LAYER_ID,
+            &[obj(1, "/a.c", content, &correct_hash)]
+        )
+        .is_ok());
     }
 
     #[test]
     fn build_objects_duplicate_local_id_is_err() {
-        assert!(build_objects(1, &[obj(1, "/a.c", b"a", ""), obj(1, "/b.c", b"b", "")]).is_err());
+        assert!(build_objects(
+            1,
+            TEST_ROOT_LAYER_ID,
+            &[obj(1, "/a.c", b"a", ""), obj(1, "/b.c", b"b", "")]
+        )
+        .is_err());
     }
 
     #[test]
     fn build_objects_relative_path_is_err() {
-        assert!(build_objects(1, &[obj(1, "relative/path.c", b"x", "")]).is_err());
+        assert!(build_objects(
+            1,
+            TEST_ROOT_LAYER_ID,
+            &[obj(1, "relative/path.c", b"x", "")]
+        )
+        .is_err());
     }
 
     #[test]
     fn build_objects_normalizes_dotdot_in_path() {
-        let result = build_objects(1, &[obj(1, "/a/b/../c.h", b"x", "")]).unwrap();
+        let result =
+            build_objects(1, TEST_ROOT_LAYER_ID, &[obj(1, "/a/b/../c.h", b"x", "")]).unwrap();
         assert_eq!(result[0].row.filesystem_path, "/a/c.h");
+    }
+
+    #[test]
+    fn build_objects_layer_equals_root_layer_id() {
+        let root_layer_id = 9999i64;
+        let objects = vec![
+            obj(1, "/a/b.c", b"hello", ""),
+            obj(2, "/a/d.c", b"world", ""),
+        ];
+        let result = build_objects(1, root_layer_id, &objects).unwrap();
+        assert!(
+            result.iter().all(|o| o.row.layer == root_layer_id),
+            "all objects must carry the root_layer_id"
+        );
     }
 
     // --- build_symbol_instances ---

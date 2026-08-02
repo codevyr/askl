@@ -58,6 +58,7 @@ diesel::table! {
         // - filesystem_path = directory path (e.g., "/src")
         // - filetype = "directory"
         // - content_hash = "" (empty)
+        layer -> BigInt,
     }
 }
 

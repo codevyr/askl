@@ -2683,10 +2683,18 @@ impl Index {
     /// closure, which runs inside an [`EphTransaction`] and must not check out a
     /// second pool connection while the layer's row lock is held (see
     /// [`Index::search_content_matches_on`]).
+    ///
+    /// Layer-sharded like [`Index::search_content_matches_on`]: `visible_layers`
+    /// scopes the resolution to a layer set (the base shard binds the root ids,
+    /// the supplement shard binds the upstream chain), and `eph_branch` adds the
+    /// eph-disjointness guard (`objects.layer < 0` — negative layers are
+    /// ephemeral) so the supplement shard only ever sees eph-layer objects.
     pub async fn find_objects_by_path_on(
         connection: &mut AsyncPgConnection,
         path: &str,
         project_name: Option<&str>,
+        visible_layers: &[i64],
+        eph_branch: bool,
     ) -> Result<Vec<(FileId, crate::symbols::ProjectId)>> {
         use crate::schema_diesel::*;
 
@@ -2700,11 +2708,21 @@ impl Index {
                     .eq(path)
                     .or(objects::filesystem_path.like(format!("%/{}", escaped))),
             )
+            // Scope to the shard's visible layer set (root ids for the base
+            // shard, the upstream chain for the supplement shard).
+            .filter(objects::layer.eq_any(visible_layers))
             .select((objects::id, projects::id))
             .into_boxed::<Pg>();
 
         if let Some(name) = project_name {
             query = query.filter(projects::project_name.eq(name));
+        }
+
+        // Eph-disjointness guard: the supplement shard scans ephemeral objects
+        // only (`objects.layer < 0`), so a base object never double-counts as a
+        // supplement object.
+        if eph_branch {
+            query = query.filter(objects::layer.lt(0));
         }
 
         let results = query
@@ -2862,7 +2880,7 @@ fn make_like_pattern(query: &str) -> String {
 /// PostgreSQL 16 rejects prepared statements with unreferenced parameters
 /// ("wrong number of parameters"), so the bind chain — and therefore the
 /// project-filter slot — must match exactly which params the SQL uses.
-fn build_search_sql(whole_word: bool, case_sensitive: bool) -> String {
+fn build_search_sql(whole_word: bool, case_sensitive: bool, eph_branch: bool) -> String {
     let uses_like_pattern = !(whole_word && !case_sensitive);
 
     // Haystack/needle passed to find_substr_byte_ranges.
@@ -2901,11 +2919,16 @@ fn build_search_sql(whole_word: bool, case_sensitive: bool) -> String {
     // produces one object per project that references it, and
     // `o.project_id = ANY($N)` keeps only the caller's.  Slot shifts based
     // on whether $3 holds the LIKE pattern.
-    let project_filter = if uses_like_pattern {
-        " AND o.project_id = ANY($4)"
+    let (proj_slot, layer_slot) = if uses_like_pattern {
+        ("$4", "$5")
     } else {
-        " AND o.project_id = ANY($3)"
+        ("$3", "$4")
     };
+    let project_filter = format!(" AND o.project_id = ANY({proj_slot})");
+    let layer_filter = format!(
+        " AND o.layer = ANY({layer_slot}){}",
+        if eph_branch { " AND o.layer < 0" } else { "" }
+    );
 
     format!(
         "SELECT \
@@ -2916,13 +2939,14 @@ fn build_search_sql(whole_word: bool, case_sensitive: bool) -> String {
          FROM index.content_store cs \
          JOIN index.objects o ON o.content_hash = cs.content_hash \
          CROSS JOIN LATERAL index.find_substr_byte_ranges({haystack}, {needle}, $2) AS p \
-         WHERE {pre_filter}{project_filter}{boundary} \
+         WHERE {pre_filter}{project_filter}{layer_filter}{boundary} \
          ORDER BY o.id, p.start_byte \
          LIMIT $2",
         haystack = haystack_expr,
         needle = needle_expr,
         pre_filter = pre_filter,
         project_filter = project_filter,
+        layer_filter = layer_filter,
         boundary = boundary_clauses,
     )
 }
@@ -2955,9 +2979,11 @@ impl Index {
         composite_filter: &CompositeFilter,
         limit: usize,
         project_id: i32,
+        visible_layers: &[i64],
+        eph_branch: bool,
     ) -> Result<(Vec<SearchMatchRow>, bool)> {
         use crate::schema_diesel::objects;
-        use diesel::sql_types::{Array, Integer, Text};
+        use diesel::sql_types::{Array, BigInt, Integer, Text};
 
         let limit_plus_one = (limit as i32).saturating_add(1);
 
@@ -2997,7 +3023,7 @@ impl Index {
             None
         };
 
-        let sql = build_search_sql(whole_word, case_sensitive);
+        let sql = build_search_sql(whole_word, case_sensitive, eph_branch);
 
         let rows: Vec<SearchMatchRow> = match like_pattern.as_ref() {
             Some(pat) => {
@@ -3006,6 +3032,7 @@ impl Index {
                     .bind::<Integer, _>(limit_plus_one)
                     .bind::<Text, _>(pat)
                     .bind::<Array<Integer>, _>(&project_ids)
+                    .bind::<Array<BigInt>, _>(visible_layers)
                     .load::<SearchMatchRow>(&mut *connection)
                     .await
             }
@@ -3014,6 +3041,7 @@ impl Index {
                     .bind::<Text, _>(query)
                     .bind::<Integer, _>(limit_plus_one)
                     .bind::<Array<Integer>, _>(&project_ids)
+                    .bind::<Array<BigInt>, _>(visible_layers)
                     .load::<SearchMatchRow>(&mut *connection)
                     .await
             }

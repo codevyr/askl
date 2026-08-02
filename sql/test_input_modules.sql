@@ -20,6 +20,7 @@ VALUES
 ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000001;
 ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000001;
 ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000001;
+ALTER TABLE objects          ALTER COLUMN layer SET DEFAULT 1000001;
 
 -- directories table has been removed - directories are now symbols
 
@@ -107,6 +108,7 @@ VALUES
 ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000002;
 ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000002;
 ALTER TABLE symbol_refs      ALTER COLUMN layer SET DEFAULT 1000002;
+ALTER TABLE objects          ALTER COLUMN layer SET DEFAULT 1000002;
 
 -- File symbol (type=2)
 INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
@@ -140,6 +142,7 @@ VALUES
 ALTER TABLE symbols          ALTER COLUMN layer DROP DEFAULT;
 ALTER TABLE symbol_instances ALTER COLUMN layer DROP DEFAULT;
 ALTER TABLE symbol_refs      ALTER COLUMN layer DROP DEFAULT;
+ALTER TABLE objects          ALTER COLUMN layer DROP DEFAULT;
 
 -- "test" symbols has the same layout as test_input_b.
 -- "other" symbols mirrors a subset of the data to exercise module-like filtering.

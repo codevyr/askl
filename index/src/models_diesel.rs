@@ -38,6 +38,7 @@ pub struct Object {
     pub filesystem_path: String,
     pub filetype: String,
     pub content_hash: String,
+    pub layer: i64,
 }
 
 #[derive(Clone, Queryable, Selectable, Identifiable, Debug, PartialEq, Eq, Hash)]

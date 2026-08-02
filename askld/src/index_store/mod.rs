@@ -176,6 +176,7 @@ struct NewObject {
     filesystem_path: String, // 3
     filetype: String,        // 4
     content_hash: String,    // 5
+    layer: i64,              // 6
 }
 
 #[derive(Insertable, Clone)]

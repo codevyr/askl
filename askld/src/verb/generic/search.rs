@@ -178,7 +178,7 @@ impl Selector for SearchSelector {
     async fn layer_spec(
         &self,
         _cfg: &ControlFlowGraph,
-        _eph: &EphContext,
+        eph: &EphContext,
         composite_filter: &CompositeFilter,
         _resolved: &crate::verb::LabelResolutions,
     ) -> Result<Option<LayerSpec>> {
@@ -223,82 +223,84 @@ impl Selector for SearchSelector {
             sym_leaf,
         });
 
-        let base_populate: crate::verb::LayerPopulate = Box::new(move |txn, root| {
-            let inputs = std::sync::Arc::clone(&inputs);
-            Box::pin(async move {
-                // 2a. Run the SQL for THIS root's project.  All filtering,
-                //     matching, and byte-range extraction happens inside one
-                //     of four straight-line SQL variants picked from
-                //     (whole_word, case_sensitive); the project scope is an
-                //     always-present bind, and the limit caps matches PER
-                //     PROJECT — required for cache correctness (this root's
-                //     base content must not depend on co-visible projects).
-                //     Reads persistent data only (`content_store`/`objects`
-                //     have no layer columns) — the base layer must stay
-                //     a pure function of the persistent index.
-                let (matches, truncated) = Index::search_content_matches_on(
-                    txn.connection(),
-                    &inputs.query,
-                    inputs.case_sensitive,
-                    inputs.whole_word,
-                    &inputs.filter,
-                    inputs.limit,
-                    root.project_id,
-                )
-                .await?;
+        let scan: crate::verb::ShardedScan =
+            Box::new(move |txn, root, visible_layers, eph_branch| {
+                let inputs = std::sync::Arc::clone(&inputs);
+                Box::pin(async move {
+                    // 2a. Run the SQL for THIS root's project.  All filtering,
+                    //     matching, and byte-range extraction happens inside one
+                    //     of four straight-line SQL variants picked from
+                    //     (whole_word, case_sensitive); the project scope is an
+                    //     always-present bind, and the limit caps matches PER
+                    //     PROJECT — required for cache correctness (this root's
+                    //     base content must not depend on co-visible projects).
+                    //     `visible_layers`/`eph_branch` select the shard: the base
+                    //     shard scans persistent content (`[root.id]`, false), the
+                    //     supplement shard scans eph-layer content (the upstream
+                    //     chain, true) — the executor picks which via
+                    //     `LayerSpec::sharded_scan`.
+                    let (matches, truncated) = Index::search_content_matches_on(
+                        txn.connection(),
+                        &inputs.query,
+                        inputs.case_sensitive,
+                        inputs.whole_word,
+                        &inputs.filter,
+                        inputs.limit,
+                        root.project_id,
+                        &visible_layers,
+                        eph_branch,
+                    )
+                    .await?;
 
-                if matches.is_empty() {
-                    // Uniform empty base: no matches in this project (or the
-                    // filter excludes it) — the layer row itself is still
-                    // materialised by the executor.
-                    return Ok(truncated);
-                }
+                    if matches.is_empty() {
+                        // Uniform empty base: no matches in this project (or the
+                        // filter excludes it) — the layer row itself is still
+                        // materialised by the executor.
+                        return Ok(truncated);
+                    }
 
-                // 2b. One ephemeral symbol for this root's project, then one
-                //     ephemeral instance per byte-range match.  SQL result
-                //     order (object_id, start) keeps the batch deterministic.
-                let mut sym_batch = LayerBatch::new();
-                sym_batch.symbols.push(EphSymbolRow {
-                    name: inputs.sym_name.clone(),
-                    path: inputs.sym_path.clone(),
-                    project_id: root.project_id,
-                    symbol_type: SYMBOL_TYPE_CONTENT,
-                    scope: None,
-                    leaf_name: inputs.sym_leaf.clone(),
-                });
-                let symbol_ids = txn.insert_batch(&sym_batch, root.project_id).await?;
-                let symbol_id = symbol_ids[0];
-
-                let mut inst_batch = LayerBatch::new();
-                for m in &matches {
-                    inst_batch.instances.push(EphInstanceRow {
-                        symbol_id,
-                        object_id: m.object_id,
-                        start: m.start_byte as i64,
-                        end: m.end_byte as i64,
-                        instance_type: INSTANCE_TYPE_DEFINITION,
+                    // 2b. One ephemeral symbol for this root's project, then one
+                    //     ephemeral instance per byte-range match.  SQL result
+                    //     order (object_id, start) keeps the batch deterministic.
+                    let mut sym_batch = LayerBatch::new();
+                    sym_batch.symbols.push(EphSymbolRow {
+                        name: inputs.sym_name.clone(),
+                        path: inputs.sym_path.clone(),
+                        project_id: root.project_id,
+                        symbol_type: SYMBOL_TYPE_CONTENT,
+                        scope: None,
+                        leaf_name: inputs.sym_leaf.clone(),
                     });
-                }
-                txn.insert_batch(&inst_batch, root.project_id).await?;
+                    let symbol_ids = txn.insert_batch(&sym_batch, root.project_id).await?;
+                    let symbol_id = symbol_ids[0];
 
-                Ok(truncated)
-            })
-        });
+                    let mut inst_batch = LayerBatch::new();
+                    for m in &matches {
+                        inst_batch.instances.push(EphInstanceRow {
+                            symbol_id,
+                            object_id: m.object_id,
+                            start: m.start_byte as i64,
+                            end: m.end_byte as i64,
+                            instance_type: INSTANCE_TYPE_DEFINITION,
+                        });
+                    }
+                    txn.insert_batch(&inst_batch, root.project_id).await?;
 
-        // Search reads persistent data only: content lives exclusively in
-        // `content_store`/`objects` (no layer columns), and no
-        // CompositeFilter leaf can scope objects through eph rows (the only
-        // `objects_expr` implementation is ProjectFilterMixin, eph-free by
-        // the contract documented on the trait method).  When eph-visible
-        // content exists, stop using `persistent_only`: run the eph-scoped
-        // search variant in a real supplement populate (a hand-built SQL
-        // variant, not a mode flag on the persistent query), fold its
-        // inputs into `supplement_extra`, and emit mask rows referencing
-        // the `BaseLayerRef`.
-        Ok(Some(LayerSpec::persistent_only(
+                    Ok(truncated)
+                })
+            });
+
+        // The executor SHARDS this scan by layer: it runs the base shard
+        // (`vec![root.id]`, `eph_branch=false`) over persistent content and,
+        // under a non-empty eph chain, the supplement shard
+        // (`eph.visible_ids()`, `eph_branch=true`) over eph-layer content.
+        // The verb stays layer-agnostic — one `scan`, no base/supplement
+        // knowledge — and `sharded_scan` owns the visibility mapping.
+        Ok(Some(LayerSpec::sharded_scan(
             hash,
             EphLayerKind::Search,
-            base_populate,
+            eph.visible_ids(),
+            scan,
         )))
     }
 

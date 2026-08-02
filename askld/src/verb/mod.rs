@@ -54,6 +54,36 @@ pub type SupplementPopulate = Box<
     ) -> EphScopedFut<'b, bool>,
 >;
 
+/// Layer-sharded content-scan callback passed by verbs to
+/// [`LayerSpec::sharded_scan`].  The verb provides ONE layer-agnostic scan;
+/// the executor invokes it per visible root (chains run in parallel) with a
+/// `(visible_layers, eph_branch)` shard.  Today's executor is 2-way: a
+/// persistent (root) shard `(vec![root.id], false)` plus, under a non-empty
+/// chain, ONE *fused* ephemeral supplement `(eph_visible, true)` keyed on the
+/// chain tip (`chain_last`) — the un-factored N=1-eph-layer case of the
+/// intended per-layer sharding.
+///
+/// TODO(n-way): factor the fused supplement into one atom per ephemeral layer
+/// (each keyed on its own layer, results composed by union — valid while the
+/// composition is masking-free) so a layer's content contribution caches
+/// independently of the rest of the chain.  The verb won't change; the split
+/// lives in `with_partitioned_layers` / `cached_load_partitioned`.  Lands with
+/// content-in-layers (ephemeral layers hold no content today, so 2-way and
+/// N-way are behaviourally identical until then).
+///
+/// Boxed AS an explicit `dyn for<'b> Fn` (like [`LayerPopulate`]) so the HRTB
+/// check is driven by the trait-object type rather than by closure inference —
+/// a plain closure is not higher-ranked over the `txn`/`root` input lifetime
+/// and cannot satisfy the bound.
+pub type ShardedScan = Box<
+    dyn for<'b> Fn(
+        &'b mut EphTransaction<'_>,
+        &'b RootLayer,
+        Vec<i64>,
+        bool,
+    ) -> EphScopedFut<'b, bool>,
+>;
+
 /// Specification for an ephemeral cache entry that a [`Selector`] wants the
 /// statement-execution layer to materialize before its query runs.
 ///
@@ -93,29 +123,32 @@ pub struct LayerSpec {
 }
 
 impl LayerSpec {
-    /// Spec for a verb whose populate reads persistent data only (search,
-    /// loc): the eph-derived delta is structurally empty and fully
-    /// determined by (parent chain, base), so the supplement materialises
-    /// zero rows and nothing extra enters the supplement key.  The empty
-    /// supplement row still gets created under a non-empty chain so
-    /// downstream chaining keys stay deterministic.
-    ///
-    /// Invariant encoded here on purpose: `supplement_extra` must cover
-    /// everything the supplement populate reads beyond (parent, base).  A
-    /// verb that later grows a real supplement populate must stop using
-    /// this constructor and supply both fields together.
-    pub fn persistent_only(
+    /// A verb whose result is a content scan the executor SHARDS by layer:
+    /// base = the root-only shard (chain-independent), supplement = the
+    /// eph-touching shard (the chain delta). The verb stays layer-agnostic —
+    /// it provides one `scan(txn, root, visible_layers, eph_branch)`; the
+    /// base/supplement→visibility mapping lives HERE, not in the verb.
+    /// `supplement_extra` is empty (a scan reads no extra key material
+    /// beyond parent+base). `eph_visible` is the caller's `eph.visible_ids()`
+    /// captured at layer_spec time (the upstream chain for the supplement).
+    pub fn sharded_scan(
         base_hash: [u8; 32],
         base_kind: EphLayerKind,
-        base_populate: LayerPopulate,
+        eph_visible: Vec<i64>,
+        scan: ShardedScan,
     ) -> Self {
+        let scan = std::sync::Arc::new(scan);
+        let scan_base = scan.clone();
+        let scan_supp = scan;
+        let base_populate: LayerPopulate =
+            Box::new(move |txn, root| scan_base(txn, root, vec![root.id], false));
+        let supplement_populate: SupplementPopulate =
+            Box::new(move |txn, root, _base_ref| scan_supp(txn, root, eph_visible.clone(), true));
         Self {
             base_hash,
             base_kind,
             base_populate,
-            supplement_populate: Box::new(move |_txn, _root, _base| {
-                Box::pin(async move { Ok(false) })
-            }),
+            supplement_populate,
             supplement_extra: Vec::new(),
         }
     }
