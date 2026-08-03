@@ -249,7 +249,7 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn start_postgres(docker: &clients::Cli) -> (Container<'_, GenericImage>, String) {
+pub(crate) fn start_postgres(docker: &clients::Cli) -> (Container<'_, GenericImage>, String) {
     let image = GenericImage::new("postgres", "15-alpine")
         .with_env_var("POSTGRES_PASSWORD", "postgres")
         .with_env_var("POSTGRES_USER", "postgres")
@@ -263,7 +263,7 @@ fn start_postgres(docker: &clients::Cli) -> (Container<'_, GenericImage>, String
     (node, url)
 }
 
-async fn wait_for_postgres(url: &str) -> anyhow::Result<()> {
+pub(crate) async fn wait_for_postgres(url: &str) -> anyhow::Result<()> {
     let mut delay = Duration::from_millis(50);
     for attempt in 1..=10 {
         match PgConnection::establish(url) {

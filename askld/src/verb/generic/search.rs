@@ -29,7 +29,7 @@ use crate::verb::LayerSpec;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    CompositeFilter, EphContext, EphInstanceRow, EphLayerKind, EphSymbolRow, Index, LayerBatch,
+    CompositeFilter, EphContext, EphInstanceRow, EphSymbolRow, Index, LayerBatch,
     INSTANCE_TYPE_DEFINITION, SYMBOL_TYPE_CONTENT,
 };
 use index::symbols::{smart_case_sensitive, symbol_path_and_leaf};
@@ -172,19 +172,23 @@ impl Selector for SearchSelector {
     /// filter compositions therefore produce different cache entries; the
     /// same query under the same filter set hits the cache — under ANY
     /// upstream ephemeral context, since the base hash deliberately does
-    /// not fold the eph chain.  Chain dependence lives in the supplement
-    /// layer the executor creates alongside the base.  Stale entries are
-    /// wiped by `purge_eph_cache` on each `finalize_project`.
+    /// not fold the eph chain.  Any eph-content dependence lives in the
+    /// per-layer atoms the executor creates alongside the base (each keyed on
+    /// its own layer, not the chain).  Stale entries are wiped by
+    /// `purge_eph_cache` on each `finalize_project`.
     async fn layer_spec(
         &self,
         _cfg: &ControlFlowGraph,
-        eph: &EphContext,
+        _eph: &EphContext,
         composite_filter: &CompositeFilter,
         _resolved: &crate::verb::LabelResolutions,
     ) -> Result<Option<LayerSpec>> {
         // 1. Base cache key over inputs + filter set — never the eph chain.
         let mut hasher = Sha256::new();
-        hasher.update(EphLayerKind::Search.as_str().as_bytes());
+        // Explicit per-verb domain tag (kept byte-identical to the former
+        // `EphLayerKind::Search.as_str()`) so hashes stay disjoint from other
+        // verbs even though the layer kind is now the coarse `Ephemeral`.
+        hasher.update(b"search");
         hasher.update((self.query.len() as u64).to_le_bytes());
         hasher.update(self.query.as_bytes());
         hasher.update([self.case_sensitive as u8]);
@@ -290,18 +294,13 @@ impl Selector for SearchSelector {
                 })
             });
 
-        // The executor SHARDS this scan by layer: it runs the base shard
-        // (`vec![root.id]`, `eph_branch=false`) over persistent content and,
-        // under a non-empty eph chain, the supplement shard
-        // (`eph.visible_ids()`, `eph_branch=true`) over eph-layer content.
-        // The verb stays layer-agnostic — one `scan`, no base/supplement
+        // The executor SHARDS this scan by layer: the base shard
+        // (`vec![root.id]`, `eph_branch=false`) over persistent content, and
+        // one per-layer atom (`vec![L_j]`, `eph_branch=true`) per visible eph
+        // content layer.  The fused supplement is a no-op (atoms hold the
+        // content).  The verb stays layer-agnostic — one `scan`, no shard
         // knowledge — and `sharded_scan` owns the visibility mapping.
-        Ok(Some(LayerSpec::sharded_scan(
-            hash,
-            EphLayerKind::Search,
-            eph.visible_ids(),
-            scan,
-        )))
+        Ok(Some(LayerSpec::sharded_scan(hash, scan)))
     }
 
     /// Reconstruct the truncation warning every time the layer reports

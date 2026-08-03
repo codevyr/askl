@@ -5,8 +5,8 @@ use crate::span::Span;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    EphContext, EphInstanceRow, EphLayerKind, EphRefRow, EphSymbolRow, LayerBatch,
-    INSTANCE_TYPE_DEFINITION, INSTANCE_TYPE_DOCUMENTATION, SYMBOL_TYPE_FIELD, SYMBOL_TYPE_FUNCTION,
+    EphContext, EphInstanceRow, EphRefRow, EphSymbolRow, LayerBatch, INSTANCE_TYPE_DEFINITION,
+    INSTANCE_TYPE_DOCUMENTATION, SYMBOL_TYPE_FIELD, SYMBOL_TYPE_FUNCTION,
 };
 use index::symbols::symbol_path_and_leaf;
 use sha2::{Digest, Sha256};
@@ -577,7 +577,10 @@ impl Selector for LayerVerb {
             }
 
             let mut h = Sha256::new();
-            h.update(EphLayerKind::Layer.as_str().as_bytes());
+            // Explicit per-verb domain tag (byte-identical to the former
+            // `EphLayerKind::Layer.as_str()`) so `layer{}` hashes stay disjoint
+            // even though the layer kind is now the coarse `Ephemeral`.
+            h.update(b"layer");
             for op in &base_ops {
                 // Op insertion order is significant for the cache key by
                 // design (within each half); two layers with the same ops in
@@ -677,9 +680,12 @@ impl Selector for LayerVerb {
 
         Ok(Some(crate::verb::LayerSpec {
             base_hash,
-            base_kind: EphLayerKind::Layer,
             base_populate,
             supplement_populate,
+            // `layer { … }` is chain-dependent ops, not a per-layer content
+            // scan, so it exposes no N-way atom: its delta stays the fused
+            // supplement keyed on `chain_last`.
+            per_layer_populate: None,
             supplement_extra,
         }))
     }
