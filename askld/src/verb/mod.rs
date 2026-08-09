@@ -716,6 +716,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         _eph: &EphContext,
         _composite_filter: &CompositeFilter,
         _resolved: &LabelResolutions,
+        _parent_scope: &ScopeContext,
     ) -> Result<Option<LayerSpec>> {
         Ok(None)
     }

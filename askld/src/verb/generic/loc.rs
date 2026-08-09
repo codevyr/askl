@@ -123,6 +123,7 @@ impl Selector for LocSelector {
         eph: &EphContext,
         _composite_filter: &index::db_diesel::CompositeFilter,
         _resolved: &crate::verb::LabelResolutions,
+        _parent_scope: &index::db_diesel::ScopeContext,
     ) -> Result<Option<LayerSpec>> {
         // 1. Base cache key from inputs only — never the eph chain.
         let mut hasher = Sha256::new();

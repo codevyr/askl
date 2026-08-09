@@ -524,6 +524,7 @@ impl Selector for LayerVerb {
         eph: &EphContext,
         _composite_filter: &index::db_diesel::CompositeFilter,
         resolved: &LabelResolutions,
+        _parent_scope: &index::db_diesel::ScopeContext,
     ) -> Result<Option<crate::verb::LayerSpec>> {
         // Classify ops, compute hashes, and collect both batches
         // synchronously, then release the lock before any .await points.

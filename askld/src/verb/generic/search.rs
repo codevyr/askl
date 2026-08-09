@@ -178,11 +178,25 @@ impl Selector for SearchSelector {
     /// `purge_eph_cache` on each `finalize_project`.
     async fn layer_spec(
         &self,
-        _cfg: &ControlFlowGraph,
-        _eph: &EphContext,
+        cfg: &ControlFlowGraph,
+        eph: &EphContext,
         composite_filter: &CompositeFilter,
         _resolved: &crate::verb::LabelResolutions,
+        parent_scope: &index::db_diesel::ScopeContext,
     ) -> Result<Option<LayerSpec>> {
+        use index::db_diesel::ScopeContext;
+        // Container scope-fusion: the scope's CONDITION (or the computed
+        // parent's instance ids) keys the cache — "cache inputs, not
+        // outputs" — while the byte-range resolve is deferred into the
+        // populate closure, so cache hits never pay it.  Resolution runs
+        // against a ROOTS-ONLY visibility so the base stays chain-independent.
+        let _ = cfg; // index handle not needed at spec time anymore
+        let fusion_scope = match parent_scope {
+            ScopeContext::Scope { .. } => Some(parent_scope.clone()),
+            ScopeContext::Skip | ScopeContext::Unscoped => None,
+        };
+        let rooted_eph = EphContext::rooted(eph.roots().to_vec());
+
         // 1. Base cache key over inputs + filter set — never the eph chain.
         let mut hasher = Sha256::new();
         // Explicit per-verb domain tag (kept byte-identical to the former
@@ -195,6 +209,29 @@ impl Selector for SearchSelector {
         hasher.update([self.whole_word as u8]);
         hasher.update((self.limit as u64).to_le_bytes());
         composite_filter.hash_into(&mut hasher);
+        // Fold the container scope's CONDITION into the base key so scoped
+        // searches cache per-scope (chain-independent: conditions are pure
+        // "ifs"; the ids arm covers an already-computed parent).
+        match parent_scope {
+            ScopeContext::Skip | ScopeContext::Unscoped => hasher.update(b"scope:none"),
+            ScopeContext::Scope { ids, filter } => {
+                hasher.update(b"scope-cond:");
+                match filter {
+                    Some(f) => {
+                        hasher.update(b"f");
+                        f.hash_into(&mut hasher);
+                    }
+                    None => hasher.update(b"-"),
+                }
+                let mut sorted = ids.clone();
+                sorted.sort_unstable();
+                sorted.dedup();
+                hasher.update((sorted.len() as u64).to_le_bytes());
+                for id in &sorted {
+                    hasher.update(id.to_le_bytes());
+                }
+            }
+        }
         let hash: [u8; 32] = hasher.finalize().into();
 
         // 2. Everything expensive is deferred into the populate closure so
@@ -213,6 +250,11 @@ impl Selector for SearchSelector {
             sym_name: String,
             sym_path: String,
             sym_leaf: String,
+            /// Container scope to fuse (None = unscoped search); resolved to
+            /// byte-range triples inside the populate closure — miss path only.
+            fusion_scope: Option<index::db_diesel::ScopeContext>,
+            /// Roots-only visibility for the scope resolve (chain-independent).
+            rooted_eph: EphContext,
         }
         let sym_name = format!("search:{}", Self::sanitise_for_symbol_name(&self.query));
         let (sym_path, sym_leaf) = symbol_path_and_leaf(&sym_name, SYMBOL_TYPE_CONTENT);
@@ -225,6 +267,8 @@ impl Selector for SearchSelector {
             sym_name,
             sym_path,
             sym_leaf,
+            fusion_scope,
+            rooted_eph,
         });
 
         let scan: crate::verb::ShardedScan =
@@ -243,6 +287,21 @@ impl Selector for SearchSelector {
                     //     supplement shard scans eph-layer content (the upstream
                     //     chain, true) — the executor picks which via
                     //     `LayerSpec::sharded_scan`.
+                    //     Scope-fusion resolve runs HERE (miss path only, on
+                    //     the layer transaction's own connection): the
+                    //     container condition → (object, [lo,hi)) triples, or
+                    //     None when fusion degrades to the unscoped scan.
+                    let scope_ranges = match &inputs.fusion_scope {
+                        None => None,
+                        Some(scope) => {
+                            Index::resolve_scope_object_ranges(
+                                txn.connection(),
+                                scope,
+                                &inputs.rooted_eph,
+                            )
+                            .await?
+                        }
+                    };
                     let (matches, truncated) = Index::search_content_matches_on(
                         txn.connection(),
                         &inputs.query,
@@ -253,6 +312,7 @@ impl Selector for SearchSelector {
                         root.project_id,
                         &visible_layers,
                         eph_branch,
+                        scope_ranges.as_deref(),
                     )
                     .await?;
 
