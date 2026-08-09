@@ -1,7 +1,7 @@
 use crate::test_util::{
     format_edges, get_shared_db_url, get_shared_index, run_query, run_query_err, run_query_traced,
-    TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC,
-    TEST_INPUT_SEARCH, TEST_INPUT_TREE_BROWSER, VERB_TEST,
+    run_query_with_budget, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES,
+    TEST_INPUT_NESTED_FUNC, TEST_INPUT_SEARCH, TEST_INPUT_TREE_BROWSER, VERB_TEST,
 };
 use index::symbols::{SymbolId, SymbolInstanceId};
 use sha2::Digest;
@@ -4565,6 +4565,38 @@ fn search_skeleton_single_match() {
         }),
         "all search instances should be ephemeral (negative IDs), got {:?}",
         nodes,
+    );
+}
+
+#[test]
+fn budget_truncation_surfaces_warning() {
+    // cap=1 → leaf LIMIT 8; search("foo") materialises >8 match instances
+    // across the fixture, so the Phase-2 layer-union read is budget-bounded
+    // and the statement must carry a "result budget" warning.  Budget
+    // truncation is acceptable; silent budget truncation is not.
+    let res = run_query_with_budget(TEST_INPUT_SEARCH, r#"search("foo")"#, 1);
+    assert!(
+        res.warnings
+            .iter()
+            .any(|w| w.message.contains("result budget")),
+        "expected a result-budget warning, got {:?}",
+        res.warnings
+            .iter()
+            .map(|w| w.message.clone())
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        !res.nodes.as_vec().is_empty(),
+        "bounded means truncated, not empty"
+    );
+
+    // Unlimited budget: same query, no budget warning.
+    let res = run_query_with_budget(TEST_INPUT_SEARCH, r#"search("foo")"#, 0);
+    assert!(
+        !res.warnings
+            .iter()
+            .any(|w| w.message.contains("result budget")),
+        "unlimited budget must not warn",
     );
 }
 

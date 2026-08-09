@@ -30,7 +30,7 @@ pub use mixins::{
 pub use selection::{
     Checked, ChildReference, EphContext, HasChildReference, HasEphLeak, HasParentReference,
     ObjectFullDiesel, ParentReference, QueryStatementRange, ReferenceFullDiesel, ReferenceResult,
-    RootLayer, Selection, SelectionNode, SymbolInstanceFullDiesel, CANARY_LAYER_ID,
+    ResultBudget, RootLayer, Selection, SelectionNode, SymbolInstanceFullDiesel, CANARY_LAYER_ID,
 };
 pub use sql_cache::{
     vec_weight, CacheKey, CacheStats, CacheWeight, ClearOnDrop, RowKey, SqlResultCache,

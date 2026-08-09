@@ -179,6 +179,14 @@ pub async fn build_result_graph(
         QueryError::Storage("Failed to resolve root layers".to_string())
     })?;
     let mut ctx = ExecutionContext::new(roots);
+    // Push the result cap into the leaf SQL (the budget facet of fusion): the
+    // renderer below still applies the exact per-symbol cap, but bounding the
+    // leaves stops bare selectors from materialising far more rows than the cap
+    // can ever keep.  Uses the same `cap` the renderer does (see below).
+    ctx.eph
+        .set_result_budget(index::db_diesel::ResultBudget::symbols(
+            limit.unwrap_or(data.max_result_symbols),
+        ));
 
     let res = {
         let _query_execute = tracing::info_span!("query_execute").entered();
