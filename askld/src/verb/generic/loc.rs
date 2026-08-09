@@ -123,6 +123,9 @@ impl Selector for LocSelector {
         eph: &EphContext,
         _composite_filter: &index::db_diesel::CompositeFilter,
         _resolved: &crate::verb::LabelResolutions,
+        // Deliberately unfused: loc is single-file by construction (its path
+        // argument already scopes the scan), so container scope-fusion buys
+        // nothing — the composition machinery constrains the result instead.
         _parent_scope: &index::db_diesel::ScopeContext,
     ) -> Result<Option<LayerSpec>> {
         // 1. Base cache key from inputs only — never the eph chain.

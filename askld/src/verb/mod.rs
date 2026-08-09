@@ -515,16 +515,44 @@ impl SelectorState {
             Default::default()
         };
         let selection = self.selection.as_mut().unwrap();
+        // A relationship is accepted on evidence from EITHER side's edge
+        // lists.  The parent's children/has_children are computed when the
+        // parent's statement runs — BEFORE a layer-creating child (e.g.
+        // `file("x") { search("y") }`) materialises its ephemeral rows — so
+        // they cannot name those rows.  This selection's own
+        // parents/has_parents were computed with the layer visible and do.
+        // The union is safe: both sides express the same predicate, one may
+        // just be missing edges to rows that did not exist yet.
+        let own_ref_evidence: std::collections::HashSet<i64> = if check_refs {
+            selection
+                .parents
+                .iter()
+                .filter(|r| parent_symbol_ids.contains(&r.from_instance.symbol))
+                .map(|r| r.to_symbol.id)
+                .collect()
+        } else {
+            Default::default()
+        };
+        let own_has_evidence: std::collections::HashSet<i64> = if check_has {
+            selection
+                .has_parents
+                .iter()
+                .filter(|r| parent_instance_ids.contains(&r.parent_instance.id))
+                .map(|r| r.child_instance.id)
+                .collect()
+        } else {
+            Default::default()
+        };
         selection.nodes.retain(|s| {
             (check_refs
-                && parent.children.iter().any(|r| {
+                && (parent.children.iter().any(|r| {
                     r.symbol.id == s.symbol.id && parent_symbol_ids.contains(&r.parent_symbol.id)
-                }))
+                }) || own_ref_evidence.contains(&s.symbol.id)))
                 || (check_has
-                    && parent.has_children.iter().any(|r| {
+                    && (parent.has_children.iter().any(|r| {
                         r.child_instance.id == s.symbol_instance.id
                             && parent_instance_ids.contains(&r.parent_instance.id)
-                    }))
+                    }) || own_has_evidence.contains(&s.symbol_instance.id)))
         });
     }
 
@@ -542,17 +570,42 @@ impl SelectorState {
             Default::default()
         };
         let selection = self.selection.as_mut().unwrap();
+        // Same evidence-union as `constrain_by_parent`, mirrored: a
+        // relationship is accepted from EITHER side's edge lists.  With
+        // two-phase execution both sides are computed under the same
+        // tree-complete visibility, so this is uniformity (one side may have
+        // deferred its neighbourhood query), not a freshness patch.
+        let own_ref_evidence: std::collections::HashSet<i64> = if check_refs {
+            selection
+                .children
+                .iter()
+                .filter(|r| child_symbol_ids.contains(&r.symbol.id))
+                .map(|r| r.parent_symbol.id)
+                .collect()
+        } else {
+            Default::default()
+        };
+        let own_has_evidence: std::collections::HashSet<i64> = if check_has {
+            selection
+                .has_children
+                .iter()
+                .filter(|r| child_instance_ids.contains(&r.child_instance.id))
+                .map(|r| r.parent_instance.id)
+                .collect()
+        } else {
+            Default::default()
+        };
         selection.nodes.retain(|s| {
             (check_refs
-                && child.parents.iter().any(|r| {
+                && (child.parents.iter().any(|r| {
                     r.from_instance.symbol == s.symbol.id
                         && child_symbol_ids.contains(&r.to_symbol.id)
-                }))
+                }) || own_ref_evidence.contains(&s.symbol.id)))
                 || (check_has
-                    && child.has_parents.iter().any(|r| {
+                    && (child.has_parents.iter().any(|r| {
                         r.parent_instance.id == s.symbol_instance.id
                             && child_instance_ids.contains(&r.child_instance.id)
-                    }))
+                    }) || own_has_evidence.contains(&s.symbol_instance.id)))
         });
     }
 

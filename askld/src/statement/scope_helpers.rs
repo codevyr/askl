@@ -30,6 +30,16 @@ pub(super) fn should_skip_in_parent_merge(child: &Statement) -> bool {
     child.get_state().weak && child.command().is_unit() && all_descendants_weak(child)
 }
 
+/// A statement that will originate selection data of its own — a non-unit
+/// selector, or a subtree containing one.  The complement of the display-only
+/// weak-unit case (`should_skip_in_parent_merge`).  Both scope builders defer
+/// an eager neighbourhood query only when the other side originates data (it
+/// will carry the relationship edges itself); a display-only side needs the
+/// eager query to materialise what it shows.
+pub(super) fn originates_data(stmt: &Statement) -> bool {
+    !should_skip_in_parent_merge(stmt)
+}
+
 fn all_descendants_weak(stmt: &Statement) -> bool {
     stmt.children()
         .all(|child| child.get_state().weak && all_descendants_weak(&child))
@@ -57,13 +67,34 @@ pub(super) fn build_parent_scope(
                     None => ScopeContext::Unscoped,
                 }
             } else {
-                // Parent not yet computed — fall back to filter-based scoping
+                // Parent not yet computed — fall back to filter-based scoping.
+                //
+                // ONE symmetric rule for both scope builders: materialise your
+                // neighbour-facing list iff the neighbour is computed or
+                // conditioned; otherwise DEFER iff your own statement is
+                // conditioned (the neighbour's opposite, scoped-by-your-
+                // condition query covers the edge) and the neighbour
+                // originates data; if both sides are bare, this (child) side
+                // materialises unscoped — someone must.
                 match parent.command().get_selector_composite_filter(eph) {
                     Some(f) => ScopeContext::Scope {
                         ids: vec![],
                         filter: Some(f),
                     },
-                    None => ScopeContext::Unscoped,
+                    None => {
+                        let self_conditioned = statement
+                            .command()
+                            .get_selector_composite_filter(eph)
+                            .is_some();
+                        if self_conditioned && originates_data(&parent) {
+                            // The parent's children-side query is scoped by
+                            // THIS statement's condition and covers the edge;
+                            // the evidence union accepts it from that side.
+                            ScopeContext::Skip
+                        } else {
+                            ScopeContext::Unscoped
+                        }
+                    }
                 }
             }
         }
@@ -82,6 +113,7 @@ pub(super) fn build_children_scope(
     let mut has_children = false;
     let mut any_uncomputed = false;
     let mut any_transparent = false;
+    let mut any_display_uncomputed = false;
     let mut selected_ids: Vec<i64> = Vec::new();
     let mut unselected_filters: Vec<CompositeFilter> = Vec::new();
 
@@ -94,6 +126,9 @@ pub(super) fn build_children_scope(
             }
         } else {
             any_uncomputed = true;
+            if !originates_data(&child) {
+                any_display_uncomputed = true;
+            }
             if let Some(f) = child.command().get_selector_composite_filter(eph) {
                 unselected_filters.push(f);
             }
@@ -111,9 +146,20 @@ pub(super) fn build_children_scope(
     };
 
     if selected_ids.is_empty() && combined_filter.is_none() {
-        if any_uncomputed || any_transparent {
+        if any_transparent || any_display_uncomputed {
+            // A weak/unit child ("show my children") or a computed-transparent
+            // one contributes no selection of its own — the eager unscoped
+            // neighbourhood query is what materialises the display edges.
             ScopeContext::Unscoped
         } else {
+            // Every filter-less child (if any) is a data-originating statement
+            // that will compute its own selection and relationship edges —
+            // DEFER (Skip) the eager neighbourhood; constraints accept either
+            // side's edge evidence and the graph renders the relationship from
+            // the computed side.  This is what stops a broad container
+            // (`mod("x") { func { … } }`) from materialising millions of edge
+            // rows it then throws away.  (No children at all was returned as
+            // Skip above.)
             ScopeContext::Skip
         }
     } else {
