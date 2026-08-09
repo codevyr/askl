@@ -208,7 +208,101 @@ impl Index {
         }
         Ok(all_ids)
     }
+
+    /// Resolve a container scope to the `(object_id, lo, hi)` byte-range of
+    /// every instance in it.  Content verbs (`search`/`loc`) fuse an enclosing
+    /// container into their scan with these: a match is kept iff it lies inside
+    /// one of the ranges (same object, `lo <= start_byte < hi`).
+    ///
+    /// **Degrade-to-unscoped contract:** fusion is a pre-filter, never a
+    /// semantic gate — anything this resolve cannot handle cheaply and
+    /// faithfully returns `None` (unscoped scan; the composition still
+    /// constrains, so results are identical, just unfused):
+    /// - `Skip`/`Unscoped` parent — nothing to fuse;
+    /// - a condition that composes to no current-query predicate ("no
+    ///   constraint" semantics — resolving it would dump the whole index);
+    /// - more than [`SCOPE_FUSION_MAX_RANGES`] instances (a broad container:
+    ///   inlining tens of thousands of literals would be slower than the
+    ///   unscoped scan it replaces);
+    /// - any instance with an unbounded `offset_range` (fusion must mirror the
+    ///   engine's containment predicate, not guess).
+    ///
+    /// `Some(vec![])` means the scope genuinely matched nothing => no matches
+    /// survive.  Condition-based: it composes the scope's filter directly, so
+    /// it never waits for the scope's statement to compute; the
+    /// pre-resolved-ids branch is the fast path for an already-computed
+    /// parent.  Runs on the caller's connection (populate closures must not
+    /// check out a second pooled connection).  `[lo, hi)` follows the stored
+    /// `int4range` `[)` convention.
+    pub async fn resolve_scope_object_ranges(
+        connection: &mut AsyncPgConnection,
+        scope: &ScopeContext,
+        eph: &EphContext,
+    ) -> Result<Option<Vec<(i32, i32, i32)>>> {
+        use crate::schema_diesel::*;
+        let (ids, filter) = match scope {
+            ScopeContext::Scope { ids, filter } => (ids.as_slice(), filter.as_ref()),
+            ScopeContext::Skip | ScopeContext::Unscoped => return Ok(None),
+        };
+        let vis = EphVisibility::combined(eph);
+        // Same join shape as `build_current_query` (compose_current predicates
+        // target it) but a narrow projection: 12 bytes per row, not 4 models.
+        let mut query = symbols::dsl::symbols
+            .inner_join(
+                symbol_instances::dsl::symbol_instances
+                    .on(symbols::dsl::id.eq(symbol_instances::dsl::symbol)),
+            )
+            .inner_join(projects::dsl::projects.on(symbols::dsl::project_id.eq(projects::dsl::id)))
+            .inner_join(
+                objects::dsl::objects.on(objects::dsl::id.eq(symbol_instances::dsl::object_id)),
+            )
+            .select((
+                symbol_instances::dsl::object_id,
+                symbol_instances::dsl::offset_range,
+            ))
+            .into_boxed::<Pg>();
+        query = query.filter(vis.pred("symbols.layer"));
+        query = query.filter(vis.pred("symbol_instances.layer"));
+        // The parent is either a not-yet-computed condition (adopt its "ifs")
+        // or an already-computed instance-id set — never both, per
+        // `build_parent_scope`.  Neither => an empty scope (matched nothing).
+        if let Some(f) = filter {
+            match f.compose_current(&vis) {
+                Some(expr) => query = query.filter(expr),
+                // "No constraint" condition: unscoped, NOT everything-resolved.
+                None => return Ok(None),
+            }
+        } else if !ids.is_empty() {
+            query = query.filter(symbol_instances::dsl::id.eq_any(ids.to_vec()));
+        } else {
+            return Ok(Some(Vec::new()));
+        }
+        let rows: Vec<(i32, (std::ops::Bound<i32>, std::ops::Bound<i32>))> = query
+            .limit(SCOPE_FUSION_MAX_RANGES + 1)
+            .load(&mut *connection)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to resolve scope object ranges: {}", e))?;
+        if rows.len() as i64 > SCOPE_FUSION_MAX_RANGES {
+            return Ok(None);
+        }
+        let mut out: Vec<(i32, i32, i32)> = Vec::with_capacity(rows.len());
+        for (object_id, range) in &rows {
+            match crate::offset_range::range_bounds_to_offsets(range) {
+                Some((lo, hi)) => out.push((*object_id, lo, hi)),
+                None => return Ok(None),
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        Ok(Some(out))
+    }
 }
+
+/// Cap on how many container instances scope-fusion will inline into the
+/// content-scan SQL.  Above this, fusion degrades to the unscoped scan (see
+/// [`Index::resolve_scope_object_ranges`]) — correct either way, and a broad
+/// container's literal list would cost more than it saves.  Tunable.
+pub const SCOPE_FUSION_MAX_RANGES: i64 = 1024;
 
 // ============================================================================
 // Shared query builders — used by both find_symbol and find_*_instance_ids
@@ -3054,7 +3148,12 @@ fn make_like_pattern(query: &str) -> String {
 /// PostgreSQL 16 rejects prepared statements with unreferenced parameters
 /// ("wrong number of parameters"), so the bind chain — and therefore the
 /// project-filter slot — must match exactly which params the SQL uses.
-fn build_search_sql(whole_word: bool, case_sensitive: bool, eph_branch: bool) -> String {
+fn build_search_sql(
+    whole_word: bool,
+    case_sensitive: bool,
+    eph_branch: bool,
+    scope: Option<&[(i32, i32, i32)]>,
+) -> String {
     let uses_like_pattern = !(whole_word && !case_sensitive);
 
     // Haystack/needle passed to find_substr_byte_ranges.
@@ -3103,6 +3202,38 @@ fn build_search_sql(whole_word: bool, case_sensitive: bool, eph_branch: bool) ->
         " AND o.layer = ANY({layer_slot}){}",
         if eph_branch { " AND o.layer < 0" } else { "" }
     );
+    // Container scope-fusion.  The resolved (object, [lo,hi)) ranges are inlined
+    // as literals (trusted DB integers, never user text) so the object-level
+    // `o.id IN (...)` is a plain top-level predicate the planner pushes BEFORE
+    // the LATERAL — pruning `find_substr_byte_ranges` to the container's objects
+    // (the actual speedup).  The `EXISTS (VALUES …)` then refines to the byte
+    // range for a finer container (a `func` body); for a whole-object container
+    // (`file`/`dir`) it is trivially satisfied.  `None` => unscoped (no clause);
+    // an empty scope => the container matched nothing => `AND FALSE`.
+    let scope_filter = match scope {
+        None => String::new(),
+        Some(ranges) if ranges.is_empty() => " AND FALSE".to_string(),
+        Some(ranges) => {
+            let mut oids: Vec<i32> = ranges.iter().map(|r| r.0).collect();
+            oids.sort_unstable();
+            oids.dedup();
+            let oid_list = oids
+                .iter()
+                .map(|o| o.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let values = ranges
+                .iter()
+                .map(|(o, lo, hi)| format!("({o},{lo},{hi})"))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                " AND o.id IN ({oid_list}) \
+                 AND EXISTS (SELECT 1 FROM (VALUES {values}) AS c(oid, lo, hi) \
+                     WHERE c.oid = o.id AND p.start_byte >= c.lo AND p.start_byte < c.hi)"
+            )
+        }
+    };
 
     // No ORDER BY: with a bare `LIMIT $2` Postgres can stop the LATERAL recheck
     // as soon as limit+1 matches exist, instead of ranking every GIN candidate
@@ -3119,13 +3250,14 @@ fn build_search_sql(whole_word: bool, case_sensitive: bool, eph_branch: bool) ->
          FROM index.content_store cs \
          JOIN index.objects o ON o.content_hash = cs.content_hash \
          CROSS JOIN LATERAL index.find_substr_byte_ranges({haystack}, {needle}, $2) AS p \
-         WHERE {pre_filter}{project_filter}{layer_filter}{boundary} \
+         WHERE {pre_filter}{project_filter}{layer_filter}{scope_filter}{boundary} \
          LIMIT $2",
         haystack = haystack_expr,
         needle = needle_expr,
         pre_filter = pre_filter,
         project_filter = project_filter,
         layer_filter = layer_filter,
+        scope_filter = scope_filter,
         boundary = boundary_clauses,
     )
 }
@@ -3160,6 +3292,7 @@ impl Index {
         project_id: i32,
         visible_layers: &[i64],
         eph_branch: bool,
+        scope: Option<&[(i32, i32, i32)]>,
     ) -> Result<(Vec<SearchMatchRow>, bool)> {
         use crate::schema_diesel::objects;
         use diesel::sql_types::{Array, BigInt, Integer, Text};
@@ -3202,7 +3335,7 @@ impl Index {
             None
         };
 
-        let sql = build_search_sql(whole_word, case_sensitive, eph_branch);
+        let sql = build_search_sql(whole_word, case_sensitive, eph_branch, scope);
 
         let rows: Vec<SearchMatchRow> = match like_pattern.as_ref() {
             Some(pat) => {
@@ -3764,6 +3897,7 @@ mod tests {
             1,
             &[-1001],
             true,
+            None,
         )
         .await?;
         assert_eq!(
@@ -3781,6 +3915,7 @@ mod tests {
             1,
             &[-1002],
             true,
+            None,
         )
         .await?;
         assert_eq!(
@@ -3798,6 +3933,7 @@ mod tests {
             1,
             &[-1001, -1002],
             true,
+            None,
         )
         .await?;
         let mut ids: Vec<i32> = m12.iter().map(|m| m.object_id).collect();
@@ -3806,6 +3942,46 @@ mod tests {
             ids,
             vec![-2002, -2001],
             "V([L1,L2]) must equal V(L1) ∪ V(L2)"
+        );
+
+        // Scope-fusion: constrain matches to object -2001's whole byte-range —
+        // only its match survives, -2002's is dropped.
+        let (m_scoped, _) = Index::search_content_matches_on(
+            &mut *conn,
+            "NWAYNEEDLE",
+            false,
+            false,
+            &filter,
+            500,
+            1,
+            &[-1001, -1002],
+            true,
+            Some(&[(-2001, 0, i32::MAX)]),
+        )
+        .await?;
+        assert_eq!(
+            m_scoped.iter().map(|m| m.object_id).collect::<Vec<_>>(),
+            vec![-2001],
+            "scope=(-2001, whole range) keeps only -2001's match"
+        );
+
+        // An empty scope means the container resolved to nothing => no matches.
+        let (m_empty_scope, _) = Index::search_content_matches_on(
+            &mut *conn,
+            "NWAYNEEDLE",
+            false,
+            false,
+            &filter,
+            500,
+            1,
+            &[-1001, -1002],
+            true,
+            Some(&[]),
+        )
+        .await?;
+        assert!(
+            m_empty_scope.is_empty(),
+            "an empty scope (container matched nothing) drops all matches"
         );
         Ok(())
     }
@@ -3987,6 +4163,7 @@ mod tests {
                 root.project_id,
                 &[layer_id],
                 true,
+                None,
             )
             .await?;
             if matches.is_empty() {

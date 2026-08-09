@@ -196,11 +196,22 @@ impl Command {
 
     /// Build a composite filter from all selectors (ORed across selectors).
     /// Used by scope builders to construct ScopeContext.
+    ///
+    /// Honest OR: selectors in a command are ORed, so if ANY selector cannot
+    /// express itself as a filter (`build_composite_filter` = None — user
+    /// verbs, layer verbs, units), the whole OR must widen to `None`
+    /// (unscoped), never narrow to the subset that could.  A narrowed scope is
+    /// recoverable for edge prefetches (the notification pass re-constrains
+    /// with real ids) but PERMANENT for scope-fusion, which materialises only
+    /// what the scope admits.
     pub fn get_selector_composite_filter(&self, eph: &EphContext) -> Option<CompositeFilter> {
-        let parts: Vec<_> = self
-            .selectors()
-            .filter_map(|sel| sel.build_composite_filter(self, eph))
-            .collect();
+        let mut parts: Vec<CompositeFilter> = Vec::new();
+        for sel in self.selectors() {
+            match sel.build_composite_filter(self, eph) {
+                Some(f) => parts.push(f),
+                None => return None,
+            }
+        }
         match parts.len() {
             0 => None,
             1 => parts.into_iter().next(),
@@ -250,11 +261,12 @@ impl Command {
         eph: &EphContext,
         composite_filter: &CompositeFilter,
         resolved: &LabelResolutions,
+        parent_scope: &ScopeContext,
     ) -> Result<Option<LayerSpec>> {
         let mut specs: Vec<LayerSpec> = Vec::new();
         for selector in self.selectors() {
             if let Some(spec) = selector
-                .layer_spec(cfg, eph, composite_filter, resolved)
+                .layer_spec(cfg, eph, composite_filter, resolved, parent_scope)
                 .await?
             {
                 specs.push(spec);
@@ -661,7 +673,13 @@ impl Command {
         let layer_composite_filter = CompositeFilter::and(filter_parts_for_layer);
 
         let (materialised_layer_ids, any_truncated): (Vec<i64>, bool) = match self
-            .aggregate_layer_spec(cfg, &local_eph, &layer_composite_filter, resolved)
+            .aggregate_layer_spec(
+                cfg,
+                &local_eph,
+                &layer_composite_filter,
+                resolved,
+                &parent_scope,
+            )
             .await
             .map_err(to_pest)?
         {
