@@ -4569,6 +4569,58 @@ fn search_skeleton_single_match() {
 }
 
 #[test]
+fn search_nested_in_container_survives_composition() {
+    // `func("fn_basic") { search("foo") }`: fn_basic's instance spans object
+    // 1's whole content, so the "foo" match (bytes 6..9) is contained in it.
+    // The container statement computes its neighbourhood BEFORE the search
+    // layer materialises, so its has_children cannot name the ephemeral
+    // rows; the composition must accept the child's own (fresh) has_parents
+    // evidence instead.  Regression test for `file("x") { search("y") }`
+    // returning 0 symbols.
+    const QUERY: &str = r#"func("fn_basic") { search("foo") }"#;
+    let res = run_query(TEST_INPUT_SEARCH, QUERY);
+
+    let ids: Vec<i64> = res.nodes.as_vec().iter().map(|id| (*id).into()).collect();
+    assert!(
+        ids.iter().any(|v| *v < 0),
+        "the contained search match must survive the composition, got {:?}",
+        ids,
+    );
+    assert!(
+        ids.contains(&110),
+        "the container (fn_basic, instance 110) must survive, got {:?}",
+        ids,
+    );
+}
+
+#[test]
+fn nested_search_in_search_composes() {
+    // `search("hello foo") { search("foo") }`: the outer match spans bytes
+    // [0,9) of obj 1 ("hello foo world"), the inner "foo" match [6,9) is
+    // contained in it.  Under two-phase execution BOTH layers materialise
+    // before either statement's neighbourhood reads, so each side's Phase R
+    // sees the other's ephemeral rows and the containment composes; the
+    // inner matches outside any outer match (obj 2/3/4/5) are constrained
+    // away.  Under the old fused executor neither statement could see the
+    // other's layer at all and this returned nothing meaningful.
+    const QUERY: &str = r#"search("hello foo") { search("foo") }"#;
+    let res = run_query(TEST_INPUT_SEARCH, QUERY);
+
+    let ids: Vec<i64> = res.nodes.as_vec().iter().map(|id| (*id).into()).collect();
+    assert!(
+        ids.iter().all(|v| *v < 0),
+        "all nodes are ephemeral content instances, got {:?}",
+        ids,
+    );
+    assert_eq!(
+        ids.len(),
+        2,
+        "exactly the outer match and its one contained inner match, got {:?}",
+        ids,
+    );
+}
+
+#[test]
 fn budget_truncation_surfaces_warning() {
     // cap=1 → leaf LIMIT 8; search("foo") materialises >8 match instances
     // across the fixture, so the Phase-2 layer-union read is budget-bounded

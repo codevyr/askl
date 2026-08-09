@@ -324,8 +324,14 @@ impl Selector for SearchSelector {
                     }
 
                     // 2b. One ephemeral symbol for this root's project, then one
-                    //     ephemeral instance per byte-range match.  SQL result
-                    //     order (object_id, start) keeps the batch deterministic.
+                    //     ephemeral instance per byte-range match.  The scan
+                    //     has NO ORDER BY (its LIMIT short-circuits the GIN
+                    //     recheck), so under truncation WHICH matches land in
+                    //     the layer is plan-dependent — an accepted trade-off:
+                    //     the same hash can map to a different truncated
+                    //     subset across independent materialisations, and the
+                    //     truncation warning always surfaces.  Untruncated
+                    //     layers hold the full match set either way.
                     let mut sym_batch = LayerBatch::new();
                     sym_batch.symbols.push(EphSymbolRow {
                         name: inputs.sym_name.clone(),

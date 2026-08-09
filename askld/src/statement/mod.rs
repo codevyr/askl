@@ -13,7 +13,7 @@ use crate::scope::{Scope, StatementIter};
 use crate::verb::{name_filter, LabelResolutions, NotificationContext};
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{ScopeContext, Selection};
+use index::db_diesel::{EphContext, ScopeContext, Selection};
 use index::symbols::{FileId, Occurrence, SymbolId, SymbolInstanceId};
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
@@ -116,6 +116,58 @@ async fn enrich_no_match_suggestions(
             }
         }
     }
+}
+
+/// Budget gate + scope construction for a statement's READ phase (Phase R).
+///
+/// Budget-pushdown safety gate: only a statement whose selection no one else
+/// consumes may bound its neighbourhood leaves.  Any Parent/Child/User
+/// dependency or dependent means another statement's `constrain_*` reads this
+/// selection's nodes/parents/children, and a PreSeedLabel DEPENDENT means
+/// `compute_roots` reads the selection for `@label` resolution (a truncated,
+/// order-arbitrary id set would silently seed the layer AND destabilise its
+/// input hash) — so both clear the budget.  Only PreSeedSibling is pure
+/// ordering with no data flow.
+fn stage_read(
+    ctx: &ExecutionContext,
+    statement: &Rc<Statement>,
+) -> (EphContext, ScopeContext, ScopeContext) {
+    let mut eph = ctx.eph.clone();
+    {
+        let st = statement.get_state();
+        let composed = st
+            .dependencies
+            .iter()
+            .any(|d| !d.dependency_role.is_pre_seed())
+            || st
+                .dependents
+                .iter()
+                .any(|d| !matches!(d.dependency_role, DependencyRole::PreSeedSibling));
+        if composed {
+            eph.set_result_budget(index::db_diesel::ResultBudget::UNLIMITED);
+        }
+    }
+    let parent_scope = build_parent_scope(statement, ctx, &eph);
+    let children_scope = build_children_scope(statement, ctx, &eph);
+    (eph, parent_scope, children_scope)
+}
+
+/// Run one statement's READ phase inline and apply it — the same-tree
+/// `@label` sub-barrier in `compute_roots`.
+async fn read_statement(
+    ctx: &mut ExecutionContext,
+    cfg: &ControlFlowGraph,
+    statement: &Rc<Statement>,
+    layer_ids: &[i64],
+    warnings: Vec<Diagnostic>,
+) -> Result<(), pest::error::Error<Rule>> {
+    let (eph, parent_scope, children_scope) = stage_read(ctx, statement);
+    let cr = statement
+        .command()
+        .compute_selection(cfg, parent_scope, children_scope, &eph, layer_ids, warnings)
+        .await?;
+    cr.apply(ctx, statement);
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -254,50 +306,166 @@ impl Statement {
         !has_selector || has_any_selection
     }
 
-    /// Compute initial selections for every statement.  Walks the
-    /// statement list (top-level + nested, pre-order) in source order;
-    /// for each statement, queues a `compute_selected` future and
-    /// joins them in batches via `join_all` to overlap DB round-trips.
+    /// Compute initial selections for every statement — TWO-PHASE, per
+    /// top-level statement tree, trees in source order:
     ///
-    /// **Pre-drain ordering.**  Before queuing a statement that has
-    /// any [`DependencyRole::PreSeedSibling`] or
-    /// [`DependencyRole::PreSeedLabel`] dependency, drain pending so
-    /// the statement's `eph` capture and (if any) `LabelResolutions`
-    /// reflect prior applied state.  Sibling edges are installed by
-    /// [`Self::build_dependency_graph`] between top-level statements
-    /// where at least one creates an ephemeral layer; label-ref
-    /// pre-drains catch nested layer-using statements whose labelled
-    /// statement isn't a top-level sibling.
+    /// - **Phase M (materialise, sequential):** every statement in the tree
+    ///   runs [`Command::materialise_layers`] in pre-order; each round is
+    ///   pushed onto the shared `ctx.eph` immediately, so later
+    ///   materialisations chain on earlier ones and the tree ends with ONE
+    ///   complete visibility set.  Materialisation is independent of any
+    ///   statement's *selection* (scope-fusion is condition-based) — the
+    ///   sequencing exists only for chain identity; parallelising
+    ///   independent materialisations is future work.
+    /// - **Phase R (read, concurrent):** every statement's selection +
+    ///   neighbourhood queries run via [`Command::compute_selection`] under
+    ///   the tree-complete visibility, overlapped with `join_all` and applied
+    ///   in pre-order.  A nested layer creator's rows are therefore visible
+    ///   to its ancestors' neighbourhood queries and vice versa — the
+    ///   symmetry the composition model assumes (`search("a"){search("b")}`
+    ///   composes because each side's Phase R sees the other's layer).
     ///
-    /// Requires `build_dependency_graph` to have run already so the
-    /// Sibling edges exist.  The ordering is enforced in
-    /// [`Self::compute_nodes`].
+    /// Trees run sequentially, so cross-tree `@label` deps and layer chaining
+    /// always see prior trees fully applied — this subsumes the old
+    /// PreSeedSibling pre-drains (the edges still exist for the notification
+    /// pass and the budget gate).  A SAME-tree `@label` dep is a genuine
+    /// M↔R circularity: the labelled statement's READ phase runs early (its
+    /// layers, if any, are already materialised — pre-order precedes the
+    /// user) before the using statement's Phase M.
     async fn compute_roots(
         &self,
         ctx: &mut ExecutionContext,
         cfg: &ControlFlowGraph,
-        statements: &Vec<Rc<Statement>>,
+        _statements: &Vec<Rc<Statement>>,
     ) -> Result<(), pest::error::Error<Rule>> {
         let _span = tracing::info_span!("compute_roots").entered();
 
-        struct PendingCompute<'a> {
+        struct Staged {
             statement: Rc<Statement>,
-            future:
-                Pin<Box<dyn Future<Output = Result<ComputeResult, pest::error::Error<Rule>>> + 'a>>,
+            /// Phase-M handoff (layer ids + Phase-M warnings); taken when the
+            /// statement's READ phase runs — early (label sub-barrier) or in
+            /// the main Phase-R batch.
+            payload: Option<(Vec<i64>, Vec<Diagnostic>)>,
         }
 
-        async fn drain_pending(
-            pending: &mut Vec<PendingCompute<'_>>,
-            ctx: &mut ExecutionContext,
-        ) -> Result<(), pest::error::Error<Rule>> {
-            if pending.is_empty() {
-                return Ok(());
+        let top_level: Vec<Rc<Statement>> = self.scope().statements().collect();
+        for top in top_level {
+            let mut tree: Vec<Rc<Statement>> = vec![top.clone()];
+            crate::scope::visit(top.scope(), &mut |s| -> Result<
+                bool,
+                pest::error::Error<Rule>,
+            > {
+                tree.push(s.clone());
+                Ok(true)
+            })?;
+
+            // ---- Phase M: materialise, sequential, rounds applied as they
+            // land so chaining and `has_chain` see prior statements. ----
+            let mut staged: Vec<Staged> = Vec::with_capacity(tree.len());
+            for statement in &tree {
+                // `@label` resolution.  Cross-tree deps are fully applied
+                // (trees are sequential); a same-tree dep gets its READ phase
+                // early so its selection exists before this layer's inputs
+                // are hashed.
+                let mut resolved = LabelResolutions::new();
+                let label_deps: Vec<(Rc<Statement>, Rc<str>)> = statement
+                    .get_state()
+                    .dependencies
+                    .iter()
+                    .filter_map(|d| match &d.dependency_role {
+                        DependencyRole::PreSeedLabel(label) => {
+                            Some((d.dependency.clone(), label.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                for (dep_stmt, label) in label_deps {
+                    if !dep_stmt.is_computed(ctx) {
+                        if let Some(m) = staged
+                            .iter_mut()
+                            .find(|m| Rc::ptr_eq(&m.statement, &dep_stmt))
+                        {
+                            if let Some((layer_ids, warnings)) = m.payload.take() {
+                                read_statement(ctx, cfg, &dep_stmt, &layer_ids, warnings).await?;
+                            }
+                        }
+                    }
+                    if let Some(sel) = dep_stmt.get_selection(ctx) {
+                        let ids = canonical_ids(sel.nodes.iter().map(|n| n.symbol.id));
+                        if ids.is_empty() {
+                            tracing::warn!(
+                                label = %label,
+                                "ephemeral verb '@{}' resolved to 0 symbols; \
+                                 layer will emit no rows",
+                                label,
+                            );
+                        }
+                        resolved.insert(label, ids);
+                    } else {
+                        tracing::warn!(
+                            label = %label,
+                            "ephemeral verb '@{}' labelled statement has no \
+                             selection at resolution time; layer will emit no rows",
+                            label,
+                        );
+                    }
+                }
+
+                let eph_m = ctx.eph.clone();
+                // Condition-based by construction: nothing in this tree has a
+                // selection yet, so the fused scope is the parent's filter.
+                let parent_scope = build_parent_scope(statement, ctx, &eph_m);
+                let outcome = statement
+                    .command()
+                    .materialise_layers(cfg, &eph_m, &resolved, &parent_scope)
+                    .await?;
+                if !outcome.round.is_empty() {
+                    ctx.eph.push_round(&outcome.round);
+                }
+                ctx.layer_activations
+                    .extend(outcome.activations.iter().copied());
+                staged.push(Staged {
+                    statement: statement.clone(),
+                    payload: Some((outcome.layer_ids, outcome.warnings)),
+                });
             }
-            let entries: Vec<_> = pending.drain(..).collect();
+
+            // ---- Phase R: concurrent reads under tree-complete visibility;
+            // statements already read early (label sub-barrier) are skipped. ----
+            struct PendingRead<'a> {
+                statement: Rc<Statement>,
+                future: Pin<
+                    Box<dyn Future<Output = Result<ComputeResult, pest::error::Error<Rule>>> + 'a>,
+                >,
+            }
+            let mut pending: Vec<PendingRead<'_>> = Vec::new();
+            for m in staged {
+                let Some((layer_ids, warnings)) = m.payload else {
+                    continue;
+                };
+                let (eph, parent_scope, children_scope) = stage_read(ctx, &m.statement);
+                let stmt = m.statement.clone();
+                pending.push(PendingRead {
+                    statement: m.statement,
+                    future: Box::pin(async move {
+                        stmt.command()
+                            .compute_selection(
+                                cfg,
+                                parent_scope,
+                                children_scope,
+                                &eph,
+                                &layer_ids,
+                                warnings,
+                            )
+                            .await
+                    }),
+                });
+            }
             let (stmts, futs): (Vec<_>, Vec<_>) =
-                entries.into_iter().map(|p| (p.statement, p.future)).unzip();
+                pending.into_iter().map(|p| (p.statement, p.future)).unzip();
             let results = futures::future::join_all(futs).await;
-            // Check all results before applying any — avoid partial ctx mutation on error.
+            // Check all results before applying any — avoid partial ctx
+            // mutation on error.
             let computed: Result<Vec<_>, _> = stmts
                 .into_iter()
                 .zip(results)
@@ -306,108 +474,7 @@ impl Statement {
             for (stmt, cr) in computed? {
                 cr.apply(ctx, &stmt);
             }
-            Ok(())
         }
-
-        let mut pending: Vec<PendingCompute<'_>> = vec![];
-
-        for statement in statements.iter() {
-            // Pre-drain when this statement has any PreSeed dependency.
-            // A PreSeed dep records "compute me after this dep's selection
-            // has applied" — used for sibling ordering between top-level
-            // layer-creating statements and for `@label` resolution by
-            // layer-creating verbs.  Both require the same scheduler
-            // action: drain pending so the dep's `compute_selected` has
-            // run, then (for label deps) read out the resolved IDs into
-            // `LabelResolutions` before pushing this statement's compute.
-            //
-            // Drain granularity is coarse: any PreSeed dep drains *all*
-            // pending, not just the listed deps.  Pending statements
-            // without a transitive relation are flushed too.  Acceptable
-            // because they would have been awaited at the next drain
-            // anyway; over-draining only sacrifices a little concurrency.
-            //
-            // Snapshot the PreSeed deps (cheap clones of the Rc<Statement>
-            // + Option<Rc<str>>) so we don't hold a borrow on `statement`
-            // across the await below.
-            let mut resolved = LabelResolutions::new();
-            let pre_seed_deps: Vec<(Rc<Statement>, Option<Rc<str>>)> = statement
-                .get_state()
-                .dependencies
-                .iter()
-                .filter_map(|d| match &d.dependency_role {
-                    DependencyRole::PreSeedSibling => Some((d.dependency.clone(), None)),
-                    DependencyRole::PreSeedLabel(label) => {
-                        Some((d.dependency.clone(), Some(label.clone())))
-                    }
-                    _ => None,
-                })
-                .collect();
-            if !pre_seed_deps.is_empty() {
-                drain_pending(&mut pending, ctx).await?;
-            }
-            for (dep_stmt, label) in pre_seed_deps {
-                let Some(label) = label else { continue };
-                if let Some(sel) = dep_stmt.get_selection(ctx) {
-                    let ids = canonical_ids(sel.nodes.iter().map(|n| n.symbol.id));
-                    if ids.is_empty() {
-                        tracing::warn!(
-                            label = %label,
-                            "ephemeral verb '@{}' resolved to 0 symbols; \
-                             layer will emit no rows",
-                            label,
-                        );
-                    }
-                    resolved.insert(label, ids);
-                } else {
-                    tracing::warn!(
-                        label = %label,
-                        "ephemeral verb '@{}' labelled statement has no \
-                         selection at resolution time; layer will emit no rows",
-                        label,
-                    );
-                }
-            }
-
-            let mut eph = ctx.eph.clone();
-            // Budget-pushdown safety gate: only a statement whose selection no
-            // one else consumes may bound its neighbourhood leaves.  Any
-            // Parent/Child/User dependency or dependent means another
-            // statement's `constrain_*` reads this selection's
-            // nodes/parents/children, and a PreSeedLabel DEPENDENT means
-            // `compute_roots` reads the selection for `@label` resolution (a
-            // truncated, order-arbitrary id set would silently seed the layer
-            // AND destabilise its input hash) — so both clear the budget.
-            // Only PreSeedSibling is pure ordering with no data flow.
-            {
-                let st = statement.get_state();
-                let composed = st
-                    .dependencies
-                    .iter()
-                    .any(|d| !d.dependency_role.is_pre_seed())
-                    || st
-                        .dependents
-                        .iter()
-                        .any(|d| !matches!(d.dependency_role, DependencyRole::PreSeedSibling));
-                if composed {
-                    eph.set_result_budget(index::db_diesel::ResultBudget::UNLIMITED);
-                }
-            }
-            let parent_scope = build_parent_scope(statement, ctx, &eph);
-            let children_scope = build_children_scope(statement, ctx, &eph);
-            let stmt = statement.clone();
-
-            pending.push(PendingCompute {
-                statement: stmt.clone(),
-                future: Box::pin(async move {
-                    stmt.command()
-                        .compute_selected(cfg, parent_scope, children_scope, &eph, &resolved)
-                        .await
-                }),
-            });
-        }
-
-        drain_pending(&mut pending, ctx).await?;
         Ok(())
     }
 

@@ -75,6 +75,34 @@ impl ComputeResult {
     }
 }
 
+/// Phase-M output of one statement: the layers it materialised (already
+/// created in the DB, NOT yet pushed onto the executor's chains — the caller
+/// pushes `round` so visibility grows in statement order), plus the Phase-M
+/// warnings (layer truncation) to be carried into the statement's Phase R.
+pub struct MaterialiseOutcome {
+    /// All materialised layer ids (bases, atoms, supplements, every root) —
+    /// Phase R's layer-union read enumerates rows from exactly these.
+    pub layer_ids: Vec<i64>,
+    /// `(root_id, layer_id)` pairs for `EphContext::push_round`.
+    pub round: Vec<(i64, i64)>,
+    /// Per-layer cache activations, in recording order.
+    pub activations: Vec<LayerActivation>,
+    /// Phase-M warnings (verb-limit truncation), surfaced via Phase R's
+    /// `ComputeResult`.
+    pub warnings: Vec<Diagnostic>,
+}
+
+impl MaterialiseOutcome {
+    fn empty() -> Self {
+        Self {
+            layer_ids: Vec::new(),
+            round: Vec::new(),
+            activations: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+}
+
 pub struct NotificationResult {
     pub changed: bool,
     pub warnings: Vec<Diagnostic>,
@@ -602,20 +630,147 @@ impl Command {
         Ok(NotificationResult::new(changed, warnings))
     }
 
-    /// Computes the selected symbols based on the selectors defined in the
-    /// command. This method returns an `Option<SymbolInstanceRefs>`, which will be
-    /// `None` if no symbols are selected. It returns
-    /// `Some(SymbolInstanceRefs::new())` if no symbols match the selectors.
-    /// Scope-building data for parent/children scoping. Since ScopeContext
-    /// contains non-clonable Box<dyn>, we store the raw data and rebuild
-    /// ScopeContext for each selector.
-    pub async fn compute_selected(
+    /// Phase M: materialise this statement's ephemeral layers (if any of its
+    /// verbs contribute one).  Multi-verb statements get a `Composite` layer
+    /// that combines every verb's contribution; the aggregation is in
+    /// `Command::aggregate_layer_spec`.
+    ///
+    /// Runs against the executor's shared eph as of this statement's turn.
+    /// The returned `round` is NOT pushed here — the executor pushes it so
+    /// visibility grows in statement order and every statement's Phase R sees
+    /// the whole tree's layers.  `parent_scope` carries the enclosing
+    /// container's CONDITION for scope-fusion (nothing is computed yet in
+    /// Phase M, so it is condition-based by construction).
+    pub async fn materialise_layers(
+        &self,
+        cfg: &ControlFlowGraph,
+        eph: &EphContext,
+        resolved: &LabelResolutions,
+        parent_scope: &ScopeContext,
+    ) -> Result<MaterialiseOutcome, pest::error::Error<Rule>> {
+        if self.selectors().next().is_none() {
+            return Ok(MaterialiseOutcome::empty());
+        }
+
+        let to_pest = |e: anyhow::Error| {
+            pest::error::Error::new_from_span(
+                pest::error::ErrorVariant::CustomError {
+                    message: e.to_string(),
+                },
+                self.span().as_pest_span(),
+            )
+        };
+
+        // The CompositeFilter is built once per statement so layer-aware
+        // selectors can mix it into their cache key and apply its
+        // `compose_objects` to scope their populate queries.
+        let filter_parts_for_layer: Vec<CompositeFilter> = self
+            .filters()
+            .filter_map(|f| f.get_composite_filter(eph))
+            .collect();
+        let layer_composite_filter = CompositeFilter::and(filter_parts_for_layer);
+
+        let spec = match self
+            .aggregate_layer_spec(cfg, eph, &layer_composite_filter, resolved, parent_scope)
+            .await
+            .map_err(to_pest)?
+        {
+            None => return Ok(MaterialiseOutcome::empty()),
+            Some(spec) => spec,
+        };
+
+        // Defense in depth, uniform across verbs: non-empty
+        // supplement inputs under an empty chain means the verb
+        // computed eph-derived content that no supplement will ever
+        // materialize — those rows would be silently dropped.  The
+        // verb-side guards (with better spans) should have caught
+        // this; reaching here is an internal invariant violation.
+        if !eph.has_chain() && !spec.supplement_extra.is_empty() {
+            return Err(to_pest(anyhow::anyhow!(
+                "internal error: layer spec carries supplement inputs \
+                 but no ephemeral context exists before this statement"
+            )));
+        }
+
+        // Chain topology is decided here, not by the verb: per
+        // visible root, the base parents on the root and the
+        // supplement (created iff that root's chain is non-empty)
+        // chains on the root's `chain_last`.  The base hash is
+        // salted per root (`root_salted_hash`), so each root's
+        // cache entry is independent of co-visible projects.
+        let results = cfg
+            .index
+            .with_partitioned_layers(
+                eph,
+                &spec.base_hash,
+                &spec.supplement_extra,
+                spec.base_populate,
+                spec.supplement_populate,
+                spec.per_layer_populate,
+            )
+            .await
+            .map_err(to_pest)?;
+
+        let mut outcome = MaterialiseOutcome::empty();
+        let mut hit_ids = Vec::with_capacity(results.len());
+        let mut truncated_any = false;
+        // Results arrive in recording order (roots ascending; within a
+        // root: base → per-layer atoms → supplement), so the root's
+        // `chain_last` ends up the supplement and downstream chaining
+        // keys keep depending on that root's full upstream chain.
+        for layer in results {
+            if !layer.outcome.created {
+                hit_ids.push(layer.outcome.layer_id);
+            }
+            outcome.activations.push(LayerActivation {
+                root_id: layer.root_id,
+                layer_id: layer.outcome.layer_id,
+                created: layer.outcome.created,
+                truncated: layer.outcome.truncated,
+                role: layer.role,
+            });
+            truncated_any |= layer.outcome.truncated;
+            outcome.round.push((layer.root_id, layer.outcome.layer_id));
+            outcome.layer_ids.push(layer.outcome.layer_id);
+        }
+        // One LRU touch round trip for all roots' hits.
+        let _ = cfg.index.touch_eph_layers(&hit_ids).await;
+
+        // Surface truncation as a single warning per statement.  All
+        // layer-creating selectors in a statement are aggregated into ONE
+        // merged layer (`aggregate_layer_spec`) with ONE `truncated` flag, so
+        // truncation can't be attributed to a specific selector — emitting one
+        // warning per layer-spec selector would over-report a single event.
+        // Use the first layer-spec selector's warning (its span/wording); cache
+        // hits and misses both surface it since the persistent
+        // `layers.truncated` flag is read on both paths.
+        if truncated_any {
+            if let Some(w) = self
+                .selectors()
+                .filter(|s| s.has_layer_spec())
+                .find_map(|s| s.make_truncation_warning())
+            {
+                outcome.warnings.push(w);
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// Phase R: build each selector's selection — pure reads.  The layers in
+    /// `layer_ids` were materialised by this statement's Phase M, and `eph`
+    /// already contains the WHOLE tree's rounds (tree-complete visibility),
+    /// so neighbourhood queries see sibling/child layers symmetrically.
+    /// `phase1_warnings` carries Phase M's truncation notices into this
+    /// statement's `ComputeResult`.  Since ScopeContext contains non-clonable
+    /// Box<dyn>, the caller builds the scopes and hands them in.
+    pub async fn compute_selection(
         &self,
         cfg: &ControlFlowGraph,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
         eph: &EphContext,
-        resolved: &LabelResolutions,
+        layer_ids: &[i64],
+        phase1_warnings: Vec<Diagnostic>,
     ) -> Result<ComputeResult, pest::error::Error<Rule>> {
         let selectors: Vec<&dyn Selector> = self.selectors().collect();
 
@@ -628,9 +783,8 @@ impl Command {
             });
         }
 
-        let mut warnings = vec![];
+        let mut warnings = phase1_warnings;
         let mut selections = vec![];
-        let mut layer_activations = vec![];
 
         // Validate: each selector that requires a name constraint must have one
         // command-wide (any filter verb on the command counts).
@@ -656,125 +810,13 @@ impl Command {
             )
         };
 
-        // Phase 1: materialise this statement's single ephemeral layer (if
-        // any of its verbs contribute one).  Multi-verb statements get a
-        // `Composite` layer that combines every verb's contribution; the
-        // aggregation is in `Command::aggregate_layer_spec`.
-        //
-        // The CompositeFilter is built here (once per statement) so it can
-        // be passed both to `layer_spec` (filter-aware selectors mix it into
-        // their cache key and apply its `compose_objects` to scope their
-        // queries) and to the Phase 2 `select_from_all_impl` calls below.
-        let mut local_eph = eph.clone();
-        let filter_parts_for_layer: Vec<CompositeFilter> = self
-            .filters()
-            .filter_map(|f| f.get_composite_filter(&local_eph))
-            .collect();
-        let layer_composite_filter = CompositeFilter::and(filter_parts_for_layer);
-
-        let (materialised_layer_ids, any_truncated): (Vec<i64>, bool) = match self
-            .aggregate_layer_spec(
-                cfg,
-                &local_eph,
-                &layer_composite_filter,
-                resolved,
-                &parent_scope,
-            )
-            .await
-            .map_err(to_pest)?
-        {
-            None => (Vec::new(), false),
-            Some(spec) => {
-                // Defense in depth, uniform across verbs: non-empty
-                // supplement inputs under an empty chain means the verb
-                // computed eph-derived content that no supplement will ever
-                // materialize — those rows would be silently dropped.  The
-                // verb-side guards (with better spans) should have caught
-                // this; reaching here is an internal invariant violation.
-                if !local_eph.has_chain() && !spec.supplement_extra.is_empty() {
-                    return Err(to_pest(anyhow::anyhow!(
-                        "internal error: layer spec carries supplement inputs \
-                         but no ephemeral context exists before this statement"
-                    )));
-                }
-
-                // Chain topology is decided here, not by the verb: per
-                // visible root, the base parents on the root and the
-                // supplement (created iff that root's chain is non-empty)
-                // chains on the root's `chain_last`.  The base hash is
-                // salted per root (`root_salted_hash`), so each root's
-                // cache entry is independent of co-visible projects.
-                let results = cfg
-                    .index
-                    .with_partitioned_layers(
-                        &local_eph,
-                        &spec.base_hash,
-                        &spec.supplement_extra,
-                        spec.base_populate,
-                        spec.supplement_populate,
-                        spec.per_layer_populate,
-                    )
-                    .await
-                    .map_err(to_pest)?;
-
-                let mut ids = Vec::with_capacity(results.len());
-                let mut hit_ids = Vec::with_capacity(results.len());
-                let mut round = Vec::with_capacity(results.len());
-                let mut truncated_any = false;
-                // Results arrive in recording order (roots ascending; within a
-                // root: base → per-layer atoms → supplement), so the root's
-                // `chain_last` ends up the supplement and downstream chaining
-                // keys keep depending on that root's full upstream chain.
-                for layer in results {
-                    if !layer.outcome.created {
-                        hit_ids.push(layer.outcome.layer_id);
-                    }
-                    layer_activations.push(LayerActivation {
-                        root_id: layer.root_id,
-                        layer_id: layer.outcome.layer_id,
-                        created: layer.outcome.created,
-                        truncated: layer.outcome.truncated,
-                        role: layer.role,
-                    });
-                    truncated_any |= layer.outcome.truncated;
-                    round.push((layer.root_id, layer.outcome.layer_id));
-                    ids.push(layer.outcome.layer_id);
-                }
-                // One atomic round: this statement's layers join every
-                // root's chain together (Phase 2 below reads via local_eph).
-                local_eph.push_round(&round);
-                // One LRU touch round trip for all roots' hits.
-                let _ = cfg.index.touch_eph_layers(&hit_ids).await;
-                (ids, truncated_any)
-            }
-        };
-
-        // Surface truncation as a single warning per statement.  All
-        // layer-creating selectors in a statement are aggregated into ONE
-        // merged layer (`aggregate_layer_spec`) with ONE `truncated` flag, so
-        // truncation can't be attributed to a specific selector — emitting one
-        // warning per layer-spec selector would over-report a single event.
-        // Use the first layer-spec selector's warning (its span/wording); cache
-        // hits and misses both surface it since the persistent
-        // `layers.truncated` flag is read on both paths.
-        if any_truncated {
-            if let Some(w) = self
-                .selectors()
-                .filter(|s| s.has_layer_spec())
-                .find_map(|s| s.make_truncation_warning())
-            {
-                warnings.push(w);
-            }
-        }
-
-        // Phase 2: build each selector's selection.  Layer-aware selectors
-        // (those whose `has_layer_spec()` was true) read from the
-        // freshly-materialised layer's contents.  All other selectors go
-        // through `select_from_all_impl` with the command's composite
-        // filter, as before.
+        // Layer-aware selectors (those whose `has_layer_spec()` was true)
+        // read from the Phase-M-materialised layer's contents.  All other
+        // selectors go through `select_from_all_impl` with the command's
+        // composite filter, as before.
         let filter_parts: Vec<CompositeFilter> = self
             .filters()
-            .filter_map(|f| f.get_composite_filter(&local_eph))
+            .filter_map(|f| f.get_composite_filter(eph))
             .collect();
 
         let mut budget_warned = false;
@@ -792,7 +834,7 @@ impl Command {
                 // zero-root context (no project exists for ephemeral rows
                 // to attach to): nothing was materialised, so the selector
                 // contributes nothing.
-                if materialised_layer_ids.is_empty() {
+                if layer_ids.is_empty() {
                     // Zero-root context: the per-root loop ran no populate,
                     // so the verb's own user-facing errors (loc's "no file
                     // matching", …) never had a chance to fire.  Surface an
@@ -811,7 +853,7 @@ impl Command {
                 }
                 let instance_ids = cfg
                     .index
-                    .get_eph_instance_ids_for_layers(&materialised_layer_ids)
+                    .get_eph_instance_ids_for_layers(layer_ids)
                     .await
                     .map_err(to_pest)?;
                 if instance_ids.is_empty() {
@@ -824,12 +866,7 @@ impl Command {
                     let filter = CompositeFilter::leaf(SymbolInstanceIdMixin::new(&ids));
                     Some(
                         cfg.index
-                            .find_symbol(
-                                &filter,
-                                parent_scope.clone(),
-                                children_scope.clone(),
-                                &local_eph,
-                            )
+                            .find_symbol(&filter, parent_scope.clone(), children_scope.clone(), eph)
                             .await
                             .map_err(to_pest)?
                             .into_inner(),
@@ -848,7 +885,7 @@ impl Command {
                         filter,
                         parent_scope.clone(),
                         children_scope.clone(),
-                        &local_eph,
+                        eph,
                     )
                     .await
                     .map_err(to_pest)?
@@ -862,7 +899,7 @@ impl Command {
                 // selector that produced the bounded selection.
                 if selection.budget_bounded && !budget_warned {
                     budget_warned = true;
-                    let bound = local_eph.result_budget().leaf_limit().unwrap_or(0);
+                    let bound = eph.result_budget().leaf_limit().unwrap_or(0);
                     warnings.push(Diagnostic::truncation(
                         Span::from_pest(selector.span(), self.span().input()),
                         format!(
@@ -884,7 +921,9 @@ impl Command {
         Ok(ComputeResult {
             selections,
             warnings,
-            layer_activations,
+            // Chain growth + activation recording happen in Phase M
+            // (materialise_layers → executor); Phase R is read-only.
+            layer_activations: Vec::new(),
         })
     }
 }
