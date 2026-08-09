@@ -759,6 +759,7 @@ impl Command {
             .filter_map(|f| f.get_composite_filter(&local_eph))
             .collect();
 
+        let mut budget_warned = false;
         for selector in selectors.into_iter() {
             let mut current_selection = if selector.has_layer_spec() {
                 // Layer-aware selector: return the union of all rows in this
@@ -837,6 +838,22 @@ impl Command {
 
             if let Some(selection) = &mut current_selection {
                 self.filter(selection);
+                // Budget truncation must SURFACE: a leaf query hit the
+                // request's result-budget LIMIT, so this selection may be
+                // missing rows.  One warning per statement, attributed to the
+                // selector that produced the bounded selection.
+                if selection.budget_bounded && !budget_warned {
+                    budget_warned = true;
+                    let bound = local_eph.result_budget().leaf_limit().unwrap_or(0);
+                    warnings.push(Diagnostic::truncation(
+                        Span::from_pest(selector.span(), self.span().input()),
+                        format!(
+                            "results were bounded to {bound} rows by the server \
+                             result budget and may be incomplete — narrow the \
+                             query or raise the request `limit`"
+                        ),
+                    ));
+                }
                 if selection.is_empty() {
                     warnings.push(Diagnostic::no_match(
                         Span::from_pest(selector.span(), self.span().input()),

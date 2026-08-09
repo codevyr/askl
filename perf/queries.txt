@@ -17,9 +17,21 @@ func { method "color_adjust" { func } }
 file("/linux/fs/read_write.c") { func }
 func { "ibv_cmd_reg_mr" }
 
+# --- W5: structured queries reported slow (test each separately) ---
+type "drm_gem_object"
+func { method "postclose" }
+file("qaic.h") { type "drm_device" }
+"create_qdev" func { macro "devm_drm_dev_alloc" }
+func "qaic_create_drm_device" { func "drm_dev_register" }
+mod("amdgpu") { func { "drm_dev_enter" } }
+
+# --- W5: search scoping A/B (nested is the correct form; sibling does NOT scope) ---
+file("drm_mm.c") { search("color") }
+search("color") file("drm_mm.c")
+search("color", limit="50")
+
 # --- full-text search (the slow ones; search("color") is the eval timeout culprit) ---
 search("mmap_lock")
 project("linux") search("EXPORT_SYMBOL", whole_word="true")
-search("color") file("drm_mm.c")
 search("color_adjust")
 search("color")

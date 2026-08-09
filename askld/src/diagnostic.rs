@@ -18,8 +18,12 @@ pub enum DiagnosticKind {
     /// A selector matched no symbols. Carries the typed token when it was a plain
     /// name (`"vfs_rea"`), which the statement layer uses to look up suggestions.
     NoMatch,
-    /// Any other advisory note (constrained no-match, truncation, validation).
+    /// Any other advisory note (constrained no-match, validation).
     Note,
+    /// A result was truncated (verb limit, server result budget).  Never
+    /// collapsed by the overlap-dedup in `gather_warnings`: truncation is
+    /// acceptable, hidden truncation is not.
+    Truncation,
 }
 
 #[derive(Debug, Clone)]
@@ -57,11 +61,24 @@ impl Diagnostic {
         }
     }
 
-    /// A generic advisory note (constrained no-match, truncation, validation).
+    /// A generic advisory note (constrained no-match, validation).
     pub fn note(span: Span, message: impl Into<String>) -> Self {
         Diagnostic {
             span,
             kind: DiagnosticKind::Note,
+            message: message.into(),
+            token: None,
+            suggestions: Vec::new(),
+            name_exists: false,
+        }
+    }
+
+    /// A truncation notice (verb limit hit, server result budget hit).
+    /// Exempt from warning overlap-dedup — it must always surface.
+    pub fn truncation(span: Span, message: impl Into<String>) -> Self {
+        Diagnostic {
+            span,
+            kind: DiagnosticKind::Truncation,
             message: message.into(),
             token: None,
             suggestions: Vec::new(),

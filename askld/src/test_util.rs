@@ -275,6 +275,23 @@ pub fn run_query(askl_input: &str, askl_query: &str) -> ExecutionResult {
     })
 }
 
+/// Like [`run_query`], but with a request result budget (the API layer's
+/// symbol cap) applied — for tests asserting budget-truncation behaviour.
+pub fn run_query_with_budget(askl_input: &str, askl_query: &str, cap: usize) -> ExecutionResult {
+    let mut rt = Runtime::new().unwrap();
+    let local = task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(askl_input).await;
+        let roots = index.load_root_layers().await.unwrap();
+        let cfg = ControlFlowGraph::from_symbols(index);
+        let ast = parse(askl_query).unwrap();
+        let mut ctx = ExecutionContext::new(roots);
+        ctx.eph
+            .set_result_budget(index::db_diesel::ResultBudget::symbols(cap));
+        ast.execute(&mut ctx, &cfg).await.unwrap()
+    })
+}
+
 pub async fn create_index_with_timeout(url: &str, timeout_ms: u64) -> Index {
     let mut config = ManagerConfig::<AsyncPgConnection>::default();
     config.custom_setup = Box::new(move |url| {

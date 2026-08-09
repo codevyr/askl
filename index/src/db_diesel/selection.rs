@@ -45,6 +45,46 @@ pub struct RootLayer {
 /// statement-queue time are clearer when each pending future captures its own
 /// buffer, and the refcount overhead of an `Arc` wrapper isn't worth it.  Do
 /// not "optimise" by wrapping in `Arc` without measuring.
+/// How many distinct result symbols a query ultimately wants (`0` = unlimited).
+///
+/// The *exact* final cap is applied post-hoc in the API renderer (it must prune
+/// whole nodes-with-edges to stay referentially valid).  This value lets a
+/// row-producing leaf query push a *bound* into its own SQL so it stops far
+/// short of materialising everything the renderer would only throw away — the
+/// budget facet of query "fusion".  Carried on [`EphContext`] because it must
+/// reach every `find_symbol` leaf, which already receives the eph context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResultBudget(usize);
+
+impl ResultBudget {
+    /// No bound — leaf queries run unlimited (the legacy behaviour).
+    pub const UNLIMITED: Self = Self(0);
+
+    /// Cap on distinct result symbols; `0` is treated as unlimited.
+    pub fn symbols(cap: usize) -> Self {
+        Self(cap)
+    }
+
+    /// SQL `LIMIT` for a single row-producing leaf, or `None` when unlimited.
+    ///
+    /// Rows are per-instance but the cap is per-symbol, and the renderer keeps
+    /// the top `cap` *distinct symbols*, so we over-fetch by a factor: the leaf
+    /// stays bounded while still yielding ≥ `cap` distinct symbols in the common
+    /// case.  The over-fetch is a heuristic — tune it against real row counts.
+    /// Clamped to `i64::MAX`: a huge user-supplied cap must degrade to
+    /// "effectively unlimited", never wrap into a negative SQL LIMIT.
+    pub fn leaf_limit(&self) -> Option<i64> {
+        const OVERFETCH: usize = 8;
+        (self.0 > 0).then(|| self.0.saturating_mul(OVERFETCH).min(i64::MAX as usize) as i64)
+    }
+}
+
+impl Default for ResultBudget {
+    fn default() -> Self {
+        Self::UNLIMITED
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EphContext {
     /// Sorted by id, deduped — constructor-enforced so visibility binds and
@@ -54,6 +94,10 @@ pub struct EphContext {
     /// has a chain slot (a missing entry is unrepresentable), and growth
     /// happens only through [`EphContext::push_round`].
     chains: Vec<Vec<i64>>,
+    /// Result budget for this request; default unlimited, set once per request
+    /// via [`EphContext::set_result_budget`].  Read by `find_symbol` to bound a
+    /// bare selector's neighbourhood queries.
+    result_budget: ResultBudget,
 }
 
 impl EphContext {
@@ -64,7 +108,22 @@ impl EphContext {
         roots.sort_by(|a, b| a.id.cmp(&b.id));
         roots.dedup_by(|a, b| a.id == b.id);
         let chains = vec![Vec::new(); roots.len()];
-        Self { roots, chains }
+        Self {
+            roots,
+            chains,
+            result_budget: ResultBudget::UNLIMITED,
+        }
+    }
+
+    /// This request's result budget (see [`ResultBudget`]).
+    pub fn result_budget(&self) -> ResultBudget {
+        self.result_budget
+    }
+
+    /// Set the result budget for this request.  Called once, at the root, from
+    /// the API layer; `clone()`/`push_round` carry it forward unchanged.
+    pub fn set_result_budget(&mut self, budget: ResultBudget) {
+        self.result_budget = budget;
     }
 
     fn root_index(&self, root_id: i64) -> Option<usize> {
@@ -292,6 +351,11 @@ pub struct Selection {
     // Containment relationships (composition)
     pub has_parents: Vec<HasParentReference>,
     pub has_children: Vec<HasChildReference>,
+    /// True when any leaf query that produced this selection hit the request's
+    /// [`ResultBudget`] LIMIT — the selection may be missing rows.  Consumers
+    /// surface this as a truncation warning on the owning command; it must
+    /// never be silently dropped.
+    pub budget_bounded: bool,
 }
 
 impl Selection {
@@ -302,6 +366,7 @@ impl Selection {
             children: Vec::new(),
             has_parents: Vec::new(),
             has_children: Vec::new(),
+            budget_bounded: false,
         }
     }
 
@@ -311,6 +376,7 @@ impl Selection {
         self.children.extend(other.children);
         self.has_parents.extend(other.has_parents);
         self.has_children.extend(other.has_children);
+        self.budget_bounded |= other.budget_bounded;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -471,6 +537,26 @@ mod tests {
     #[test]
     fn empty_selection_no_leak() {
         assert!(!Selection::new().has_eph_leak(&EphContext::rooted(vec![])));
+    }
+
+    #[test]
+    fn result_budget_leaf_limit() {
+        // Unlimited (0) → no SQL bound.
+        assert_eq!(ResultBudget::UNLIMITED.leaf_limit(), None);
+        assert_eq!(ResultBudget::symbols(0).leaf_limit(), None);
+        // Otherwise cap × over-fetch (8).
+        assert_eq!(ResultBudget::symbols(1).leaf_limit(), Some(8));
+        assert_eq!(ResultBudget::symbols(100).leaf_limit(), Some(800));
+    }
+
+    #[test]
+    fn eph_context_carries_budget() {
+        let mut eph = EphContext::rooted(vec![]);
+        assert_eq!(eph.result_budget(), ResultBudget::UNLIMITED);
+        eph.set_result_budget(ResultBudget::symbols(50));
+        assert_eq!(eph.result_budget().leaf_limit(), Some(400));
+        // clone() carries the budget forward unchanged.
+        assert_eq!(eph.clone().result_budget(), ResultBudget::symbols(50));
     }
 
     #[test]

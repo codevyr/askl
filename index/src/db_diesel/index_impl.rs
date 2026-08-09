@@ -55,6 +55,15 @@ pub enum ScopeContext {
     Unscoped,
 }
 
+impl ScopeContext {
+    /// True for a composition-driven scope (`A { B }`), where the query's rows
+    /// feed a Rust-side intersection and so must NOT be budget-bounded.
+    /// `Skip`/`Unscoped` are display-only neighbourhoods, safe to bound.
+    pub fn is_scope(&self) -> bool {
+        matches!(self, ScopeContext::Scope { .. })
+    }
+}
+
 /// Constrains scope resolution to instances reachable via references.
 enum ScopeRole {
     /// Resolved instances must be children of these parent IDs.
@@ -174,6 +183,7 @@ impl Index {
         tracing::info!(
             elapsed_ms = t0.elapsed().as_millis() as u64,
             result_rows = results.len(),
+            result_bytes = super::sql_cache::vec_weight(results.as_ref()),
             "resolve_filter_to_ids completed",
         );
         let mut ids: Vec<i64> = results.iter().map(|(_, inst, _, _)| inst.id).collect();
@@ -1440,6 +1450,18 @@ impl Index {
         // sharing loss, simple plumbing).
         let chain_dependent = filter.is_chain_dependent();
 
+        // Budget pushdown — the "how many" facet of fusion.  A *bare* selector's
+        // neighbourhood queries are display-only, so bound how many rows they
+        // produce.  A *composed* selector (parent/children scope is a `Scope`)
+        // must NOT be bounded here: its unscoped rows feed the Rust-side
+        // intersection, and truncating them would drop valid results — that is a
+        // job for scope-fusion, not budget.
+        let leaf_limit: Option<i64> = if parent_scope.is_scope() || children_scope.is_scope() {
+            None
+        } else {
+            eph.result_budget().leaf_limit()
+        };
+
         let current = {
             let _select_current: tracing::span::EnteredSpan =
                 tracing::info_span!("select_current", eph_count = eph_ids.len()).entered();
@@ -1451,13 +1473,18 @@ impl Index {
                     if let Some(expr) = filter.compose_current(vis) {
                         q = q.filter(expr);
                     }
-                    q.filter(vis.guard())
+                    let mut q = q.filter(vis.guard());
+                    if let Some(l) = leaf_limit {
+                        q = q.limit(l);
+                    }
+                    q
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?;
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = rows.len(),
+                result_bytes = super::sql_cache::vec_weight(&rows),
                 "select_current completed",
             );
             rows
@@ -1489,13 +1516,18 @@ impl Index {
                         if let Some(expr) = filter.compose_parents(vis) {
                             q = q.filter(expr);
                         }
-                        q.filter(vis.guard())
+                        let mut q = q.filter(vis.guard());
+                        if let Some(l) = leaf_limit {
+                            q = q.limit(l);
+                        }
+                        q
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
                 tracing::info!(
                     elapsed_ms = t0.elapsed().as_millis() as u64,
                     result_rows = rows.len(),
+                    result_bytes = super::sql_cache::vec_weight(&rows),
                     "select_parents completed",
                 );
                 rows
@@ -1540,6 +1572,7 @@ impl Index {
                 tracing::info!(
                     elapsed_ms = t0.elapsed().as_millis() as u64,
                     result_rows = rows.len(),
+                    result_bytes = super::sql_cache::vec_weight(&rows),
                     "select_parents completed",
                 );
                 rows
@@ -1570,13 +1603,18 @@ impl Index {
                         if let Some(expr) = filter.compose_children(vis) {
                             q = q.filter(expr);
                         }
-                        q.filter(vis.guard())
+                        let mut q = q.filter(vis.guard());
+                        if let Some(l) = leaf_limit {
+                            q = q.limit(l);
+                        }
+                        q
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
                 tracing::info!(
                     elapsed_ms = t0.elapsed().as_millis() as u64,
                     result_rows = rows.len(),
+                    result_bytes = super::sql_cache::vec_weight(&rows),
                     "select_children completed",
                 );
                 rows
@@ -1621,6 +1659,7 @@ impl Index {
                 tracing::info!(
                     elapsed_ms = t0.elapsed().as_millis() as u64,
                     result_rows = rows.len(),
+                    result_bytes = super::sql_cache::vec_weight(&rows),
                     "select_children completed",
                 );
                 rows
@@ -1649,6 +1688,7 @@ impl Index {
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = rows.len(),
+                result_bytes = super::sql_cache::vec_weight(&rows),
                 "select_has_parents completed",
             );
             rows
@@ -1688,10 +1728,21 @@ impl Index {
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = rows.len(),
+                result_bytes = super::sql_cache::vec_weight(&rows),
                 "select_has_children completed",
             );
             rows
         };
+
+        // Any leaf that filled its budget LIMIT may have dropped rows — flag
+        // the selection so the owning command surfaces a truncation warning.
+        // Budget truncation is acceptable, silent budget truncation is not.
+        // (Branch-level limits mean a full branch is only *probably* truncated;
+        // over-warning is the safe direction.)
+        let budget_bounded = leaf_limit.is_some_and(|l| {
+            let l = l as usize;
+            current.len() >= l || parents.len() >= l || children.len() >= l
+        });
 
         let selection: Result<Selection> = {
             let _collect_span: tracing::span::EnteredSpan =
@@ -1781,6 +1832,7 @@ impl Index {
                 children,
                 has_parents,
                 has_children,
+                budget_bounded,
             })
         };
 
@@ -1840,6 +1892,7 @@ impl Index {
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = results.len(),
+                result_bytes = super::sql_cache::vec_weight(&results),
                 "find_child_instance_ids (has) completed",
             );
             for (ps, pi, cs, ci, _) in &results {
@@ -1883,6 +1936,7 @@ impl Index {
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = results.len(),
+                result_bytes = super::sql_cache::vec_weight(&results),
                 "find_child_instance_ids (refs) completed",
             );
             for (ps, cs, ci, fi, sr, _) in &results {
@@ -1952,6 +2006,7 @@ impl Index {
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = results.len(),
+                result_bytes = super::sql_cache::vec_weight(&results),
                 "find_parent_instance_ids (refs) completed",
             );
             for (sr, s, ci, pi) in &results {
@@ -1988,6 +2043,7 @@ impl Index {
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = results.len(),
+                result_bytes = super::sql_cache::vec_weight(&results),
                 "find_parent_instance_ids (has) completed",
             );
             for (cs, ci, ps, pi) in &results {
@@ -2087,6 +2143,7 @@ impl Index {
         tracing::info!(
             elapsed_ms = t0.elapsed().as_millis() as u64,
             result_rows = results.len(),
+            result_bytes = super::sql_cache::vec_weight(&results),
             "find_edges_between completed",
         );
 
@@ -3047,6 +3104,12 @@ fn build_search_sql(whole_word: bool, case_sensitive: bool, eph_branch: bool) ->
         if eph_branch { " AND o.layer < 0" } else { "" }
     );
 
+    // No ORDER BY: with a bare `LIMIT $2` Postgres can stop the LATERAL recheck
+    // as soon as limit+1 matches exist, instead of ranking every GIN candidate
+    // before truncating.  Truncation is therefore non-deterministic in *which*
+    // matches drop (the count and the `truncated` flag are unaffected) — an
+    // accepted trade-off for the dense-common-term case.  Re-sort the ≤limit set
+    // in Rust if a stable display order is ever needed.
     format!(
         "SELECT \
             o.id AS object_id, \
@@ -3057,7 +3120,6 @@ fn build_search_sql(whole_word: bool, case_sensitive: bool, eph_branch: bool) ->
          JOIN index.objects o ON o.content_hash = cs.content_hash \
          CROSS JOIN LATERAL index.find_substr_byte_ranges({haystack}, {needle}, $2) AS p \
          WHERE {pre_filter}{project_filter}{layer_filter}{boundary} \
-         ORDER BY o.id, p.start_byte \
          LIMIT $2",
         haystack = haystack_expr,
         needle = needle_expr,

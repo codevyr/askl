@@ -309,7 +309,7 @@ impl Selector for SearchSelector {
     /// wording and uses its own span, so the warning UX is identical
     /// across calls.
     fn make_truncation_warning(&self) -> Option<crate::diagnostic::Diagnostic> {
-        Some(crate::diagnostic::Diagnostic::note(
+        Some(crate::diagnostic::Diagnostic::truncation(
             self.span.clone(),
             format!(
                 "search({:?}): result truncated at {} matches in at least one \

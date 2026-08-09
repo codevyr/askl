@@ -369,7 +369,30 @@ impl Statement {
                 }
             }
 
-            let eph = ctx.eph.clone();
+            let mut eph = ctx.eph.clone();
+            // Budget-pushdown safety gate: only a statement whose selection no
+            // one else consumes may bound its neighbourhood leaves.  Any
+            // Parent/Child/User dependency or dependent means another
+            // statement's `constrain_*` reads this selection's
+            // nodes/parents/children, and a PreSeedLabel DEPENDENT means
+            // `compute_roots` reads the selection for `@label` resolution (a
+            // truncated, order-arbitrary id set would silently seed the layer
+            // AND destabilise its input hash) — so both clear the budget.
+            // Only PreSeedSibling is pure ordering with no data flow.
+            {
+                let st = statement.get_state();
+                let composed = st
+                    .dependencies
+                    .iter()
+                    .any(|d| !d.dependency_role.is_pre_seed())
+                    || st
+                        .dependents
+                        .iter()
+                        .any(|d| !matches!(d.dependency_role, DependencyRole::PreSeedSibling));
+                if composed {
+                    eph.set_result_budget(index::db_diesel::ResultBudget::UNLIMITED);
+                }
+            }
             let parent_scope = build_parent_scope(statement, ctx, &eph);
             let children_scope = build_children_scope(statement, ctx, &eph);
             let stmt = statement.clone();
@@ -608,23 +631,40 @@ impl Statement {
         }
 
         // Order by start; among equal starts, NoMatch before Note so it is the
-        // one kept when spans coincide.
+        // one kept when spans coincide.  Truncation warnings sort with Notes
+        // but are EXEMPT from the overlap-collapse below.
         let kind_rank = |d: &Diagnostic| match d.kind {
             DiagnosticKind::NoMatch => 0u8,
             DiagnosticKind::Note => 1u8,
+            DiagnosticKind::Truncation => 2u8,
         };
         all_warnings.sort_by_key(|d| (d.start(), kind_rank(d)));
 
         let mut filtered: Vec<Diagnostic> = vec![];
         for warning in all_warnings {
-            if let Some(last) = filtered.last() {
+            // Truncation must always surface: it is never dropped by the
+            // overlap-collapse and never displaces/gets displaced.  Truncation
+            // is acceptable, hidden truncation is not.
+            if warning.kind == DiagnosticKind::Truncation {
+                filtered.push(warning);
+                continue;
+            }
+            if let Some(last) = filtered
+                .iter()
+                .rev()
+                .find(|d| d.kind != DiagnosticKind::Truncation)
+            {
                 if last.end() >= warning.start() {
                     // Overlaps the previous kept warning. A NoMatch may still
                     // displace a kept Note (it carries the useful payload);
                     // otherwise drop the overlapping warning.
                     if warning.kind == DiagnosticKind::NoMatch && last.kind == DiagnosticKind::Note
                     {
-                        *filtered.last_mut().unwrap() = warning;
+                        let idx = filtered
+                            .iter()
+                            .rposition(|d| d.kind != DiagnosticKind::Truncation)
+                            .unwrap();
+                        filtered[idx] = warning;
                     }
                     continue;
                 }
