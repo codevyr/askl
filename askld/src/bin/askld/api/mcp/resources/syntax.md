@@ -56,3 +56,18 @@ separate statements; a `{` must be on the same line as its verb to attach.
 ## Rules
 - Every statement must contain at least one selector at some nesting level.
 - A scope only yields results if the relationship actually exists in the code.
+
+## Recipes — the short list (more in the `askl://cookbook` resource)
+- Find a symbol by fuzzy name:   `g"*color*"`  (prefer over `search()` for names)
+- Who calls X:                   `func { "vfs_read" }`
+- What X calls:                  `"vfs_read" { func }`
+- Functions in a file:           `file("/proj/fs/read_write.c") { func }`
+- Implementations of an ops field: `"reg_mr" { func }`  — a struct field's
+  children are the functions assigned to it in initializers, so this one query
+  lists every `.reg_mr = xxx_reg_mr` implementation; don't grep for `.field =`.
+- Transitive callees:            `"vfs_read" unnest { func }`
+- Full-text (non-symbol text):   `project("linux") search("EXPORT_SYMBOL", whole_word="true")`
+
+To read a listed symbol's **body**, re-run the query with `projection="body"`
+on `askl_run` — exact definition, no line-range guessing.  Use `askl_read`
+(file + line range) only for non-symbol regions.

@@ -13,6 +13,7 @@ Call graph
 - Who calls X (callers):      `{ "vfs_read" }`
 - Typed, less noisy callers:  `func { "vfs_read" }`
 - Indirect calls (fn pointer):`func { method "color_adjust" { func } }`  (calls that dispatch through a struct fn-pointer field to its implementations; `method` = `field`, a type filter)
+- Implementations of an ops field: `"reg_mr" { func }`  (a struct field's children are the functions assigned to it in initializers — ONE query lists every `.reg_mr = xxx_reg_mr` implementation across providers; no grep needed)
 - Two levels of callees:      `"vfs_read" { { } }`
 - Transitive callees:         `"vfs_read" unnest { func }`
 
@@ -30,4 +31,5 @@ Full-text (raw source bytes — for text that is NOT a symbol name; to find a sy
 Scope and hygiene
 - Restrict to a project:      `project("linux") "main" { }`
 - Exclude test/helpers:       `ignore("test") "main" { }`
-- Read raw lines:             use the `askl_read` tool with a `file` and line range.
+- Read a symbol's body:       re-run the query with `projection="body"` on `askl_run` (e.g. `func("vfs_read")`) — the exact definition, no line-range guessing.
+- Read raw lines:             use the `askl_read` tool with a `file` and line range — for non-symbol regions (headers, config, context around a hit) only.
