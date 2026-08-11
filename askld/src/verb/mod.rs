@@ -369,6 +369,9 @@ pub enum AnchorKind {
     Location,
     /// An explicit `layer { ... }` literal.
     LayerLiteral,
+    /// The explicit `all` verb: an always-true anchor.  The user opted
+    /// into a broad, budget-bounded enumeration.
+    All,
 }
 
 pub trait Verb: std::fmt::Debug + Send + Sync {

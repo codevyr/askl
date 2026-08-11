@@ -1284,16 +1284,18 @@ fn type_selector_function_query() {
 
 #[test]
 fn type_selector_function_filter_at_root() {
-    // func (no name) at root acts as filter - returns empty
-    // because there's no parent to derive from
-    const QUERY: &str = r#"func"#;
-    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
-
-    println!("{:#?}", res.nodes);
-    println!("{:#?}", res.edges);
-
-    // Filter at root level = empty
-    assert_eq!(res.nodes.as_vec().len(), 0);
+    // func (no name) at root is a pure constraint with nothing to derive
+    // from — the anchor-completeness check rejects it with a hint instead
+    // of the old silent empty result.
+    let res = run_query_err(TEST_INPUT_CONTAINMENT, r#"func"#);
+    let err = match res {
+        Err(e) => e,
+        Ok(_) => panic!("bare func at root must be an anchoring error"),
+    };
+    assert!(
+        err.to_string().contains("selects nothing"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
@@ -1708,16 +1710,16 @@ fn full_hierarchy_query() {
 
 #[test]
 fn file_type_selector_filter_at_root() {
-    // file (no name) at root acts as filter - returns empty
-    // because there's no parent to derive from
-    const QUERY: &str = r#"file"#;
-    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
-
-    println!("{:#?}", res.nodes);
-    println!("{:#?}", res.edges);
-
-    // Filter at root level = empty
-    assert_eq!(res.nodes.as_vec().len(), 0);
+    // file (no name) at root is a pure constraint — anchoring error.
+    let res = run_query_err(TEST_INPUT_CONTAINMENT, r#"file"#);
+    let err = match res {
+        Err(e) => e,
+        Ok(_) => panic!("bare file at root must be an anchoring error"),
+    };
+    assert!(
+        err.to_string().contains("selects nothing"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
@@ -1736,16 +1738,16 @@ fn file_type_selector_by_name() {
 
 #[test]
 fn directory_type_selector_filter_at_root() {
-    // dir (no name) at root acts as filter - returns empty
-    // because there's no parent to derive from
-    const QUERY: &str = r#"dir"#;
-    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
-
-    println!("{:#?}", res.nodes);
-    println!("{:#?}", res.edges);
-
-    // Filter at root level = empty
-    assert_eq!(res.nodes.as_vec().len(), 0);
+    // dir (no name) at root is a pure constraint — anchoring error.
+    let res = run_query_err(TEST_INPUT_CONTAINMENT, r#"dir"#);
+    let err = match res {
+        Err(e) => e,
+        Ok(_) => panic!("bare dir at root must be an anchoring error"),
+    };
+    assert!(
+        err.to_string().contains("selects nothing"),
+        "unexpected error: {err}"
+    );
 }
 
 // ============================================================================
@@ -1929,14 +1931,17 @@ fn generic_filter_type_func_with_name_and_select() {
 
 #[test]
 fn generic_filter_type_func_only() {
-    // filter("type", "func") — filter only, no selection (like bare func)
-    // At root level with no parent to derive from, filter-only returns empty
-    const QUERY: &str = r#"filter("type", "func")"#;
-    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
-
-    println!("{:#?}", res.nodes);
-    // Filter at root = empty (no selector to drive selection)
-    assert_eq!(res.nodes.as_vec().len(), 0);
+    // filter("type", "func") — a pure constraint with nothing to derive
+    // from at root level: anchoring error instead of silent empty.
+    let res = run_query_err(TEST_INPUT_CONTAINMENT, r#"filter("type", "func")"#);
+    let err = match res {
+        Err(e) => e,
+        Ok(_) => panic!("bare type filter at root must be an anchoring error"),
+    };
+    assert!(
+        err.to_string().contains("selects nothing"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
@@ -2020,12 +2025,11 @@ fn generic_filter_exact_name() {
 
 #[test]
 fn generic_filter_type_filter_alone_is_weak() {
-    // filter("type", "func") alone — no selector, UnitVerb added, statement is weak
-    const QUERY: &str = r#"filter("type", "func")"#;
-    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
-
-    println!("{:#?}", res.nodes);
-    assert_eq!(res.nodes.as_vec().len(), 0);
+    // filter("type", "func") alone — no selector, UnitVerb added.  The
+    // anchor-completeness check now rejects it outright (the weak-statement
+    // path is unreachable for constraint-only root statements).
+    let res = run_query_err(TEST_INPUT_CONTAINMENT, r#"filter("type", "func")"#);
+    assert!(res.is_err(), "constraint-only root statement must error");
 }
 
 #[test]
@@ -2044,15 +2048,16 @@ fn generic_filter_with_select_constrains_parent() {
 
 #[test]
 fn generic_select_alone_warns() {
-    // select alone (no name filter) — should return warning
-    const QUERY: &str = r#"select"#;
-    let res = run_query(TEST_INPUT_A, QUERY);
-
-    println!("{:#?}", res.warnings);
-    // Should have a warning about missing name constraint
+    // select alone (no name filter, no anchor) — anchoring error whose
+    // hint names `all` as the explicit enumerate-everything opt-in.
+    let res = run_query_err(TEST_INPUT_A, r#"select"#);
+    let err = match res {
+        Err(e) => e,
+        Ok(_) => panic!("bare select must be an anchoring error"),
+    };
     assert!(
-        res.warnings.len() >= 1,
-        "Expected warning about missing name filter for select"
+        err.to_string().contains("`all`"),
+        "the error must point at the `all` escape hatch: {err}"
     );
 }
 
@@ -7279,4 +7284,53 @@ fn combined_fallback_consults_eph_rows() {
             layered_nodes,
         );
     });
+}
+
+// ============================================================================
+// Anchor completeness (cost-based execution, F1)
+// ============================================================================
+
+#[test]
+fn anchor_error_nested_constraint_only_tree() {
+    // func { file } — a whole tree of pure constraints: anchoring error.
+    let res = run_query_err(TEST_INPUT_CONTAINMENT, r#"func { file }"#);
+    assert!(res.is_err(), "constraint-only tree must error");
+}
+
+#[test]
+fn anchor_error_is_per_component() {
+    // The first tree is anchored; the second, independent tree is not.
+    // Anchoring is judged per component — an anchor elsewhere in the query
+    // must not excuse an unanchored group.
+    let res = run_query_err(TEST_INPUT_A, r#""a"; func"#);
+    let err = match res {
+        Err(e) => e,
+        Ok(_) => panic!("unanchored second tree must error"),
+    };
+    assert!(
+        err.to_string().contains("selects nothing"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn all_verb_enumerates_and_composes_with_constraints() {
+    // `all` — the explicit enumerate-everything anchor.
+    let res = run_query(TEST_INPUT_A, r#"all"#);
+    assert!(!res.nodes.as_vec().is_empty(), "all must return symbols");
+
+    // Composes with type constraints: `func all` = all functions.
+    let res = run_query(TEST_INPUT_A, r#"func all"#);
+    let nodes = res.nodes.as_vec();
+    assert!(nodes.contains(&SymbolInstanceId::new(91)), "function a");
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(1001)),
+        "file instance excluded by the func constraint"
+    );
+}
+
+#[test]
+fn all_verb_rejects_arguments() {
+    let res = run_query_err(TEST_INPUT_A, r#"all("x")"#);
+    assert!(res.is_err(), "all takes no arguments");
 }
