@@ -188,6 +188,18 @@ impl Command {
         self.verbs.iter().any(|v| v.anchor_kind().is_some())
     }
 
+    /// True when this command carries a real constraint: a filter verb, or
+    /// a selector that constrains.  Unit verbs (and other non-constraining
+    /// selectors) are pure structure — a component made only of those is a
+    /// harmless degenerate query, not an anchoring error.  Preamble
+    /// statements end up unit-only by construction (their verbs are
+    /// redirected to the global context), so directives never demand.
+    pub fn demands_anchoring(&self) -> bool {
+        self.verbs.iter().any(|v| {
+            v.as_filter().is_ok() || (v.as_selector().is_ok() && !v.is_non_constraining_selector())
+        })
+    }
+
     /// Check if any verb suppresses the default type filter.
     pub fn has_suppress_default_type_filter(&self) -> bool {
         self.verbs

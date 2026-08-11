@@ -25,7 +25,7 @@ mod search;
 mod selectors;
 
 pub use self::filters::{DefaultTypeFilter, DirectOnlyFilter, GenericFilter};
-pub use self::selectors::{GenericSelector, NameSelector, UnitVerb};
+pub use self::selectors::{AllSelector, GenericSelector, NameSelector, UnitVerb};
 
 pub(super) use self::ephemeral::LayerVerb;
 use self::ephemeral::{EphemeralInstanceVerb, EphemeralRefVerb, EphemeralSymbolVerb};
@@ -94,6 +94,7 @@ pub(crate) fn build_generic_verb(
 
     let res = match ident_name.as_str() {
         GenericSelector::NAME => GenericSelector::new(verb_span, &positional, &named),
+        AllSelector::NAME => AllSelector::new(verb_span, &positional, &named),
         GenericFilter::NAME => GenericFilter::new(verb_span, &positional, &named),
         IgnoreVerb::NAME => IgnoreVerb::new(verb_span, &positional, &named),
         ProjectFilter::NAME => ProjectFilter::new(verb_span, &positional, &named),

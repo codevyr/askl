@@ -517,8 +517,17 @@ impl Verb for TypeSelector {
     }
 
     /// `func("foo")` anchors by name; bare `func` is a pure constraint.
+    /// Explicit `filter="false"` (selector mode without a name) is the
+    /// user opting into "all symbols of this type" — an `All` anchor,
+    /// budget-bounded like the `all` verb.
     fn anchor_kind(&self) -> Option<AnchorKind> {
-        self.name_pattern.as_ref().map(|_| AnchorKind::Name)
+        if self.name_pattern.is_some() {
+            Some(AnchorKind::Name)
+        } else if !self.filter_only {
+            Some(AnchorKind::All)
+        } else {
+            None
+        }
     }
 
     fn matched_token(&self) -> Option<String> {
@@ -799,5 +808,98 @@ impl Selector for GenericSelector {
 impl Display for GenericSelector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "GenericSelector")
+    }
+}
+
+/// `all` — the explicit budget-bounded enumeration anchor.  Emission-wise
+/// identical to `select` (everything the command's filters allow), but it
+/// ANCHORS the statement: the user explicitly opted into a broad result,
+/// so the anchor-completeness check passes and the output is bounded by
+/// the request's result budget with a truncation warning.
+#[derive(Debug)]
+pub struct AllSelector {
+    span: Span,
+}
+
+impl AllSelector {
+    pub const NAME: &'static str = "all";
+
+    pub fn new(
+        span: Span,
+        positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
+    ) -> Result<Arc<dyn Verb>> {
+        if !positional.is_empty() || !named.is_empty() {
+            bail!("all takes no arguments");
+        }
+        Ok(Arc::new(Self { span }))
+    }
+}
+
+impl Verb for AllSelector {
+    fn name(&self) -> &str {
+        AllSelector::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
+        Ok(self)
+    }
+
+    fn anchor_kind(&self) -> Option<AnchorKind> {
+        Some(AnchorKind::All)
+    }
+}
+
+#[async_trait(?Send)]
+impl Selector for AllSelector {
+    fn build_composite_filter(
+        &self,
+        command: &crate::command::Command,
+        eph: &EphContext,
+    ) -> Option<CompositeFilter> {
+        let parts: Vec<CompositeFilter> = command
+            .filters()
+            .filter_map(|f| f.get_composite_filter(eph))
+            .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(CompositeFilter::and(parts))
+        }
+    }
+
+    /// No constraint of its own — the widest possible branch.
+    fn own_predicate(&self, _eph: &EphContext) -> OwnPredicate {
+        OwnPredicate::Filter(None)
+    }
+
+    fn fusable(&self) -> bool {
+        true
+    }
+
+    async fn select_from_all_impl(
+        &self,
+        cfg: &ControlFlowGraph,
+        filter: CompositeFilter,
+        parent_scope: ScopeContext,
+        children_scope: ScopeContext,
+        eph: &EphContext,
+    ) -> Result<Option<Selection>> {
+        let selection = cfg
+            .index
+            .find_symbol(&filter, parent_scope, children_scope, eph)
+            .await?
+            .into_inner();
+        Ok(Some(selection))
+    }
+}
+
+impl Display for AllSelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AllSelector")
     }
 }

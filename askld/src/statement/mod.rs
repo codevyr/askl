@@ -22,6 +22,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 
+mod anchor;
 mod parse;
 mod scope_helpers;
 
@@ -669,6 +670,11 @@ impl Statement {
         // layer.  See `Self::build_dependency_graph` (sibling edges)
         // and `compute_roots` (pre-drain).
         self.build_dependency_graph(&labeled_statements)?;
+
+        // Every component (top-level tree ∪ label-connected trees) must
+        // carry at least one anchor — a component without one cannot
+        // produce anything, and used to return empty silently.
+        anchor::check_anchor_completeness(self)?;
 
         self.mark_weak_statements(&statements);
 

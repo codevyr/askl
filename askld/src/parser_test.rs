@@ -292,6 +292,9 @@ fn anchor_classification_table() {
     assert!(first_statement_anchored(
         r#"filter("compound_name", "a::b")"#
     ));
+    // Anchored: the explicit enumeration opt-ins.
+    assert!(first_statement_anchored("all"));
+    assert!(first_statement_anchored(r#"func(filter="false")"#));
     // Anchored: content and location predicates.
     assert!(first_statement_anchored(r#"search("needle")"#));
     assert!(first_statement_anchored(r#"loc("main.c", "1")"#));
