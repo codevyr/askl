@@ -869,21 +869,6 @@ impl Command {
         let mut warnings = phase1_warnings;
         let mut selections = vec![];
 
-        // Validate: each selector that requires a name constraint must have one
-        // command-wide (any filter verb on the command counts).
-        for selector in selectors.iter() {
-            if !selector.requires_name_constraint() {
-                continue;
-            }
-            let has_name = self.verbs.iter().any(|v| v.has_name_constraint());
-            if !has_name {
-                warnings.push(Diagnostic::note(
-                    Span::from_pest(selector.span(), self.span().input()),
-                    "select requires at least one name filter (filter(\"compound_name\", ...) or filter(\"exact_name\", ...))",
-                ));
-            }
-        }
-
         let to_pest = |e: anyhow::Error| {
             pest::error::Error::new_from_span(
                 pest::error::ErrorVariant::CustomError {

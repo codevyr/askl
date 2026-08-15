@@ -201,7 +201,7 @@ mod preamble;
 
 pub(crate) use self::generic::{name_filter, EphemeralOps, LabelResolutions};
 pub use self::generic::{
-    DefaultTypeFilter, DirectOnlyFilter, GenericFilter, GenericSelector, NameSelector, UnitVerb,
+    DefaultTypeFilter, GenericFilter, GenericSelector, NameSelector, UnitVerb,
 };
 
 use self::generic::{build_generic_verb, ForcedVerb};
@@ -319,7 +319,6 @@ pub enum DeriveMethod {
 pub enum VerbTag {
     ProjectFilter,
     NameSelector,
-    TypeFilter,
     GenericFilter(&'static str),
     GenericSelector,
     Unnest,
@@ -444,14 +443,6 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
         false
     }
 
-    fn requires_name_constraint(&self) -> bool {
-        false
-    }
-
-    fn has_name_constraint(&self) -> bool {
-        false
-    }
-
     /// The anchor this verb contributes, if any.  A statement carrying at
     /// least one anchored verb is *eligible to drive execution* (it denotes
     /// a set narrow enough to be worth materialising on its own); pure
@@ -467,7 +458,7 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
 /// Two filtering stages:
 /// - `get_composite_filter(eph)` — returns a `CompositeFilter` tree compiled
 ///   into SQL WHERE clauses.  Receives the request's `EphContext` so filters
-///   whose SQL needs the visibility chain (today: only `DirectOnlyFilter`)
+///   whose SQL needs the visibility chain (today: only the direct-only mixin)
 ///   can bind it; impls that don't need it ignore the parameter.
 /// - `filter_impl()` — optional in-memory post-filter on the returned `Selection`.
 ///   Use only when SQL cannot express the constraint (e.g., application-level logic).

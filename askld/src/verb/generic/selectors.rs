@@ -333,31 +333,29 @@ impl Display for UnitVerb {
 ///
 /// # Behavior Modes
 ///
-/// - **Filter mode** (`filter_only=true`): Returns `None` from `select_from_all`,
+/// - **Constraint mode** (no name): Returns `None` from `select_from_all`,
 ///   forcing derivation from parent. Much more efficient when used inside `has { }`.
 ///   At root level (no parent), returns empty results.
 ///
-/// - **Selector mode** (`filter_only=false`): Queries all symbols of this type
+/// - **Selector mode** (with a name): Queries the named symbols of this type
 ///   from the database. Works at any level including root.
 ///
 /// # Default Behavior
 ///
-/// The default is optimized for performance - querying all symbols of a type
-/// can be expensive, so filter mode is preferred when possible:
+/// Name presence decides the role — the old `filter=` plan toggle is a
+/// parse error; cost-based execution decides materialisation:
 ///
-/// - `func` (no args) -> filter mode
-/// - `func("foo")` (with name) -> selector mode
-/// - `func(filter="true")` -> explicitly filter mode
-/// - `func(filter="false")` -> explicitly selector mode (select all)
-/// - `func("foo", filter="true")` -> filter mode even with name
+/// - `func` (no name) -> pure constraint (derives from neighbours)
+/// - `func("foo")` (with name) -> selector (name-anchored)
+/// - `func select` -> enumerate all functions, budget-bounded
 ///
 /// # Examples
 ///
 /// ```text
-/// file("main.go") has { func }             // filter: derives functions from file
+/// file("main.go") has { func }             // constraint: derives functions from file
 /// func("main")                              // selector: queries for "main" function
-/// func(filter="false")                      // selector: queries ALL functions
-/// func                                      // filter: empty at root, derives in has
+/// func select                               // enumerates ALL functions (budget-bounded)
+/// func                                      // constraint: anchor error at root, derives in scopes
 /// ```
 #[derive(Debug)]
 pub(in crate::verb) struct TypeSelector {
@@ -366,7 +364,6 @@ pub(in crate::verb) struct TypeSelector {
     name_pattern: Option<NamePattern>,
     /// If true, don't select from all - only act as a filter when deriving from parent.
     /// This is much more efficient for queries like `file has { func }`.
-    filter_only: bool,
     /// If true, this filter is inherited (cloned) into derived child scopes.
     /// Used for namespace filters like `mod("test", filter="true", inherit="true")`.
     inherit: bool,
@@ -397,19 +394,17 @@ impl TypeSelector {
             .map(NamePattern::from_value)
             .transpose()?;
 
-        // Check for explicit filter argument (true or false)
-        let explicit_filter = match named.get("filter") {
-            Some(v) => Some(v.as_plain()?.eq_ignore_ascii_case("true")),
-            None => None,
-        };
-
-        // Default: filter mode if no name pattern, selector mode if name provided
-        // Can be overridden with explicit filter="true" or filter="false"
-        let filter_only = match explicit_filter {
-            Some(true) => true,             // filter="true" forces filter mode
-            Some(false) => false,           // filter="false" forces selector mode
-            None => name_pattern.is_none(), // default based on name presence
-        };
+        // `filter=` was a manual query-plan toggle; statements are
+        // cost-planned now, so it is gone rather than silently ignored
+        // (its namespace mode changed a query's MEANING, not just its plan).
+        if named.contains_key("filter") {
+            bail!(
+                "`filter=` was removed: statements are cost-planned. Use `select` to \
+                 make a statement binding (was filter=\"false\"); for namespace \
+                 scoping use composition (mod(\"x\") has {{ ... }}) or \
+                 filter(\"compound_name\", ...) (was mod(\"x\", filter=\"true\") name)"
+            );
+        }
 
         // Bare type selectors (no name) inherit by default so they propagate
         // the type filter into child scopes. Named type selectors don't inherit.
@@ -429,7 +424,6 @@ impl TypeSelector {
             span,
             symbol_type_id,
             name_pattern,
-            filter_only,
             inherit,
             leaf_anchored,
         }))
@@ -516,18 +510,10 @@ impl Verb for TypeSelector {
         self.span.as_pest_span()
     }
 
-    /// `func("foo")` anchors by name; bare `func` is a pure constraint.
-    /// Explicit `filter="false"` (selector mode without a name) is the
-    /// user opting into "all symbols of this type" — an `All` anchor,
-    /// budget-bounded like the `all` verb.
+    /// `func("foo")` anchors by name; bare `func` is a pure constraint
+    /// (`func select` is the enumerate-all opt-in).
     fn anchor_kind(&self) -> Option<AnchorKind> {
-        if self.name_pattern.is_some() {
-            Some(AnchorKind::Name)
-        } else if !self.filter_only {
-            Some(AnchorKind::All)
-        } else {
-            None
-        }
+        self.name_pattern.as_ref().map(|_| AnchorKind::Name)
     }
 
     fn matched_token(&self) -> Option<String> {
@@ -541,10 +527,8 @@ impl Verb for TypeSelector {
     }
 
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
-        if self.filter_only && self.name_pattern.is_none() && self.inherit {
-            Err(anyhow!(
-                "Filter-only inherited TypeSelector is not a selector"
-            ))
+        if self.name_pattern.is_none() && self.inherit {
+            Err(anyhow!("Inherited bare TypeSelector is not a selector"))
         } else {
             Ok(self)
         }
@@ -569,18 +553,13 @@ impl Verb for TypeSelector {
             span: self.span.clone(),
             symbol_type_id: self.symbol_type_id,
             name_pattern: self.name_pattern.clone(),
-            filter_only: self.filter_only,
             inherit: self.inherit,
             leaf_anchored: self.leaf_anchored,
         }))
     }
 
     fn get_tag(&self) -> Option<VerbTag> {
-        if self.filter_only && self.name_pattern.is_some() {
-            Some(VerbTag::TypeFilter)
-        } else {
-            None
-        }
+        None
     }
 
     fn add_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
@@ -614,9 +593,9 @@ impl Verb for TypeSelector {
     }
 
     fn is_non_constraining_selector(&self) -> bool {
-        // Filter mode without a name pattern: this verb provides no meaningful
-        // selection or constraint — it only filters by symbol type.
-        self.filter_only && self.name_pattern.is_none()
+        // No name pattern: this verb provides no meaningful selection or
+        // constraint of its own — it only filters by symbol type.
+        self.name_pattern.is_none()
     }
 
     fn suppresses_default_type_filter(&self) -> bool {
@@ -626,19 +605,11 @@ impl Verb for TypeSelector {
 
 impl Filter for TypeSelector {
     fn get_composite_filter(&self, _eph: &EphContext) -> Option<CompositeFilter> {
-        if self.filter_only && self.name_pattern.is_some() {
-            // When used as a namespace filter (e.g., mod("test", filter="true")),
-            // only constrain by name pattern, not by type.
-            let dot_is_separator = index::symbols::dot_is_separator(self.symbol_type_id);
-            match self.name_pattern.as_ref().unwrap() {
-                NamePattern::Exact(name) => Some(CompositeFilter::leaf(
-                    CompoundNameMixin::with_options(name, false, dot_is_separator),
-                )),
-                NamePattern::Glob(glob) => Some(glob.filter(dot_is_separator, true)),
-            }
-        } else {
-            Some(CompositeFilter::and(self.build_filter_parts()))
-        }
+        // Uniform: type ∧ name.  The old namespace mode (name-only predicate
+        // under `filter="true"`) went with the `filter=` toggle; namespace
+        // scoping is composition (`mod("x") has { … }`) or
+        // filter("compound_name", …) now.
+        Some(CompositeFilter::and(self.build_filter_parts()))
     }
 }
 
@@ -671,7 +642,7 @@ impl Selector for TypeSelector {
     }
 
     fn fusable(&self) -> bool {
-        !self.filter_only
+        self.name_pattern.is_some()
     }
 
     async fn select_from_all_impl(
@@ -682,7 +653,8 @@ impl Selector for TypeSelector {
         children_scope: ScopeContext,
         eph: &EphContext,
     ) -> Result<Option<Selection>> {
-        if self.filter_only {
+        if self.name_pattern.is_none() {
+            // Pure constraint: nothing to emit; the statement derives.
             return Ok(None);
         }
 
@@ -747,8 +719,12 @@ impl Verb for GenericSelector {
         Ok(self)
     }
 
-    fn requires_name_constraint(&self) -> bool {
-        true
+    /// `select` is the bindness verb: it declares the tree binding ("I
+    /// want instances"), makes its own command strong, and carries the All
+    /// anchor — an unanchored command with `select` enumerates everything
+    /// its filters allow, budget-bounded with a truncation warning.
+    fn anchor_kind(&self) -> Option<AnchorKind> {
+        Some(AnchorKind::All)
     }
 
     fn get_tag(&self) -> Option<VerbTag> {
@@ -808,98 +784,5 @@ impl Selector for GenericSelector {
 impl Display for GenericSelector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "GenericSelector")
-    }
-}
-
-/// `all` — the explicit budget-bounded enumeration anchor.  Emission-wise
-/// identical to `select` (everything the command's filters allow), but it
-/// ANCHORS the statement: the user explicitly opted into a broad result,
-/// so the anchor-completeness check passes and the output is bounded by
-/// the request's result budget with a truncation warning.
-#[derive(Debug)]
-pub struct AllSelector {
-    span: Span,
-}
-
-impl AllSelector {
-    pub const NAME: &'static str = "all";
-
-    pub fn new(
-        span: Span,
-        positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
-        if !positional.is_empty() || !named.is_empty() {
-            bail!("all takes no arguments");
-        }
-        Ok(Arc::new(Self { span }))
-    }
-}
-
-impl Verb for AllSelector {
-    fn name(&self) -> &str {
-        AllSelector::NAME
-    }
-
-    fn span(&self) -> pest::Span<'_> {
-        self.span.as_pest_span()
-    }
-
-    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
-        Ok(self)
-    }
-
-    fn anchor_kind(&self) -> Option<AnchorKind> {
-        Some(AnchorKind::All)
-    }
-}
-
-#[async_trait(?Send)]
-impl Selector for AllSelector {
-    fn build_composite_filter(
-        &self,
-        command: &crate::command::Command,
-        eph: &EphContext,
-    ) -> Option<CompositeFilter> {
-        let parts: Vec<CompositeFilter> = command
-            .filters()
-            .filter_map(|f| f.get_composite_filter(eph))
-            .collect();
-        if parts.is_empty() {
-            None
-        } else {
-            Some(CompositeFilter::and(parts))
-        }
-    }
-
-    /// No constraint of its own — the widest possible branch.
-    fn own_predicate(&self, _eph: &EphContext) -> OwnPredicate {
-        OwnPredicate::Filter(None)
-    }
-
-    fn fusable(&self) -> bool {
-        true
-    }
-
-    async fn select_from_all_impl(
-        &self,
-        cfg: &ControlFlowGraph,
-        filter: CompositeFilter,
-        parent_scope: ScopeContext,
-        children_scope: ScopeContext,
-        eph: &EphContext,
-    ) -> Result<Option<Selection>> {
-        let selection = cfg
-            .index
-            .find_symbol(&filter, parent_scope, children_scope, eph)
-            .await?
-            .into_inner();
-        Ok(Some(selection))
-    }
-}
-
-impl Display for AllSelector {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "AllSelector")
     }
 }

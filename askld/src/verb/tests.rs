@@ -202,11 +202,11 @@ fn test_glob_ignore_filter() {
 fn test_glob_filter_mode_namespace() {
     // Filter-mode type selectors apply glob semantics too: the compound glob
     // g"sort.*" constrains the selection to symbols under sort.
-    let query = r#"mod(g"sort.*", filter="true") "IsSorted""#;
+    let query = r#"filter("compound_name", g"sort.*") "IsSorted""#;
     let res = run_query("verb_test.sql", query);
     assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(95)]);
 
-    let query = r#"mod(g"nomatch.*", filter="true") "IsSorted""#;
+    let query = r#"filter("compound_name", g"nomatch.*") "IsSorted""#;
     let res = run_query("verb_test.sql", query);
     assert_eq!(res.nodes.as_vec(), vec![]);
 }

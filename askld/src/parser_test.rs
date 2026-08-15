@@ -292,16 +292,15 @@ fn anchor_classification_table() {
     assert!(first_statement_anchored(
         r#"filter("compound_name", "a::b")"#
     ));
-    // Anchored: the explicit enumeration opt-ins.
-    assert!(first_statement_anchored("all"));
-    assert!(first_statement_anchored(r#"func(filter="false")"#));
+    // Anchored: `select`, the bindness verb, carries the All anchor.
+    assert!(first_statement_anchored("select"));
+    assert!(first_statement_anchored("func select"));
     // Anchored: content and location predicates.
     assert!(first_statement_anchored(r#"search("needle")"#));
     assert!(first_statement_anchored(r#"loc("main.c", "1")"#));
     // Pure constraints: type predicates, project, bare select.
     assert!(!first_statement_anchored("func"));
     assert!(!first_statement_anchored(r#"project("linux")"#));
-    assert!(!first_statement_anchored("select"));
     assert!(!first_statement_anchored(r#"func project("linux")"#));
     assert!(!first_statement_anchored(r#"filter("type", "func")"#));
     // An anchor anywhere in the verb bag anchors the whole statement.
