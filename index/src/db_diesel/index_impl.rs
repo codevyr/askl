@@ -496,9 +496,27 @@ pub const SCOPE_FUSION_MAX_RANGES: i64 = 1024;
 
 fn build_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ParentsQuery<'static> {
     use crate::schema_diesel::*;
+    use diesel::sql_types::Bool;
 
     let parent_decls = PARENT_DECLS_ALIAS;
     let parent_symbols = PARENT_SYMBOLS_ALIAS;
+
+    // Redundant by the joins (sr.to_symbol = symbols.id = si.symbol), but
+    // it hands the planner the cheap probe route: without it the 5-way
+    // join hash-joins a full symbol_refs scan against the source side
+    // (measured 933ms for 0 rows from ~900 sources); with it a nested
+    // loop drives symbol_refs_to_symbol_idx from the source symbols
+    // (10ms).  Semantically a no-op in every scope mode.
+    let to_symbol_probe = EphSqlFragment::<Bool>::builder()
+        .sql(
+            "symbol_refs.to_symbol IN (\
+                SELECT si2.symbol FROM index.symbol_instances si2 WHERE ",
+        )
+        .eph_visibility("si2.layer", vis)
+        .sql(" AND si2.id = ANY(")
+        .bind(source_ids.clone())
+        .sql("))")
+        .build();
 
     symbol_refs::dsl::symbol_refs
         .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::dsl::id)))
@@ -522,6 +540,7 @@ fn build_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ParentsQuer
                 .contains_range(symbol_refs::dsl::from_offset_range),
         )
         .filter(symbol_instances::dsl::id.eq_any(source_ids))
+        .filter(to_symbol_probe)
         // Ephemeral visibility — canonical and aliased tables, rendered by
         // the partition token (records columns for the eph-branch guard).
         .filter(vis.pred("symbol_refs.layer"))
@@ -2052,6 +2071,22 @@ impl Index {
             }
         };
 
+        // Scope the containment families by an ids-only neighbour scope —
+        // the probe-resolved / computed-selection case.  This is what keeps
+        // a broad container's has-family from materialising its entire
+        // containment neighbourhood (measured 214k rows / 142MB) when the
+        // neighbour is already known to a small id set.  Predicate scopes
+        // and Skip/Unscoped keep the unconstrained display behaviour:
+        // Skip's refs-deferral contract does not extend to containment.
+        let has_parent_scope_ids: Option<Vec<i64>> = match &parent_scope {
+            ScopeContext::Scope { ids, filter: None } => Some(ids.clone()),
+            _ => None,
+        };
+        let has_children_scope_ids: Option<Vec<i64>> = match &children_scope {
+            ScopeContext::Scope { ids, filter: None } => Some(ids.clone()),
+            _ => None,
+        };
+
         let has_parents = {
             let _has_parents_span: tracing::span::EnteredSpan = tracing::info_span!(
                 "select_has_parents",
@@ -2066,6 +2101,14 @@ impl Index {
                     let mut q = build_has_parents_query(current_instance_ids.clone(), vis);
                     if let Some(expr) = filter.compose_has_parents(vis) {
                         q = q.filter(expr);
+                    }
+                    if let Some(scope_ids) = &has_parent_scope_ids {
+                        let container_instance = CONTAINER_INSTANCE_ALIAS;
+                        q = q.filter(
+                            container_instance
+                                .field(symbol_instances::dsl::id)
+                                .eq_any(scope_ids.clone()),
+                        );
                     }
                     q.filter(vis.guard())
                 })
@@ -2091,6 +2134,17 @@ impl Index {
             let t0 = std::time::Instant::now();
 
             let has_children_filtered = filter.constrains_has_children();
+            let contained_scope = |q: super::mixins::HasChildrenQuery<'static>| {
+                let contained_instance = super::mixins::CONTAINED_INSTANCE_ALIAS;
+                match &has_children_scope_ids {
+                    Some(scope_ids) => q.filter(
+                        contained_instance
+                            .field(symbol_instances::dsl::id)
+                            .eq_any(scope_ids.clone()),
+                    ),
+                    None => q,
+                }
+            };
             let rows: Vec<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)> =
                 if has_children_filtered {
                     self.cached_load_partitioned(eph, chain_dependent, |vis| {
@@ -2098,7 +2152,7 @@ impl Index {
                         if let Some(expr) = filter.compose_has_children(vis) {
                             q = q.filter(expr);
                         }
-                        q.filter(vis.guard())
+                        contained_scope(q).filter(vis.guard())
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?
@@ -2106,7 +2160,8 @@ impl Index {
                     // Fast path: CTE-materialised source set (planner-hint fix).
                     self.cached_load_partitioned(eph, chain_dependent, |vis| CteHasChildren {
                         cte_body: build_has_children_cte_body(current_instance_ids.clone(), vis),
-                        outer: build_has_children_query_against_cte(vis).filter(vis.guard()),
+                        outer: contained_scope(build_has_children_query_against_cte(vis))
+                            .filter(vis.guard()),
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?
@@ -2235,6 +2290,13 @@ impl Index {
         filter: &CompositeFilter,
         eph: &EphContext,
     ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
+        // Canonical binds: callers pass selection-order ids; the SQL cache
+        // keys on rendered binds, so sort+dedup for run-stable keys.
+        let mut canonical: Vec<i64> = parent_ids.to_vec();
+        canonical.sort_unstable();
+        canonical.dedup();
+        let parent_ids: &[i64] = &canonical;
+
         let visible_ids = eph.visible_ids();
         let eph_ids: &[i64] = &visible_ids;
         let chain_dependent = filter.is_chain_dependent();
@@ -2360,6 +2422,13 @@ impl Index {
         filter: &CompositeFilter,
         eph: &EphContext,
     ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
+        // Canonical binds: callers pass selection-order ids; the SQL cache
+        // keys on rendered binds, so sort+dedup for run-stable keys.
+        let mut canonical: Vec<i64> = child_ids.to_vec();
+        canonical.sort_unstable();
+        canonical.dedup();
+        let child_ids: &[i64] = &canonical;
+
         let visible_ids = eph.visible_ids();
         let eph_ids: &[i64] = &visible_ids;
         let chain_dependent = filter.is_chain_dependent();

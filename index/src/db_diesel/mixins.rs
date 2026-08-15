@@ -1250,9 +1250,15 @@ pub struct SymbolInstanceIdMixin {
 
 impl SymbolInstanceIdMixin {
     pub fn new(ids: &[SymbolInstanceId]) -> Self {
-        Self {
-            instance_ids: ids.iter().map(|id| Into::<i64>::into(*id)).collect(),
-        }
+        // Canonical binds (sorted, deduped): id lists arrive in selection
+        // order from the worklist paths, which varies run to run — and the
+        // SQL cache keys on rendered binds, so a non-canonical list turns
+        // every re-read into a cache miss.  IN-list order is semantically
+        // irrelevant; canonicalising here covers every caller.
+        let mut instance_ids: Vec<i64> = ids.iter().map(|id| Into::<i64>::into(*id)).collect();
+        instance_ids.sort_unstable();
+        instance_ids.dedup();
+        Self { instance_ids }
     }
 }
 
