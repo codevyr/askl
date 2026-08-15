@@ -164,6 +164,7 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
         cfg: ControlFlowGraph::from_symbols(index_query),
         query_timeout: std::time::Duration::from_secs(query_timeout_secs),
         max_result_symbols: serve_args.max_result_symbols,
+        probe_cap: serve_args.probe_cap,
     });
 
     // Background GC: periodically purge ephemeral layers idle past the TTL.

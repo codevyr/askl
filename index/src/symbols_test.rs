@@ -335,7 +335,13 @@ async fn test_probe_instance_ids() -> anyhow::Result<()> {
             &eph,
         )
         .await?;
-    assert_eq!(outcome, ProbeOutcome::Resolved(vec![91, 942, 1001, 1003]));
+    // Symbol-level: the directory symbol is evidenced via instance 1003,
+    // so its other instance (1002) is kept too — mirroring the worklist's
+    // per-symbol constrain.
+    assert_eq!(
+        outcome,
+        ProbeOutcome::Resolved(vec![91, 942, 1001, 1002, 1003])
+    );
 
     // RefsChildrenOf: callees referenced from within main(942).
     let outcome = index
@@ -358,7 +364,7 @@ async fn test_probe_instance_ids() -> anyhow::Result<()> {
             &eph,
         )
         .await?;
-    assert_eq!(outcome, ProbeOutcome::Resolved(vec![1001, 1003]));
+    assert_eq!(outcome, ProbeOutcome::Resolved(vec![1001, 1002, 1003]));
 
     // HasChildrenOf: rows contained in file 1001 — the eight function
     // instances (directory 1003 is excluded by the level rule).

@@ -1,7 +1,8 @@
 use crate::test_util::{
-    format_edges, get_shared_db_url, get_shared_index, run_query, run_query_err, run_query_traced,
-    run_query_with_budget, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES,
-    TEST_INPUT_NESTED_FUNC, TEST_INPUT_SEARCH, TEST_INPUT_TREE_BROWSER, VERB_TEST,
+    format_edges, get_shared_db_url, get_shared_index, run_query, run_query_err,
+    run_query_probe_traced, run_query_traced, run_query_with_budget, TEST_INPUT_A, TEST_INPUT_B,
+    TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC, TEST_INPUT_SEARCH,
+    TEST_INPUT_TREE_BROWSER, VERB_TEST,
 };
 use index::symbols::{SymbolId, SymbolInstanceId};
 use sha2::Digest;
@@ -7333,4 +7334,145 @@ fn all_verb_enumerates_and_composes_with_constraints() {
 fn all_verb_rejects_arguments() {
     let res = run_query_err(TEST_INPUT_A, r#"all("x")"#);
     assert!(res.is_err(), "all takes no arguments");
+}
+
+// ============================================================================
+// Cardinality probes, wave 0 (cost-based execution, F2)
+// ============================================================================
+
+#[test]
+fn probe_resolves_and_matches_predicate_emission() {
+    // Wave 0 probes `"a"`; the probe resolves and the read becomes an
+    // id-driven fetch.  With cap=0 every probe is capped and the read
+    // stays predicate-driven.  Both paths must produce identical output.
+    const QUERY: &str = r#""a" {}"#;
+    let (probed, acts) = run_query_probe_traced(TEST_INPUT_A, QUERY, 1000);
+    assert_eq!(acts.len(), 1, "one anchored fusable statement probes");
+    assert_eq!(acts[0].resolved, Some(1), "\"a\" is exactly one instance");
+
+    let (fallback, acts0) = run_query_probe_traced(TEST_INPUT_A, QUERY, 0);
+    assert!(
+        acts0.iter().all(|a| a.resolved.is_none()),
+        "cap=0 must cap every probe, got {:?}",
+        acts0,
+    );
+    assert_eq!(probed.nodes.as_vec(), fallback.nodes.as_vec());
+    assert_eq!(format_edges(probed.edges), format_edges(fallback.edges));
+}
+
+#[test]
+fn probe_covers_fused_multi_selector_statement() {
+    // The fused statement probes ONCE for both selectors.
+    let (res, acts) = run_query_probe_traced(TEST_INPUT_A, r#""b" "a""#, 1000);
+    assert_eq!(acts.len(), 1, "one probe per statement, not per selector");
+    assert_eq!(acts[0].resolved, Some(2), "two instances across the OR");
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(92)]
+    );
+}
+
+#[test]
+fn probe_skips_layer_and_derived_statements() {
+    // Layer-backed statements keep their read path unprobed in wave 0…
+    let (_res, acts) = run_query_probe_traced(TEST_INPUT_SEARCH, r#"search("foo")"#, 1000);
+    assert!(acts.is_empty(), "search must not probe, got {:?}", acts);
+
+    // …and derive-path statements (`func { }`) never probe in WAVE 0 —
+    // only the anchored child does.  (They may refine in later rounds
+    // once the child resolves.)
+    let (_res, acts) = run_query_probe_traced(TEST_INPUT_A, r#"func { "a" }"#, 1000);
+    let wave0: Vec<_> = acts.iter().filter(|a| a.round == 0).collect();
+    assert_eq!(wave0.len(), 1, "only the anchored child probes: {:?}", acts);
+    assert_eq!(wave0[0].query_statement.trim(), r#""a""#);
+}
+
+// ============================================================================
+// Semi-join refinement rounds (cost-based execution, F3)
+// ============================================================================
+
+#[test]
+fn refinement_resolves_capped_statement() {
+    // cap=5: `all` (11 instances) caps in wave 0; `"b"` resolves.  Round 1
+    // re-probes the outer statement under the child's refs+has role
+    // branches (the `{ }` default relationship counts either edge kind)
+    // and unions the branch results: the caller SYMBOLS of b (a, main,
+    // file, directory — with the directory's second instance riding along,
+    // symbol-level like the worklist's constrain) plus b's containers.
+    const QUERY: &str = r#"all { "b" }"#;
+    let (refined, acts) = run_query_probe_traced(TEST_INPUT_A, QUERY, 5);
+
+    let outer: Vec<_> = acts
+        .iter()
+        .filter(|a| a.query_statement.starts_with("all"))
+        .collect();
+    assert_eq!(outer.len(), 2, "wave-0 cap + one refinement: {:?}", acts);
+    assert_eq!(outer[0].resolved, None, "wave 0 must cap at 5");
+    assert_eq!(outer[0].round, 0);
+    assert_eq!(
+        outer[1].resolved,
+        Some(5),
+        "callers of b at symbol level: a, main, file, dir (both instances)"
+    );
+    assert_eq!(outer[1].round, 1);
+    let child = acts
+        .iter()
+        .find(|a| a.query_statement.trim() == r#""b""#)
+        .expect("child must probe in wave 0");
+    assert_eq!(child.resolved, Some(1));
+
+    // Identical output whether the statement resolves in wave 0 (cap
+    // 1000), via refinement (cap 4), or never (cap 0, predicate path).
+    let (wave0, _) = run_query_probe_traced(TEST_INPUT_A, QUERY, 1000);
+    let (unprobed, _) = run_query_probe_traced(TEST_INPUT_A, QUERY, 0);
+    assert_eq!(refined.nodes.as_vec(), wave0.nodes.as_vec());
+    assert_eq!(refined.nodes.as_vec(), unprobed.nodes.as_vec());
+    assert_eq!(
+        format_edges(refined.edges),
+        format_edges(unprobed.edges),
+        "edges must match the unprobed path"
+    );
+}
+
+#[test]
+fn refinement_cascades_through_unanchored_middle() {
+    // The worst-case shape in miniature: a broad anchored container, an
+    // unanchored pure-constraint middle, a selective leaf.  cap=4:
+    //   wave 0: `all` caps; `"g"` resolves.
+    //   round 1: the middle `func { }` — never wave-0 probed (unanchored,
+    //            and its inherited bare type selector is not even a
+    //            selector) — re-probes its filter conjunction under the
+    //            leaf's refs/has role branches and resolves to f.
+    //   round 2: the outer re-probes under the middle's roles and resolves.
+    // The middle's resolved ids also feed the outer's children scope in
+    // place of the bare `func` condition the index would otherwise have
+    // to materialise in full.
+    const QUERY: &str = r#"all { func { "g" } }"#;
+    let (refined, acts) = run_query_probe_traced(TEST_INPUT_A, QUERY, 4);
+
+    assert_eq!(acts.len(), 4, "no wasted probes: {:?}", acts);
+    let middle = acts
+        .iter()
+        .find(|a| a.query_statement.starts_with("func"))
+        .expect("middle statement must refine");
+    assert_eq!(middle.round, 1);
+    assert_eq!(middle.resolved, Some(1), "callers of g = f alone");
+    let outer_refined = acts
+        .iter()
+        .find(|a| a.query_statement.starts_with("all") && a.round == 2)
+        .expect("outer must resolve in round 2, after the middle");
+    assert_eq!(
+        outer_refined.resolved,
+        Some(4),
+        "caller symbols of f (d, file, dir) ∪ f's containers"
+    );
+
+    // Identical across probe regimes.
+    let (unprobed, _) = run_query_probe_traced(TEST_INPUT_A, QUERY, 0);
+    assert_eq!(refined.nodes.as_vec(), unprobed.nodes.as_vec());
+    assert_eq!(format_edges(refined.edges), format_edges(unprobed.edges));
+    assert!(
+        refined.nodes.as_vec().contains(&SymbolInstanceId::new(96)),
+        "f (caller of g) must be in the result"
+    );
 }

@@ -174,6 +174,57 @@ fn refs_parents_of_expr(
         .build()
 }
 
+/// SYMBOL-level REFS semi-join for probes: rows whose SYMBOL is called
+/// from within any of the given parent instances.  Symbol-level because the
+/// worklist's constrain accepts evidence per symbol — every instance of an
+/// evidenced symbol survives, so probe roles must not drop co-instances.
+fn refs_children_of_symbols_expr(
+    parent_ids: Vec<i64>,
+    vis: &EphVisibility,
+) -> EphSqlFragment<diesel::sql_types::Bool> {
+    EphSqlFragment::<diesel::sql_types::Bool>::builder()
+        .sql(
+            "symbols.id IN (\
+                SELECT sr.to_symbol FROM index.symbol_refs sr \
+                JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
+                  AND pd.offset_range @> sr.from_offset_range \
+                WHERE ",
+        )
+        .eph_visibility("sr.layer", vis)
+        .sql(" AND ")
+        .eph_visibility("pd.layer", vis)
+        .sql(" AND pd.id = ANY(")
+        .bind(parent_ids)
+        .sql("))")
+        .build()
+}
+
+/// SYMBOL-level REFS semi-join for probes: rows whose SYMBOL encloses a
+/// call site of any of the given child instances' symbols.
+fn refs_parents_of_symbols_expr(
+    child_ids: Vec<i64>,
+    vis: &EphVisibility,
+) -> EphSqlFragment<diesel::sql_types::Bool> {
+    EphSqlFragment::<diesel::sql_types::Bool>::builder()
+        .sql(
+            "symbols.id IN (\
+                SELECT pd.symbol FROM index.symbol_refs sr \
+                JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
+                  AND pd.offset_range @> sr.from_offset_range \
+                JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
+                WHERE ",
+        )
+        .eph_visibility("sr.layer", vis)
+        .sql(" AND ")
+        .eph_visibility("si.layer", vis)
+        .sql(" AND ")
+        .eph_visibility("pd.layer", vis)
+        .sql(" AND si.id = ANY(")
+        .bind(child_ids)
+        .sql("))")
+        .build()
+}
+
 /// Resolve a CompositeFilter to instance IDs by running a CurrentQuery.
 ///
 /// Runs in Combined (legacy-visibility) mode through the SQL cache: the
@@ -284,10 +335,10 @@ impl Index {
         for role in roles {
             match role {
                 ProbeRole::RefsChildrenOf(ids) => {
-                    query = query.filter(refs_children_of_expr(ids, &vis));
+                    query = query.filter(refs_children_of_symbols_expr(ids, &vis));
                 }
                 ProbeRole::RefsParentsOf(ids) => {
-                    query = query.filter(refs_parents_of_expr(ids, &vis));
+                    query = query.filter(refs_parents_of_symbols_expr(ids, &vis));
                 }
                 ProbeRole::HasChildrenOf(ids) => {
                     anyhow::ensure!(
@@ -297,7 +348,7 @@ impl Index {
                     );
                     let name = PROBE_ROLE_CTE_NAMES[cte_bodies.len()];
                     query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&format!(
-                        "symbol_instances.id IN (SELECT id FROM {name})"
+                        "symbols.id IN (SELECT symbol FROM {name})"
                     )));
                     cte_bodies.push(has_role_cte_body(ids, true, &vis));
                 }
@@ -309,7 +360,7 @@ impl Index {
                     );
                     let name = PROBE_ROLE_CTE_NAMES[cte_bodies.len()];
                     query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&format!(
-                        "symbol_instances.id IN (SELECT id FROM {name})"
+                        "symbols.id IN (SELECT symbol FROM {name})"
                     )));
                     cte_bodies.push(has_role_cte_body(ids, false, &vis));
                 }
@@ -654,21 +705,22 @@ fn has_role_cte_body(
         .filter(vis.subquery_pred("container_instances.layer"));
 
     if seed_container {
-        // HasChildrenOf: containers are bound, contained ids come out.
+        // HasChildrenOf: containers are bound, contained SYMBOLS come out
+        // (symbol-level, mirroring the worklist's per-symbol evidence).
         Box::new(
             base.filter(
                 container_instance
                     .field(symbol_instances::dsl::id)
                     .eq_any(ids),
             )
-            .select(symbol_instances::dsl::id)
+            .select(symbol_instances::dsl::symbol)
             .into_boxed::<Pg>(),
         )
     } else {
-        // HasParentsOf: contained rows are bound, container ids come out.
+        // HasParentsOf: contained rows are bound, container SYMBOLS come out.
         Box::new(
             base.filter(symbol_instances::dsl::id.eq_any(ids))
-                .select(container_instance.field(symbol_instances::dsl::id))
+                .select(container_instance.field(symbol_instances::dsl::symbol))
                 .into_boxed::<Pg>(),
         )
     }
@@ -678,13 +730,17 @@ fn has_role_cte_body(
 /// ids into (see [`Index::probe_instance_ids`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeRole {
-    /// Probe rows must be REFS children (callees) of these instances.
+    /// Probe rows' SYMBOLS must be REFS children (callees) of these
+    /// instances.  All roles match at SYMBOL level, mirroring the
+    /// worklist's per-symbol evidence: every instance of a matched symbol
+    /// is kept, so a probe-resolved set never drops a co-instance the
+    /// constrain step would have retained.
     RefsChildrenOf(Vec<i64>),
-    /// Probe rows must be REFS parents (callers) of these instances.
+    /// Probe rows' symbols must be REFS parents (callers) of these instances.
     RefsParentsOf(Vec<i64>),
-    /// Probe rows must be contained in these instances.
+    /// Probe rows' symbols must be contained in these instances.
     HasChildrenOf(Vec<i64>),
-    /// Probe rows must contain these instances.
+    /// Probe rows' symbols must contain these instances.
     HasParentsOf(Vec<i64>),
 }
 

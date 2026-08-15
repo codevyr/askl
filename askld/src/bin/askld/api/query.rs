@@ -179,6 +179,7 @@ pub async fn build_result_graph(
         QueryError::Storage("Failed to resolve root layers".to_string())
     })?;
     let mut ctx = ExecutionContext::new(roots);
+    ctx.probe_cap = data.probe_cap;
     // Push the result cap into the leaf SQL (the budget facet of fusion): the
     // renderer below still applies the exact per-symbol cap, but bounding the
     // leaves stops bare selectors from materialising far more rows than the cap

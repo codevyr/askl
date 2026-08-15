@@ -114,6 +114,33 @@ impl NotificationResult {
     }
 }
 
+/// Fold a statement's filter conjunction with its fusable selectors' OR
+/// branches into the single predicate their shared emission (and its
+/// cardinality probe) runs: `AND(filters) ∧ OR(own predicates)`.
+pub(crate) fn fuse_predicate(
+    mut filter_parts: Vec<CompositeFilter>,
+    selectors: &[&dyn Selector],
+    eph: &EphContext,
+) -> CompositeFilter {
+    let mut or_parts: Vec<CompositeFilter> = Vec::new();
+    let mut unconstrained = false;
+    for sel in selectors {
+        match sel.own_predicate(eph) {
+            OwnPredicate::Filter(Some(f)) => or_parts.push(f),
+            // A branch with no extra constraint widens the OR to the
+            // whole filter conjunction.
+            OwnPredicate::Filter(None) => unconstrained = true,
+            OwnPredicate::Opaque => {
+                unreachable!("fusable selector must expose an own predicate")
+            }
+        }
+    }
+    if !unconstrained && !or_parts.is_empty() {
+        filter_parts.push(CompositeFilter::or(or_parts));
+    }
+    CompositeFilter::and(filter_parts)
+}
+
 #[derive(Debug, Default)]
 pub struct Command {
     verbs: Vec<Arc<dyn Verb>>,
@@ -198,6 +225,41 @@ impl Command {
         self.verbs.iter().any(|v| {
             v.as_filter().is_ok() || (v.as_selector().is_ok() && !v.is_non_constraining_selector())
         })
+    }
+
+    /// The bare filter conjunction of this command, when non-empty — the
+    /// predicate the derive path applies for unit/filter-only statements
+    /// (`func { }`), used as their refinement-probe predicate.
+    pub fn constraint_predicate(&self, eph: &EphContext) -> Option<CompositeFilter> {
+        let parts: Vec<CompositeFilter> = self
+            .filters()
+            .filter_map(|f| f.get_composite_filter(eph))
+            .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(CompositeFilter::and(parts))
+        }
+    }
+
+    /// The predicate a cardinality probe runs for this statement, when one
+    /// exists: the statement must be anchored and every selector fusable
+    /// (its whole emission is one `find_symbol` over this predicate).
+    /// Layer-backed, forced, unit, and label statements return `None` and
+    /// keep their own read paths unprobed.
+    pub fn probe_predicate(&self, eph: &EphContext) -> Option<CompositeFilter> {
+        if !self.is_anchored() {
+            return None;
+        }
+        let selectors: Vec<&dyn Selector> = self.selectors().collect();
+        if selectors.is_empty() || !selectors.iter().all(|s| s.fusable()) {
+            return None;
+        }
+        let filter_parts: Vec<CompositeFilter> = self
+            .filters()
+            .filter_map(|f| f.get_composite_filter(eph))
+            .collect();
+        Some(fuse_predicate(filter_parts, &selectors, eph))
     }
 
     /// Check if any verb suppresses the default type filter.
@@ -791,6 +853,7 @@ impl Command {
         eph: &EphContext,
         layer_ids: &[i64],
         phase1_warnings: Vec<Diagnostic>,
+        probe_ids: Option<Vec<i64>>,
     ) -> Result<ComputeResult, pest::error::Error<Rule>> {
         let selectors: Vec<&dyn Selector> = self.selectors().collect();
 
@@ -954,25 +1017,23 @@ impl Command {
         // the shared selection is stored under every participating selector
         // (`Selection::extend` is idempotent, so the statement-level OR fold
         // dedups the shared rows).
+        //
+        // A wave-0 probe that RESOLVED this statement already holds its
+        // exact current-instance set — the id leaf is ANDed in, driving the
+        // current family through the pkey.  The predicate stays: filter
+        // leaves may also constrain the neighbourhood families
+        // (compose_parents/compose_children), and those contributions must
+        // be byte-identical to the unprobed emission.
         if !fused.is_empty() {
-            let mut or_parts: Vec<CompositeFilter> = Vec::new();
-            let mut unconstrained = false;
-            for sel in &fused {
-                match sel.own_predicate(eph) {
-                    OwnPredicate::Filter(Some(f)) => or_parts.push(f),
-                    // A branch with no extra constraint widens the OR to the
-                    // whole filter conjunction.
-                    OwnPredicate::Filter(None) => unconstrained = true,
-                    OwnPredicate::Opaque => {
-                        unreachable!("fusable selector must expose an own predicate")
-                    }
-                }
+            let mut filter = fuse_predicate(filter_parts.clone(), &fused, eph);
+            if let Some(ids) = &probe_ids {
+                let ids: Vec<SymbolInstanceId> =
+                    ids.iter().map(|id| SymbolInstanceId::new(*id)).collect();
+                filter = CompositeFilter::and(vec![
+                    filter,
+                    CompositeFilter::leaf(SymbolInstanceIdMixin::new(&ids)),
+                ]);
             }
-            let mut parts = filter_parts.clone();
-            if !unconstrained && !or_parts.is_empty() {
-                parts.push(CompositeFilter::or(or_parts));
-            }
-            let filter = CompositeFilter::and(parts);
             let _fused_span = tracing::debug_span!("select_fused", n = fused.len()).entered();
             let mut selection = cfg
                 .index
