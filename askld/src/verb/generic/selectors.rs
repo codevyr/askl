@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::{Arc, OnceLock};
 
-use super::super::{DeriveMethod, Filter, Selector, Verb, VerbTag};
+use super::super::{AnchorKind, DeriveMethod, Filter, OwnPredicate, Selector, Verb, VerbTag};
 use super::name_filter;
 
 #[derive(Debug)]
@@ -57,6 +57,10 @@ impl Verb for NameSelector {
         Ok(self)
     }
 
+    fn anchor_kind(&self) -> Option<AnchorKind> {
+        Some(AnchorKind::Name)
+    }
+
     fn name(&self) -> &str {
         NameSelector::NAME
     }
@@ -84,6 +88,14 @@ impl Selector for NameSelector {
             .collect();
         parts.push(name_filter(&self.pattern));
         Some(CompositeFilter::and(parts))
+    }
+
+    fn own_predicate(&self, _eph: &EphContext) -> OwnPredicate {
+        OwnPredicate::Filter(Some(name_filter(&self.pattern)))
+    }
+
+    fn fusable(&self) -> bool {
+        true
     }
 
     async fn select_from_all_impl(
@@ -140,6 +152,10 @@ impl Verb for ForcedVerb {
         self.span.as_pest_span()
     }
 
+    fn anchor_kind(&self) -> Option<AnchorKind> {
+        Some(AnchorKind::Name)
+    }
+
     fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
         Ok(self)
     }
@@ -158,6 +174,12 @@ impl Selector for ForcedVerb {
             .collect();
         parts.push(name_filter(&self.pattern));
         Some(CompositeFilter::and(parts))
+    }
+
+    /// Predicate-expressible (feeds scope narrowing), but NOT fusable: the
+    /// forced emission path caches its match set and returns `None`.
+    fn own_predicate(&self, _eph: &EphContext) -> OwnPredicate {
+        OwnPredicate::Filter(Some(name_filter(&self.pattern)))
     }
 
     fn dependency_kind(&self, role: DependencyRole) -> DependencyKind {
@@ -494,6 +516,11 @@ impl Verb for TypeSelector {
         self.span.as_pest_span()
     }
 
+    /// `func("foo")` anchors by name; bare `func` is a pure constraint.
+    fn anchor_kind(&self) -> Option<AnchorKind> {
+        self.name_pattern.as_ref().map(|_| AnchorKind::Name)
+    }
+
     fn matched_token(&self) -> Option<String> {
         // A typed selector like `func "vfs_read"` carries the name here; expose
         // it so no-match diagnostics offer suggestions for these too, not just
@@ -626,6 +653,18 @@ impl Selector for TypeSelector {
         }
     }
 
+    /// No extra constraint beyond the filter conjunction (this selector's
+    /// type/name criteria arrive via `as_filter`).  Fusable only in selector
+    /// mode: filter-only emission is `None` (waits to be derived), which one
+    /// shared statement query must not replace with rows.
+    fn own_predicate(&self, _eph: &EphContext) -> OwnPredicate {
+        OwnPredicate::Filter(None)
+    }
+
+    fn fusable(&self) -> bool {
+        !self.filter_only
+    }
+
     async fn select_from_all_impl(
         &self,
         cfg: &ControlFlowGraph,
@@ -728,6 +767,16 @@ impl Selector for GenericSelector {
         } else {
             Some(CompositeFilter::and(parts))
         }
+    }
+
+    /// No constraint of its own: `select` emits whatever the command's
+    /// filters allow.
+    fn own_predicate(&self, _eph: &EphContext) -> OwnPredicate {
+        OwnPredicate::Filter(None)
+    }
+
+    fn fusable(&self) -> bool {
+        true
     }
 
     async fn select_from_all_impl(

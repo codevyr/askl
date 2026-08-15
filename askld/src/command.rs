@@ -7,8 +7,8 @@ use crate::span::Span;
 use crate::statement::Statement;
 use crate::verb::{
     add_verb, find_symbol_by_instance_id, ConstraintAction, DeriveMethod, Filter, LabelResolutions,
-    Labeler, LayerPopulate, LayerSpec, NotificationContext, PerLayerPopulate, Selector, SelectorId,
-    SupplementPopulate, Verb, VerbTag,
+    Labeler, LayerPopulate, LayerSpec, NotificationContext, OwnPredicate, PerLayerPopulate,
+    Selector, SelectorId, SupplementPopulate, Verb, VerbTag,
 };
 use anyhow::Result;
 use core::fmt::Debug;
@@ -178,6 +178,14 @@ impl Command {
 
     pub fn selectors<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Selector> + 'a> {
         Box::new(self.verbs.iter().filter_map(|verb| verb.as_selector().ok()))
+    }
+
+    /// True when any verb contributes an anchor (see [`Verb::anchor_kind`]):
+    /// the statement denotes a set narrow enough in principle to drive
+    /// execution on its own.  Non-anchored statements only ever derive from
+    /// their neighbours.
+    pub fn is_anchored(&self) -> bool {
+        self.verbs.iter().any(|v| v.anchor_kind().is_some())
     }
 
     /// Check if any verb suppresses the default type filter.
@@ -811,16 +819,25 @@ impl Command {
         };
 
         // Layer-aware selectors (those whose `has_layer_spec()` was true)
-        // read from the Phase-M-materialised layer's contents.  All other
-        // selectors go through `select_from_all_impl` with the command's
-        // composite filter, as before.
+        // read from the Phase-M-materialised layer's contents; all other
+        // selectors go through `select_from_all_impl`.  Both paths apply
+        // the command's composite filter — a statement's filters constrain
+        // its layer reads exactly like its persistent reads.
         let filter_parts: Vec<CompositeFilter> = self
             .filters()
             .filter_map(|f| f.get_composite_filter(eph))
             .collect();
 
         let mut budget_warned = false;
+        // Plain predicate-only selectors fold into ONE statement query (the
+        // fused block below); layer-backed and side-effectful selectors keep
+        // their own paths.
+        let mut fused: Vec<&dyn Selector> = Vec::new();
         for selector in selectors.into_iter() {
+            if !selector.has_layer_spec() && selector.fusable() {
+                fused.push(selector);
+                continue;
+            }
             let mut current_selection = if selector.has_layer_spec() {
                 // Layer-aware selector: return the union of all rows in this
                 // statement's materialised layer.  For single-verb statements
@@ -863,7 +880,9 @@ impl Command {
                         .into_iter()
                         .map(SymbolInstanceId::new)
                         .collect();
-                    let filter = CompositeFilter::leaf(SymbolInstanceIdMixin::new(&ids));
+                    let mut parts = filter_parts.clone();
+                    parts.push(CompositeFilter::leaf(SymbolInstanceIdMixin::new(&ids)));
+                    let filter = CompositeFilter::and(parts);
                     Some(
                         cfg.index
                             .find_symbol(&filter, parent_scope.clone(), children_scope.clone(), eph)
@@ -917,6 +936,89 @@ impl Command {
                 }
             }
             selections.push((selector.id(), current_selection));
+        }
+
+        // Fused emission: one find_symbol over filters ∧ OR(own predicates);
+        // the shared selection is stored under every participating selector
+        // (`Selection::extend` is idempotent, so the statement-level OR fold
+        // dedups the shared rows).
+        if !fused.is_empty() {
+            let mut or_parts: Vec<CompositeFilter> = Vec::new();
+            let mut unconstrained = false;
+            for sel in &fused {
+                match sel.own_predicate(eph) {
+                    OwnPredicate::Filter(Some(f)) => or_parts.push(f),
+                    // A branch with no extra constraint widens the OR to the
+                    // whole filter conjunction.
+                    OwnPredicate::Filter(None) => unconstrained = true,
+                    OwnPredicate::Opaque => {
+                        unreachable!("fusable selector must expose an own predicate")
+                    }
+                }
+            }
+            let mut parts = filter_parts.clone();
+            if !unconstrained && !or_parts.is_empty() {
+                parts.push(CompositeFilter::or(or_parts));
+            }
+            let filter = CompositeFilter::and(parts);
+            let _fused_span = tracing::debug_span!("select_fused", n = fused.len()).entered();
+            let mut selection = cfg
+                .index
+                .find_symbol(&filter, parent_scope.clone(), children_scope.clone(), eph)
+                .await
+                .map_err(to_pest)?
+                .into_inner();
+            self.filter(&mut selection);
+
+            if selection.budget_bounded && !budget_warned {
+                let bound = eph.result_budget().leaf_limit().unwrap_or(0);
+                warnings.push(Diagnostic::truncation(
+                    Span::from_pest(fused[0].span(), self.span().input()),
+                    format!(
+                        "results were bounded to {bound} rows by the server \
+                         result budget and may be incomplete — narrow the \
+                         query or raise the request `limit`"
+                    ),
+                ));
+            }
+
+            if selection.is_empty() {
+                for sel in &fused {
+                    warnings.push(Diagnostic::no_match(
+                        Span::from_pest(sel.span(), self.span().input()),
+                        sel.matched_token(),
+                    ));
+                }
+            } else if fused.len() > 1 {
+                // Per-selector no-match attribution: the shared result cannot
+                // say which OR branch matched nothing, but a LIMIT-1
+                // existence check per constrained branch can (cached,
+                // current-only — the same emptiness the branch's own query
+                // would have reported).  Unconstrained branches match
+                // whenever the statement result is non-empty.
+                for sel in &fused {
+                    if let OwnPredicate::Filter(Some(own)) = sel.own_predicate(eph) {
+                        let mut probe_parts = filter_parts.clone();
+                        probe_parts.push(own);
+                        let probe = CompositeFilter::and(probe_parts);
+                        if !cfg
+                            .index
+                            .has_symbol_matching(&probe, eph)
+                            .await
+                            .map_err(to_pest)?
+                        {
+                            warnings.push(Diagnostic::no_match(
+                                Span::from_pest(sel.span(), self.span().input()),
+                                sel.matched_token(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            for sel in &fused {
+                selections.push((sel.id(), Some(selection.clone())));
+            }
         }
         Ok(ComputeResult {
             selections,
