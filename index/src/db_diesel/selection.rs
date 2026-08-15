@@ -1,5 +1,6 @@
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::symbols::{FileId, Occurrence, SymbolId, SymbolInstanceId, SymbolScope, SymbolType};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 /// Well-known ephemeral layer ID used as a canary.  If any row with this
@@ -370,12 +371,67 @@ impl Selection {
         }
     }
 
+    /// Set-union merge: `extend` is idempotent, so a selection stored under
+    /// several selectors and re-folded (statement-level OR) accumulates no
+    /// duplicates.
+    ///
+    /// Nodes are identified by instance id — the same identity the renderer's
+    /// `node_map` uses — and a duplicate node's `query_statements` provenance
+    /// is merged span-uniquely onto the surviving node, mirroring the
+    /// renderer (which only ever merges distinct statement spans).  Edge rows
+    /// collapse only when literally identical: their keys include the ref
+    /// identity (id + occurrence offsets), so two distinct call sites between
+    /// the same instances remain two rows.
     pub fn extend(&mut self, other: Selection) {
-        self.nodes.extend(other.nodes);
-        self.parents.extend(other.parents);
-        self.children.extend(other.children);
-        self.has_parents.extend(other.has_parents);
-        self.has_children.extend(other.has_children);
+        let mut by_instance: HashMap<i64, usize> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(pos, node)| (node.symbol_instance.id, pos))
+            .collect();
+        for node in other.nodes {
+            match by_instance.entry(node.symbol_instance.id) {
+                Entry::Occupied(slot) => {
+                    let existing = &mut self.nodes[*slot.get()];
+                    for qs in node.query_statements {
+                        if !existing
+                            .query_statements
+                            .iter()
+                            .any(|have| have.start == qs.start && have.end == qs.end)
+                        {
+                            existing.query_statements.push(qs);
+                        }
+                    }
+                }
+                Entry::Vacant(slot) => {
+                    slot.insert(self.nodes.len());
+                    self.nodes.push(node);
+                }
+            }
+        }
+
+        extend_dedup(&mut self.parents, other.parents, |p| {
+            (
+                p.symbol_ref.id,
+                p.symbol_ref.from_offset_range,
+                p.from_instance.id,
+                p.to_instance.id,
+            )
+        });
+        extend_dedup(&mut self.children, other.children, |c| {
+            (
+                c.symbol_ref.id,
+                c.symbol_ref.from_offset_range,
+                c.from_instance.id,
+                c.symbol_instance.id,
+            )
+        });
+        extend_dedup(&mut self.has_parents, other.has_parents, |hp| {
+            (hp.parent_instance.id, hp.child_instance.id)
+        });
+        extend_dedup(&mut self.has_children, other.has_children, |hc| {
+            (hc.parent_instance.id, hc.child_instance.id)
+        });
         self.budget_bounded |= other.budget_bounded;
     }
 
@@ -389,6 +445,13 @@ impl Selection {
             .map(|node| node.symbol_instance.id)
             .collect()
     }
+}
+
+/// Append `src` rows to `dst`, dropping any row whose `key` already occurs
+/// in either list.  Keeps first occurrence; order otherwise preserved.
+fn extend_dedup<T, K: Hash + Eq>(dst: &mut Vec<T>, src: Vec<T>, key: impl Fn(&T) -> K) {
+    let mut seen: HashSet<K> = dst.iter().map(&key).collect();
+    dst.extend(src.into_iter().filter(|row| seen.insert(key(row))));
 }
 
 impl HasEphLeak for Selection {
@@ -660,6 +723,124 @@ mod tests {
         ]);
         assert_eq!(eph.root_ids(), vec![3, 7]);
         assert_eq!(eph.visible_ids(), vec![3, 7]);
+    }
+
+    // --- Selection::extend set-union semantics -----------------------------
+
+    fn test_instance_id(id: i64) -> SymbolInstance {
+        SymbolInstance {
+            id,
+            ..test_instance(TEST_ROOT)
+        }
+    }
+
+    fn test_ref(id: i64, lo: i32) -> SymbolRef {
+        SymbolRef {
+            id,
+            to_symbol: 1,
+            from_object: 1,
+            from_offset_range: (Bound::Included(lo), Bound::Excluded(lo + 1)),
+            layer: TEST_ROOT,
+        }
+    }
+
+    fn node_with(instance_id: i64, span_start: usize, text: &str) -> SelectionNode {
+        SelectionNode {
+            symbol: test_symbol(TEST_ROOT),
+            symbol_instance: test_instance_id(instance_id),
+            object: test_object(),
+            project: test_project(),
+            query_statements: vec![QueryStatementRange {
+                start: span_start,
+                end: span_start + text.len(),
+                text: text.into(),
+            }],
+        }
+    }
+
+    fn parent_ref(ref_id: i64, lo: i32, from: i64, to: i64) -> ParentReference {
+        ParentReference {
+            to_symbol: test_symbol(TEST_ROOT),
+            to_instance: test_instance_id(to),
+            from_instance: test_instance_id(from),
+            symbol_ref: test_ref(ref_id, lo),
+        }
+    }
+
+    fn has_child(parent: i64, child: i64) -> HasChildReference {
+        HasChildReference {
+            parent_symbol: test_symbol(TEST_ROOT),
+            parent_instance: test_instance_id(parent),
+            child_symbol: test_symbol(TEST_ROOT),
+            child_instance: test_instance_id(child),
+            parent_object: test_object(),
+        }
+    }
+
+    #[test]
+    fn extend_merges_duplicate_nodes_and_provenance() {
+        let mut a = Selection::new();
+        a.nodes.push(node_with(7, 0, "\"x\""));
+        let mut b = Selection::new();
+        b.nodes.push(node_with(7, 10, "\"y\""));
+        b.nodes.push(node_with(8, 10, "\"y\""));
+        a.extend(b);
+        assert_eq!(a.nodes.len(), 2);
+        // Duplicate node collapsed; both statements' provenance survives.
+        let texts: Vec<_> = a.nodes[0]
+            .query_statements
+            .iter()
+            .map(|q| q.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["\"x\"", "\"y\""]);
+    }
+
+    #[test]
+    fn extend_dedups_identical_edges_keeps_distinct_call_sites() {
+        let mut a = Selection::new();
+        a.parents.push(parent_ref(11, 100, 1, 2));
+        let mut b = Selection::new();
+        // Literally identical row: collapses.
+        b.parents.push(parent_ref(11, 100, 1, 2));
+        // Second call site between the same instances: must survive.
+        b.parents.push(parent_ref(12, 200, 1, 2));
+        a.extend(b);
+        assert_eq!(a.parents.len(), 2);
+    }
+
+    #[test]
+    fn extend_dedups_containment_by_instance_pair() {
+        let mut a = Selection::new();
+        a.has_children.push(has_child(1, 2));
+        let mut b = Selection::new();
+        b.has_children.push(has_child(1, 2));
+        b.has_children.push(has_child(1, 3));
+        a.extend(b);
+        assert_eq!(a.has_children.len(), 2);
+    }
+
+    #[test]
+    fn extend_is_idempotent() {
+        let mut a = Selection::new();
+        a.nodes.push(node_with(7, 0, "\"x\""));
+        a.parents.push(parent_ref(11, 100, 1, 2));
+        a.has_children.push(has_child(1, 2));
+        let snapshot = a.clone();
+        a.extend(snapshot.clone());
+        a.extend(snapshot);
+        assert_eq!(a.nodes.len(), 1);
+        assert_eq!(a.nodes[0].query_statements.len(), 1);
+        assert_eq!(a.parents.len(), 1);
+        assert_eq!(a.has_children.len(), 1);
+    }
+
+    #[test]
+    fn extend_ors_budget_bounded() {
+        let mut a = Selection::new();
+        let mut b = Selection::new();
+        b.budget_bounded = true;
+        a.extend(b);
+        assert!(a.budget_bounded);
     }
 }
 

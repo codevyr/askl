@@ -413,6 +413,36 @@ fn two_selectors_children() {
 }
 
 #[test]
+fn two_selectors_partial_no_match_attribution() {
+    // `"b" "nonexistent_zzz"`: both selectors share one fused statement
+    // query; the missing name must still get ITS OWN no-match diagnostic
+    // (via the per-branch existence check) while "b"'s rows keep the
+    // statement non-empty.
+    const QUERY: &str = r#""b" "nonexistent_zzz""#;
+    let res = run_query(TEST_INPUT_A, QUERY);
+
+    assert!(!res.nodes.as_vec().is_empty(), "\"b\" must still match");
+    assert!(
+        res.warnings
+            .iter()
+            .any(|w| w.message.contains("nonexistent_zzz")),
+        "the unmatched selector must get a no-match diagnostic, got {:?}",
+        res.warnings
+            .iter()
+            .map(|w| w.message.clone())
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        !res.warnings.iter().any(|w| w.message.contains("`\"b\"`")),
+        "the matched selector must NOT get a no-match diagnostic, got {:?}",
+        res.warnings
+            .iter()
+            .map(|w| w.message.clone())
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn statement_after_scope() {
     const QUERY: &str = r#""a" {}; "a""#;
     let res = run_query(TEST_INPUT_A, QUERY);
@@ -4617,6 +4647,46 @@ fn nested_search_in_search_composes() {
         2,
         "exactly the outer match and its one contained inner match, got {:?}",
         ids,
+    );
+}
+
+#[test]
+fn search_explicit_type_filter_constrains_layer_read() {
+    // `func search("foo")`: search rows are content-typed, so an explicit
+    // `func` type filter in the same statement excludes every match on the
+    // layer-read path.  Before the layer-read filter fix the command's
+    // filters were silently dropped when reading a materialised layer and
+    // this returned all matches.
+    const QUERY: &str = r#"func search("foo")"#;
+    let res = run_query(TEST_INPUT_SEARCH, QUERY);
+
+    assert!(
+        res.nodes.as_vec().is_empty(),
+        "explicit func filter must exclude content-typed search matches, got {:?}",
+        res.nodes.as_vec(),
+    );
+}
+
+#[test]
+fn search_project_filter_layer_read_parity() {
+    // `project(...)` is folded into the search populate at object level;
+    // after the layer-read fix it also constrains the read path.  Both
+    // paths must agree: filtering to project 1 keeps its matches and drops
+    // project 2's (objects 4/5 carry "foo" matches too).
+    let all = run_query(TEST_INPUT_SEARCH, r#"search("foo")"#);
+    let p1 = run_query(
+        TEST_INPUT_SEARCH,
+        r#"search("foo") project("search_proj_1")"#,
+    );
+
+    let all_n = all.nodes.as_vec().len();
+    let p1_n = p1.nodes.as_vec().len();
+    assert!(p1_n > 0, "project 1 must keep its own matches");
+    assert!(
+        p1_n < all_n,
+        "project filter must drop project 2's matches: {} filtered vs {} total",
+        p1_n,
+        all_n,
     );
 }
 

@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::{Arc, Mutex};
 
-use super::super::{DeriveMethod, Selector, Verb};
+use super::super::{AnchorKind, DeriveMethod, Selector, Verb};
 
 /// Resolved selections for labels referenced by ephemeral verbs.  An
 /// ephemeral verb that takes `symbol="@foo"` looks up the symbol IDs of
@@ -489,6 +489,15 @@ impl Verb for LayerVerb {
     }
     fn span(&self) -> pest::Span<'_> {
         self.span.as_pest_span()
+    }
+    /// Layer rows carry the types the layer literal declares; a scope's
+    /// inherited default type filter must not second-guess them (see
+    /// SearchSelector).  Explicit type filters still apply.
+    fn suppresses_default_type_filter(&self) -> bool {
+        true
+    }
+    fn anchor_kind(&self) -> Option<AnchorKind> {
+        Some(AnchorKind::LayerLiteral)
     }
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Skip

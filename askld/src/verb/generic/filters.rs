@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use super::super::{DeriveMethod, Filter, Verb, VerbTag};
+use super::super::{AnchorKind, DeriveMethod, Filter, Verb, VerbTag};
 use super::selectors::TypeSelector;
 
 #[derive(Debug)]
@@ -445,6 +445,12 @@ impl Verb for GenericFilter {
 
     fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
         Ok(self)
+    }
+
+    /// `filter("exact_name"/"compound_name", ...)` anchors by name — it
+    /// constrains the whole statement to a name, unlike a type filter.
+    fn anchor_kind(&self) -> Option<AnchorKind> {
+        self.kind.has_name_constraint().then_some(AnchorKind::Name)
     }
 
     fn derive_method(&self) -> DeriveMethod {

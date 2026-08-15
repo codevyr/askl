@@ -20,7 +20,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 /// on every `loc(...)` call, which drowned operator logs.
 static CRLF_WARNED: LazyLock<Mutex<HashSet<i32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
-use super::super::{DeriveMethod, Selector, Verb};
+use super::super::{AnchorKind, DeriveMethod, Selector, Verb};
 
 /// LocSelector - creates an ephemeral symbol at a specific file location.
 ///
@@ -80,6 +80,16 @@ impl Verb for LocSelector {
 
     fn span(&self) -> pest::Span<'_> {
         self.span.as_pest_span()
+    }
+
+    /// Loc rows are always content-typed; a scope's inherited default type
+    /// filter must not be injected into this command (see SearchSelector).
+    fn suppresses_default_type_filter(&self) -> bool {
+        true
+    }
+
+    fn anchor_kind(&self) -> Option<AnchorKind> {
+        Some(AnchorKind::Location)
     }
 
     fn derive_method(&self) -> DeriveMethod {

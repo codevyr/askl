@@ -353,6 +353,24 @@ pub fn add_verb(existing_verbs: Vec<Arc<dyn Verb>>, new_verb: Arc<dyn Verb>) -> 
     updated_verbs
 }
 
+/// What kind of anchor a verb contributes (see [`Verb::anchor_kind`]).
+/// Anchors are the predicates selective enough *in principle* to drive
+/// execution: a name pattern, a content match, a source location, or an
+/// explicit layer literal.  Whether an anchored statement actually drives
+/// is a cost decision made at execution time, not here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnchorKind {
+    /// A name predicate: `"foo"`, `g"foo*"`, `!"foo"`, `func("foo")`,
+    /// `filter("exact_name"/"compound_name", ...)`.
+    Name,
+    /// A content predicate: `search(...)`.
+    Content,
+    /// A source location: `loc(...)`.
+    Location,
+    /// An explicit `layer { ... }` literal.
+    LayerLiteral,
+}
+
 pub trait Verb: std::fmt::Debug + Send + Sync {
     fn name(&self) -> &str;
 
@@ -429,6 +447,15 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
 
     fn has_name_constraint(&self) -> bool {
         false
+    }
+
+    /// The anchor this verb contributes, if any.  A statement carrying at
+    /// least one anchored verb is *eligible to drive execution* (it denotes
+    /// a set narrow enough to be worth materialising on its own); pure
+    /// constraints — type predicates, `project(...)`, `preamble` — never
+    /// drive and are derived from their neighbours instead.
+    fn anchor_kind(&self) -> Option<AnchorKind> {
+        None
     }
 }
 
@@ -660,6 +687,17 @@ pub enum ConstraintAction {
     Derive,
 }
 
+/// A selector's own predicate contribution BEYOND the command's filters —
+/// the OR-branch it contributes to the statement's predicate.
+pub enum OwnPredicate {
+    /// Rows = command filters ∧ this predicate (`None` = no extra
+    /// constraint: the selector's criteria already live in the filter
+    /// conjunction, e.g. a `TypeSelector` contributing via `as_filter`).
+    Filter(Option<CompositeFilter>),
+    /// Not expressible as a SQL predicate (labels, units, layer reads).
+    Opaque,
+}
+
 #[async_trait(?Send)]
 pub trait Selector: std::fmt::Debug + Verb {
     fn id(&self) -> SelectorId {
@@ -668,6 +706,22 @@ pub trait Selector: std::fmt::Debug + Verb {
 
     fn get_label(&self) -> Option<String> {
         None
+    }
+
+    /// This selector's own predicate beyond the command's filters.  Keep
+    /// consistent with [`Selector::build_composite_filter`]: expressible
+    /// selectors must derive both from the same predicate.
+    fn own_predicate(&self, _eph: &EphContext) -> OwnPredicate {
+        OwnPredicate::Opaque
+    }
+
+    /// True when this selector's emission is exactly `find_symbol(command
+    /// filters ∧ own_predicate)` with no side effects.  Such selectors fold
+    /// into ONE statement-level query (OR across their own predicates)
+    /// instead of one round trip each.  Contract: `fusable()` implies
+    /// `own_predicate()` returns [`OwnPredicate::Filter`].
+    fn fusable(&self) -> bool {
+        false
     }
 
     /// Build a composite filter representing this selector's filter criteria.

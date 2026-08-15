@@ -333,3 +333,61 @@ where
         Ok(())
     }
 }
+
+// ============================================================================
+// ProbeCtes — MATERIALIZED role CTEs for `probe_instance_ids`
+// ============================================================================
+
+/// CTE names for probe roles, in declaration order.  Bounded so the outer
+/// query's membership filters can reference them as static SQL.
+pub(super) const PROBE_ROLE_CTE_NAMES: [&str; 4] = [
+    "probe_role_0",
+    "probe_role_1",
+    "probe_role_2",
+    "probe_role_3",
+];
+
+/// `WITH probe_role_0 AS MATERIALIZED (…), … <outer>` — the containment
+/// (HAS) probe roles.  Same planner-hint rationale as [`CteHasChildren`]:
+/// as a plain IN-subquery the planner refuses to drive the probe side from
+/// the tiny role set (measured 1.8–10.6 s against a full 14.8M-row scan);
+/// materialised first, the outer query runs id-driven through the pkey
+/// (0.5–6.9 ms).  See perf/PROBE_BASELINE.md.
+pub(super) struct ProbeCtes<Outer> {
+    pub bodies: Vec<Box<dyn QueryFragment<Pg> + Send>>,
+    pub outer: Outer,
+}
+
+impl<Outer> QueryId for ProbeCtes<Outer> {
+    type QueryId = ();
+    const HAS_STATIC_QUERY_ID: bool = false;
+}
+
+impl<Outer> Query for ProbeCtes<Outer>
+where
+    Outer: Query,
+{
+    type SqlType = Outer::SqlType;
+}
+
+impl<Outer> QueryFragment<Pg> for ProbeCtes<Outer>
+where
+    Outer: QueryFragment<Pg>,
+{
+    fn walk_ast<'b>(&'b self, mut out: AstPass<'_, 'b, Pg>) -> diesel::QueryResult<()> {
+        if !self.bodies.is_empty() {
+            out.push_sql("WITH ");
+            for (i, body) in self.bodies.iter().enumerate() {
+                if i > 0 {
+                    out.push_sql(", ");
+                }
+                out.push_sql(PROBE_ROLE_CTE_NAMES[i]);
+                out.push_sql(" AS MATERIALIZED (");
+                body.walk_ast(out.reborrow())?;
+                out.push_sql(") ");
+            }
+        }
+        self.outer.walk_ast(out.reborrow())?;
+        Ok(())
+    }
+}

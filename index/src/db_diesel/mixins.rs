@@ -68,6 +68,12 @@ type SelectionTuple = (
 pub type CurrentQuery<'a> =
     BoxedSelectStatement<'a, SelectionTuple, FromClause<SymbolInstanceProjectObjectJoin>, Pg>;
 
+/// Same join tree as [`CurrentQuery`], projected to `symbol_instances.id`
+/// only — the probe shape: capped probes fetch up to cap+1 ids, so the
+/// payload must stay bytes-cheap regardless of how wide the predicate is.
+pub type CurrentIdQuery<'a> =
+    BoxedSelectStatement<'a, BigInt, FromClause<SymbolInstanceProjectObjectJoin>, Pg>;
+
 type SymbolInstanceColumnsSqlType = (BigInt, BigInt, Integer, Int4range, Integer, BigInt);
 
 type SymbolColumnsSqlType = (

@@ -283,3 +283,119 @@ pub(crate) async fn wait_for_postgres(url: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_probe_instance_ids() -> anyhow::Result<()> {
+    use crate::db_diesel::{EphContext, Index, ProbeOutcome, ProbeRole};
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_A).await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+
+    // Fixture: function instances 91..97 + 942(main), file instance 1001
+    // and directory instance 1003 both spanning [0,10000) on object 1,
+    // directory self-instance 1002 on object 2 — 11 instances total.
+    // Calls: main(942) -> {a(91), b(92)}; a -> b (two call sites).
+
+    // Selective predicate, below cap: the probe IS the exact result.
+    let name_a = CompositeFilter::leaf(CompoundNameMixin::new("a"));
+    let outcome = index.probe_instance_ids(&name_a, vec![], 10, &eph).await?;
+    assert_eq!(outcome, ProbeOutcome::Resolved(vec![91]));
+
+    // Unconstrained predicate: exact cap boundary.  11 rows exist.
+    let unconstrained = CompositeFilter::and(vec![]);
+    let outcome = index
+        .probe_instance_ids(&unconstrained, vec![], 11, &eph)
+        .await?;
+    match &outcome {
+        ProbeOutcome::Resolved(ids) => assert_eq!(ids.len(), 11, "all 11 instances"),
+        other => panic!("expected Resolved at cap=11, got {:?}", other),
+    }
+    let outcome = index
+        .probe_instance_ids(&unconstrained, vec![], 10, &eph)
+        .await?;
+    assert_eq!(
+        outcome,
+        ProbeOutcome::Capped,
+        "cap=10 must detect an 11th row"
+    );
+
+    // RefsParentsOf: enclosing decls of b(92)'s call sites — a(91) and
+    // main(942), plus the file/directory instances whose ranges cover the
+    // sites (the same containment rule the engine's parents query uses).
+    let outcome = index
+        .probe_instance_ids(
+            &unconstrained,
+            vec![ProbeRole::RefsParentsOf(vec![92])],
+            100,
+            &eph,
+        )
+        .await?;
+    assert_eq!(outcome, ProbeOutcome::Resolved(vec![91, 942, 1001, 1003]));
+
+    // RefsChildrenOf: callees referenced from within main(942).
+    let outcome = index
+        .probe_instance_ids(
+            &unconstrained,
+            vec![ProbeRole::RefsChildrenOf(vec![942])],
+            100,
+            &eph,
+        )
+        .await?;
+    assert_eq!(outcome, ProbeOutcome::Resolved(vec![91, 92]));
+
+    // HasParentsOf: containers of a(91) — file 1001 (level 3 >= 2) and
+    // directory 1003 (level 5 >= 2).
+    let outcome = index
+        .probe_instance_ids(
+            &unconstrained,
+            vec![ProbeRole::HasParentsOf(vec![91])],
+            100,
+            &eph,
+        )
+        .await?;
+    assert_eq!(outcome, ProbeOutcome::Resolved(vec![1001, 1003]));
+
+    // HasChildrenOf: rows contained in file 1001 — the eight function
+    // instances (directory 1003 is excluded by the level rule).
+    let outcome = index
+        .probe_instance_ids(
+            &unconstrained,
+            vec![ProbeRole::HasChildrenOf(vec![1001])],
+            100,
+            &eph,
+        )
+        .await?;
+    assert_eq!(
+        outcome,
+        ProbeOutcome::Resolved(vec![91, 92, 93, 94, 95, 96, 97, 942])
+    );
+
+    // Predicate ∧ containment role compose.
+    let outcome = index
+        .probe_instance_ids(
+            &name_a,
+            vec![ProbeRole::HasChildrenOf(vec![1001])],
+            100,
+            &eph,
+        )
+        .await?;
+    assert_eq!(outcome, ProbeOutcome::Resolved(vec![91]));
+
+    // Repeat probe: identical result through the cache path.
+    let again = index
+        .probe_instance_ids(
+            &name_a,
+            vec![ProbeRole::HasChildrenOf(vec![1001])],
+            100,
+            &eph,
+        )
+        .await?;
+    assert_eq!(again, ProbeOutcome::Resolved(vec![91]));
+
+    Ok(())
+}

@@ -25,9 +25,9 @@ use super::cte::{
     build_has_children_query_against_cte, CteFindEdgesBetween, CteHasChildren,
 };
 use super::mixins::{
-    ChildrenQuery, CompositeFilter, CurrentQuery, EphVisibility, HasParentsQuery, ParentsQuery,
-    CONTAINER_INSTANCE_ALIAS, CONTAINER_SYMBOL_ALIAS, CONTAINER_TYPE_ALIAS, PARENT_DECLS_ALIAS,
-    PARENT_SYMBOLS_ALIAS,
+    ChildrenQuery, CompositeFilter, CurrentIdQuery, CurrentQuery, EphVisibility, HasParentsQuery,
+    ParentsQuery, CONTAINER_INSTANCE_ALIAS, CONTAINER_SYMBOL_ALIAS, CONTAINER_TYPE_ALIAS,
+    PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
 };
 use super::selection::{
     is_eph_leak, ChildReference, EphContext, HasChildReference, HasParentReference,
@@ -100,7 +100,79 @@ fn build_current_query(vis: &EphVisibility) -> CurrentQuery<'static> {
     query
 }
 
+/// [`build_current_query`]'s join tree projected to `symbol_instances.id`
+/// — the probe shape (see [`Index::probe_instance_ids`]).
+fn build_current_id_query(vis: &EphVisibility) -> CurrentIdQuery<'static> {
+    use crate::schema_diesel::*;
+    let mut query = symbols::dsl::symbols
+        .inner_join(
+            symbol_instances::dsl::symbol_instances
+                .on(symbols::dsl::id.eq(symbol_instances::dsl::symbol)),
+        )
+        .inner_join(projects::dsl::projects.on(symbols::dsl::project_id.eq(projects::dsl::id)))
+        .inner_join(objects::dsl::objects.on(objects::dsl::id.eq(symbol_instances::dsl::object_id)))
+        .select(symbol_instances::dsl::id)
+        .into_boxed::<Pg>();
+
+    query = query.filter(vis.pred("symbols.layer"));
+    query = query.filter(vis.pred("symbol_instances.layer"));
+
+    query
+}
+
 use super::mixins::EphSqlFragment;
+
+/// REFS semi-join: rows whose instance is a CHILD (callee) of any of the
+/// given parent instances.  Shared by scope resolution and probes.
+fn refs_children_of_expr(
+    parent_ids: Vec<i64>,
+    vis: &EphVisibility,
+) -> EphSqlFragment<diesel::sql_types::Bool> {
+    EphSqlFragment::<diesel::sql_types::Bool>::builder()
+        .sql(
+            "symbol_instances.id IN (\
+                SELECT si.id FROM index.symbol_refs sr \
+                JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
+                JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
+                  AND pd.offset_range @> sr.from_offset_range \
+                WHERE ",
+        )
+        .eph_visibility("sr.layer", vis)
+        .sql(" AND ")
+        .eph_visibility("si.layer", vis)
+        .sql(" AND ")
+        .eph_visibility("pd.layer", vis)
+        .sql(" AND pd.id = ANY(")
+        .bind(parent_ids)
+        .sql("))")
+        .build()
+}
+
+/// REFS semi-join: rows whose instance is a PARENT (caller) of any of the
+/// given child instances.  Shared by scope resolution and probes.
+fn refs_parents_of_expr(
+    child_ids: Vec<i64>,
+    vis: &EphVisibility,
+) -> EphSqlFragment<diesel::sql_types::Bool> {
+    EphSqlFragment::<diesel::sql_types::Bool>::builder()
+        .sql(
+            "symbol_instances.id IN (\
+                SELECT pd.id FROM index.symbol_refs sr \
+                JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
+                  AND pd.offset_range @> sr.from_offset_range \
+                JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
+                WHERE ",
+        )
+        .eph_visibility("sr.layer", vis)
+        .sql(" AND ")
+        .eph_visibility("si.layer", vis)
+        .sql(" AND ")
+        .eph_visibility("pd.layer", vis)
+        .sql(" AND si.id = ANY(")
+        .bind(child_ids)
+        .sql("))")
+        .build()
+}
 
 /// Resolve a CompositeFilter to instance IDs by running a CurrentQuery.
 ///
@@ -115,8 +187,6 @@ impl Index {
         role: Option<&ScopeRole>,
         eph: &EphContext,
     ) -> Result<Vec<i64>> {
-        use diesel::sql_types::Bool;
-
         let _span =
             tracing::info_span!("resolve_filter_to_ids", has_chain = eph.has_chain()).entered();
         let t0 = std::time::Instant::now();
@@ -130,48 +200,10 @@ impl Index {
         // Add reference-based constraint when resolving scoped filters.
         match role {
             Some(ScopeRole::Children(parent_ids)) if !parent_ids.is_empty() => {
-                query = query.filter(
-                    EphSqlFragment::<Bool>::builder()
-                        .sql(
-                            "symbol_instances.id IN (\
-                                SELECT si.id FROM index.symbol_refs sr \
-                                JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
-                                JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                                  AND pd.offset_range @> sr.from_offset_range \
-                                WHERE ",
-                        )
-                        .eph_visibility("sr.layer", &vis)
-                        .sql(" AND ")
-                        .eph_visibility("si.layer", &vis)
-                        .sql(" AND ")
-                        .eph_visibility("pd.layer", &vis)
-                        .sql(" AND pd.id = ANY(")
-                        .bind(parent_ids.clone())
-                        .sql("))")
-                        .build(),
-                );
+                query = query.filter(refs_children_of_expr(parent_ids.clone(), &vis));
             }
             Some(ScopeRole::Parents(child_ids)) if !child_ids.is_empty() => {
-                query = query.filter(
-                    EphSqlFragment::<Bool>::builder()
-                        .sql(
-                            "symbol_instances.id IN (\
-                                SELECT pd.id FROM index.symbol_refs sr \
-                                JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                                  AND pd.offset_range @> sr.from_offset_range \
-                                JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
-                                WHERE ",
-                        )
-                        .eph_visibility("sr.layer", &vis)
-                        .sql(" AND ")
-                        .eph_visibility("si.layer", &vis)
-                        .sql(" AND ")
-                        .eph_visibility("pd.layer", &vis)
-                        .sql(" AND si.id = ANY(")
-                        .bind(child_ids.clone())
-                        .sql("))")
-                        .build(),
-                );
+                query = query.filter(refs_parents_of_expr(child_ids.clone(), &vis));
             }
             _ => {}
         }
@@ -207,6 +239,109 @@ impl Index {
             all_ids.dedup();
         }
         Ok(all_ids)
+    }
+
+    /// Capped cardinality probe: fetch up to `cap + 1` instance ids
+    /// matching `filter ∧ roles` and classify the result.
+    ///
+    /// This is the dynamic-cost primitive of probe-driven execution: it is
+    /// an id-fetch, NOT a `COUNT(*)` — a probe that comes back at or under
+    /// the cap already holds the statement's exact current-instance set
+    /// ([`ProbeOutcome::Resolved`]) and never needs re-running, while a
+    /// capped probe cost at most cap+1 id rows.
+    ///
+    /// Runs in Combined visibility through the SQL cache, mirroring
+    /// [`Index::resolve_filter_to_ids`]: role subqueries consult
+    /// chain-visible rows, so the persistent/eph partition union would not
+    /// equal the legacy result.  REFS roles are IN-subquery fragments
+    /// (shared with scope resolution); HAS roles are emitted as
+    /// MATERIALIZED CTEs — the planner mis-drives them as IN-subqueries
+    /// (see `has_role_cte_body` and perf/PROBE_BASELINE.md).
+    ///
+    /// The Resolved id set is complete, so despite the `LIMIT` the outcome
+    /// is deterministic: the LIMIT only ever bites in the Capped case,
+    /// whose rows are discarded.
+    pub async fn probe_instance_ids(
+        &self,
+        filter: &CompositeFilter,
+        roles: Vec<ProbeRole>,
+        cap: usize,
+        eph: &EphContext,
+    ) -> Result<ProbeOutcome> {
+        use super::cte::{ProbeCtes, PROBE_ROLE_CTE_NAMES};
+
+        let _span = tracing::info_span!("probe_instance_ids", cap, roles = roles.len()).entered();
+        let t0 = std::time::Instant::now();
+
+        let vis = EphVisibility::combined(eph);
+        let mut query = build_current_id_query(&vis);
+        if let Some(expr) = filter.compose_current(&vis) {
+            query = query.filter(expr);
+        }
+
+        let mut cte_bodies: Vec<Box<dyn diesel::query_builder::QueryFragment<Pg> + Send>> =
+            Vec::new();
+        for role in roles {
+            match role {
+                ProbeRole::RefsChildrenOf(ids) => {
+                    query = query.filter(refs_children_of_expr(ids, &vis));
+                }
+                ProbeRole::RefsParentsOf(ids) => {
+                    query = query.filter(refs_parents_of_expr(ids, &vis));
+                }
+                ProbeRole::HasChildrenOf(ids) => {
+                    anyhow::ensure!(
+                        cte_bodies.len() < PROBE_ROLE_CTE_NAMES.len(),
+                        "probe supports at most {} containment roles",
+                        PROBE_ROLE_CTE_NAMES.len(),
+                    );
+                    let name = PROBE_ROLE_CTE_NAMES[cte_bodies.len()];
+                    query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&format!(
+                        "symbol_instances.id IN (SELECT id FROM {name})"
+                    )));
+                    cte_bodies.push(has_role_cte_body(ids, true, &vis));
+                }
+                ProbeRole::HasParentsOf(ids) => {
+                    anyhow::ensure!(
+                        cte_bodies.len() < PROBE_ROLE_CTE_NAMES.len(),
+                        "probe supports at most {} containment roles",
+                        PROBE_ROLE_CTE_NAMES.len(),
+                    );
+                    let name = PROBE_ROLE_CTE_NAMES[cte_bodies.len()];
+                    query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&format!(
+                        "symbol_instances.id IN (SELECT id FROM {name})"
+                    )));
+                    cte_bodies.push(has_role_cte_body(ids, false, &vis));
+                }
+            }
+        }
+
+        let query = query.limit(cap as i64 + 1);
+        let rows: std::sync::Arc<Vec<i64>> = if cte_bodies.is_empty() {
+            self.cached_load(query).await?
+        } else {
+            self.cached_load(ProbeCtes {
+                bodies: cte_bodies,
+                outer: query,
+            })
+            .await?
+        };
+
+        let outcome = if rows.len() > cap {
+            ProbeOutcome::Capped
+        } else {
+            let mut ids = rows.as_ref().clone();
+            ids.sort_unstable();
+            ids.dedup();
+            ProbeOutcome::Resolved(ids)
+        };
+        tracing::info!(
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            rows = rows.len(),
+            capped = matches!(outcome, ProbeOutcome::Capped),
+            "probe completed",
+        );
+        Ok(outcome)
     }
 
     /// Resolve a container scope to the `(object_id, lo, hi)` byte-range of
@@ -460,6 +595,107 @@ fn build_has_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> HasPare
             container_instance.fields(crate::schema_diesel::symbol_instances::all_columns),
         ))
         .into_boxed::<Pg>()
+}
+
+/// Containment join tree shared by the probe-role CTE bodies: canonical
+/// `symbol_instances`/`symbols`/`symbol_types` is the CONTAINED side, the
+/// `container_*` aliases the containing side (same object, container's
+/// offset range covers the row's, container's type level ≥ the row's).
+/// `seed_container` picks which side the bound ids constrain; the returned
+/// query selects the OTHER side's instance ids.  Emitted only inside a
+/// MATERIALIZED CTE (see `ProbeCtes`) — as a plain IN-subquery the planner
+/// mis-drives this shape (perf/PROBE_BASELINE.md, S6/S7).
+fn has_role_cte_body(
+    ids: Vec<i64>,
+    seed_container: bool,
+    vis: &EphVisibility,
+) -> Box<dyn diesel::query_builder::QueryFragment<Pg> + Send> {
+    use crate::schema_diesel::*;
+
+    let container_instance = CONTAINER_INSTANCE_ALIAS;
+    let container_symbol = CONTAINER_SYMBOL_ALIAS;
+    let container_type = CONTAINER_TYPE_ALIAS;
+
+    let base = symbol_instances::dsl::symbol_instances
+        .inner_join(symbols::dsl::symbols.on(symbol_instances::dsl::symbol.eq(symbols::dsl::id)))
+        .inner_join(
+            symbol_types::dsl::symbol_types.on(symbols::dsl::symbol_type.eq(symbol_types::dsl::id)),
+        )
+        .inner_join(
+            container_instance.on(container_instance
+                .field(symbol_instances::dsl::object_id)
+                .eq(symbol_instances::dsl::object_id)),
+        )
+        .inner_join(
+            container_symbol.on(container_symbol
+                .field(symbols::dsl::id)
+                .eq(container_instance.field(symbol_instances::dsl::symbol))),
+        )
+        .inner_join(
+            container_type.on(container_type
+                .field(symbol_types::dsl::id)
+                .eq(container_symbol.field(symbols::dsl::symbol_type))),
+        )
+        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
+            "container_instances.offset_range @> symbol_instances.offset_range",
+        ))
+        .filter(
+            container_type
+                .field(symbol_types::dsl::level)
+                .ge(symbol_types::dsl::level),
+        )
+        .filter(
+            container_instance
+                .field(symbol_instances::dsl::id)
+                .ne(symbol_instances::dsl::id),
+        )
+        // Subquery position: candidate-set membership, not selected rows.
+        .filter(vis.subquery_pred("symbol_instances.layer"))
+        .filter(vis.subquery_pred("container_instances.layer"));
+
+    if seed_container {
+        // HasChildrenOf: containers are bound, contained ids come out.
+        Box::new(
+            base.filter(
+                container_instance
+                    .field(symbol_instances::dsl::id)
+                    .eq_any(ids),
+            )
+            .select(symbol_instances::dsl::id)
+            .into_boxed::<Pg>(),
+        )
+    } else {
+        // HasParentsOf: contained rows are bound, container ids come out.
+        Box::new(
+            base.filter(symbol_instances::dsl::id.eq_any(ids))
+                .select(container_instance.field(symbol_instances::dsl::id))
+                .into_boxed::<Pg>(),
+        )
+    }
+}
+
+/// A semi-join constraint a probe binds a resolved neighbour's instance
+/// ids into (see [`Index::probe_instance_ids`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeRole {
+    /// Probe rows must be REFS children (callees) of these instances.
+    RefsChildrenOf(Vec<i64>),
+    /// Probe rows must be REFS parents (callers) of these instances.
+    RefsParentsOf(Vec<i64>),
+    /// Probe rows must be contained in these instances.
+    HasChildrenOf(Vec<i64>),
+    /// Probe rows must contain these instances.
+    HasParentsOf(Vec<i64>),
+}
+
+/// What a capped cardinality probe learned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeOutcome {
+    /// At most `cap` rows exist; these are ALL of them (sorted, deduped) —
+    /// the probe result IS the statement's exact current-instance set.
+    Resolved(Vec<i64>),
+    /// More than `cap` rows exist; the fetched sample was discarded.
+    Capped,
 }
 
 #[derive(Clone)]

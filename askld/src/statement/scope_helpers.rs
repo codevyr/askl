@@ -111,7 +111,6 @@ pub(super) fn build_children_scope(
     eph: &EphContext,
 ) -> ScopeContext {
     let mut has_children = false;
-    let mut any_uncomputed = false;
     let mut any_transparent = false;
     let mut any_display_uncomputed = false;
     let mut selected_ids: Vec<i64> = Vec::new();
@@ -125,7 +124,6 @@ pub(super) fn build_children_scope(
                 None => any_transparent = true,
             }
         } else {
-            any_uncomputed = true;
             if !originates_data(&child) {
                 any_display_uncomputed = true;
             }

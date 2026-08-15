@@ -268,3 +268,40 @@ fn extra_semicolons_do_not_create_statements() {
     assert_eq!(stmts.len(), 1); // just "foo" + scope
     assert_eq!(stmts[0].scope().statements().count(), 1); // just "bar"
 }
+
+/// Anchor classification: parse a one-statement query and report whether its
+/// command is anchored (eligible to drive execution).
+#[cfg(test)]
+fn first_statement_anchored(query: &str) -> bool {
+    let ast = parse(query).unwrap();
+    let statements: Vec<_> = ast.scope().statements().collect();
+    assert!(!statements.is_empty(), "query must parse to a statement");
+    statements[0].command().is_anchored()
+}
+
+#[test]
+fn anchor_classification_table() {
+    // Anchored: name predicates in any form.
+    assert!(first_statement_anchored(r#""foo""#));
+    assert!(first_statement_anchored(r#"g"foo*""#));
+    assert!(first_statement_anchored(r#"!"foo""#));
+    assert!(first_statement_anchored(r#"func("foo")"#));
+    assert!(first_statement_anchored(
+        r#"select filter("exact_name", "foo")"#
+    ));
+    assert!(first_statement_anchored(
+        r#"filter("compound_name", "a::b")"#
+    ));
+    // Anchored: content and location predicates.
+    assert!(first_statement_anchored(r#"search("needle")"#));
+    assert!(first_statement_anchored(r#"loc("main.c", "1")"#));
+    // Pure constraints: type predicates, project, bare select.
+    assert!(!first_statement_anchored("func"));
+    assert!(!first_statement_anchored(r#"project("linux")"#));
+    assert!(!first_statement_anchored("select"));
+    assert!(!first_statement_anchored(r#"func project("linux")"#));
+    assert!(!first_statement_anchored(r#"filter("type", "func")"#));
+    // An anchor anywhere in the verb bag anchors the whole statement.
+    assert!(first_statement_anchored(r#"func "foo""#));
+    assert!(first_statement_anchored(r#"project("linux") "foo""#));
+}

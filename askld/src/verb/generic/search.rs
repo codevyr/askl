@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use super::super::{DeriveMethod, Selector, Verb};
+use super::super::{AnchorKind, DeriveMethod, Selector, Verb};
 
 /// Default per-project cap when the caller omits `limit=`.  Predictable
 /// cost; explicit `limit=N` overrides it.  Aligns with how interactive
@@ -149,6 +149,18 @@ impl Verb for SearchSelector {
 
     fn span(&self) -> pest::Span<'_> {
         self.span.as_pest_span()
+    }
+
+    /// Search rows are always content-typed; a scope's inherited default
+    /// type filter (e.g. `func { search("x") }`) must not be injected into
+    /// this command — it would exclude every match on the layer-read path.
+    /// Explicit type filters written in the statement still apply.
+    fn suppresses_default_type_filter(&self) -> bool {
+        true
+    }
+
+    fn anchor_kind(&self) -> Option<AnchorKind> {
+        Some(AnchorKind::Content)
     }
 
     fn derive_method(&self) -> DeriveMethod {
