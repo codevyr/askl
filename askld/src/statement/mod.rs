@@ -1,7 +1,7 @@
 use crate::cfg::{ControlFlowGraph, EdgeList, HasEdge, HasEdgeList, NodeList, SymbolNodeId};
 use crate::command::{Command, ComputeResult, LabeledStatements};
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
-use crate::execution_context::ExecutionContext;
+use crate::execution_context::{statement_key, ExecutionContext, ProbeActivation};
 use crate::execution_state::{
     DependencyRole, ExecutionState, RelationshipType, StatementDependency, StatementDependent,
 };
@@ -13,7 +13,7 @@ use crate::scope::{Scope, StatementIter};
 use crate::verb::{name_filter, LabelResolutions, NotificationContext};
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{EphContext, ScopeContext, Selection};
+use index::db_diesel::{CompositeFilter, EphContext, ScopeContext, Selection};
 use index::symbols::{FileId, Occurrence, SymbolId, SymbolInstanceId};
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
@@ -153,6 +153,17 @@ fn stage_read(
     (eph, parent_scope, children_scope)
 }
 
+/// True when a statement may re-probe in a refinement round: every
+/// selector is either fusable (its emission is the shared statement
+/// query) or non-constraining (unit verbs, bare filter-only type
+/// selectors — pure derive-path statements).  Layer-backed, forced, and
+/// label statements have their own read semantics and never refine.
+fn refinable(command: &Command) -> bool {
+    command
+        .selectors()
+        .all(|s| s.fusable() || s.is_non_constraining_selector())
+}
+
 /// Run one statement's READ phase inline and apply it — the same-tree
 /// `@label` sub-barrier in `compute_roots`.
 async fn read_statement(
@@ -163,9 +174,19 @@ async fn read_statement(
     warnings: Vec<Diagnostic>,
 ) -> Result<(), pest::error::Error<Rule>> {
     let (eph, parent_scope, children_scope) = stage_read(ctx, statement);
+    // The label sub-barrier runs during Phase M, before this tree's probe
+    // wave — no probe result exists yet.
     let cr = statement
         .command()
-        .compute_selection(cfg, parent_scope, children_scope, &eph, layer_ids, warnings)
+        .compute_selection(
+            cfg,
+            parent_scope,
+            children_scope,
+            &eph,
+            layer_ids,
+            warnings,
+            None,
+        )
         .await?;
     cr.apply(ctx, statement);
     Ok(())
@@ -431,6 +452,283 @@ impl Statement {
                 });
             }
 
+            // ---- Phase P: cardinality probes, concurrent, under
+            // tree-complete visibility.
+            //
+            // Wave 0: every eligible statement (anchored, all selectors
+            // fusable, not read early) probes its fused predicate with the
+            // request's cap.  Resolved outcomes hold the statement's EXACT
+            // current-instance set.
+            //
+            // Refinement rounds: statements still unresolved re-probe under
+            // semi-join roles built from neighbours resolved in earlier
+            // rounds.  A neighbour related by BOTH refs and has (the `{ }`
+            // default: either edge kind counts) contributes one probe per
+            // relationship BRANCH, and the statement resolves iff every
+            // branch combination resolves — the union of the combination
+            // results is then exact under the either-edge semantics.
+            //
+            // Sound by monotonicity: a role is at least as permissive as
+            // the edge-evidence relation the worklist later narrows by, and
+            // a neighbour's resolved set is a superset of its final
+            // selection — so a refinement-resolved set is a superset of the
+            // statement's final selection, exact in composition.
+            //
+            // Consumers: Phase-R emission (fused statements fetch by id)
+            // and the scope builders (a resolved neighbour contributes ids
+            // instead of a condition the index would have to materialise —
+            // this is what keeps a broad container from resolving a bare
+            // type predicate to millions of ids).
+            let run_probe_wave = |entries: Vec<(
+                Rc<Statement>,
+                CompositeFilter,
+                Vec<index::db_diesel::ProbeRole>,
+            )>,
+                                  cap: usize,
+                                  eph: EphContext| {
+                async move {
+                    let mut futs = Vec::new();
+                    let mut probed = Vec::new();
+                    for (stmt, predicate, roles) in entries {
+                        let eph = eph.clone();
+                        let index = &cfg.index;
+                        probed.push(stmt);
+                        futs.push(async move {
+                            index.probe_instance_ids(&predicate, roles, cap, &eph).await
+                        });
+                    }
+                    let results = futures::future::join_all(futs).await;
+                    let mut outcomes = Vec::new();
+                    for (stmt, outcome) in probed.into_iter().zip(results) {
+                        let outcome = outcome.map_err(|e| {
+                            pest::error::Error::new_from_span(
+                                pest::error::ErrorVariant::CustomError {
+                                    message: format!("cardinality probe failed: {e}"),
+                                },
+                                stmt.command().span().as_pest_span(),
+                            )
+                        })?;
+                        outcomes.push((stmt, outcome));
+                    }
+                    Ok::<_, pest::error::Error<Rule>>(outcomes)
+                }
+            };
+
+            // Group per-branch outcomes by statement: resolved iff EVERY
+            // branch resolved (ids unioned), else capped.  Records one
+            // activation per statement per round.
+            let settle = |outcomes: Vec<(Rc<Statement>, index::db_diesel::ProbeOutcome)>,
+                          ctx: &mut ExecutionContext,
+                          round: usize|
+             -> bool {
+                let mut order: Vec<usize> = Vec::new();
+                let mut groups: HashMap<
+                    usize,
+                    (Rc<Statement>, Vec<index::db_diesel::ProbeOutcome>),
+                > = HashMap::new();
+                for (stmt, outcome) in outcomes {
+                    let key = statement_key(&stmt);
+                    groups
+                        .entry(key)
+                        .or_insert_with(|| {
+                            order.push(key);
+                            (stmt, Vec::new())
+                        })
+                        .1
+                        .push(outcome);
+                }
+                let mut any_resolved = false;
+                for key in order {
+                    let (stmt, branch_outcomes) = groups.remove(&key).unwrap();
+                    let statement_text = stmt.command().span().as_pest_span().as_str().to_string();
+                    let mut ids: Vec<i64> = Vec::new();
+                    let mut capped = false;
+                    for outcome in branch_outcomes {
+                        match outcome {
+                            index::db_diesel::ProbeOutcome::Resolved(branch) => ids.extend(branch),
+                            index::db_diesel::ProbeOutcome::Capped => capped = true,
+                        }
+                    }
+                    if capped {
+                        ctx.probe_activations.push(ProbeActivation {
+                            query_statement: statement_text,
+                            resolved: None,
+                            round,
+                        });
+                    } else {
+                        ids.sort_unstable();
+                        ids.dedup();
+                        ctx.probe_activations.push(ProbeActivation {
+                            query_statement: statement_text,
+                            resolved: Some(ids.len()),
+                            round,
+                        });
+                        ctx.probe_resolved.insert(key, ids);
+                        any_resolved = true;
+                    }
+                }
+                any_resolved
+            };
+
+            // Wave 0.
+            let mut wave: Vec<(
+                Rc<Statement>,
+                CompositeFilter,
+                Vec<index::db_diesel::ProbeRole>,
+            )> = Vec::new();
+            for m in &staged {
+                if m.payload.is_none() {
+                    continue; // read early by the label sub-barrier
+                }
+                let Some(predicate) = m.statement.command().probe_predicate(&ctx.eph) else {
+                    continue;
+                };
+                wave.push((m.statement.clone(), predicate, vec![]));
+            }
+            let outcomes = run_probe_wave(wave, ctx.probe_cap, ctx.eph.clone()).await?;
+            settle(outcomes, ctx, 0);
+
+            // Refinement rounds, to fixpoint.  A candidate re-probes only
+            // when a NEW neighbour resolved since its last attempt.
+            const MAX_ROLE_BRANCHES: usize = 4;
+            let mut last_neighbor_count: HashMap<usize, usize> = HashMap::new();
+            for round in 1..=staged.len() {
+                let mut wave: Vec<(
+                    Rc<Statement>,
+                    CompositeFilter,
+                    Vec<index::db_diesel::ProbeRole>,
+                )> = Vec::new();
+                for m in &staged {
+                    if m.payload.is_none() {
+                        continue;
+                    }
+                    let stmt = &m.statement;
+                    let key = statement_key(stmt);
+                    if ctx.probe_resolved.contains_key(&key) {
+                        continue;
+                    }
+                    if !refinable(stmt.command()) {
+                        continue;
+                    }
+                    // Fused statements re-probe their wave-0 predicate
+                    // (unconstrained selectors like `all` fold to TRUE there,
+                    // which the honest-OR scope condition cannot express);
+                    // derive-path statements re-probe their scope condition.
+                    // Fused statements re-probe their wave-0 predicate
+                    // (unconstrained selectors like `all` fold to TRUE there,
+                    // which the honest-OR scope condition cannot express);
+                    // otherwise the scope condition; otherwise — for pure
+                    // derive-path statements (all selectors non-constraining,
+                    // e.g. `func { }`, whose bare type selector is not even a
+                    // selector once inherit applies) — the filter conjunction
+                    // the derive path itself applies.
+                    let all_non_constraining = stmt
+                        .command()
+                        .selectors()
+                        .all(|s| s.is_non_constraining_selector());
+                    let pp = stmt.command().probe_predicate(&ctx.eph);
+                    let sc = stmt.command().get_selector_composite_filter(&ctx.eph);
+                    let cp = if all_non_constraining {
+                        stmt.command().constraint_predicate(&ctx.eph)
+                    } else {
+                        None
+                    };
+                    let Some(predicate) = pp.or(sc).or(cp) else {
+                        continue;
+                    };
+                    // Bind ONLY the smallest resolved neighbour's roles: a
+                    // role's probe cost scales with the bound id set, and a
+                    // broad neighbour (a resolved container with hundreds of
+                    // instances) can cost more to AND in than it narrows —
+                    // measured as 2.7s of the amdgpu worst case.  The result
+                    // is a (still sound) superset; the worklist narrows the
+                    // rest.  A pure refs or has relationship contributes one
+                    // branch, the combined default contributes both (union
+                    // semantics).
+                    use index::db_diesel::ProbeRole;
+                    let mut smallest: Option<(usize, Vec<ProbeRole>)> = None;
+                    let mut consider =
+                        |ids: &Vec<i64>, rel: RelationshipType, parent_side: bool| {
+                            let mut branches = Vec::new();
+                            if rel.contains(RelationshipType::REFS) {
+                                branches.push(if parent_side {
+                                    ProbeRole::RefsChildrenOf(ids.clone())
+                                } else {
+                                    ProbeRole::RefsParentsOf(ids.clone())
+                                });
+                            }
+                            if rel.contains(RelationshipType::HAS) {
+                                branches.push(if parent_side {
+                                    ProbeRole::HasChildrenOf(ids.clone())
+                                } else {
+                                    ProbeRole::HasParentsOf(ids.clone())
+                                });
+                            }
+                            if branches.is_empty() {
+                                return; // EMPTY relationship: no constraint
+                            }
+                            let better = match &smallest {
+                                None => true,
+                                Some((best_len, _)) => ids.len() < *best_len,
+                            };
+                            if better {
+                                smallest = Some((ids.len(), branches));
+                            }
+                        };
+                    if let Some(parent) = stmt.parent().and_then(|p| p.upgrade()) {
+                        if let Some(ids) = ctx.probe_resolved.get(&statement_key(&parent)) {
+                            consider(ids, stmt.relationship_type, true);
+                        }
+                    }
+                    for child in stmt.children() {
+                        if let Some(ids) = ctx.probe_resolved.get(&statement_key(&child)) {
+                            consider(ids, child.relationship_type, false);
+                        }
+                    }
+                    let Some((best_len, branches)) = smallest else {
+                        continue;
+                    };
+                    // Re-probe only when a strictly smaller binding appeared
+                    // since the last attempt.
+                    if last_neighbor_count
+                        .get(&key)
+                        .is_some_and(|prev| *prev <= best_len)
+                    {
+                        continue;
+                    }
+                    let branch_sets: Vec<Vec<ProbeRole>> = vec![branches];
+                    let neighbors = best_len;
+                    // Cartesian product of the branch sets: one probe per
+                    // combination, ANDing one branch per neighbour.
+                    let mut combos: Vec<Vec<ProbeRole>> = vec![Vec::new()];
+                    for set in &branch_sets {
+                        let mut next = Vec::new();
+                        for combo in &combos {
+                            for role in set {
+                                let mut c = combo.clone();
+                                c.push(role.clone());
+                                next.push(c);
+                            }
+                        }
+                        combos = next;
+                    }
+                    if combos.len() > MAX_ROLE_BRANCHES {
+                        continue; // pathological fan-in: keep the predicate path
+                    }
+                    last_neighbor_count.insert(key, neighbors);
+                    for combo in combos {
+                        wave.push((stmt.clone(), predicate.clone(), combo));
+                    }
+                }
+                if wave.is_empty() {
+                    break;
+                }
+                let outcomes = run_probe_wave(wave, ctx.probe_cap, ctx.eph.clone()).await?;
+                if !settle(outcomes, ctx, round) {
+                    break;
+                }
+            }
+
             // ---- Phase R: concurrent reads under tree-complete visibility;
             // statements already read early (label sub-barrier) are skipped. ----
             struct PendingRead<'a> {
@@ -445,6 +743,10 @@ impl Statement {
                     continue;
                 };
                 let (eph, parent_scope, children_scope) = stage_read(ctx, &m.statement);
+                let probe_ids = ctx
+                    .probe_resolved
+                    .get(&statement_key(&m.statement))
+                    .cloned();
                 let stmt = m.statement.clone();
                 pending.push(PendingRead {
                     statement: m.statement,
@@ -457,6 +759,7 @@ impl Statement {
                                 &eph,
                                 &layer_ids,
                                 warnings,
+                                probe_ids,
                             )
                             .await
                     }),

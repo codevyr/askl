@@ -314,3 +314,28 @@ pub async fn create_index_with_timeout(url: &str, timeout_ms: u64) -> Index {
         .expect("Failed to build timeout pool");
     Index::from_pool(pool)
 }
+
+/// Like [`run_query`], but with an explicit cardinality-probe cap,
+/// returning the probe activations recorded during execution — the hook
+/// for probe-phase tests (which statements probed, resolved vs capped).
+pub fn run_query_probe_traced(
+    askl_input: &str,
+    askl_query: &str,
+    probe_cap: usize,
+) -> (
+    ExecutionResult,
+    Vec<crate::execution_context::ProbeActivation>,
+) {
+    let mut rt = Runtime::new().unwrap();
+    let local = task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(askl_input).await;
+        let roots = index.load_root_layers().await.unwrap();
+        let cfg = ControlFlowGraph::from_symbols(index);
+        let ast = parse(askl_query).unwrap();
+        let mut ctx = ExecutionContext::new(roots);
+        ctx.probe_cap = probe_cap;
+        let res = ast.execute(&mut ctx, &cfg).await.unwrap();
+        (res, ctx.probe_activations)
+    })
+}

@@ -9,6 +9,8 @@ pub struct AsklData {
     pub query_timeout: std::time::Duration,
     /// Default cap on distinct symbols per result (0 = unlimited).
     pub max_result_symbols: usize,
+    /// Cardinality-probe cap (see `ExecutionContext::probe_cap`).
+    pub probe_cap: usize,
 }
 
 fn symbolid_as_string<S>(x: &SymbolId, s: S) -> Result<S::Ok, S::Error>

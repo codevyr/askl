@@ -67,6 +67,19 @@ pub(super) fn build_parent_scope(
                     None => ScopeContext::Unscoped,
                 }
             } else {
+                // Parent not yet computed but probe-resolved: its exact (or
+                // composition-exact) instance set is already known — scope
+                // by ids, skipping the condition the index would otherwise
+                // have to materialise.
+                if let Some(ids) = ctx
+                    .probe_resolved
+                    .get(&crate::execution_context::statement_key(&parent))
+                {
+                    return ScopeContext::Scope {
+                        ids: ids.clone(),
+                        filter: None,
+                    };
+                }
                 // Parent not yet computed — fall back to filter-based scoping.
                 //
                 // ONE symmetric rule for both scope builders: materialise your
@@ -113,6 +126,7 @@ pub(super) fn build_children_scope(
     let mut has_children = false;
     let mut any_transparent = false;
     let mut any_display_uncomputed = false;
+    let mut any_probe_resolved = false;
     let mut selected_ids: Vec<i64> = Vec::new();
     let mut unselected_filters: Vec<CompositeFilter> = Vec::new();
 
@@ -127,7 +141,18 @@ pub(super) fn build_children_scope(
             if !originates_data(&child) {
                 any_display_uncomputed = true;
             }
-            if let Some(f) = child.command().get_selector_composite_filter(eph) {
+            // A probe-resolved child contributes its exact id set instead
+            // of a condition the index would have to materialise.  An
+            // EMPTY resolved set still forces the Scope branch below — it
+            // means "this child matches nothing", exactly like its
+            // condition resolving to an empty scope, never Unscoped.
+            if let Some(ids) = ctx
+                .probe_resolved
+                .get(&crate::execution_context::statement_key(&child))
+            {
+                any_probe_resolved = true;
+                selected_ids.extend(ids.iter().copied());
+            } else if let Some(f) = child.command().get_selector_composite_filter(eph) {
                 unselected_filters.push(f);
             }
         }
@@ -143,7 +168,7 @@ pub(super) fn build_children_scope(
         Some(CompositeFilter::or(unselected_filters))
     };
 
-    if selected_ids.is_empty() && combined_filter.is_none() {
+    if selected_ids.is_empty() && combined_filter.is_none() && !any_probe_resolved {
         if any_transparent || any_display_uncomputed {
             // A weak/unit child ("show my children") or a computed-transparent
             // one contributes no selection of its own — the eager unscoped

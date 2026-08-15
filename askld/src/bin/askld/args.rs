@@ -44,6 +44,11 @@ pub struct ServeArgs {
     /// Max distinct symbols per query result (0 = unlimited); per-request `?limit=` overrides
     #[clap(long, default_value = "100", env = "ASKL_MAX_RESULT_SYMBOLS")]
     pub max_result_symbols: usize,
+
+    /// Cardinality-probe cap: statements whose probe returns at most this
+    /// many instance ids are resolved exactly and read by id
+    #[clap(long, default_value = "1000", env = "ASKL_PROBE_CAP")]
+    pub probe_cap: usize,
 }
 
 #[derive(ClapArgs, Debug)]
