@@ -120,7 +120,7 @@ pub(super) fn check_anchor_completeness(root: &Statement) -> Result<(), Error<Ru
                         message: "this query group selects nothing: no statement in it has a \
                                   selecting predicate.  Add an anchor — a name (\"foo\", g\"pat*\", \
                                   func(\"foo\")), a name filter, search(...), loc(...) — or use \
-                                  `all` for an explicit budget-bounded enumeration"
+                                  `select` for an explicit budget-bounded enumeration"
                             .to_string(),
                     },
                     statement.command().span().as_pest_span(),

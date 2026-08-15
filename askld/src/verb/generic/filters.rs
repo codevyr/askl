@@ -175,53 +175,6 @@ impl Display for ProjectFilter {
     }
 }
 
-/// DirectOnlyFilter - filter verb that adds DirectOnlyMixin to the search.
-/// Added automatically when a statement has a scope and unnest is not set.
-/// Restricts children/has_children queries to direct (non-transitive) results.
-#[derive(Debug)]
-pub struct DirectOnlyFilter {
-    span: Span,
-}
-
-impl DirectOnlyFilter {
-    pub fn new(span: Span) -> Arc<dyn Verb> {
-        Arc::new(Self { span })
-    }
-}
-
-impl Verb for DirectOnlyFilter {
-    fn name(&self) -> &str {
-        "direct_only_filter"
-    }
-
-    fn span(&self) -> pest::Span<'_> {
-        self.span.as_pest_span()
-    }
-
-    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
-        Ok(self)
-    }
-
-    fn derive_method(&self) -> DeriveMethod {
-        // Don't inherit - each statement decides based on its own unnest flag
-        DeriveMethod::Skip
-    }
-}
-
-impl Filter for DirectOnlyFilter {
-    fn get_composite_filter(&self, _eph: &index::db_diesel::EphContext) -> Option<CompositeFilter> {
-        Some(CompositeFilter::leaf(
-            index::db_diesel::DirectOnlyMixin::new(),
-        ))
-    }
-}
-
-impl Display for DirectOnlyFilter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "DirectOnlyFilter")
-    }
-}
-
 /// DefaultTypeFilter - filters symbols by multiple types (OR).
 /// Used when a child scope inherits default types from parent without explicit type selector.
 #[derive(Debug)]
@@ -483,10 +436,6 @@ impl Verb for GenericFilter {
 
     fn suppresses_default_type_filter(&self) -> bool {
         self.kind.suppresses_default_type_filter()
-    }
-
-    fn has_name_constraint(&self) -> bool {
-        self.kind.has_name_constraint()
     }
 
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {

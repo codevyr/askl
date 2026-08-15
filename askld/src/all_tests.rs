@@ -708,9 +708,13 @@ fn two_statements() {
 #[test]
 fn project_double_parent_query() {
     // Tests mod filter with double parent query pattern.
-    // mod("test", filter="true", inherit="true") acts as a namespace filter
+    // filter("compound_name", "test", inherit="true") acts as a namespace filter
     // that propagates into child scopes via inherit="true".
-    const QUERY: &str = r#"mod("test", filter="true", inherit="true") {{"b"}}"#;
+    // `select` keeps the outer command strong (the old namespace filter was
+    // constraining); by the weakness propagation rule the bare middle scope
+    // is then sandwiched between a strong parent and a strong child and
+    // stays strong too — reproducing the old constrained result.
+    const QUERY: &str = r#"select filter("compound_name", "test", inherit="true") {{"b"}}"#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -725,11 +729,26 @@ fn project_double_parent_query() {
     );
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-92", "942-91", "942-92"]);
+
+    // Without `select` the outer command is unit+filter → non-constraining →
+    // weak (root parent), and weakness propagates through the bare middle:
+    // the echo keeps every namespace-matching caller, including test.c (93).
+    const WEAK_QUERY: &str = r#"filter("compound_name", "test", inherit="true") {{"b"}}"#;
+    let res = run_query(TEST_INPUT_MODULES, WEAK_QUERY);
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(92),
+            SymbolInstanceId::new(93),
+            SymbolInstanceId::new(942)
+        ]
+    );
 }
 
 #[test]
 fn module_filter_excludes_other_modules() {
-    const FILTERED_QUERY: &str = r#"mod("test", filter="true") "a""#;
+    const FILTERED_QUERY: &str = r#"filter("compound_name", "test") "a""#;
     let filtered = run_query(TEST_INPUT_MODULES, FILTERED_QUERY);
 
     println!("{:#?}", filtered.nodes);
@@ -751,7 +770,7 @@ fn module_filter_excludes_other_modules() {
         ]
     );
 
-    const FILTERED_AND_UNFILTERED_QUERY: &str = r#"mod("test", filter="true") "a"; "a""#;
+    const FILTERED_AND_UNFILTERED_QUERY: &str = r#"filter("compound_name", "test") "a"; "a""#;
     let filtered_unfiltered = run_query(TEST_INPUT_MODULES, FILTERED_AND_UNFILTERED_QUERY);
     let filtered_unfiltered_nodes = filtered_unfiltered.nodes.as_vec();
 
@@ -765,7 +784,7 @@ fn module_filter_excludes_other_modules() {
     );
 
     const PREAMBLE_FILTERED_QUERY: &str =
-        r#"preamble mod("test", filter="true", inherit="true"); "a""#;
+        r#"preamble filter("compound_name", "test", inherit="true"); "a""#;
     let preamble_filtered = run_query(TEST_INPUT_MODULES, PREAMBLE_FILTERED_QUERY);
     let preamble_filtered_nodes = preamble_filtered.nodes.as_vec();
 
@@ -774,7 +793,7 @@ fn module_filter_excludes_other_modules() {
 
 #[test]
 fn module_filter_selects_other_module() {
-    const QUERY: &str = r#"mod("other", filter="true") "a""#;
+    const QUERY: &str = r#"filter("compound_name", "other") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -786,7 +805,7 @@ fn module_filter_selects_other_module() {
 
 #[test]
 fn module_filter_replaced_by_second_invocation() {
-    const QUERY: &str = r#"mod("test", filter="true") mod("other", filter="true") "a""#;
+    const QUERY: &str = r#"filter("compound_name", "test") filter("compound_name", "other") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -798,7 +817,7 @@ fn module_filter_replaced_by_second_invocation() {
 
 #[test]
 fn module_filter_children_scope_honors_filter() {
-    const QUERY: &str = r#"mod("other", filter="true") "a" {}"#;
+    const QUERY: &str = r#"filter("compound_name", "other") "a" {}"#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -894,7 +913,7 @@ fn project_filter_selects_other_project() {
 
 #[test]
 fn project_and_module_filters_combine() {
-    const QUERY: &str = r#"project("test_project") mod("other", filter="true") "a""#;
+    const QUERY: &str = r#"project("test_project") filter("compound_name", "other") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -906,7 +925,7 @@ fn project_and_module_filters_combine() {
 
 #[test]
 fn conflicting_project_and_module_filters_return_empty() {
-    const QUERY: &str = r#"project("other_project") mod("other", filter="true") "a""#;
+    const QUERY: &str = r#"project("other_project") filter("compound_name", "other") "a""#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -1301,15 +1320,14 @@ fn type_selector_function_filter_at_root() {
 
 #[test]
 fn type_selector_function_explicit_select_all() {
-    // func(filter="false")
-    // Explicitly select all functions (override default filter behavior)
-    const QUERY: &str = r#"func(filter="false")"#;
+    // `func select`
+    // Explicitly select all functions (was func(filter="false")).
+    const QUERY: &str = r#"func select"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
-    println!("{:#?}", res.edges);
 
-    // Should have foo (20), bar (30), baz (40)
+    // foo (20), bar (30), baz (40)
     assert_eq!(res.nodes.as_vec().len(), 3);
 }
 
@@ -2048,17 +2066,14 @@ fn generic_filter_with_select_constrains_parent() {
 }
 
 #[test]
-fn generic_select_alone_warns() {
-    // select alone (no name filter, no anchor) — anchoring error whose
-    // hint names `all` as the explicit enumerate-everything opt-in.
-    let res = run_query_err(TEST_INPUT_A, r#"select"#);
-    let err = match res {
-        Err(e) => e,
-        Ok(_) => panic!("bare select must be an anchoring error"),
-    };
+fn generic_select_alone_enumerates() {
+    // Bare `select` is the bindness verb with the All anchor: it declares
+    // the tree binding and enumerates everything its filters allow,
+    // budget-bounded — no warning, no error.
+    let res = run_query(TEST_INPUT_A, r#"select"#);
     assert!(
-        err.to_string().contains("`all`"),
-        "the error must point at the `all` escape hatch: {err}"
+        !res.nodes.as_vec().is_empty(),
+        "select must enumerate under the budget"
     );
 }
 
@@ -7315,13 +7330,13 @@ fn anchor_error_is_per_component() {
 }
 
 #[test]
-fn all_verb_enumerates_and_composes_with_constraints() {
-    // `all` — the explicit enumerate-everything anchor.
-    let res = run_query(TEST_INPUT_A, r#"all"#);
+fn select_verb_enumerates_and_composes_with_constraints() {
+    // `select` — the explicit enumerate-everything anchor.
+    let res = run_query(TEST_INPUT_A, r#"select"#);
     assert!(!res.nodes.as_vec().is_empty(), "all must return symbols");
 
     // Composes with type constraints: `func all` = all functions.
-    let res = run_query(TEST_INPUT_A, r#"func all"#);
+    let res = run_query(TEST_INPUT_A, r#"func select"#);
     let nodes = res.nodes.as_vec();
     assert!(nodes.contains(&SymbolInstanceId::new(91)), "function a");
     assert!(
@@ -7331,9 +7346,21 @@ fn all_verb_enumerates_and_composes_with_constraints() {
 }
 
 #[test]
-fn all_verb_rejects_arguments() {
-    let res = run_query_err(TEST_INPUT_A, r#"all("x")"#);
-    assert!(res.is_err(), "all takes no arguments");
+fn filter_argument_is_a_hard_error() {
+    // `filter=` was the manual plan toggle; it is gone, not ignored.
+    let res = run_query_err(TEST_INPUT_A, r#"func(filter="false")"#);
+    let err = match res {
+        Err(e) => e,
+        Ok(_) => panic!("filter= must be a parse error"),
+    };
+    assert!(
+        err.to_string().contains("`filter=` was removed"),
+        "error must carry the migration hint: {err}"
+    );
+    assert!(
+        run_query_err(TEST_INPUT_A, r#"mod("test", filter="true") "a""#).is_err(),
+        "filter=\"true\" errors too"
+    );
 }
 
 // ============================================================================
@@ -7393,18 +7420,18 @@ fn probe_skips_layer_and_derived_statements() {
 
 #[test]
 fn refinement_resolves_capped_statement() {
-    // cap=5: `all` (11 instances) caps in wave 0; `"b"` resolves.  Round 1
+    // cap=5: `select` (11 instances) caps in wave 0; `"b"` resolves.  Round 1
     // re-probes the outer statement under the child's refs+has role
     // branches (the `{ }` default relationship counts either edge kind)
     // and unions the branch results: the caller SYMBOLS of b (a, main,
     // file, directory — with the directory's second instance riding along,
     // symbol-level like the worklist's constrain) plus b's containers.
-    const QUERY: &str = r#"all { "b" }"#;
+    const QUERY: &str = r#"select { "b" }"#;
     let (refined, acts) = run_query_probe_traced(TEST_INPUT_A, QUERY, 5);
 
     let outer: Vec<_> = acts
         .iter()
-        .filter(|a| a.query_statement.starts_with("all"))
+        .filter(|a| a.query_statement.starts_with("select"))
         .collect();
     assert_eq!(outer.len(), 2, "wave-0 cap + one refinement: {:?}", acts);
     assert_eq!(outer[0].resolved, None, "wave 0 must cap at 5");
@@ -7438,7 +7465,7 @@ fn refinement_resolves_capped_statement() {
 fn refinement_cascades_through_unanchored_middle() {
     // The worst-case shape in miniature: a broad anchored container, an
     // unanchored pure-constraint middle, a selective leaf.  cap=4:
-    //   wave 0: `all` caps; `"g"` resolves.
+    //   wave 0: `select` caps; `"g"` resolves.
     //   round 1: the middle `func { }` — never wave-0 probed (unanchored,
     //            and its inherited bare type selector is not even a
     //            selector) — re-probes its filter conjunction under the
@@ -7447,7 +7474,7 @@ fn refinement_cascades_through_unanchored_middle() {
     // The middle's resolved ids also feed the outer's children scope in
     // place of the bare `func` condition the index would otherwise have
     // to materialise in full.
-    const QUERY: &str = r#"all { func { "g" } }"#;
+    const QUERY: &str = r#"select { func { "g" } }"#;
     let (refined, acts) = run_query_probe_traced(TEST_INPUT_A, QUERY, 4);
 
     assert_eq!(acts.len(), 4, "no wasted probes: {:?}", acts);
@@ -7459,7 +7486,7 @@ fn refinement_cascades_through_unanchored_middle() {
     assert_eq!(middle.resolved, Some(1), "callers of g = f alone");
     let outer_refined = acts
         .iter()
-        .find(|a| a.query_statement.starts_with("all") && a.round == 2)
+        .find(|a| a.query_statement.starts_with("select") && a.round == 2)
         .expect("outer must resolve in round 2, after the middle");
     assert_eq!(
         outer_refined.resolved,
