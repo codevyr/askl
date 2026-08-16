@@ -75,7 +75,7 @@ pub struct MaterialiseOutcome {
     pub layer_ids: Vec<i64>,
     /// `(root_id, layer_id)` pairs for `EphContext::push_materialisation`.
     pub layers: Vec<(i64, i64)>,
-    /// Per-layer cache activations, in recording order.
+    /// Per-shard cache activations, in recording order.
     pub activations: Vec<LayerActivation>,
     /// Phase-M warnings (verb-limit truncation), surfaced via Phase R's
     /// `ComputeResult`.
@@ -397,7 +397,7 @@ impl Command {
                 .iter()
                 .map(|p| &p.input_hash[..8])
                 .collect::<Vec<_>>(),
-            "partitioned composite layer synthesised",
+            "partitioned composite layer spec synthesised",
         );
 
         // Composite selection-shard key: fold every part's extra
@@ -714,7 +714,7 @@ impl Command {
     ///
     /// Runs against the PRE-TREE visibility snapshot (the executor takes it
     /// once per top-level statement tree): no command sees a tree-mate's
-    /// layers at materialise time, so supplements parent on the previous
+    /// layers at materialise time, so selection shards parent on the previous
     /// tree's tip and `has_chain` guards evaluate pre-tree.  The returned
     /// `layers` is NOT pushed here — the executor folds it into the tree's
     /// single materialisation, after which every statement's Phase R sees the
@@ -770,7 +770,7 @@ impl Command {
         // this; reaching here is an internal invariant violation.
         if !eph.has_chain() && !spec.selection_extra.is_empty() {
             return Err(to_pest(anyhow::anyhow!(
-                "internal error: layer spec carries supplement inputs \
+                "internal error: layer spec carries selection-shard inputs \
                  but no ephemeral context exists before this statement"
             )));
         }
@@ -909,7 +909,8 @@ impl Command {
                 // selector returns the same combined view — the command-level
                 // OR across selectors dedupes the union into one selection.
                 // Union read across the statement's materialised layers
-                // (all roots' bases ∪ supplements) — the composition point
+                // (all roots' root shards ∪ layer shards ∪ selection shards)
+                // — the composition point
                 // where future mask rows will subtract.  Empty only under a
                 // zero-root context (no project exists for ephemeral rows
                 // to attach to): nothing was materialised, so the selector
@@ -1117,66 +1118,71 @@ impl LabeledStatements {
 mod tests {
     use super::*;
 
-    fn noop_base() -> RootShardPopulate {
+    fn noop_root_shard() -> RootShardPopulate {
         Box::new(|_txn, _root| Box::pin(async { Ok(false) }))
     }
 
-    fn noop_supplement() -> SelectionShardPopulate {
-        Box::new(|_txn, _root, _base| Box::pin(async { Ok(false) }))
+    fn noop_selection_shard() -> SelectionShardPopulate {
+        Box::new(|_txn, _root, _root_shard_ref| Box::pin(async { Ok(false) }))
     }
 
     /// A content-scan-less part with an empty `selection_extra` and no
-    /// per-layer populate (`None`) — the shape a lone `layer { … }` with only
-    /// base ops produces. (A real `search()` differs: it sets
+    /// layer-shard populate (`None`) — the shape a lone `layer { … }` with only
+    /// root-shard ops produces. (A real `search()` differs: it sets
     /// `layer_shard_populate: Some(..)` via `LayerSpec::sharded_scan`.)
     fn empty_part() -> LayerSpec {
         LayerSpec {
             input_hash: [0u8; 32],
-            root_shard_populate: noop_base(),
-            selection_shard_populate: noop_supplement(),
+            root_shard_populate: noop_root_shard(),
+            selection_shard_populate: noop_selection_shard(),
             layer_shard_populate: None,
             selection_extra: Vec::new(),
         }
     }
 
-    /// A part carrying real supplement inputs, like a `layer { … }` that
+    /// A part carrying real selection-shard inputs, like a `layer { … }` that
     /// references ephemeral ids.
-    fn part_with_supplement(extra: Vec<u8>) -> LayerSpec {
+    fn part_with_selection_extra(extra: Vec<u8>) -> LayerSpec {
         LayerSpec {
             input_hash: [0u8; 32],
-            root_shard_populate: noop_base(),
-            selection_shard_populate: noop_supplement(),
+            root_shard_populate: noop_root_shard(),
+            selection_shard_populate: noop_selection_shard(),
             layer_shard_populate: None,
             selection_extra: extra,
         }
     }
 
     #[test]
-    fn composite_of_empty_supplements_stays_empty() {
+    fn composite_of_empty_selection_extras_stays_empty() {
         // `search("A") search("B")`: both parts are persistent-only, so the
-        // composite must carry NO supplement — otherwise the empty-chain guard
-        // in `compute_selected` rejects it as "supplement inputs but no
-        // ephemeral context". Regression test for that internal error.
+        // composite must carry NO selection-shard key — otherwise the
+        // empty-chain guard in `compute_selected` rejects it as
+        // "selection-shard inputs but no ephemeral context". Regression test
+        // for that internal error.
         let composite = Command::partitioned_composite(vec![empty_part(), empty_part()]);
         assert!(
             composite.selection_extra.is_empty(),
-            "two persistent-only parts must not fabricate a supplement"
+            "two persistent-only parts must not fabricate a selection-shard key"
         );
     }
 
     #[test]
-    fn composite_with_a_real_supplement_is_nonempty_and_order_distinct() {
-        // If any part has supplement inputs, the composite keeps a (32-byte)
-        // supplement key that still distinguishes source order.
-        let a =
-            Command::partitioned_composite(vec![empty_part(), part_with_supplement(vec![1, 2, 3])]);
+    fn composite_with_a_real_selection_extra_is_nonempty_and_order_distinct() {
+        // If any part has selection-shard inputs, the composite keeps a
+        // (32-byte) selection-shard key that still distinguishes source order.
+        let a = Command::partitioned_composite(vec![
+            empty_part(),
+            part_with_selection_extra(vec![1, 2, 3]),
+        ]);
         assert!(!a.selection_extra.is_empty());
-        let b =
-            Command::partitioned_composite(vec![part_with_supplement(vec![1, 2, 3]), empty_part()]);
+        let b = Command::partitioned_composite(vec![
+            part_with_selection_extra(vec![1, 2, 3]),
+            empty_part(),
+        ]);
         assert!(!b.selection_extra.is_empty());
         assert_ne!(
             a.selection_extra, b.selection_extra,
-            "supplement key must fold parts in source order"
+            "selection-shard key must fold parts in source order"
         );
     }
 }

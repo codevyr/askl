@@ -929,7 +929,7 @@ pub async fn purge_eph_cache(conn: &mut AsyncPgConnection) -> Result<usize, dies
 ///
 /// `symbol_instances.symbol` / `symbol_refs.to_symbol` cascade to
 /// `symbols.id`, and layers reference symbols ACROSS layer boundaries by
-/// design (a supplement's rows point into upstream layers).  A plain
+/// design (a selection shard's rows point into upstream layers).  A plain
 /// `DELETE FROM layers WHERE <seed>` therefore cascade-deletes rows out
 /// of OTHER still-cached layers while leaving their `layers` rows
 /// `populated = true` — hollow entries whose keys never change, served as
@@ -1011,8 +1011,8 @@ pub enum EphLayerKind {
     /// once by migration and preserved across `purge_eph_cache` /
     /// `purge_old_eph_layers`.  Loaded by `kind='canary'`.
     Canary,
-    /// Any query-time ephemeral cache layer — a base, a `layer { … }` block, a
-    /// composite, the fused supplement, or a per-layer content atom.  All are
+    /// Any query-time ephemeral cache layer — a root shard, a `layer { … }`
+    /// block, a composite, a selection shard, or a layer shard.  All are
     /// GC-able; none of these are distinguished by kind (their identity and
     /// role live in the hash, `parent_id`, and `ShardRole`).
     Ephemeral,
@@ -1455,7 +1455,7 @@ impl Index {
     /// hash — through the SQL result cache, so per-request resolution is a
     /// RAM hit and the same epoch clear that index mutations already perform
     /// invalidates it.  Ids feed visibility binds via [`EphContext::rooted`];
-    /// hashes feed the base-hash salt (see [`root_shard_hash`]).
+    /// hashes feed the root-shard salt (see [`root_shard_hash`]).
     pub async fn load_root_layers(&self) -> Result<Vec<RootLayer>> {
         use crate::schema_diesel::{layers, projects};
 
@@ -2713,11 +2713,12 @@ impl Index {
             Ok(row) => row,
             Err(e) => {
                 let _ = diesel::sql_query("ROLLBACK").execute(&mut *conn).await;
-                // A parent/base FK violation here means the referenced layer
-                // was purged between this statement's earlier materialization
-                // steps and this insert (e.g. `purge_eph_cache` won the
-                // layers lock in the gap between a base commit and its
-                // supplement).  The cache is coherent — this request just
+                // A parent/root-shard FK violation here means the referenced
+                // layer was purged between this statement's earlier
+                // materialization steps and this insert (e.g. `purge_eph_cache`
+                // won the layers lock in the gap between a root shard's commit
+                // and its selection shard).  The cache is coherent — this
+                // request just
                 // straddled the purge — so tell the user to retry rather
                 // than surfacing a raw constraint error.
                 use diesel::result::{DatabaseErrorKind, Error as E};
@@ -3085,16 +3086,17 @@ impl Index {
 
         // Deterministic result (and therefore activation-trace) order
         // regardless of completion order: roots ascending, and within a root
-        // base → per-layer atoms → supplement (by construction of each group;
+        // root shard → layer shards → selection shard (by construction of each
+        // group;
         // the stable sort preserves that intra-group order).
         groups.sort_by_key(|g| g.get(0).map(|l| l.root_id));
         Ok(groups.into_iter().flatten().collect())
     }
 
     /// Get all instance IDs belonging to any of the given ephemeral layers.
-    /// Union read across a base+supplement pair — the point where the two
-    /// halves of a partitioned entry compose (and where future mask rows
-    /// will subtract).
+    /// Union read across a root shard + selection shard pair — the point
+    /// where the halves of a partitioned entry compose (and where future mask
+    /// rows will subtract).
     pub async fn get_eph_instance_ids_for_layers(&self, layer_ids: &[i64]) -> Result<Vec<i64>> {
         use crate::schema_diesel::symbol_instances;
 
@@ -3328,10 +3330,10 @@ impl Index {
     /// [`Index::search_content_matches_on`]).
     ///
     /// Layer-sharded like [`Index::search_content_matches_on`]: `visible_layers`
-    /// scopes the resolution to a layer set (the base shard binds the root ids,
-    /// the supplement shard binds the upstream chain), and `eph_branch` adds the
+    /// scopes the resolution to a layer set (the root shard binds the root
+    /// ids, an eph shard binds its own layer), and `eph_branch` adds the
     /// eph-disjointness guard (`objects.layer < 0` — negative layers are
-    /// ephemeral) so the supplement shard only ever sees eph-layer objects.
+    /// ephemeral) so an eph shard only ever sees eph-layer objects.
     pub async fn find_objects_by_path_on(
         connection: &mut AsyncPgConnection,
         path: &str,
@@ -3351,8 +3353,8 @@ impl Index {
                     .eq(path)
                     .or(objects::filesystem_path.like(format!("%/{}", escaped))),
             )
-            // Scope to the shard's visible layer set (root ids for the base
-            // shard, the upstream chain for the supplement shard).
+            // Scope to the shard's visible layer set (root ids for the root
+            // shard, its own layer for an eph shard).
             .filter(objects::layer.eq_any(visible_layers))
             .select((objects::id, projects::id))
             .into_boxed::<Pg>();
@@ -3361,9 +3363,9 @@ impl Index {
             query = query.filter(projects::project_name.eq(name));
         }
 
-        // Eph-disjointness guard: the supplement shard scans ephemeral objects
-        // only (`objects.layer < 0`), so a base object never double-counts as a
-        // supplement object.
+        // Eph-disjointness guard: an eph shard scans ephemeral objects
+        // only (`objects.layer < 0`), so a root-shard object never
+        // double-counts as an eph-shard object.
         if eph_branch {
             query = query.filter(objects::layer.lt(0));
         }
@@ -3562,7 +3564,7 @@ fn build_search_sql(
     // Project-level scoping: ALWAYS present.  Per-root populate scopes
     // every search to one project; the caller intersects the composite
     // filter's resolved project set with the root's project and binds the
-    // result (possibly empty — zero rows, the uniform empty base).  Content
+    // result (possibly empty — zero rows, the uniform empty shard).  Content
     // shared across projects is naturally scoped: for each cs row the JOIN
     // produces one object per project that references it, and
     // `o.project_id = ANY($N)` keeps only the caller's.  Slot shifts based
@@ -3681,7 +3683,7 @@ impl Index {
         // pass the filter" — instead of loading every matching project's
         // id.  With no filter, the root's project passes through.  The
         // resulting bind is `[project_id]` or `[]` — an empty array yields
-        // zero rows, the uniform empty base for a filtered-out root.  No
+        // zero rows, the uniform empty shard for a filtered-out root.  No
         // special-casing per filter type — any future FilterLeaf that
         // implements objects_expr is picked up automatically (the typed
         // expression is applied verbatim inside the probe).
@@ -4016,12 +4018,12 @@ impl Drop for EphTransaction<'_> {
 mod tests {
     use super::*;
 
-    /// Per-root base-layer identity: identical verb inputs against different
-    /// roots key different bases, the fold is stable per (root, hash), and —
-    /// the reuse property — the v2 domain is disjoint from the multi-root
-    /// v1 fold so upgrades strand (rather than alias) old cache rows.
+    /// Per-root root-shard identity: identical verb inputs against different
+    /// roots key different root shards, the fold is stable per (root, hash),
+    /// and — the reuse property — the domain tag is disjoint from the older
+    /// multi-root fold so upgrades strand (rather than alias) old cache rows.
     #[test]
-    fn root_salted_hash_scopes_cache_per_root() {
+    fn root_shard_hash_scopes_cache_per_root() {
         let verb_hash = [7u8; 32];
         let r1 = RootLayer {
             project_id: 1,
@@ -4036,7 +4038,7 @@ mod tests {
 
         let k1 = root_shard_hash(&r1, &verb_hash);
         let k2 = root_shard_hash(&r2, &verb_hash);
-        assert_ne!(k1, k2, "different roots must key different bases");
+        assert_ne!(k1, k2, "different roots must key different root shards");
         assert_ne!(k1, verb_hash, "salting must change the verb hash");
         assert_eq!(
             k1,
@@ -4045,36 +4047,38 @@ mod tests {
         );
     }
 
-    /// Per-layer atom keys: distinct per (layer, base), deterministic, and
-    /// disjoint from the fused-supplement key family and the raw base hash —
-    /// the property the `layer-shard-v1` domain tag exists to guarantee.
+    /// Layer-shard keys: distinct per (layer, root shard), deterministic, and
+    /// disjoint from the selection-shard key family and the raw root-shard
+    /// hash — the property the `layer-shard-v1` domain tag exists to
+    /// guarantee.
     #[test]
-    fn per_layer_hash_is_layer_scoped_and_disjoint() {
-        let base = [9u8; 32];
-        let k1 = layer_shard_hash(-1001, &base);
-        let k2 = layer_shard_hash(-1002, &base);
-        assert_ne!(k1, k2, "different layers must key different atoms");
+    fn layer_shard_hash_is_layer_scoped_and_disjoint() {
+        let root_shard = [9u8; 32];
+        let k1 = layer_shard_hash(-1001, &root_shard);
+        let k2 = layer_shard_hash(-1002, &root_shard);
+        assert_ne!(k1, k2, "different layers must key different layer shards");
         assert_eq!(
             k1,
-            layer_shard_hash(-1001, &base),
-            "same (layer, base) must fold deterministically"
+            layer_shard_hash(-1001, &root_shard),
+            "same (layer, root shard) must fold deterministically"
         );
-        // Different base (different verb inputs) ⇒ different atom key.
+        // A different root shard (different verb inputs) ⇒ a different
+        // layer-shard key.
         assert_ne!(
             k1,
             layer_shard_hash(-1001, &[1u8; 32]),
-            "different base hash must key a different atom"
+            "a different root-shard hash must key a different layer shard"
         );
-        // Disjoint from the fused-supplement key over the SAME ids — the domain
+        // Disjoint from the selection-shard key over the SAME ids — the domain
         // tags (`layer-shard-v1` vs `selection-shard-v1`) keep them apart.
         assert_ne!(
             k1,
-            selection_shard_hash(-1001, &base, &[]),
-            "per-layer and fused-supplement keys must never collide"
+            selection_shard_hash(-1001, &root_shard, &[]),
+            "layer-shard and selection-shard keys must never collide"
         );
         assert_ne!(
-            k1, base,
-            "an atom key must differ from the base hash it folds"
+            k1, root_shard,
+            "a layer-shard key must differ from the root-shard hash it folds"
         );
     }
 
@@ -4139,7 +4143,7 @@ mod tests {
     }
 
     // ===================================================================
-    // N-way per-layer sharding.
+    // N-way layer sharding.
     //
     // Nothing in production writes ephemeral CONTENT (objects/content_store
     // on a negative layer), so N-way is byte-identical to 2-way until such a
@@ -4147,8 +4151,8 @@ mod tests {
     // way to make `V(L_k)` non-empty — to prove: (a) the shard-set
     // enumeration, (b) the content scan is a union-homomorphism over layers
     // `V([L1,L2]) = V(L1) ∪ V(L2)`, and (c) the headline caching property —
-    // extending the chain re-materialises ONLY the new layer's atom while
-    // every prior atom (and the base) is a cache hit.
+    // extending the chain re-materialises ONLY the new layer's shard while
+    // every prior layer shard (and the root shard) is a cache hit.
     // ===================================================================
 
     /// Seed a positive root layer plus two ephemeral CONTENT layers (-1001,
@@ -4204,26 +4208,27 @@ mod tests {
         }
     }
 
-    // No-op populates: the cache-reuse property is a function of the atom's
-    // KEY and layer row, not its contents, so these tests need no real scan.
-    fn nway_noop_base<'b>(
+    // No-op populates: the cache-reuse property is a function of the layer
+    // shard's KEY and layer row, not its contents, so these tests need no real
+    // scan.
+    fn nway_noop_root_shard<'b>(
         _txn: &'b mut EphTransaction<'_>,
         _root: &'b RootLayer,
     ) -> EphScopedFut<'b, bool> {
         Box::pin(async { Ok(false) })
     }
-    fn nway_noop_supp<'b>(
+    fn nway_noop_selection_shard<'b>(
         _txn: &'b mut EphTransaction<'_>,
         _root: &'b RootLayer,
-        _base: RootShardRef,
+        _root_shard_ref: RootShardRef,
     ) -> EphScopedFut<'b, bool> {
         Box::pin(async { Ok(false) })
     }
-    fn nway_noop_per_layer<'b>(
+    fn nway_noop_layer_shard<'b>(
         _txn: &'b mut EphTransaction<'_>,
         _root: &'b RootLayer,
         _layer_id: i64,
-        _base: RootShardRef,
+        _root_shard_ref: RootShardRef,
     ) -> EphScopedFut<'b, bool> {
         Box::pin(async { Ok(false) })
     }
@@ -4362,7 +4367,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn nway_perlayer_atoms_reuse_across_chain_extension() -> Result<()> {
+    async fn nway_layer_shards_reuse_across_chain_extension() -> Result<()> {
         let docker = testcontainers::clients::Cli::default();
         let (_node, url) = crate::symbols_test::start_postgres(&docker);
         crate::symbols_test::wait_for_postgres(&url).await?;
@@ -4379,48 +4384,54 @@ mod tests {
                 &eph_a,
                 &input_hash,
                 &[],
-                nway_noop_base,
-                nway_noop_supp,
-                Some(nway_noop_per_layer),
+                nway_noop_root_shard,
+                nway_noop_selection_shard,
+                Some(nway_noop_layer_shard),
             )
             .await?;
 
-        let base_a = a
+        let root_shard_a = a
             .iter()
             .find(|l| l.role == ShardRole::Root)
-            .expect("a base layer");
-        assert!(base_a.outcome.created, "base is cold on first run");
-        let atoms_a: Vec<_> = a.iter().filter(|l| l.role == ShardRole::Layer).collect();
+            .expect("a root shard");
+        assert!(
+            root_shard_a.outcome.created,
+            "the root shard is cold on first run"
+        );
+        let layer_shards_a: Vec<_> = a.iter().filter(|l| l.role == ShardRole::Layer).collect();
         assert_eq!(
-            atoms_a.len(),
+            layer_shards_a.len(),
             1,
-            "one visible content layer ⇒ one atom, got {:?}",
+            "one visible content layer ⇒ one layer shard, got {:?}",
             a
         );
-        assert!(atoms_a[0].outcome.created, "the atom is cold on first run");
+        assert!(
+            layer_shards_a[0].outcome.created,
+            "the layer shard is cold on first run"
+        );
         assert_eq!(
             index
-                .eph_layer_meta(atoms_a[0].outcome.layer_id)
+                .eph_layer_meta(layer_shards_a[0].outcome.layer_id)
                 .await?
                 .parent_id,
             Some(-1001),
-            "the atom parents on the layer it shards"
+            "the layer shard parents on the layer it shards"
         );
-        let atom_a_id = atoms_a[0].outcome.layer_id;
-        let base_a_id = base_a.outcome.layer_id;
+        let layer_shard_a_id = layer_shards_a[0].outcome.layer_id;
+        let root_shard_a_id = root_shard_a.outcome.layer_id;
 
-        // Ordering even for a single-atom run: base → atom → supplement, so the
-        // supplement is the deterministic tip (not the atom).
+        // Ordering even for a single-layer-shard run: root shard → layer shard
+        // → selection shard, so the selection shard is the deterministic tip.
         assert_eq!(
             a.get(0).map(|l| l.role),
             Some(ShardRole::Root),
-            "base must be first, got {:?}",
+            "the root shard must be first, got {:?}",
             a
         );
         assert_eq!(
             a.last().map(|l| l.role),
             Some(ShardRole::Selection),
-            "supplement must be last (tip) on run A, got {:?}",
+            "the selection shard must be last (tip) on run A, got {:?}",
             a
         );
 
@@ -4433,40 +4444,43 @@ mod tests {
                 &eph_b,
                 &input_hash,
                 &[],
-                nway_noop_base,
-                nway_noop_supp,
-                Some(nway_noop_per_layer),
+                nway_noop_root_shard,
+                nway_noop_selection_shard,
+                Some(nway_noop_layer_shard),
             )
             .await?;
 
-        // The base is chain-independent, so it is reused unchanged.
-        let base_b = b
+        // The root shard is chain-independent, so it is reused unchanged.
+        let root_shard_b = b
             .iter()
             .find(|l| l.role == ShardRole::Root)
-            .expect("a base layer");
+            .expect("a root shard");
         assert!(
-            !base_b.outcome.created,
-            "base must be reused across the chain extension"
+            !root_shard_b.outcome.created,
+            "the root shard must be reused across the chain extension"
         );
-        assert_eq!(base_b.outcome.layer_id, base_a_id, "same base row");
-
-        // The headline: the -1001 atom reappears by the SAME layer_id as a
-        // cache hit; only the newly-appended -1002 layer's atom is cold.
-        // Under 2-way the whole fused supplement went cold here.
-        let atoms_b: Vec<_> = b.iter().filter(|l| l.role == ShardRole::Layer).collect();
         assert_eq!(
-            atoms_b.len(),
+            root_shard_b.outcome.layer_id, root_shard_a_id,
+            "same root-shard row"
+        );
+
+        // The headline: the -1001 layer shard reappears by the SAME layer_id as
+        // a cache hit; only the newly-appended -1002 layer's shard is cold.
+        // Under 2-way the whole selection shard went cold here.
+        let layer_shards_b: Vec<_> = b.iter().filter(|l| l.role == ShardRole::Layer).collect();
+        assert_eq!(
+            layer_shards_b.len(),
             2,
-            "two visible content layers ⇒ two atoms, got {:?}",
+            "two visible content layers ⇒ two layer shards, got {:?}",
             b
         );
-        let reused = atoms_b
+        let reused = layer_shards_b
             .iter()
-            .find(|l| l.outcome.layer_id == atom_a_id)
-            .expect("the L=-1001 atom must reappear by the same layer_id");
+            .find(|l| l.outcome.layer_id == layer_shard_a_id)
+            .expect("the L=-1001 layer shard must reappear by the same layer_id");
         assert!(
             !reused.outcome.created,
-            "the non-tip atom must be a cache HIT — the core N-way property"
+            "the non-tip layer shard must be a cache HIT — the core N-way property"
         );
         assert_eq!(
             index
@@ -4475,14 +4489,14 @@ mod tests {
                 .parent_id,
             Some(-1001),
         );
-        let fresh: Vec<_> = atoms_b
+        let fresh: Vec<_> = layer_shards_b
             .iter()
-            .filter(|l| l.outcome.layer_id != atom_a_id)
+            .filter(|l| l.outcome.layer_id != layer_shard_a_id)
             .collect();
-        assert_eq!(fresh.len(), 1, "exactly one new atom");
+        assert_eq!(fresh.len(), 1, "exactly one new layer shard");
         assert!(
             fresh[0].outcome.created,
-            "only the new tip layer's atom is materialised cold"
+            "only the new tip layer's shard is materialised cold"
         );
         assert_eq!(
             index
@@ -4490,16 +4504,16 @@ mod tests {
                 .await?
                 .parent_id,
             Some(-1002),
-            "the fresh atom shards the newly-appended tip L=-1002"
+            "the fresh layer shard covers the newly-appended tip L=-1002"
         );
 
-        // Ordering / tip: the (empty) supplement is emitted LAST, so it
-        // — not a nondeterministically-ordered atom — is the root's
-        // tip, keeping downstream supplement keys stable.
+        // Ordering / tip: the (empty) selection shard is emitted LAST, so it
+        // — not a nondeterministically-ordered layer shard — is the root's
+        // tip, keeping downstream selection-shard keys stable.
         assert_eq!(
             b.last().map(|l| l.role),
             Some(ShardRole::Selection),
-            "the supplement must be the last (tip) layer, got {:?}",
+            "the selection shard must be the last (tip) layer, got {:?}",
             b
         );
         assert!(
@@ -4507,22 +4521,22 @@ mod tests {
                 < b.iter()
                     .rposition(|l| l.role == ShardRole::Selection)
                     .unwrap(),
-            "every per-layer atom must precede the supplement, got {:?}",
+            "every layer shard must precede the selection shard, got {:?}",
             b
         );
         Ok(())
     }
 
-    // A per-layer populate that materialises the atom's real content: it finds
-    // the object seeded on `L_j` and inserts one instance for it, mirroring
-    // what `sharded_scan`'s scan does.  Used to prove that with the fused
-    // supplement a no-op, reading across base+atoms+supplement returns each
-    // match exactly ONCE (no double-count).
-    fn nway_content_per_layer<'b>(
+    // A layer-shard populate that materialises the shard's real content: it
+    // finds the object seeded on `L_j` and inserts one instance for it,
+    // mirroring what `sharded_scan`'s scan does.  Used to prove that with the
+    // selection shard a no-op, reading across root + layer + selection shards
+    // returns each match exactly ONCE (no double-count).
+    fn nway_content_layer_shard<'b>(
         txn: &'b mut EphTransaction<'_>,
         root: &'b RootLayer,
         layer_id: i64,
-        _base: RootShardRef,
+        _root_shard_ref: RootShardRef,
     ) -> EphScopedFut<'b, bool> {
         Box::pin(async move {
             let filter = CompositeFilter::and(vec![]);
@@ -4570,15 +4584,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn nway_fused_supplement_is_noop_so_no_double_count() -> Result<()> {
+    async fn nway_selection_shard_is_noop_so_no_double_count() -> Result<()> {
         let docker = testcontainers::clients::Cli::default();
         let (_node, url) = crate::symbols_test::start_postgres(&docker);
         crate::symbols_test::wait_for_postgres(&url).await?;
         let index = Index::connect(&url).await?;
         seed_nway_content(&index).await?;
 
-        // Chain over both content layers; atoms carry the content, supplement
-        // is the no-op marker.
+        // Chain over both content layers; the layer shards carry the content,
+        // the selection shard is the no-op marker.
         let mut eph = EphContext::rooted(vec![nway_root()]);
         eph.push_materialisation(&[(1000001, -1001)]);
         eph.push_materialisation(&[(1000001, -1002)]);
@@ -4587,39 +4601,39 @@ mod tests {
                 &eph,
                 &[7u8; 32],
                 &[],
-                nway_noop_base,
-                nway_noop_supp,
-                Some(nway_content_per_layer),
+                nway_noop_root_shard,
+                nway_noop_selection_shard,
+                Some(nway_content_layer_shard),
             )
             .await?;
 
-        // The supplement holds ZERO rows (no-op) while each atom holds its
-        // layer's single match.
-        let supp = layers
+        // The selection shard holds ZERO rows (no-op) while each layer shard
+        // holds its layer's single match.
+        let selection_shard = layers
             .iter()
             .find(|l| l.role == ShardRole::Selection)
-            .expect("a supplement marker");
+            .expect("a selection-shard marker");
         assert_eq!(
             index
-                .count_eph_rows_for_layer(supp.outcome.layer_id)
+                .count_eph_rows_for_layer(selection_shard.outcome.layer_id)
                 .await?,
             (0, 0),
-            "the fused supplement must stay empty — content lives in the atoms"
+            "the selection shard must stay empty — content lives in the layer shards"
         );
-        let atoms: Vec<_> = layers
+        let layer_shards: Vec<_> = layers
             .iter()
             .filter(|l| l.role == ShardRole::Layer)
             .collect();
-        assert_eq!(atoms.len(), 2, "one atom per content layer");
-        for atom in &atoms {
+        assert_eq!(layer_shards.len(), 2, "one layer shard per content layer");
+        for layer_shard in &layer_shards {
             let (_syms, insts) = index
-                .count_eph_rows_for_layer(atom.outcome.layer_id)
+                .count_eph_rows_for_layer(layer_shard.outcome.layer_id)
                 .await?;
-            assert_eq!(insts, 1, "each atom holds its layer's single match");
+            assert_eq!(insts, 1, "each layer shard holds its layer's single match");
         }
 
         // The union read across ALL of this statement's layers returns each
-        // match exactly once — no supplement/atom double-count.
+        // match exactly once — no selection/layer shard double-count.
         let all_ids: Vec<i64> = layers.iter().map(|l| l.outcome.layer_id).collect();
         let instance_ids = index.get_eph_instance_ids_for_layers(&all_ids).await?;
         assert_eq!(

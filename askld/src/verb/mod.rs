@@ -134,11 +134,11 @@ pub struct LayerSpec {
     /// The eph-derived delta.  Provided unconditionally (uniform shape);
     /// the executor runs it iff an upstream chain exists.
     pub selection_shard_populate: SelectionShardPopulate,
-    /// N-way content sharding: the verb's per-layer contribution `V(L_j)`,
+    /// N-way content sharding: the verb's layer-shard contribution `V(L_j)`,
     /// invoked once per visible eph *content* layer.  `Some` for content
     /// scans (search, loc) that decompose as `V(⋃L)=⋃V(L)`; `None` for
     /// `layer { … }` blocks, whose selection shard is genuinely
-    /// chain-dependent, not a per-layer content scan.  Additive to the root
+    /// chain-dependent, not a layer-shard content scan.  Additive to the root
     /// and selection shards: today no eph layer carries content, so the
     /// executor materialises zero layer shards and production is
     /// byte-identical.  See [`Index::with_partitioned_layers`].
@@ -175,7 +175,7 @@ impl LayerSpec {
             Box::new(|_txn, _root, _root_shard_ref| Box::pin(async { Ok(false) }));
         // N-way: each layer shard scans exactly ONE eph content layer
         // `[layer_id]`.  Binding the same layer-agnostic scan to a singleton
-        // visible set is what makes `V(L_j)` a stand-alone, per-layer-cacheable
+        // visible set is what makes `V(L_j)` a stand-alone, layer-cacheable
         // unit.
         let layer_shard_populate: LayerShardPopulate =
             Box::new(move |txn, root, layer_id, _root_shard_ref| {

@@ -11,8 +11,8 @@ pub const CANARY_LAYER_ID: i64 = -999999;
 /// A project root layer visible to the current request: the persistent layer
 /// id (positive, one per project), the owning project's id, and the root's
 /// identity hash.  The layer id feeds visibility binds; the project id scopes
-/// per-root populate reads/writes; the hash is folded into base-layer cache
-/// hashes so cache identity tracks root identity (and, once roots become
+/// per-root populate reads/writes; the hash is folded into root-shard cache
+/// keys so cache identity tracks root identity (and, once roots become
 /// version-hashed, content).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RootLayer {
