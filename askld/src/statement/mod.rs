@@ -154,22 +154,32 @@ fn stage_read(
 }
 
 /// Phase-M handoff to the Phase-R batch: one substatement's
-/// materialised layer ids + Phase-M warnings.
+/// materialised layer ids, its `(root, layer)` round entries (pushed by
+/// the executor as part of the TREE's single round), and Phase-M
+/// warnings.
 struct Staged {
     statement: Rc<Statement>,
     layer_ids: Vec<i64>,
+    round: Vec<(i64, i64)>,
     warnings: Vec<Diagnostic>,
 }
 
 /// The per-substatement materialise step of Phase M: `@label`
-/// resolution, [`Command::materialise_layers`], pushing the round,
-/// recording activations, and staging the outcome for Phase R.
-/// Extracted so the per-statement-rounds switch can swap the Phase-M
-/// loop body without touching this step.
+/// resolution, [`Command::materialise_layers`], recording activations,
+/// and staging the outcome for Phase R.
+///
+/// Runs against `pre_tree_eph` — the visibility snapshot taken ONCE
+/// before any of the tree's materialisations — so every command in a
+/// tree materialises independently of its tree-mates: supplements
+/// parent on the PREVIOUS tree's tip, and per-layer shards enumerate
+/// only pre-tree content layers.  The round is NOT pushed here; the
+/// executor pushes the whole tree's layers as one round after the
+/// tree's Phase-M loop.
 async fn materialise_substatement(
     ctx: &mut ExecutionContext,
     cfg: &ControlFlowGraph,
     statement: &Rc<Statement>,
+    pre_tree_eph: &EphContext,
 ) -> Result<Staged, pest::error::Error<Rule>> {
     // `@label` resolution.  The parse-time ordering rule
     // guarantees every label dep lives in an EARLIER tree,
@@ -207,22 +217,19 @@ async fn materialise_substatement(
         }
     }
 
-    let eph_m = ctx.eph.clone();
     // Condition-based by construction: nothing in this tree has a
     // selection yet, so the fused scope is the parent's filter.
-    let parent_scope = build_parent_scope(statement, ctx, &eph_m);
+    let parent_scope = build_parent_scope(statement, ctx, pre_tree_eph);
     let outcome = statement
         .command()
-        .materialise_layers(cfg, &eph_m, &resolved, &parent_scope)
+        .materialise_layers(cfg, pre_tree_eph, &resolved, &parent_scope)
         .await?;
-    if !outcome.round.is_empty() {
-        ctx.eph.push_round(&outcome.round);
-    }
     ctx.layer_activations
         .extend(outcome.activations.iter().copied());
     Ok(Staged {
         statement: statement.clone(),
         layer_ids: outcome.layer_ids,
+        round: outcome.round,
         warnings: outcome.warnings,
     })
 }
@@ -374,18 +381,37 @@ impl Statement {
         !has_selector || has_any_selection
     }
 
-    /// Compute initial selections for every statement — TWO-PHASE, per
-    /// top-level statement tree, trees in source order:
+    /// Compute initial selections for every statement — PHASED (M, P, R),
+    /// per top-level statement tree, trees in source order.  ONE round per
+    /// tree: nesting no longer sequences; `;` is the only time axis.
     ///
-    /// - **Phase M (materialise, sequential):** runs per tree — every
-    ///   substatement runs [`materialise_substatement`] in pre-order and its
-    ///   round is pushed onto the shared `ctx.eph` as it lands (per-statement
-    ///   rounds are future work), so later materialisations chain on earlier
-    ///   ones and the tree ends with ONE complete visibility set.
-    ///   Materialisation is independent of any statement's *selection*
-    ///   (scope-fusion is condition-based) — the sequencing exists only for
-    ///   chain identity; parallelising independent materialisations is
-    ///   future work.
+    /// - **Phase M (materialise):** runs per tree — a visibility snapshot
+    ///   is taken ONCE before any of the tree's materialisations, and every
+    ///   substatement runs [`materialise_substatement`] in pre-order against
+    ///   that same PRE-TREE snapshot: no command sees a tree-mate's layers
+    ///   at materialise time (intra-tree chaining does not exist).  The
+    ///   tree's layers then enter visibility as ONE round, pushed after the
+    ///   loop; each command keeps its own layers (attribution by layer id
+    ///   is load-bearing for per-command selections).
+    ///
+    ///   **Spine advance rule.**  Every supplement-bearing command's
+    ///   supplement parents on the PREVIOUS tree's tip (`chain_last` of the
+    ///   pre-tree snapshot); a tree with ≥2 supplements makes them SIBLINGS
+    ///   — no intra-tree key chaining.  The tree's new tip is, per root,
+    ///   the LAST layer of its round in substatement pre-order: the final
+    ///   layer-bearing substatement's supplement, or — under an empty
+    ///   pre-tree chain, where NO command materialises a supplement
+    ///   (first-round elision, per command) — that substatement's base.
+    ///   This is deterministic: pre-order is source order and each
+    ///   command's internal layer order is canonical (roots ascending;
+    ///   base → per-layer atoms → supplement, sorted by
+    ///   [`index::db_diesel::Index::with_partitioned_layers`]), so the tip
+    ///   is a pure function of the query text and the pre-tree chain —
+    ///   nothing completion-order-dependent feeds it.  A single-supplement
+    ///   tree parents and tips exactly like the old chained model.
+    /// - **Phase P (probe, concurrent):** cardinality probes + refinement
+    ///   rounds under the tree-complete visibility — see the inline block
+    ///   below for the full contract.
     /// - **Phase R (read, concurrent):** every statement's selection +
     ///   neighbourhood queries run via [`Command::compute_selection`] under
     ///   the tree-complete visibility, overlapped with `join_all` and applied
@@ -422,13 +448,28 @@ impl Statement {
                 Ok(true)
             })?;
 
-            // ---- Phase M: materialise, sequential, rounds applied as they
-            // land so chaining and `has_chain` see prior statements.  The
-            // per-substatement outcomes are collected into the tree's
-            // `staged` batch — the rounds belonging to this tree. ----
+            // ---- Phase M: every materialisation runs against the PRE-TREE
+            // snapshot (no intra-tree chaining; `has_chain` and the
+            // eph-referencing guards evaluate against it — correct by
+            // construction, since labels may only reference earlier trees).
+            // The per-substatement outcomes are collected into the tree's
+            // `staged` batch. ----
+            let pre_tree_eph = ctx.eph.clone();
             let mut staged: Vec<Staged> = Vec::with_capacity(tree.len());
             for statement in &tree {
-                staged.push(materialise_substatement(ctx, cfg, statement).await?);
+                staged.push(materialise_substatement(ctx, cfg, statement, &pre_tree_eph).await?);
+            }
+
+            // The tree's layers enter visibility as ONE round: substatement
+            // pre-order, each command's layers in their canonical internal
+            // order — making the last layer per root the tree's new tip
+            // (see the spine advance rule in the doc comment above).
+            let tree_round: Vec<(i64, i64)> = staged
+                .iter()
+                .flat_map(|s| s.round.iter().copied())
+                .collect();
+            if !tree_round.is_empty() {
+                ctx.eph.push_round(&tree_round);
             }
 
             // ---- Phase P: cardinality probes, concurrent, under
@@ -786,33 +827,20 @@ impl Statement {
 
         // Top-level sibling-ordering edges.
         //
-        // **Invariant we need to maintain.** When `compute_roots`
-        // pushes a top-level statement S into the pending list, the
-        // `eph` snapshot it captures must reflect every materialised
-        // ephemeral layer from preceding top-level statements.  A
-        // statement without a `PreSeed*` dependency does NOT pre-drain,
-        // so any time a preceding layer-creator's materialisation
-        // could affect a successor's `eph`, an edge is required.
+        // Execution order no longer depends on these: trees run
+        // sequentially and each tree's layers land as ONE round, so
+        // ordering is structural.  The edges survive for their two
+        // remaining readers — the notification pass (`notify`
+        // short-circuits every `PreSeed*` edge explicitly) and the
+        // budget gate in `stage_read` (`PreSeedSibling` is the one
+        // dependent role with no data flow, so it does NOT clear the
+        // budget).
         //
-        // **Minimal-edge construction.** A statement T whose `eph`
-        // could be affected by a preceding layer is exactly: any
-        // statement T that follows the most recent layer-creating
-        // statement L in source order.  Linking T → L is enough: the
-        // pre-drain in `compute_roots` flushes ALL pending futures
-        // (not just L), so transitive predecessors that may still be
-        // in flight are awaited too.  Each statement therefore needs
-        // at most one such edge — to the most recent layer-creator
-        // before it.
-        //
-        // This emits O(N) edges (vs. the previous O(K·N) double-loop),
-        // and skips edges between layer-free statements entirely so
-        // they remain free to run concurrently.
-        //
-        // We only consider top-level statements (no parent); nested
-        // siblings still rely on Parent/Child edges, and a nested
-        // layer's `@label` refs point at earlier trees (parse-enforced),
-        // which are fully applied.  This is a deliberate
-        // scoping choice (per the design discussion); a nested
+        // Construction: each top-level statement links to the most
+        // recent layer-creating top-level statement before it — O(N)
+        // edges, none between layer-free statements.  Nested siblings
+        // rely on Parent/Child edges, and a nested layer's `@label`
+        // refs point at earlier trees (parse-enforced); a nested
         // `loc(...) ; loc(...)` pair does NOT get a Sibling edge.
         let mut last_layer_creator: Option<usize> = None;
         for j in 0..top_level.len() {

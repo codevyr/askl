@@ -48,10 +48,11 @@ pub struct LayerActivation {
 }
 
 /// Result of computing initial selections for a statement's selectors.
+/// Phase R is read-only: chain growth and activation recording happen in
+/// Phase M (`materialise_layers` → the executor's per-tree round push).
 pub struct ComputeResult {
     pub selections: Vec<(SelectorId, Option<Selection>)>,
     pub warnings: Vec<Diagnostic>,
-    pub layer_activations: Vec<LayerActivation>,
 }
 
 impl ComputeResult {
@@ -60,25 +61,14 @@ impl ComputeResult {
             ctx.registry.add_by_id(id, selection);
         }
         statement.get_state_mut().warnings.extend(self.warnings);
-        // Activations are the single source of truth for chain growth: one
-        // statement's layers join the chains as ONE atomic round (lockstep
-        // by construction — see EphContext::push_round).
-        if !self.layer_activations.is_empty() {
-            let round: Vec<(i64, i64)> = self
-                .layer_activations
-                .iter()
-                .map(|a| (a.root_id, a.layer_id))
-                .collect();
-            ctx.eph.push_round(&round);
-        }
-        ctx.layer_activations.extend(self.layer_activations);
     }
 }
 
 /// Phase-M output of one statement: the layers it materialised (already
-/// created in the DB, NOT yet pushed onto the executor's chains — the caller
-/// pushes `round` so visibility grows in statement order), plus the Phase-M
-/// warnings (layer truncation) to be carried into the statement's Phase R.
+/// created in the DB, NOT yet pushed onto the executor's chains — the
+/// executor folds `round` into its tree's SINGLE round push, so the whole
+/// tree's layers enter visibility together), plus the Phase-M warnings
+/// (layer truncation) to be carried into the statement's Phase R.
 pub struct MaterialiseOutcome {
     /// All materialised layer ids (bases, atoms, supplements, every root) —
     /// Phase R's layer-union read enumerates rows from exactly these.
@@ -717,10 +707,13 @@ impl Command {
     /// that combines every verb's contribution; the aggregation is in
     /// `Command::aggregate_layer_spec`.
     ///
-    /// Runs against the executor's shared eph as of this statement's turn.
-    /// The returned `round` is NOT pushed here — the executor pushes it so
-    /// visibility grows in statement order and every statement's Phase R sees
-    /// the whole tree's layers.  `parent_scope` carries the enclosing
+    /// Runs against the PRE-TREE visibility snapshot (the executor takes it
+    /// once per top-level statement tree): no command sees a tree-mate's
+    /// layers at materialise time, so supplements parent on the previous
+    /// tree's tip and `has_chain` guards evaluate pre-tree.  The returned
+    /// `round` is NOT pushed here — the executor folds it into the tree's
+    /// single round push, after which every statement's Phase R sees the
+    /// whole tree's layers.  `parent_scope` carries the enclosing
     /// container's CONDITION for scope-fusion (nothing is computed yet in
     /// Phase M, so it is condition-based by construction).
     pub async fn materialise_layers(
@@ -765,6 +758,9 @@ impl Command {
         // supplement inputs under an empty chain means the verb
         // computed eph-derived content that no supplement will ever
         // materialize — those rows would be silently dropped.  The
+        // check runs against the pre-tree snapshot, which is correct
+        // by construction: labels may only reference earlier trees,
+        // so no eph input can originate from a tree-mate.  The
         // verb-side guards (with better spans) should have caught
         // this; reaching here is an internal invariant violation.
         if !eph.has_chain() && !spec.supplement_extra.is_empty() {
@@ -776,9 +772,10 @@ impl Command {
 
         // Chain topology is decided here, not by the verb: per
         // visible root, the base parents on the root and the
-        // supplement (created iff that root's chain is non-empty)
-        // chains on the root's `chain_last`.  The base hash is
-        // salted per root (`root_salted_hash`), so each root's
+        // supplement (created iff that root's pre-tree chain is
+        // non-empty) chains on the root's `chain_last` — the previous
+        // TREE's tip, since `eph` is the pre-tree snapshot.  The base
+        // hash is salted per root (`root_salted_hash`), so each root's
         // cache entry is independent of co-visible projects.
         let results = cfg
             .index
@@ -797,9 +794,10 @@ impl Command {
         let mut hit_ids = Vec::with_capacity(results.len());
         let mut truncated_any = false;
         // Results arrive in recording order (roots ascending; within a
-        // root: base → per-layer atoms → supplement), so the root's
-        // `chain_last` ends up the supplement and downstream chaining
-        // keys keep depending on that root's full upstream chain.
+        // root: base → per-layer atoms → supplement), so this command's
+        // final layer per root is its supplement — and when this command
+        // is the tree's last layer-bearing substatement, that supplement
+        // is the tree's new tip.
         for layer in results {
             if !layer.outcome.created {
                 hit_ids.push(layer.outcome.layer_id);
@@ -840,7 +838,7 @@ impl Command {
 
     /// Phase R: build each selector's selection — pure reads.  The layers in
     /// `layer_ids` were materialised by this statement's Phase M, and `eph`
-    /// already contains the WHOLE tree's rounds (tree-complete visibility),
+    /// already contains the tree's single round (tree-complete visibility),
     /// so neighbourhood queries see sibling/child layers symmetrically.
     /// `phase1_warnings` carries Phase M's truncation notices into this
     /// statement's `ComputeResult`.  Since ScopeContext contains non-clonable
@@ -862,7 +860,6 @@ impl Command {
             return Ok(ComputeResult {
                 selections: Vec::new(),
                 warnings: Vec::new(),
-                layer_activations: Vec::new(),
             });
         }
 
@@ -1081,9 +1078,6 @@ impl Command {
         Ok(ComputeResult {
             selections,
             warnings,
-            // Chain growth + activation recording happen in Phase M
-            // (materialise_layers → executor); Phase R is read-only.
-            layer_activations: Vec::new(),
         })
     }
 }

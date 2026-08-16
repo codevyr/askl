@@ -5903,6 +5903,221 @@ fn downstream_chaining_keys_deterministic() {
 }
 
 // ============================================================================
+// Per-statement rounds: one round per top-level statement (tree)
+// ============================================================================
+//
+// All of a tree's commands materialise against the PRE-TREE visibility and
+// the tree's layers enter as ONE round — nesting no longer sequences; `;;`
+// (or `;`) between top-level statements is the only time axis.  These tests
+// pin the new spine: sibling supplements parent on the previous tree's tip,
+// the tip designation is deterministic (last layer in substatement
+// pre-order), and intra-tree independence (a nested command sees no
+// tree-mate layers at materialise time).
+
+#[test]
+fn nested_search_no_intra_tree_supplements() {
+    // `search("hello foo") { search("foo") }` is ONE tree, so both searches
+    // materialise against the pre-tree visibility — an empty chain here.
+    // Neither command sees the other's layers at materialise time: no
+    // supplement exists anywhere in the tree (first-round elision, per
+    // command) — one base per root per command, nothing else.  Under the
+    // old intra-tree chaining the inner search materialised AFTER the
+    // outer's round landed and grew a supplement per root.
+    //
+    // Results are unchanged from the chained model (the exact assertions of
+    // `nested_search_in_search_composes`): populates never read each
+    // other's output and search's eph delta is structurally empty, so
+    // composition happens entirely in Phase R under tree-complete
+    // visibility.
+    use crate::command::LayerRole;
+    const QUERY: &str = r#"search("hello foo") { search("foo") }"#;
+    let (res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
+
+    assert_root_roles(
+        &acts,
+        &[
+            (R1, LayerRole::Base), // outer search base, root 1
+            (R2, LayerRole::Base), // outer search base, root 2
+            (R1, LayerRole::Base), // inner search base, root 1
+            (R2, LayerRole::Base), // inner search base, root 2
+        ],
+    );
+
+    let ids: Vec<i64> = res.nodes.as_vec().iter().map(|id| (*id).into()).collect();
+    assert!(
+        ids.iter().all(|v| *v < 0),
+        "all nodes are ephemeral content instances, got {:?}",
+        ids,
+    );
+    assert_eq!(
+        ids.len(),
+        2,
+        "exactly the outer match and its one contained inner match, got {:?}",
+        ids,
+    );
+}
+
+#[test]
+fn multi_supplement_tree_sibling_parents_and_deterministic_tip() {
+    // A tree with TWO supplement-bearing commands: tree 0 seeds the chain,
+    // tree 1 is `{ layer{} ; layer{} }` (two layer blocks in ONE tree),
+    // tree 2 chains after it.  Pins the spine advance rule:
+    //
+    //  - both of tree 1's supplements parent on tree 0's tip — SIBLINGS,
+    //    no intra-tree chaining;
+    //  - tree 1's tip is its round's last layer in substatement pre-order
+    //    (block B's supplement), which tree 2's supplements parent on;
+    //  - the whole pipeline is deterministic: a repeat run is a full cache
+    //    hit with identical layer ids on every root.
+    use crate::command::LayerRole;
+    const QUERY: &str = concat!(
+        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="86000", end="86100", instance_type="1") }; "#,
+        r#"{ layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="86200", end="86300", instance_type="1") } ; "#,
+        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="86400", end="86500", instance_type="1") } }; "#,
+        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="86600", end="86700", instance_type="1") }"#,
+    );
+    let shape: &[(i64, LayerRole)] = &[
+        // tree 0 (seed): empty pre-tree chain → bases only.
+        (R1, LayerRole::Base),
+        (R2, LayerRole::Base),
+        // tree 1, block A (pre-order): non-empty pre-tree chain → base +
+        // supplement per root.
+        (R1, LayerRole::Base),
+        (R1, LayerRole::Supplement),
+        (R2, LayerRole::Base),
+        (R2, LayerRole::Supplement),
+        // tree 1, block B: same shape — its materialisation is independent
+        // of block A's.
+        (R1, LayerRole::Base),
+        (R1, LayerRole::Supplement),
+        (R2, LayerRole::Base),
+        (R2, LayerRole::Supplement),
+        // tree 2: chains on tree 1's tip.
+        (R1, LayerRole::Base),
+        (R1, LayerRole::Supplement),
+        (R2, LayerRole::Base),
+        (R2, LayerRole::Supplement),
+    ];
+
+    let (_res1, acts1) = run_query_traced(VERB_TEST, QUERY);
+    assert_root_roles(&acts1, shape);
+    assert!(
+        acts1.iter().all(|a| a.created),
+        "byte ranges unique to this test ⇒ cold everywhere, got {:?}",
+        acts1
+    );
+
+    // Per root: both of tree 1's supplements are siblings under tree 0's
+    // tip (its base for that root).
+    let (seed_r1, seed_r2) = (acts1[0], acts1[1]);
+    let (supp_a_r1, supp_a_r2) = (acts1[3], acts1[5]);
+    let (supp_b_r1, supp_b_r2) = (acts1[7], acts1[9]);
+    for (seed, supp_a, supp_b) in [
+        (seed_r1, supp_a_r1, supp_b_r1),
+        (seed_r2, supp_a_r2, supp_b_r2),
+    ] {
+        let (meta_a, _) = eph_layer_state(VERB_TEST, supp_a.layer_id);
+        let (meta_b, _) = eph_layer_state(VERB_TEST, supp_b.layer_id);
+        assert_eq!(
+            meta_a.parent_id,
+            Some(seed.layer_id),
+            "block A's supplement parents the PREVIOUS tree's tip, got {:?}",
+            meta_a
+        );
+        assert_eq!(
+            meta_b.parent_id,
+            Some(seed.layer_id),
+            "block B's supplement is block A's SIBLING (same parent, no \
+             intra-tree chaining), got {:?}",
+            meta_b
+        );
+    }
+
+    // Tree 2's supplements parent on tree 1's designated tip: the last
+    // layer of tree 1's round in pre-order — block B's supplement.
+    let (supp_t2_r1, supp_t2_r2) = (acts1[11], acts1[13]);
+    for (tip, supp) in [(supp_b_r1, supp_t2_r1), (supp_b_r2, supp_t2_r2)] {
+        let (meta, _) = eph_layer_state(VERB_TEST, supp.layer_id);
+        assert_eq!(
+            meta.parent_id,
+            Some(tip.layer_id),
+            "the next tree chains on the last pre-order supplement, got {:?}",
+            meta
+        );
+    }
+
+    // Determinism: the tip choice (and with it every supplement key) is a
+    // pure function of the query — a repeat run hits every layer.
+    let (_res2, acts2) = run_query_traced(VERB_TEST, QUERY);
+    assert_root_roles(&acts2, shape);
+    assert!(
+        acts2.iter().all(|a| !a.created),
+        "repeat run must be a full cache hit on every layer, got {:?}",
+        acts2
+    );
+    assert_eq!(
+        acts1.iter().map(|a| a.layer_id).collect::<Vec<_>>(),
+        acts2.iter().map(|a| a.layer_id).collect::<Vec<_>>(),
+        "every layer id (roles and order included) must be stable across runs"
+    );
+}
+
+#[test]
+fn first_round_multi_block_tree_tip_is_last_base() {
+    // First-round elision, generalised: with an EMPTY pre-tree chain no
+    // command in the tree materialises a supplement — even when the tree
+    // holds several layer-bearing commands (under intra-tree chaining the
+    // second block would have seen the first's round and grown one).  The
+    // tree's tip is then the last layer-bearing substatement's BASE (last
+    // in pre-order), which the next tree's supplements parent on.
+    use crate::command::LayerRole;
+    const QUERY: &str = concat!(
+        r#"{ layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="87000", end="87100", instance_type="1") } ; "#,
+        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="87200", end="87300", instance_type="1") } }; "#,
+        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
+        r#"start="87400", end="87500", instance_type="1") }"#,
+    );
+
+    let (_res, acts) = run_query_traced(VERB_TEST, QUERY);
+    assert_root_roles(
+        &acts,
+        &[
+            // tree 0, blocks E then F: bases only — no supplements anywhere
+            // in the first round.
+            (R1, LayerRole::Base),
+            (R2, LayerRole::Base),
+            (R1, LayerRole::Base),
+            (R2, LayerRole::Base),
+            // tree 1: base + supplement per root.
+            (R1, LayerRole::Base),
+            (R1, LayerRole::Supplement),
+            (R2, LayerRole::Base),
+            (R2, LayerRole::Supplement),
+        ],
+    );
+
+    // Tree 1's supplements parent on tree 0's tip: block F's base per root.
+    let (f_base_r1, f_base_r2) = (acts[2], acts[3]);
+    let (supp_r1, supp_r2) = (acts[5], acts[7]);
+    for (tip, supp) in [(f_base_r1, supp_r1), (f_base_r2, supp_r2)] {
+        let (meta, _) = eph_layer_state(VERB_TEST, supp.layer_id);
+        assert_eq!(
+            meta.parent_id,
+            Some(tip.layer_id),
+            "under an empty pre-tree chain the tree's tip is its last \
+             pre-order BASE, got {:?}",
+            meta
+        );
+    }
+}
+
+// ============================================================================
 // Chained-variant removal: loc/layer{} partitioning tests
 // ============================================================================
 //

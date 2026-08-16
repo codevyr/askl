@@ -32,11 +32,11 @@ pub struct RootLayer {
 /// per root: a root's next layer parents on [`EphContext::chain_last`] of
 /// that root, and base layers parent on the root itself.
 ///
-/// Lockstep invariant: every layer-creating statement materialises for every
+/// Lockstep invariant: every layer-creating command materialises for every
 /// visible root, and chains grow only through [`EphContext::push_round`],
-/// which appends one statement's layers for EVERY root atomically — so
-/// out-of-lockstep states are unrepresentable and "has a chain" is a
-/// request-level property by construction.
+/// which appends one top-level statement's (tree's) layers for EVERY root
+/// atomically — so out-of-lockstep states are unrepresentable and "has a
+/// chain" is a request-level property by construction.
 ///
 /// Visibility stays a FLAT set: [`EphContext::visible_ids`] is roots ∪ all
 /// chains; queries never see the forest.
@@ -131,11 +131,14 @@ impl EphContext {
         self.roots.binary_search_by_key(&root_id, |r| r.id).ok()
     }
 
-    /// Append one statement's freshly materialised layers — for EVERY visible
-    /// root, in (root, base → per-layer atoms → supplement) order — to the
-    /// chains.  A round contributes one OR MORE layers per root (a base, zero
-    /// or more per-layer content atoms, then a supplement iff the chain was
-    /// non-empty).  This is the ONLY growth path, so lockstep is enforced at
+    /// Append one top-level statement's (tree's) freshly materialised layers
+    /// to the chains: every layer-bearing command's contribution in
+    /// substatement pre-order, each in its canonical internal order (roots
+    /// ascending; base → per-layer atoms → supplement).  A round contributes
+    /// one OR MORE layers per root — per command a base, zero or more
+    /// per-layer content atoms, then a supplement iff the pre-tree chain was
+    /// non-empty — so per root the round's LAST layer becomes the tree's
+    /// tip.  This is the ONLY growth path, so lockstep is enforced at
     /// the source: a round that misses a root entirely, or names an unknown
     /// one, is a programming error and panics.
     pub fn push_round(&mut self, layers: &[(i64, i64)]) {

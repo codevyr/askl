@@ -108,8 +108,8 @@ pub type ShardedScan = Box<
 /// delta (see [`Index::with_partitioned_layers`]).  Layer-creating selectors
 /// (`search`, `loc`, `layer { … }`) implement [`Selector::layer_spec`]
 /// returning `Some(LayerSpec)`.  The executor materializes the layers per
-/// visible root, records them as `LayerActivation`s (whose replay grows
-/// each root's chain in the `EphContext`), and then builds the `Selection`
+/// visible root, records them as `LayerActivation`s, folds them into its
+/// tree's single `EphContext` round, and then builds the `Selection`
 /// from the layers' instances.  The selector itself does not own the
 /// transaction, the layer ids, or any mutable interior state.
 ///
