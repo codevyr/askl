@@ -178,15 +178,15 @@ impl Selector for SearchSelector {
         true
     }
 
-    /// The base-layer hash mixes the user-visible inputs (query, case,
+    /// The input hash mixes the user-visible inputs (query, case,
     /// whole_word, limit) with the canonical hash of the surrounding
     /// command's filters via [`CompositeFilter::hash_into`].  Different
     /// filter compositions therefore produce different cache entries; the
     /// same query under the same filter set hits the cache — under ANY
-    /// upstream ephemeral context, since the base hash deliberately does
+    /// upstream ephemeral context, since the input hash deliberately does
     /// not fold the eph chain.  Any eph-content dependence lives in the
-    /// per-layer atoms the executor creates alongside the base (each keyed on
-    /// its own layer, not the chain).  Stale entries are wiped by
+    /// layer shards the executor creates alongside the root shard (each keyed
+    /// on its own layer, not the chain).  Stale entries are wiped by
     /// `purge_eph_cache` on each `finalize_project`.
     async fn layer_spec(
         &self,
@@ -201,7 +201,8 @@ impl Selector for SearchSelector {
         // parent's instance ids) keys the cache — "cache inputs, not
         // outputs" — while the byte-range resolve is deferred into the
         // populate closure, so cache hits never pay it.  Resolution runs
-        // against a ROOTS-ONLY visibility so the base stays chain-independent.
+        // against a ROOTS-ONLY visibility so the root shard stays
+        // chain-independent.
         let _ = cfg; // index handle not needed at spec time anymore
         let fusion_scope = match parent_scope {
             ScopeContext::Scope { .. } => Some(parent_scope.clone()),
@@ -209,7 +210,7 @@ impl Selector for SearchSelector {
         };
         let rooted_eph = EphContext::rooted(eph.roots().to_vec());
 
-        // 1. Base cache key over inputs + filter set — never the eph chain.
+        // 1. Input hash over inputs + filter set — never the eph chain.
         let mut hasher = Sha256::new();
         // Explicit per-verb domain tag (kept byte-identical to the former
         // `EphLayerKind::Search.as_str()`) so hashes stay disjoint from other
@@ -221,7 +222,7 @@ impl Selector for SearchSelector {
         hasher.update([self.whole_word as u8]);
         hasher.update((self.limit as u64).to_le_bytes());
         composite_filter.hash_into(&mut hasher);
-        // Fold the container scope's CONDITION into the base key so scoped
+        // Fold the container scope's CONDITION into the input hash so scoped
         // searches cache per-scope (chain-independent: conditions are pure
         // "ifs"; the ids arm covers an already-computed parent).
         match parent_scope {
@@ -293,11 +294,12 @@ impl Selector for SearchSelector {
                     //     (whole_word, case_sensitive); the project scope is an
                     //     always-present bind, and the limit caps matches PER
                     //     PROJECT — required for cache correctness (this root's
-                    //     base content must not depend on co-visible projects).
-                    //     `visible_layers`/`eph_branch` select the shard: the base
-                    //     shard scans persistent content (`[root.id]`, false), the
-                    //     supplement shard scans eph-layer content (the upstream
-                    //     chain, true) — the executor picks which via
+                    //     root-shard content must not depend on co-visible
+                    //     projects).
+                    //     `visible_layers`/`eph_branch` select the shard: the root
+                    //     shard scans persistent content (`[root.id]`, false), a
+                    //     layer shard scans eph-layer content (`[L_j]`, true) —
+                    //     the executor picks which via
                     //     `LayerSpec::sharded_scan`.
                     //     Scope-fusion resolve runs HERE (miss path only, on
                     //     the layer transaction's own connection): the
@@ -329,7 +331,7 @@ impl Selector for SearchSelector {
                     .await?;
 
                     if matches.is_empty() {
-                        // Uniform empty base: no matches in this project (or the
+                        // Uniform empty shard: no matches in this project (or the
                         // filter excludes it) — the layer row itself is still
                         // materialised by the executor.
                         return Ok(truncated);
@@ -372,11 +374,11 @@ impl Selector for SearchSelector {
                 })
             });
 
-        // The executor SHARDS this scan by layer: the base shard
+        // The executor SHARDS this scan by layer: the root shard
         // (`vec![root.id]`, `eph_branch=false`) over persistent content, and
-        // one per-layer atom (`vec![L_j]`, `eph_branch=true`) per visible eph
-        // content layer.  The fused supplement is a no-op (atoms hold the
-        // content).  The verb stays layer-agnostic — one `scan`, no shard
+        // one layer shard (`vec![L_j]`, `eph_branch=true`) per visible eph
+        // content layer.  The selection shard is a no-op (the layer shards hold
+        // the content).  The verb stays layer-agnostic — one `scan`, no shard
         // knowledge — and `sharded_scan` owns the visibility mapping.
         Ok(Some(LayerSpec::sharded_scan(hash, scan)))
     }

@@ -107,13 +107,13 @@ impl Selector for LocSelector {
         true
     }
 
-    /// The base-layer hash is over the request *inputs only* (file_path,
+    /// The input hash is over the request *inputs only* (file_path,
     /// line, project).  It deliberately does **not** depend on the
     /// matched-file set returned by `find_objects_by_path`, so the cache
     /// stays meaningful across repeated calls with the same source text —
-    /// and it does not fold the eph chain, so the base survives any
-    /// upstream ephemeral change (chain dependence lives in the supplement
-    /// the executor creates alongside it).
+    /// and it does not fold the eph chain, so the root shard survives any
+    /// upstream ephemeral change (chain dependence lives in the selection
+    /// shard the executor creates alongside it).
     ///
     /// Consequence: if the underlying index changes (a new project is
     /// pushed, a file is renamed), a previously-cached layer becomes
@@ -138,7 +138,7 @@ impl Selector for LocSelector {
         // nothing — the composition machinery constrains the result instead.
         _parent_scope: &index::db_diesel::ScopeContext,
     ) -> Result<Option<LayerSpec>> {
-        // 1. Base cache key from inputs only — never the eph chain.
+        // 1. Input hash from inputs only — never the eph chain.
         let mut hasher = Sha256::new();
         // Explicit per-verb domain tag (byte-identical to the former
         // `EphLayerKind::Loc.as_str()`) so loc's hashes stay disjoint even
@@ -170,20 +170,22 @@ impl Selector for LocSelector {
         //    GLOBAL across roots on each shard's layer set — NOT per-root
         //    `[root.id]` — so the path/line bails stay functions of global
         //    data and behave uniformly across roots: either every root's
-        //    base populate bails (file matches nowhere on the root layers)
+        //    root-shard populate bails (file matches nowhere on the root
+        //    layers)
         //    or none does.  Only the batch built from the resolved matches
         //    is scoped to the root's project.
         //
-        //    Base shard  = GLOBAL resolution over `eph.root_ids()` (persistent
+        //    Root shard = GLOBAL resolution over `eph.root_ids()` (persistent
         //    branch, `eph_branch=false`): every persistent object lives on a
         //    root layer and loc had no layer filter before, so the same
         //    objects resolve → the same "no file" bail and the same
         //    instances.
-        //    Supplement shard = GLOBAL resolution over `eph.visible_ids()`
+        //    Eph shard = GLOBAL resolution over `eph.visible_ids()`
         //    with the eph-disjointness guard (`objects.layer < 0`,
         //    `eph_branch=true`): there are no ephemeral objects today, so it
         //    resolves empty — and an empty eph resolution is NORMAL, so it
-        //    must NOT bail (only the base bails "no file"; see `resolve`).
+        //    must NOT bail (only the root shard bails "no file"; see
+        //    `resolve`).
         struct FileMatch {
             file_id: i32,
             project_id: i32,
@@ -197,29 +199,29 @@ impl Selector for LocSelector {
             sym_name: String,
             sym_path: String,
             sym_leaf: String,
-            /// Root-layer id set — the persistent base shard, captured at
-            /// `layer_spec` time.  Per-layer atoms bind their own singleton
+            /// Root-layer id set — the persistent root shard, captured at
+            /// `layer_spec` time.  Layer shards bind their own singleton
             /// `[L_j]`, so no chain-wide eph set is needed here.
             root_visible: Vec<i64>,
-            /// GLOBAL path/line resolution for the base shard, shared across
+            /// GLOBAL path/line resolution for the root shard, shared across
             /// its per-root populates: the first root to run resolves (path
             /// query + content reads + line offsets) and memoises; siblings
             /// await the cell instead of re-reading every matching file once
             /// per root.  The "no file" bail lives inside the initialiser, so
             /// error semantics stay uniform across roots, and cache hits skip
-            /// resolution entirely.  Per-layer atoms resolve their own `[L_j]`
+            /// resolution entirely.  Layer shards resolve their own `[L_j]`
             /// fresh (distinct sets ⇒ no shared memo).
-            base_resolved: tokio::sync::OnceCell<Vec<FileMatch>>,
+            root_resolved: tokio::sync::OnceCell<Vec<FileMatch>>,
         }
 
         /// GLOBAL path/line resolution for one shard.  Identical body to the
         /// previous single-cell resolution, with ONE difference: BOTH bails —
-        /// "no file" and "line out of range" — fire only on the base shard
+        /// "no file" and "line out of range" — fire only on the root shard
         /// (`!eph_branch`).  On an eph shard an empty resolution is normal: a
         /// layer may simply not carry this path, or may carry a shorter copy
         /// where the line is out of range — in either case the layer just
         /// contributes nothing, so `resolve` returns `Ok(vec![])` rather than
-        /// failing the whole statement.  On the base shard both remain hard
+        /// failing the whole statement.  On the root shard both remain hard
         /// user errors against the file the user actually named.
         async fn resolve(
             txn: &mut index::db_diesel::EphTransaction<'_>,
@@ -239,9 +241,9 @@ impl Selector for LocSelector {
             .await?;
 
             if matches.is_empty() {
-                // Only the base shard bails "no file": an empty eph
+                // Only the root shard bails "no file": an empty eph
                 // resolution is normal (there are no ephemeral objects
-                // today), so the supplement returns empty instead.
+                // today), so an eph shard returns empty instead.
                 if !eph_branch {
                     bail!("loc: no file matching '{}' found in index", file_path);
                 }
@@ -284,7 +286,7 @@ impl Selector for LocSelector {
             }
 
             if file_matches.is_empty() {
-                // Only the base shard treats an out-of-range line as a user
+                // Only the root shard treats an out-of-range line as a user
                 // error; on an eph shard the layer may hold a shorter copy of
                 // the file, which just means this layer contributes no match.
                 if !eph_branch {
@@ -357,7 +359,7 @@ impl Selector for LocSelector {
             sym_path,
             sym_leaf,
             root_visible: eph.root_ids(),
-            base_resolved: tokio::sync::OnceCell::new(),
+            root_resolved: tokio::sync::OnceCell::new(),
         });
 
         let root_shard_inputs = std::sync::Arc::clone(&inputs);
@@ -365,7 +367,7 @@ impl Selector for LocSelector {
             let inputs = std::sync::Arc::clone(&root_shard_inputs);
             Box::pin(async move {
                 let file_matches: &Vec<FileMatch> = inputs
-                    .base_resolved
+                    .root_resolved
                     .get_or_try_init(|| resolve(txn, &inputs, &inputs.root_visible, false))
                     .await?;
                 build_instances(txn, &inputs, file_matches, root).await?;

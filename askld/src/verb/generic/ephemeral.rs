@@ -73,7 +73,8 @@ pub(crate) trait EphemeralOp: std::fmt::Debug + Send + Sync {
 }
 
 /// Whether any row in the batch references an eph (negative) id.  This is
-/// the base/supplement classifier for `layer { … }` blocks: it inspects the
+/// the root/selection shard classifier for `layer { … }` blocks: it inspects
+/// the
 /// rows an op actually emits, so classification is by resolved *value* (a
 /// literal negative id counts the same as a label that resolved to eph
 /// rows) and lives in exactly one place — an op cannot opt out by omission.
@@ -693,7 +694,7 @@ impl Selector for LayerVerb {
             input_hash,
             root_shard_populate,
             selection_shard_populate,
-            // `layer { … }` is chain-dependent ops, not a per-layer content
+            // `layer { … }` is chain-dependent ops, not a layer-shard content
             // scan, so it exposes no N-way layer shard: its delta stays the
             // selection shard keyed on `tip`.
             layer_shard_populate: None,

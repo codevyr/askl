@@ -3860,8 +3860,8 @@ fn layer_block_cache_hit() {
         "same layer block should produce same ephemeral IDs (cache hit)"
     );
 
-    // One layer-bearing statement, materialised per visible root: one base
-    // per fixture project (project 2's base is empty — the op references
+    // One layer-bearing statement, materialised per visible root: one root shard
+    // per fixture project (project 2's root shard is empty — the op references
     // project 1's object — but goes through the same cache gate).
     use crate::command::ShardRole;
     assert_root_roles(&acts1, &[(R1, ShardRole::Root), (R2, ShardRole::Root)]);
@@ -4589,7 +4589,7 @@ fn ephemeral_instance_label_hash_matches_equivalent_literal() {
 
 #[test]
 fn ephemeral_instance_same_tree_label_rejected() {
-    // Parse-time label ordering rule (per-statement rounds groundwork):
+    // Parse-time label ordering rule (per-statement materialisations groundwork):
     // a layer's `@label` must reference a label defined by an EARLIER
     // top-level statement.  Label and reference living in the same
     // top-level statement tree is a structured error with a
@@ -4963,8 +4963,8 @@ fn search_truncation_warning_surfaces_on_cache_miss() {
     const QUERY: &str = r#"search("foo", whole_word="true", limit="3")"#;
     let (res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
 
-    // One layer-bearing statement, one base per visible root (no upstream
-    // chain, so no supplements).
+    // One layer-bearing statement, one root shard per visible root (no upstream
+    // chain, so no selection shards).
     use crate::command::ShardRole;
     assert_root_roles(&acts, &[(R1, ShardRole::Root), (R2, ShardRole::Root)]);
     assert!(
@@ -4974,7 +4974,7 @@ fn search_truncation_warning_surfaces_on_cache_miss() {
     );
     // The limit caps matches PER PROJECT: whole-word "foo" has 6 matches
     // in proj 1 (1 basic + 3 multi + 2 boundary) and 4 in proj 2
-    // (3 mixedcase + 1 docless), so limit=3 truncates both roots' bases.
+    // (3 mixedcase + 1 docless), so limit=3 truncates both roots' root shards.
     assert!(
         acts.iter().all(|a| a.truncated),
         "limit=3 must truncate in both projects, got {:?}",
@@ -5336,7 +5336,7 @@ fn eph_layer_state(fixture: &str, layer_id: i64) -> (index::db_diesel::EphLayerM
 
 #[test]
 fn search_first_call_reports_created_and_populated() {
-    // A cold search() must report one created=true base activation per
+    // A cold search() must report one created=true root shard activation per
     // visible root, and leave behind, per root, an layers row with
     // populated=true (2-phase commit completed) and truncated=false, whose
     // instance rows hold exactly that project's matches — summing to the
@@ -5371,7 +5371,7 @@ fn search_first_call_reports_created_and_populated() {
         assert_eq!(
             meta.parent_id,
             Some(act.root_id),
-            "base layers parent their root, got {:?}",
+            "root shards parent their root, got {:?}",
             meta
         );
         assert!(
@@ -5384,11 +5384,11 @@ fn search_first_call_reports_created_and_populated() {
             "truncated flag must be false on the row, got {:?}",
             meta
         );
-        // Each root's base holds only its own project's rows: exactly one
+        // Each root's root shard holds only its own project's rows: exactly one
         // 'search:foo' eph symbol.
         assert_eq!(
             symbols, 1,
-            "expected one 'search:foo' symbol in each root's base"
+            "expected one 'search:foo' symbol in each root's root shard"
         );
         total_instances += instances;
         per_root_instances.push(instances);
@@ -5400,9 +5400,9 @@ fn search_first_call_reports_created_and_populated() {
     assert_eq!(
         per_root_instances,
         vec![8, 4],
-        "per-root bases must hold exactly their project's matches",
+        "per-root root shards must hold exactly their project's matches",
     );
-    // The statement's selection is exactly the union of the bases' rows.
+    // The statement's selection is exactly the union of the root shards' rows.
     assert_eq!(
         total_instances,
         res.nodes.as_vec().len() as i64,
@@ -5510,15 +5510,15 @@ fn search_truncated_flag_persists_on_layer_row() {
 }
 
 // ============================================================================
-// Partitioned base/supplement cache tests
+// Partitioned root/selection shard cache tests
 // ============================================================================
 //
-// search() now produces, PER VISIBLE ROOT, a BASE layer parented on that
+// search() now produces, PER VISIBLE ROOT, a ROOT SHARD parented on that
 // root and keyed on the root-salted verb inputs (never the upstream eph
-// chain) plus, iff that root's chain is non-empty, a chained SUPPLEMENT
+// chain) plus, iff that root's chain is non-empty, a chained SELECTION SHARD
 // layer holding the eph-derived delta (structurally empty today).  Each
-// root's base holds only that project's rows.  These tests pin down the
-// partitioning contract: per-root base reuse across upstream eph changes,
+// root's root shard holds only that project's rows.  These tests pin down the
+// partitioning contract: per-root root shard reuse across upstream eph changes,
 // chain-topology rules, and warning/chaining stability.
 //
 // Same isolation convention as above: every cache-sensitive test uses a
@@ -5532,9 +5532,9 @@ const R2: i64 = 1000002;
 
 /// Assert an activation trace's (root, role) pairs match `expected`.
 /// Statement order: each statement materialises per visible root
-/// (ascending); within a root, base first, then zero or more per-layer
-/// content atoms, then — under a non-empty chain for that root — its
-/// supplement.
+/// (ascending); within a root, the root shard first, then zero or more
+/// layer shards, then — under a non-empty chain for that root — its
+/// selection shard.
 fn assert_root_roles(
     acts: &[crate::command::LayerActivation],
     expected: &[(i64, crate::command::ShardRole)],
@@ -5544,12 +5544,12 @@ fn assert_root_roles(
 }
 
 #[test]
-fn search_base_reused_across_eph_prefix_change() {
+fn search_root_shard_reused_across_eph_prefix_change() {
     // The headline behaviour of the partitioned cache: changing the
     // ephemeral prefix before a search must NOT invalidate the search's
-    // base layer.  Two runs with different layer{} blocks share the base
+    // root shard.  Two runs with different layer{} blocks share the root shard
     // (created=false, same layer_id on the second run) while each gets its
-    // own supplement (chained on its own prefix).  Before partitioning,
+    // own selection shard (chained on its own prefix).  Before partitioning,
     // run B's search layer was a full cache miss.
     use crate::command::ShardRole;
     const Q_A: &str = concat!(
@@ -5564,16 +5564,16 @@ fn search_base_reused_across_eph_prefix_change() {
     );
 
     // Trace shape, per visible root (ascending): the layer{} block (itself
-    // partitioned now) contributes a base per root; the search statement
-    // contributes base + supplement per root (every root's chain is
+    // partitioned now) contributes a root shard per root; the search statement
+    // contributes root shard + selection shard per root (every root's chain is
     // non-empty by then).
     let shape: &[(i64, ShardRole)] = &[
-        (R1, ShardRole::Root),      // layer block base, root 1
-        (R2, ShardRole::Root),      // layer block base, root 2 (empty)
-        (R1, ShardRole::Root),      // search base, root 1
-        (R1, ShardRole::Selection), // search supplement, root 1
-        (R2, ShardRole::Root),      // search base, root 2
-        (R2, ShardRole::Selection), // search supplement, root 2
+        (R1, ShardRole::Root),      // layer block root shard, root 1
+        (R2, ShardRole::Root),      // layer block root shard, root 2 (empty)
+        (R1, ShardRole::Root),      // search root shard, root 1
+        (R1, ShardRole::Selection), // search selection shard, root 1
+        (R2, ShardRole::Root),      // search root shard, root 2
+        (R2, ShardRole::Selection), // search selection shard, root 2
     ];
     let (res_a, acts_a) = run_query_traced(TEST_INPUT_SEARCH, Q_A);
     assert_root_roles(&acts_a, shape);
@@ -5582,12 +5582,14 @@ fn search_base_reused_across_eph_prefix_change() {
         "unique limit and byte range ⇒ cold everywhere, got {:?}",
         acts_a
     );
-    let (base_a_r1, supp_a_r1, base_a_r2, supp_a_r2) = (acts_a[2], acts_a[3], acts_a[4], acts_a[5]);
+    let (root_shard_a_r1, sel_a_r1, root_shard_a_r2, sel_a_r2) =
+        (acts_a[2], acts_a[3], acts_a[4], acts_a[5]);
 
     let (res_b, acts_b) = run_query_traced(TEST_INPUT_SEARCH, Q_B);
     assert_root_roles(&acts_b, shape);
     let (layer_b_r1, layer_b_r2) = (acts_b[0], acts_b[1]);
-    let (base_b_r1, supp_b_r1, base_b_r2, supp_b_r2) = (acts_b[2], acts_b[3], acts_b[4], acts_b[5]);
+    let (root_shard_b_r1, sel_b_r1, root_shard_b_r2, sel_b_r2) =
+        (acts_b[2], acts_b[3], acts_b[4], acts_b[5]);
 
     assert!(
         layer_b_r1.created && layer_b_r2.created,
@@ -5595,34 +5597,34 @@ fn search_base_reused_across_eph_prefix_change() {
         acts_b
     );
     assert!(
-        !base_b_r1.created && !base_b_r2.created,
-        "each root's base must be reused despite the changed eph prefix, got {:?}",
+        !root_shard_b_r1.created && !root_shard_b_r2.created,
+        "each root's root shard must be reused despite the changed eph prefix, got {:?}",
         acts_b
     );
     assert_eq!(
-        base_b_r1.layer_id, base_a_r1.layer_id,
-        "root 1 base reuse must hit the same layers row"
+        root_shard_b_r1.layer_id, root_shard_a_r1.layer_id,
+        "root 1 root shard reuse must hit the same layers row"
     );
     assert_eq!(
-        base_b_r2.layer_id, base_a_r2.layer_id,
-        "root 2 base reuse must hit the same layers row"
+        root_shard_b_r2.layer_id, root_shard_a_r2.layer_id,
+        "root 2 root shard reuse must hit the same layers row"
     );
     assert!(
-        supp_b_r1.created && supp_b_r2.created,
-        "different upstream chain ⇒ fresh supplements, got {:?}",
+        sel_b_r1.created && sel_b_r2.created,
+        "different upstream chain ⇒ fresh selection shards, got {:?}",
         acts_b
     );
     assert_ne!(
-        supp_b_r1.layer_id, supp_a_r1.layer_id,
-        "each prefix gets its own supplement row (root 1)"
+        sel_b_r1.layer_id, sel_a_r1.layer_id,
+        "each prefix gets its own selection shard row (root 1)"
     );
     assert_ne!(
-        supp_b_r2.layer_id, supp_a_r2.layer_id,
-        "each prefix gets its own supplement row (root 2)"
+        sel_b_r2.layer_id, sel_a_r2.layer_id,
+        "each prefix gets its own selection shard row (root 2)"
     );
 
     // Result equivalence: the search-derived nodes are the SAME rows in
-    // both runs (the base layer was reused, so instance ids are identical);
+    // both runs (the root shard was reused, so instance ids are identical);
     // the runs differ only in their one-per-run layer-block instance.
     let nodes_a: std::collections::HashSet<_> = res_a.nodes.as_vec().into_iter().collect();
     let nodes_b: std::collections::HashSet<_> = res_b.nodes.as_vec().into_iter().collect();
@@ -5635,10 +5637,10 @@ fn search_base_reused_across_eph_prefix_change() {
 }
 
 #[test]
-fn search_without_upstream_creates_only_base() {
+fn search_without_upstream_creates_only_root_shard() {
     // Chain-topology rule: with an empty upstream eph chain there is no
-    // supplement — a bare search materialises exactly one activation per
-    // visible root, the root-parented base, and repeat runs hit both.
+    // selection shard — a bare search materialises exactly one activation per
+    // visible root, the root-parented root shard, and repeat runs hit both.
     use crate::command::ShardRole;
     const QUERY: &str = r#"search("foo", limit="22")"#;
 
@@ -5646,7 +5648,7 @@ fn search_without_upstream_creates_only_base() {
     assert_root_roles(&acts1, &[(R1, ShardRole::Root), (R2, ShardRole::Root)]);
     assert!(
         acts1.iter().all(|a| a.created),
-        "unique limit ⇒ cold bases, got {:?}",
+        "unique limit ⇒ cold root shards, got {:?}",
         acts1
     );
 
@@ -5656,7 +5658,7 @@ fn search_without_upstream_creates_only_base() {
         assert_eq!(
             meta.parent_id,
             Some(act.root_id),
-            "base layers parent their root by construction, got {:?}",
+            "root shards parent their root by construction, got {:?}",
             meta
         );
     }
@@ -5671,13 +5673,13 @@ fn search_without_upstream_creates_only_base() {
     assert_eq!(
         acts1.iter().map(|a| a.layer_id).collect::<Vec<_>>(),
         acts2.iter().map(|a| a.layer_id).collect::<Vec<_>>(),
-        "hits must reuse the same per-root base rows"
+        "hits must reuse the same per-root root-shard rows"
     );
 }
 
 #[test]
-fn search_supplement_empty_but_materialized() {
-    // Under a non-empty chain the supplement row always materialises —
+fn search_selection_shard_empty_but_materialized() {
+    // Under a non-empty chain the selection shard row always materialises —
     // populated and committed — even though search's eph-derived delta is
     // structurally empty today (search reads only persistent content).
     // The row's existence is what keeps downstream chaining deterministic.
@@ -5692,18 +5694,20 @@ fn search_supplement_empty_but_materialized() {
     assert_root_roles(
         &acts,
         &[
-            (R1, ShardRole::Root),      // layer block base, root 1
-            (R2, ShardRole::Root),      // layer block base, root 2
-            (R1, ShardRole::Root),      // search base, root 1
-            (R1, ShardRole::Selection), // search supplement, root 1
-            (R2, ShardRole::Root),      // search base, root 2
-            (R2, ShardRole::Selection), // search supplement, root 2
+            (R1, ShardRole::Root),      // layer block root shard, root 1
+            (R2, ShardRole::Root),      // layer block root shard, root 2
+            (R1, ShardRole::Root),      // search root shard, root 1
+            (R1, ShardRole::Selection), // search selection shard, root 1
+            (R2, ShardRole::Root),      // search root shard, root 2
+            (R2, ShardRole::Selection), // search selection shard, root 2
         ],
     );
 
-    // The supplement contract holds per root: each root's supplement
-    // chains on that root's own layer-block base.
-    for (layer_block, base, supp) in [(acts[0], acts[2], acts[3]), (acts[1], acts[4], acts[5])] {
+    // The selection shard contract holds per root: each root's selection shard
+    // chains on that root's own layer-block root shard.
+    for (layer_block, root_shard, sel_shard) in
+        [(acts[0], acts[2], acts[3]), (acts[1], acts[4], acts[5])]
+    {
         let root_id = layer_block.root_id;
 
         let (layer_meta, _) = eph_layer_state(TEST_INPUT_SEARCH, layer_block.layer_id);
@@ -5711,58 +5715,67 @@ fn search_supplement_empty_but_materialized() {
         assert_eq!(
             layer_meta.parent_id,
             Some(root_id),
-            "the layer block's own base parents its root too, got {:?}",
+            "the layer block's own root shard parents its root too, got {:?}",
             layer_meta
         );
 
-        let (base_meta, (base_symbols, base_instances)) =
-            eph_layer_state(TEST_INPUT_SEARCH, base.layer_id);
-        assert_eq!(base_meta.kind, "ephemeral", "got {:?}", base_meta);
-        assert_eq!(base_meta.parent_id, Some(root_id), "got {:?}", base_meta);
-        assert!(base_meta.populated, "got {:?}", base_meta);
+        let (root_shard_meta, (root_shard_symbols, root_shard_instances)) =
+            eph_layer_state(TEST_INPUT_SEARCH, root_shard.layer_id);
+        assert_eq!(
+            root_shard_meta.kind, "ephemeral",
+            "got {:?}",
+            root_shard_meta
+        );
+        assert_eq!(
+            root_shard_meta.parent_id,
+            Some(root_id),
+            "got {:?}",
+            root_shard_meta
+        );
+        assert!(root_shard_meta.populated, "got {:?}", root_shard_meta);
         assert!(
-            base_symbols > 0 && base_instances > 0,
-            "search matches live in each root's base (both fixture projects \
+            root_shard_symbols > 0 && root_shard_instances > 0,
+            "search matches live in each root's root shard (both fixture projects \
              contain \"foo\"), got ({}, {}) for root {}",
-            base_symbols,
-            base_instances,
+            root_shard_symbols,
+            root_shard_instances,
             root_id
         );
 
-        let (supp_meta, (supp_symbols, supp_instances)) =
-            eph_layer_state(TEST_INPUT_SEARCH, supp.layer_id);
-        assert_eq!(supp_meta.kind, "ephemeral", "got {:?}", supp_meta);
+        let (sel_shard_meta, (sel_shard_symbols, sel_shard_instances)) =
+            eph_layer_state(TEST_INPUT_SEARCH, sel_shard.layer_id);
+        assert_eq!(sel_shard_meta.kind, "ephemeral", "got {:?}", sel_shard_meta);
         assert_eq!(
-            supp_meta.parent_id,
+            sel_shard_meta.parent_id,
             Some(layer_block.layer_id),
-            "supplement chains on its root's upstream layer-block base, got {:?}",
-            supp_meta
+            "selection shard chains on its root's upstream layer-block root shard, got {:?}",
+            sel_shard_meta
         );
         assert!(
-            supp_meta.populated,
-            "empty supplement still commits through 2-PC, got {:?}",
-            supp_meta
+            sel_shard_meta.populated,
+            "empty selection shard still commits through 2-PC, got {:?}",
+            sel_shard_meta
         );
         assert_eq!(
-            (supp_symbols, supp_instances),
+            (sel_shard_symbols, sel_shard_instances),
             (0, 0),
             "search's eph delta is structurally empty today",
         );
         assert!(
-            !supp_meta.truncated,
-            "empty supplement never truncates, got {:?}",
-            supp_meta
+            !sel_shard_meta.truncated,
+            "empty selection shard never truncates, got {:?}",
+            sel_shard_meta
         );
     }
 }
 
 #[test]
-fn search_truncation_on_base_survives_eph_change() {
-    // The truncated flag lives on the base row (the limit fences the
+fn search_truncation_on_root_shard_survives_eph_change() {
+    // The truncated flag lives on the root-shard row (the limit fences the
     // persistent scan) and is PER ROOT: whole-word "foo" has 6 matches in
     // proj 1 (> limit=4 ⇒ truncated) but exactly 4 in proj 2 (not
     // truncated).  A truncating search under prefix A rerun under prefix B
-    // hits the bases and must still surface the warning — the warning
+    // hits the root shards and must still surface the warning — the warning
     // survives BOTH cache dimensions (hit, and changed prefix).
     use crate::command::ShardRole;
     const Q_A: &str = concat!(
@@ -5777,62 +5790,63 @@ fn search_truncation_on_base_survives_eph_change() {
     );
 
     let shape: &[(i64, ShardRole)] = &[
-        (R1, ShardRole::Root),      // layer block base, root 1
-        (R2, ShardRole::Root),      // layer block base, root 2
-        (R1, ShardRole::Root),      // search base, root 1
-        (R1, ShardRole::Selection), // search supplement, root 1
-        (R2, ShardRole::Root),      // search base, root 2
-        (R2, ShardRole::Selection), // search supplement, root 2
+        (R1, ShardRole::Root),      // layer block root shard, root 1
+        (R2, ShardRole::Root),      // layer block root shard, root 2
+        (R1, ShardRole::Root),      // search root shard, root 1
+        (R1, ShardRole::Selection), // search selection shard, root 1
+        (R2, ShardRole::Root),      // search root shard, root 2
+        (R2, ShardRole::Selection), // search selection shard, root 2
     ];
     let (_res_a, acts_a) = run_query_traced(TEST_INPUT_SEARCH, Q_A);
     assert_root_roles(&acts_a, shape);
-    let (base_a_r1, base_a_r2) = (acts_a[2], acts_a[4]);
+    let (root_shard_a_r1, root_shard_a_r2) = (acts_a[2], acts_a[4]);
     assert!(
-        base_a_r1.created && base_a_r2.created,
-        "cold bases, got {:?}",
+        root_shard_a_r1.created && root_shard_a_r2.created,
+        "cold root shards, got {:?}",
         acts_a
     );
     assert!(
-        base_a_r1.truncated,
-        "whole-word foo (6 matches in proj 1) at limit=4 must truncate root 1's base, got {:?}",
+        root_shard_a_r1.truncated,
+        "whole-word foo (6 matches in proj 1) at limit=4 must truncate root 1's root shard, got {:?}",
         acts_a
     );
     assert!(
-        !base_a_r2.truncated,
+        !root_shard_a_r2.truncated,
         "proj 2 has exactly 4 whole-word matches — within limit=4, so root 2's \
-         base must NOT truncate, got {:?}",
+         root shard must NOT truncate, got {:?}",
         acts_a
     );
-    let (meta_a_r1, _) = eph_layer_state(TEST_INPUT_SEARCH, base_a_r1.layer_id);
-    let (meta_a_r2, _) = eph_layer_state(TEST_INPUT_SEARCH, base_a_r2.layer_id);
+    let (meta_a_r1, _) = eph_layer_state(TEST_INPUT_SEARCH, root_shard_a_r1.layer_id);
+    let (meta_a_r2, _) = eph_layer_state(TEST_INPUT_SEARCH, root_shard_a_r2.layer_id);
     assert!(
         meta_a_r1.truncated && !meta_a_r2.truncated,
-        "the per-root truncated flags must be persisted on the base rows, got {:?} / {:?}",
+        "the per-root truncated flags must be persisted on the root-shard rows, got {:?} / {:?}",
         meta_a_r1,
         meta_a_r2
     );
 
     let (res_b, acts_b) = run_query_traced(TEST_INPUT_SEARCH, Q_B);
     assert_root_roles(&acts_b, shape);
-    let (base_b_r1, supp_b_r1, base_b_r2, supp_b_r2) = (acts_b[2], acts_b[3], acts_b[4], acts_b[5]);
+    let (root_shard_b_r1, sel_b_r1, root_shard_b_r2, sel_b_r2) =
+        (acts_b[2], acts_b[3], acts_b[4], acts_b[5]);
     assert!(
-        !base_b_r1.created && !base_b_r2.created,
-        "bases reused under prefix B, got {:?}",
+        !root_shard_b_r1.created && !root_shard_b_r2.created,
+        "root shards reused under prefix B, got {:?}",
         acts_b
     );
     assert!(
-        base_b_r1.truncated,
-        "persisted truncated flag must propagate on root 1's base hit, got {:?}",
+        root_shard_b_r1.truncated,
+        "persisted truncated flag must propagate on root 1's root shard hit, got {:?}",
         acts_b
     );
     assert!(
-        !base_b_r2.truncated,
-        "root 2's base stays untruncated on the hit, got {:?}",
+        !root_shard_b_r2.truncated,
+        "root 2's root shard stays untruncated on the hit, got {:?}",
         acts_b
     );
     assert!(
-        !supp_b_r1.truncated && !supp_b_r2.truncated,
-        "the supplements carry no truncation, got {:?}",
+        !sel_b_r1.truncated && !sel_b_r2.truncated,
+        "the selection shards carry no truncation, got {:?}",
         acts_b
     );
     assert!(
@@ -5840,19 +5854,19 @@ fn search_truncation_on_base_survives_eph_change() {
             .warnings
             .iter()
             .any(|w| format!("{}", w).contains("truncated")),
-        "warning must surface on a base hit under a different prefix, got {:?}",
+        "warning must surface on a root shard hit under a different prefix, got {:?}",
         res_b.warnings,
     );
 }
 
 #[test]
 fn downstream_chaining_keys_deterministic() {
-    // Downstream verbs chain off their root's supplement id, which folds
-    // that root's upstream prefix and the root-salted base hash — so a
+    // Downstream verbs chain off their root's selection shard id, which folds
+    // that root's upstream prefix and the root-salted input hash — so a
     // repeat of the whole pipeline is a full cache hit on every layer of
     // every root, including a layer{} block AFTER the search.  This pins
-    // the per-root push order (base first, supplement last = that root's
-    // chain tail) and the supplement-id stability downstream keys depend
+    // the per-root push order (root shard first, selection shard last = that root's
+    // chain tail) and the selection shard-id stability downstream keys depend
     // on.
     const QUERY: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
@@ -5863,8 +5877,8 @@ fn downstream_chaining_keys_deterministic() {
     );
 
     // 10 activations — each statement materialises per root: the leading
-    // layer block contributes a base per root; the search and the trailing
-    // layer block each contribute base + supplement per root (both sit
+    // layer block contributes a root shard per root; the search and the trailing
+    // layer block each contribute root shard + selection shard per root (both sit
     // under a non-empty per-root chain).
     use crate::command::ShardRole;
     let shape: &[(i64, ShardRole)] = &[
@@ -5903,26 +5917,26 @@ fn downstream_chaining_keys_deterministic() {
 }
 
 // ============================================================================
-// Per-statement rounds: one round per top-level statement (tree)
+// Per-statement materialisations: one materialisation per top-level statement (tree)
 // ============================================================================
 //
 // All of a tree's commands materialise against the PRE-TREE visibility and
-// the tree's layers enter as ONE round — nesting no longer sequences; `;;`
+// the tree's layers enter as ONE materialisation — nesting no longer sequences; `;;`
 // (or `;`) between top-level statements is the only time axis.  These tests
-// pin the new spine: sibling supplements parent on the previous tree's tip,
+// pin the new spine: sibling selection shards parent on the previous tree's tip,
 // the tip designation is deterministic (last layer in substatement
 // pre-order), and intra-tree independence (a nested command sees no
 // tree-mate layers at materialise time).
 
 #[test]
-fn nested_search_no_intra_tree_supplements() {
+fn nested_search_no_intra_tree_selection_shards() {
     // `search("hello foo") { search("foo") }` is ONE tree, so both searches
     // materialise against the pre-tree visibility — an empty chain here.
     // Neither command sees the other's layers at materialise time: no
-    // supplement exists anywhere in the tree (first-round elision, per
-    // command) — one base per root per command, nothing else.  Under the
+    // selection shard exists anywhere in the tree (first-materialisation elision, per
+    // command) — one root shard per root per command, nothing else.  Under the
     // old intra-tree chaining the inner search materialised AFTER the
-    // outer's round landed and grew a supplement per root.
+    // outer's materialisation landed and grew a selection shard per root.
     //
     // Results are unchanged from the chained model (the exact assertions of
     // `nested_search_in_search_composes`): populates never read each
@@ -5936,10 +5950,10 @@ fn nested_search_no_intra_tree_supplements() {
     assert_root_roles(
         &acts,
         &[
-            (R1, ShardRole::Root), // outer search base, root 1
-            (R2, ShardRole::Root), // outer search base, root 2
-            (R1, ShardRole::Root), // inner search base, root 1
-            (R2, ShardRole::Root), // inner search base, root 2
+            (R1, ShardRole::Root), // outer search root shard, root 1
+            (R2, ShardRole::Root), // outer search root shard, root 2
+            (R1, ShardRole::Root), // inner search root shard, root 1
+            (R2, ShardRole::Root), // inner search root shard, root 2
         ],
     );
 
@@ -5958,15 +5972,15 @@ fn nested_search_no_intra_tree_supplements() {
 }
 
 #[test]
-fn multi_supplement_tree_sibling_parents_and_deterministic_tip() {
-    // A tree with TWO supplement-bearing commands: tree 0 seeds the chain,
+fn multi_selection_shard_tree_sibling_parents_and_deterministic_tip() {
+    // A tree with TWO selection-shard-bearing commands: tree 0 seeds the chain,
     // tree 1 is `{ layer{} ; layer{} }` (two layer blocks in ONE tree),
     // tree 2 chains after it.  Pins the spine advance rule:
     //
-    //  - both of tree 1's supplements parent on tree 0's tip — SIBLINGS,
+    //  - both of tree 1's selection shards parent on tree 0's tip — SIBLINGS,
     //    no intra-tree chaining;
-    //  - tree 1's tip is its round's last layer in substatement pre-order
-    //    (block B's supplement), which tree 2's supplements parent on;
+    //  - tree 1's tip is its materialisation's last layer in substatement pre-order
+    //    (block B's selection shard), which tree 2's selection shards parent on;
     //  - the whole pipeline is deterministic: a repeat run is a full cache
     //    hit with identical layer ids on every root.
     use crate::command::ShardRole;
@@ -5981,11 +5995,11 @@ fn multi_supplement_tree_sibling_parents_and_deterministic_tip() {
         r#"start="86600", end="86700", instance_type="1") }"#,
     );
     let shape: &[(i64, ShardRole)] = &[
-        // tree 0 (seed): empty pre-tree chain → bases only.
+        // tree 0 (seed): empty pre-tree chain → root shards only.
         (R1, ShardRole::Root),
         (R2, ShardRole::Root),
-        // tree 1, block A (pre-order): non-empty pre-tree chain → base +
-        // supplement per root.
+        // tree 1, block A (pre-order): non-empty pre-tree chain → root shard +
+        // selection shard per root.
         (R1, ShardRole::Root),
         (R1, ShardRole::Selection),
         (R2, ShardRole::Root),
@@ -6011,46 +6025,43 @@ fn multi_supplement_tree_sibling_parents_and_deterministic_tip() {
         acts1
     );
 
-    // Per root: both of tree 1's supplements are siblings under tree 0's
-    // tip (its base for that root).
+    // Per root: both of tree 1's selection shards are siblings under tree 0's
+    // tip (its root shard for that root).
     let (seed_r1, seed_r2) = (acts1[0], acts1[1]);
-    let (supp_a_r1, supp_a_r2) = (acts1[3], acts1[5]);
-    let (supp_b_r1, supp_b_r2) = (acts1[7], acts1[9]);
-    for (seed, supp_a, supp_b) in [
-        (seed_r1, supp_a_r1, supp_b_r1),
-        (seed_r2, supp_a_r2, supp_b_r2),
-    ] {
-        let (meta_a, _) = eph_layer_state(VERB_TEST, supp_a.layer_id);
-        let (meta_b, _) = eph_layer_state(VERB_TEST, supp_b.layer_id);
+    let (sel_a_r1, sel_a_r2) = (acts1[3], acts1[5]);
+    let (sel_b_r1, sel_b_r2) = (acts1[7], acts1[9]);
+    for (seed, sel_a, sel_b) in [(seed_r1, sel_a_r1, sel_b_r1), (seed_r2, sel_a_r2, sel_b_r2)] {
+        let (meta_a, _) = eph_layer_state(VERB_TEST, sel_a.layer_id);
+        let (meta_b, _) = eph_layer_state(VERB_TEST, sel_b.layer_id);
         assert_eq!(
             meta_a.parent_id,
             Some(seed.layer_id),
-            "block A's supplement parents the PREVIOUS tree's tip, got {:?}",
+            "block A's selection shard parents the PREVIOUS tree's tip, got {:?}",
             meta_a
         );
         assert_eq!(
             meta_b.parent_id,
             Some(seed.layer_id),
-            "block B's supplement is block A's SIBLING (same parent, no \
+            "block B's selection shard is block A's SIBLING (same parent, no \
              intra-tree chaining), got {:?}",
             meta_b
         );
     }
 
-    // Tree 2's supplements parent on tree 1's designated tip: the last
-    // layer of tree 1's round in pre-order — block B's supplement.
-    let (supp_t2_r1, supp_t2_r2) = (acts1[11], acts1[13]);
-    for (tip, supp) in [(supp_b_r1, supp_t2_r1), (supp_b_r2, supp_t2_r2)] {
-        let (meta, _) = eph_layer_state(VERB_TEST, supp.layer_id);
+    // Tree 2's selection shards parent on tree 1's designated tip: the last
+    // layer of tree 1's materialisation in pre-order — block B's selection shard.
+    let (sel_t2_r1, sel_t2_r2) = (acts1[11], acts1[13]);
+    for (tip, sel_shard) in [(sel_b_r1, sel_t2_r1), (sel_b_r2, sel_t2_r2)] {
+        let (meta, _) = eph_layer_state(VERB_TEST, sel_shard.layer_id);
         assert_eq!(
             meta.parent_id,
             Some(tip.layer_id),
-            "the next tree chains on the last pre-order supplement, got {:?}",
+            "the next tree chains on the last pre-order selection shard, got {:?}",
             meta
         );
     }
 
-    // Determinism: the tip choice (and with it every supplement key) is a
+    // Determinism: the tip choice (and with it every selection shard key) is a
     // pure function of the query — a repeat run hits every layer.
     let (_res2, acts2) = run_query_traced(VERB_TEST, QUERY);
     assert_root_roles(&acts2, shape);
@@ -6067,13 +6078,13 @@ fn multi_supplement_tree_sibling_parents_and_deterministic_tip() {
 }
 
 #[test]
-fn first_round_multi_block_tree_tip_is_last_base() {
-    // First-round elision, generalised: with an EMPTY pre-tree chain no
-    // command in the tree materialises a supplement — even when the tree
+fn first_materialisation_multi_block_tree_tip_is_last_root_shard() {
+    // First-materialisation elision, generalised: with an EMPTY pre-tree chain no
+    // command in the tree materialises a selection shard — even when the tree
     // holds several layer-bearing commands (under intra-tree chaining the
-    // second block would have seen the first's round and grown one).  The
-    // tree's tip is then the last layer-bearing substatement's BASE (last
-    // in pre-order), which the next tree's supplements parent on.
+    // second block would have seen the first's materialisation and grown one).  The
+    // tree's tip is then the last layer-bearing substatement's ROOT SHARD (last
+    // in pre-order), which the next tree's selection shards parent on.
     use crate::command::ShardRole;
     const QUERY: &str = concat!(
         r#"{ layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
@@ -6088,13 +6099,13 @@ fn first_round_multi_block_tree_tip_is_last_base() {
     assert_root_roles(
         &acts,
         &[
-            // tree 0, blocks E then F: bases only — no supplements anywhere
-            // in the first round.
+            // tree 0, blocks E then F: root shards only — no selection shards anywhere
+            // in the first materialisation.
             (R1, ShardRole::Root),
             (R2, ShardRole::Root),
             (R1, ShardRole::Root),
             (R2, ShardRole::Root),
-            // tree 1: base + supplement per root.
+            // tree 1: root shard + selection shard per root.
             (R1, ShardRole::Root),
             (R1, ShardRole::Selection),
             (R2, ShardRole::Root),
@@ -6102,16 +6113,16 @@ fn first_round_multi_block_tree_tip_is_last_base() {
         ],
     );
 
-    // Tree 1's supplements parent on tree 0's tip: block F's base per root.
-    let (f_base_r1, f_base_r2) = (acts[2], acts[3]);
-    let (supp_r1, supp_r2) = (acts[5], acts[7]);
-    for (tip, supp) in [(f_base_r1, supp_r1), (f_base_r2, supp_r2)] {
-        let (meta, _) = eph_layer_state(VERB_TEST, supp.layer_id);
+    // Tree 1's selection shards parent on tree 0's tip: block F's root shard per root.
+    let (f_root_shard_r1, f_root_shard_r2) = (acts[2], acts[3]);
+    let (sel_r1, sel_r2) = (acts[5], acts[7]);
+    for (tip, sel_shard) in [(f_root_shard_r1, sel_r1), (f_root_shard_r2, sel_r2)] {
+        let (meta, _) = eph_layer_state(VERB_TEST, sel_shard.layer_id);
         assert_eq!(
             meta.parent_id,
             Some(tip.layer_id),
             "under an empty pre-tree chain the tree's tip is its last \
-             pre-order BASE, got {:?}",
+             pre-order ROOT SHARD, got {:?}",
             meta
         );
     }
@@ -6132,7 +6143,7 @@ fn identical_tree_mates_converge_on_same_layers() {
     const QUERY: &str = r#"{ search("foo", limit="44") ; search("foo", limit="44") }"#;
 
     let shape: &[(i64, ShardRole)] = &[
-        // ONE tree, empty pre-tree chain → first-round elision: bases
+        // ONE tree, empty pre-tree chain → first-materialisation elision: root shards
         // only, in substatement pre-order.
         (R1, ShardRole::Root), // first search, root 1
         (R2, ShardRole::Root), // first search, root 2
@@ -6192,7 +6203,7 @@ fn three_content_verb_tree_deterministic_across_runs() {
     // F3 determinism: THREE content verbs materialise concurrently within
     // one tree, yet keys, parents, activation order, and the tree's tip
     // remain a pure function of the query text and the pre-tree chain.
-    // Tree 0 seeds the chain so every tree-mate grows a supplement (the
+    // Tree 0 seeds the chain so every tree-mate grows a selection shard (the
     // half whose key folds the previous tree's tip — the part worth
     // pinning under concurrency).  Three runs: identical
     // (root, role, layer_id) sequences every time, runs 2..3 full cache
@@ -6206,10 +6217,10 @@ fn three_content_verb_tree_deterministic_across_runs() {
     );
 
     let shape: &[(i64, ShardRole)] = &[
-        // tree 0 (seed): empty pre-tree chain → base only, per root.
+        // tree 0 (seed): empty pre-tree chain → root shard only, per root.
         (R1, ShardRole::Root),
         (R2, ShardRole::Root),
-        // tree 1, substatement pre-order; per command: base + supplement
+        // tree 1, substatement pre-order; per command: root shard + selection shard
         // per root (every root's chain is non-empty by now).
         (R1, ShardRole::Root),
         (R1, ShardRole::Selection),
@@ -6229,11 +6240,11 @@ fn three_content_verb_tree_deterministic_across_runs() {
     assert_root_roles(&acts1, shape);
     let ids1: Vec<i64> = acts1.iter().map(|a| a.layer_id).collect();
 
-    // All three tree-mates' supplements are SIBLINGS under tree 0's tip
-    // (its base, per root) — concurrency must not re-introduce
+    // All three tree-mates' selection shards are SIBLINGS under tree 0's tip
+    // (its root shard, per root) — concurrency must not re-introduce
     // intra-tree chaining.
     let (seed_r1, seed_r2) = (acts1[0], acts1[1]);
-    for (seed, supp) in [
+    for (seed, sel_shard) in [
         (seed_r1, acts1[3]),
         (seed_r2, acts1[5]),
         (seed_r1, acts1[7]),
@@ -6241,11 +6252,11 @@ fn three_content_verb_tree_deterministic_across_runs() {
         (seed_r1, acts1[11]),
         (seed_r2, acts1[13]),
     ] {
-        let (meta, _) = eph_layer_state(TEST_INPUT_SEARCH, supp.layer_id);
+        let (meta, _) = eph_layer_state(TEST_INPUT_SEARCH, sel_shard.layer_id);
         assert_eq!(
             meta.parent_id,
             Some(seed.layer_id),
-            "every tree-mate's supplement parents the PREVIOUS tree's \
+            "every tree-mate's selection shard parents the PREVIOUS tree's \
              tip, got {:?}",
             meta
         );
@@ -6264,7 +6275,7 @@ fn three_content_verb_tree_deterministic_across_runs() {
         assert_eq!(
             ids1, ids,
             "run {}: the (root, role, layer_id) sequence — and with it \
-             the tree's tip, its round's last pre-order layer per root — \
+             the tree's tip, its materialisation's last pre-order layer per root — \
              must be identical across runs",
             run
         );
@@ -6276,13 +6287,13 @@ fn three_content_verb_tree_deterministic_across_runs() {
 // ============================================================================
 //
 // After the migration every layer-creating verb is partitioned.  These tests
-// pin the per-verb contracts: loc base reuse, layer{} op classification
-// (persistent ops → base, eph-referencing ops → supplement), and the
-// supplement-key collision guard (selection_extra).
+// pin the per-verb contracts: loc root shard reuse, layer{} op classification
+// (persistent ops → root shard, eph-referencing ops → selection shard), and the
+// selection-shard-key collision guard (selection_extra).
 
 #[test]
-fn loc_base_reused_across_eph_prefix_change() {
-    // Same contract as search: loc reads only persistent data, so its base
+fn loc_root_shard_reused_across_eph_prefix_change() {
+    // Same contract as search: loc reads only persistent data, so its root shard
     // must be reused when the upstream ephemeral prefix changes.
     use crate::command::ShardRole;
     const Q_A: &str = concat!(
@@ -6297,58 +6308,58 @@ fn loc_base_reused_across_eph_prefix_change() {
     );
 
     let shape: &[(i64, ShardRole)] = &[
-        (R1, ShardRole::Root),      // layer block base, root 1
-        (R2, ShardRole::Root),      // layer block base, root 2
-        (R1, ShardRole::Root),      // loc base, root 1 (/main.c)
-        (R1, ShardRole::Selection), // loc supplement, root 1
-        (R2, ShardRole::Root),      // loc base, root 2 (/src/main.c)
-        (R2, ShardRole::Selection), // loc supplement, root 2
+        (R1, ShardRole::Root),      // layer block root shard, root 1
+        (R2, ShardRole::Root),      // layer block root shard, root 2
+        (R1, ShardRole::Root),      // loc root shard, root 1 (/main.c)
+        (R1, ShardRole::Selection), // loc selection shard, root 1
+        (R2, ShardRole::Root),      // loc root shard, root 2 (/src/main.c)
+        (R2, ShardRole::Selection), // loc selection shard, root 2
     ];
     let (_res_a, acts_a) = run_query_traced(VERB_TEST, Q_A);
     assert_root_roles(&acts_a, shape);
-    let (loc_base_a_r1, loc_supp_a_r1, loc_base_a_r2, loc_supp_a_r2) =
+    let (loc_root_shard_a_r1, loc_sel_shard_a_r1, loc_root_shard_a_r2, loc_sel_shard_a_r2) =
         (acts_a[2], acts_a[3], acts_a[4], acts_a[5]);
     assert!(
-        loc_base_a_r1.created && loc_base_a_r2.created,
-        "line 2 is unique to this test ⇒ cold loc bases, got {:?}",
+        loc_root_shard_a_r1.created && loc_root_shard_a_r2.created,
+        "line 2 is unique to this test ⇒ cold loc root shards, got {:?}",
         acts_a
     );
 
-    for act in [loc_base_a_r1, loc_base_a_r2] {
+    for act in [loc_root_shard_a_r1, loc_root_shard_a_r2] {
         let (loc_meta, _) = eph_layer_state(VERB_TEST, act.layer_id);
         assert_eq!(loc_meta.kind, "ephemeral", "got {:?}", loc_meta);
         assert_eq!(
             loc_meta.parent_id,
             Some(act.root_id),
-            "loc base parents its root, got {:?}",
+            "loc root shard parents its root, got {:?}",
             loc_meta
         );
     }
 
     let (_res_b, acts_b) = run_query_traced(VERB_TEST, Q_B);
     assert_root_roles(&acts_b, shape);
-    let (loc_base_b_r1, loc_supp_b_r1, loc_base_b_r2, loc_supp_b_r2) =
+    let (loc_root_shard_b_r1, loc_sel_shard_b_r1, loc_root_shard_b_r2, loc_sel_shard_b_r2) =
         (acts_b[2], acts_b[3], acts_b[4], acts_b[5]);
     assert!(
-        !loc_base_b_r1.created && !loc_base_b_r2.created,
-        "loc bases must survive the changed eph prefix, got {:?}",
+        !loc_root_shard_b_r1.created && !loc_root_shard_b_r2.created,
+        "loc root shards must survive the changed eph prefix, got {:?}",
         acts_b
     );
-    assert_eq!(loc_base_b_r1.layer_id, loc_base_a_r1.layer_id);
-    assert_eq!(loc_base_b_r2.layer_id, loc_base_a_r2.layer_id);
+    assert_eq!(loc_root_shard_b_r1.layer_id, loc_root_shard_a_r1.layer_id);
+    assert_eq!(loc_root_shard_b_r2.layer_id, loc_root_shard_a_r2.layer_id);
     assert!(
-        loc_supp_b_r1.created && loc_supp_b_r2.created,
-        "fresh supplements, got {:?}",
+        loc_sel_shard_b_r1.created && loc_sel_shard_b_r2.created,
+        "fresh selection shards, got {:?}",
         acts_b
     );
-    assert_ne!(loc_supp_b_r1.layer_id, loc_supp_a_r1.layer_id);
-    assert_ne!(loc_supp_b_r2.layer_id, loc_supp_a_r2.layer_id);
+    assert_ne!(loc_sel_shard_b_r1.layer_id, loc_sel_shard_a_r1.layer_id);
+    assert_ne!(loc_sel_shard_b_r2.layer_id, loc_sel_shard_a_r2.layer_id);
 }
 
 #[test]
-fn layer_block_base_reused_across_eph_prefix_change() {
+fn layer_block_root_shard_reused_across_eph_prefix_change() {
     // A layer{} block whose ops reference only persistent ids is itself a
-    // partitioned entry: its base is keyed on the resolved op content, not
+    // partitioned entry: its root shard is keyed on the resolved op content, not
     // the chain, so changing the upstream prefix reuses it.
     use crate::command::ShardRole;
     const Q_A: &str = concat!(
@@ -6365,56 +6376,76 @@ fn layer_block_base_reused_across_eph_prefix_change() {
     );
 
     let shape: &[(i64, ShardRole)] = &[
-        (R1, ShardRole::Root),      // first layer block base, root 1
-        (R2, ShardRole::Root),      // first layer block base, root 2
-        (R1, ShardRole::Root),      // second layer block base, root 1
-        (R1, ShardRole::Selection), // second layer block supplement, root 1
-        (R2, ShardRole::Root),      // second layer block base, root 2
-        (R2, ShardRole::Selection), // second layer block supplement, root 2
+        (R1, ShardRole::Root),      // first layer block root shard, root 1
+        (R2, ShardRole::Root),      // first layer block root shard, root 2
+        (R1, ShardRole::Root),      // second layer block root shard, root 1
+        (R1, ShardRole::Selection), // second layer block selection shard, root 1
+        (R2, ShardRole::Root),      // second layer block root shard, root 2
+        (R2, ShardRole::Selection), // second layer block selection shard, root 2
     ];
     let (_res_a, acts_a) = run_query_traced(VERB_TEST, Q_A);
     assert_root_roles(&acts_a, shape);
-    let (block2_base_a_r1, block2_supp_a_r1, block2_base_a_r2, block2_supp_a_r2) =
-        (acts_a[2], acts_a[3], acts_a[4], acts_a[5]);
+    let (
+        block2_root_shard_a_r1,
+        block2_sel_shard_a_r1,
+        block2_root_shard_a_r2,
+        block2_sel_shard_a_r2,
+    ) = (acts_a[2], acts_a[3], acts_a[4], acts_a[5]);
     assert!(
-        block2_base_a_r1.created && block2_base_a_r2.created,
-        "cold block bases, got {:?}",
+        block2_root_shard_a_r1.created && block2_root_shard_a_r2.created,
+        "cold block root shards, got {:?}",
         acts_a
     );
 
     let (_res_b, acts_b) = run_query_traced(VERB_TEST, Q_B);
     assert_root_roles(&acts_b, shape);
-    let (block1_base_b_r1, block1_base_b_r2) = (acts_b[0], acts_b[1]);
-    let (block2_base_b_r1, block2_supp_b_r1, block2_base_b_r2, block2_supp_b_r2) =
-        (acts_b[2], acts_b[3], acts_b[4], acts_b[5]);
+    let (block1_root_shard_b_r1, block1_root_shard_b_r2) = (acts_b[0], acts_b[1]);
+    let (
+        block2_root_shard_b_r1,
+        block2_sel_shard_b_r1,
+        block2_root_shard_b_r2,
+        block2_sel_shard_b_r2,
+    ) = (acts_b[2], acts_b[3], acts_b[4], acts_b[5]);
     assert!(
-        block1_base_b_r1.created && block1_base_b_r2.created,
+        block1_root_shard_b_r1.created && block1_root_shard_b_r2.created,
         "changed prefix block is fresh on each root, got {:?}",
         acts_b
     );
     assert!(
-        !block2_base_b_r1.created && !block2_base_b_r2.created,
-        "identical persistent-ops block must reuse its per-root bases across prefixes, got {:?}",
+        !block2_root_shard_b_r1.created && !block2_root_shard_b_r2.created,
+        "identical persistent-ops block must reuse its per-root root shards across prefixes, got {:?}",
         acts_b
     );
-    assert_eq!(block2_base_b_r1.layer_id, block2_base_a_r1.layer_id);
-    assert_eq!(block2_base_b_r2.layer_id, block2_base_a_r2.layer_id);
+    assert_eq!(
+        block2_root_shard_b_r1.layer_id,
+        block2_root_shard_a_r1.layer_id
+    );
+    assert_eq!(
+        block2_root_shard_b_r2.layer_id,
+        block2_root_shard_a_r2.layer_id
+    );
     assert!(
-        block2_supp_b_r1.created && block2_supp_b_r2.created,
-        "fresh supplements, got {:?}",
+        block2_sel_shard_b_r1.created && block2_sel_shard_b_r2.created,
+        "fresh selection shards, got {:?}",
         acts_b
     );
-    assert_ne!(block2_supp_b_r1.layer_id, block2_supp_a_r1.layer_id);
-    assert_ne!(block2_supp_b_r2.layer_id, block2_supp_a_r2.layer_id);
+    assert_ne!(
+        block2_sel_shard_b_r1.layer_id,
+        block2_sel_shard_a_r1.layer_id
+    );
+    assert_ne!(
+        block2_sel_shard_b_r2.layer_id,
+        block2_sel_shard_a_r2.layer_id
+    );
 }
 
 #[test]
-fn layer_block_eph_ops_split_into_supplement() {
+fn layer_block_eph_ops_split_into_selection_shard() {
     // Mixed block: one persistent op (ephemeral_symbol) and one
     // eph-referencing op (@e labels the search statement, whose selection
     // is eph instances of search's eph symbol — negative symbol ids).
-    // The persistent op's rows must land in the base, the eph-referencing
-    // op's rows in the supplement.
+    // The persistent op's rows must land in the root shard, the eph-referencing
+    // op's rows in the selection shard.
     use crate::command::ShardRole;
     const QUERY: &str = concat!(
         r#"@e search("foo", limit="26"); "#,
@@ -6429,70 +6460,76 @@ fn layer_block_eph_ops_split_into_supplement() {
     assert_root_roles(
         &acts,
         &[
-            (R1, ShardRole::Root),      // search base, root 1 (no chain yet)
-            (R2, ShardRole::Root),      // search base, root 2
-            (R1, ShardRole::Root),      // mixed block base, root 1
-            (R1, ShardRole::Selection), // mixed block supplement, root 1
-            (R2, ShardRole::Root),      // mixed block base, root 2
-            (R2, ShardRole::Selection), // mixed block supplement, root 2
+            (R1, ShardRole::Root),      // search root shard, root 1 (no chain yet)
+            (R2, ShardRole::Root),      // search root shard, root 2
+            (R1, ShardRole::Root),      // mixed block root shard, root 1
+            (R1, ShardRole::Selection), // mixed block selection shard, root 1
+            (R2, ShardRole::Root),      // mixed block root shard, root 2
+            (R2, ShardRole::Selection), // mixed block selection shard, root 2
         ],
     );
-    let (mixed_base_r1, mixed_supp_r1, mixed_base_r2, mixed_supp_r2) =
+    let (mixed_root_shard_r1, mixed_sel_shard_r1, mixed_root_shard_r2, mixed_sel_shard_r2) =
         (acts[2], acts[3], acts[4], acts[5]);
 
-    // Row partitioning is two-dimensional now: base vs supplement (op
+    // Row partitioning is two-dimensional now: root shard vs selection shard (op
     // classification) AND per root (row's project).  splitsym2 declares
     // project_id=1, the @e instance targets object 1 (project 1) — so all
     // rows land in root 1's halves; root 2's halves stay empty but still
     // materialise.
-    let (_, (base_symbols, base_instances)) =
-        eph_layer_state(TEST_INPUT_SEARCH, mixed_base_r1.layer_id);
+    let (_, (root_shard_symbols, root_shard_instances)) =
+        eph_layer_state(TEST_INPUT_SEARCH, mixed_root_shard_r1.layer_id);
     assert_eq!(
-        (base_symbols, base_instances),
+        (root_shard_symbols, root_shard_instances),
         (1, 0),
-        "persistent op (splitsym2, project 1) lands in root 1's base",
+        "persistent op (splitsym2, project 1) lands in root 1's root shard",
     );
-    let (_, r2_base_counts) = eph_layer_state(TEST_INPUT_SEARCH, mixed_base_r2.layer_id);
+    let (_, r2_root_shard_counts) =
+        eph_layer_state(TEST_INPUT_SEARCH, mixed_root_shard_r2.layer_id);
     assert_eq!(
-        r2_base_counts,
+        r2_root_shard_counts,
         (0, 0),
-        "root 2's base gets no rows — splitsym2 belongs to project 1",
+        "root 2's root shard gets no rows — splitsym2 belongs to project 1",
     );
 
-    let (supp_meta, (supp_symbols, supp_instances)) =
-        eph_layer_state(TEST_INPUT_SEARCH, mixed_supp_r1.layer_id);
-    assert_eq!(supp_meta.kind, "ephemeral", "got {:?}", supp_meta);
+    let (sel_shard_meta, (sel_shard_symbols, sel_shard_instances)) =
+        eph_layer_state(TEST_INPUT_SEARCH, mixed_sel_shard_r1.layer_id);
+    assert_eq!(sel_shard_meta.kind, "ephemeral", "got {:?}", sel_shard_meta);
     assert_eq!(
-        supp_symbols, 0,
+        sel_shard_symbols, 0,
         "the eph-referencing op creates no symbols, got {:?}",
-        supp_meta
+        sel_shard_meta
     );
     assert_eq!(
-        supp_instances, 2,
+        sel_shard_instances, 2,
         "eph-referencing op (@e instance, one row per resolved search \
          symbol — one per project — all on project 1's object) lands in \
-         root 1's supplement, got {} instances",
-        supp_instances
+         root 1's selection shard, got {} instances",
+        sel_shard_instances
     );
 
-    let (r2_supp_meta, r2_supp_counts) = eph_layer_state(TEST_INPUT_SEARCH, mixed_supp_r2.layer_id);
-    assert_eq!(r2_supp_meta.kind, "ephemeral", "got {:?}", r2_supp_meta);
+    let (r2_sel_shard_meta, r2_sel_shard_counts) =
+        eph_layer_state(TEST_INPUT_SEARCH, mixed_sel_shard_r2.layer_id);
     assert_eq!(
-        r2_supp_counts,
+        r2_sel_shard_meta.kind, "ephemeral",
+        "got {:?}",
+        r2_sel_shard_meta
+    );
+    assert_eq!(
+        r2_sel_shard_counts,
         (0, 0),
-        "root 2's supplement is empty — object 1 is not in project 2",
+        "root 2's selection shard is empty — object 1 is not in project 2",
     );
 }
 
 #[test]
-fn supplement_collision_guard_extra_disambiguates() {
+fn selection_shard_collision_guard_extra_disambiguates() {
     // THE collision the selection_extra fix exists for: two blocks with
-    // identical base halves (here: empty — every op references eph ids)
+    // identical root-shard halves (here: empty — every op references eph ids)
     // under the SAME upstream chain, differing only in their
     // eph-referencing ops.  parent_id and input_hash are identical for
     // both, so without selection_extra the second query would silently
-    // HIT the first query's supplement and serve its rows.  With the fix,
-    // the differing op content flows into the supplement key.
+    // HIT the first query's selection shard and serve its rows.  With the fix,
+    // the differing op content flows into the selection shard key.
     use crate::command::ShardRole;
     const Q_1: &str = concat!(
         r#"@c search("foo", limit="27"); "#,
@@ -6506,65 +6543,71 @@ fn supplement_collision_guard_extra_disambiguates() {
     );
 
     let shape: &[(i64, ShardRole)] = &[
-        (R1, ShardRole::Root),      // search base, root 1 (no chain yet)
-        (R2, ShardRole::Root),      // search base, root 2
-        (R1, ShardRole::Root),      // layer block (empty) base, root 1
-        (R1, ShardRole::Selection), // layer block supplement, root 1
-        (R2, ShardRole::Root),      // layer block (empty) base, root 2
-        (R2, ShardRole::Selection), // layer block supplement, root 2
+        (R1, ShardRole::Root),      // search root shard, root 1 (no chain yet)
+        (R2, ShardRole::Root),      // search root shard, root 2
+        (R1, ShardRole::Root),      // layer block (empty) root shard, root 1
+        (R1, ShardRole::Selection), // layer block selection shard, root 1
+        (R2, ShardRole::Root),      // layer block (empty) root shard, root 2
+        (R2, ShardRole::Selection), // layer block selection shard, root 2
     ];
     let (_res1, acts1) = run_query_traced(TEST_INPUT_SEARCH, Q_1);
     assert_root_roles(&acts1, shape);
-    let (final_base_1_r1, final_supp_1_r1, final_base_1_r2, final_supp_1_r2) =
+    let (final_root_shard_1_r1, final_sel_shard_1_r1, final_root_shard_1_r2, final_sel_shard_1_r2) =
         (acts1[2], acts1[3], acts1[4], acts1[5]);
     assert!(
-        final_supp_1_r1.created && final_supp_1_r2.created,
-        "cold supplements, got {:?}",
+        final_sel_shard_1_r1.created && final_sel_shard_1_r2.created,
+        "cold selection shards, got {:?}",
         acts1
     );
 
     let (_res2, acts2) = run_query_traced(TEST_INPUT_SEARCH, Q_2);
     assert_root_roles(&acts2, shape);
-    let (prefix_base_2_r1, prefix_base_2_r2) = (acts2[0], acts2[1]);
-    let (final_base_2_r1, final_supp_2_r1, final_base_2_r2, final_supp_2_r2) =
+    let (prefix_root_shard_2_r1, prefix_root_shard_2_r2) = (acts2[0], acts2[1]);
+    let (final_root_shard_2_r1, final_sel_shard_2_r1, final_root_shard_2_r2, final_sel_shard_2_r2) =
         (acts2[2], acts2[3], acts2[4], acts2[5]);
 
-    // Identical prefix and identical (empty) base half: shared per root.
+    // Identical prefix and identical (empty) root-shard half: shared per root.
     assert!(
-        !prefix_base_2_r1.created && !prefix_base_2_r2.created,
-        "identical prefix (search) bases must hit, got {:?}",
+        !prefix_root_shard_2_r1.created && !prefix_root_shard_2_r2.created,
+        "identical prefix (search) root shards must hit, got {:?}",
         acts2
     );
     assert!(
-        !final_base_2_r1.created && !final_base_2_r2.created,
-        "the empty base halves are shared between the two blocks, got {:?}",
+        !final_root_shard_2_r1.created && !final_root_shard_2_r2.created,
+        "the empty root-shard halves are shared between the two blocks, got {:?}",
         acts2
     );
-    assert_eq!(final_base_2_r1.layer_id, final_base_1_r1.layer_id);
-    assert_eq!(final_base_2_r2.layer_id, final_base_1_r2.layer_id);
+    assert_eq!(
+        final_root_shard_2_r1.layer_id,
+        final_root_shard_1_r1.layer_id
+    );
+    assert_eq!(
+        final_root_shard_2_r2.layer_id,
+        final_root_shard_1_r2.layer_id
+    );
 
-    // The load-bearing assertion, per root: same parent, same base hash,
-    // different eph-referencing ops ⇒ DIFFERENT supplement.  Without the
-    // selection_extra fold this was created=false with Q_1's supplement id.
+    // The load-bearing assertion, per root: same parent, same input hash,
+    // different eph-referencing ops ⇒ DIFFERENT selection shard.  Without the
+    // selection_extra fold this was created=false with Q_1's selection shard id.
     assert!(
-        final_supp_2_r1.created && final_supp_2_r2.created,
-        "differing eph ops must produce fresh supplements, got {:?}",
+        final_sel_shard_2_r1.created && final_sel_shard_2_r2.created,
+        "differing eph ops must produce fresh selection shards, got {:?}",
         acts2
     );
     assert_ne!(
-        final_supp_2_r1.layer_id, final_supp_1_r1.layer_id,
-        "supplement key must fold the eph-referencing op content (root 1)"
+        final_sel_shard_2_r1.layer_id, final_sel_shard_1_r1.layer_id,
+        "selection shard key must fold the eph-referencing op content (root 1)"
     );
     assert_ne!(
-        final_supp_2_r2.layer_id, final_supp_1_r2.layer_id,
-        "supplement key must fold the eph-referencing op content (root 2)"
+        final_sel_shard_2_r2.layer_id, final_sel_shard_1_r2.layer_id,
+        "selection shard key must fold the eph-referencing op content (root 2)"
     );
 }
 
 #[test]
 fn layer_block_negative_literal_without_chain_errors() {
     // A literal negative id references an eph row, but with no upstream
-    // chain the executor creates no supplement — the rows would be
+    // chain the executor creates no selection shard — the rows would be
     // silently dropped.  The layer verb must error instead.
     const QUERY: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="-5", object_id="1", "#,
@@ -6587,7 +6630,7 @@ fn layer_block_negative_literal_without_chain_errors() {
 // ============================================================================
 //
 // Cover the invalidation/lifecycle fixes: delete_project purging, the
-// blocking purge, base↔supplement lifecycle coupling (base_id FK), the
+// blocking purge, root↔selection shard lifecycle coupling (root_shard_id FK), the
 // doomed-closure GC (no hollow populated=true layers), canonical label
 // resolutions, and the eph-free filter fence.
 //
@@ -6607,9 +6650,9 @@ fn canonical_ids_sorts_and_dedups() {
 }
 
 #[test]
-fn base_delete_cascades_supplement() {
-    // The base_id FK: deleting a base takes its supplement with it, so a
-    // cached supplement can never pair with a recreated base of a
+fn root_shard_delete_cascades_selection_shard() {
+    // The root_shard_id FK: deleting a root shard takes its selection shard with it, so a
+    // cached selection shard can never pair with a recreated root shard of a
     // different incarnation.
     use crate::command::ShardRole;
     const QUERY: &str = concat!(
@@ -6621,39 +6664,42 @@ fn base_delete_cascades_supplement() {
     assert_root_roles(
         &acts,
         &[
-            (R1, ShardRole::Root),      // prefix layer block base, root 1
-            (R2, ShardRole::Root),      // prefix layer block base, root 2
-            (R1, ShardRole::Root),      // search base, root 1
-            (R1, ShardRole::Selection), // search supplement, root 1
-            (R2, ShardRole::Root),      // search base, root 2
-            (R2, ShardRole::Selection), // search supplement, root 2
+            (R1, ShardRole::Root),      // prefix layer block root shard, root 1
+            (R2, ShardRole::Root),      // prefix layer block root shard, root 2
+            (R1, ShardRole::Root),      // search root shard, root 1
+            (R1, ShardRole::Selection), // search selection shard, root 1
+            (R2, ShardRole::Root),      // search root shard, root 2
+            (R2, ShardRole::Selection), // search selection shard, root 2
         ],
     );
     let (prefix_r1, prefix_r2) = (acts[0], acts[1]);
-    let (base_r1, supp_r1, base_r2, supp_r2) = (acts[2], acts[3], acts[4], acts[5]);
+    let (root_shard_r1, sel_r1, root_shard_r2, sel_r2) = (acts[2], acts[3], acts[4], acts[5]);
 
     let mut rt = tokio::runtime::Runtime::new().unwrap();
     let local = tokio::task::LocalSet::new();
     local.block_on(&mut rt, async {
         let index = get_shared_index(TEST_INPUT_SEARCH).await;
-        // Delete root 1's base only: its pair dies, root 2's pair survives.
-        index.delete_eph_layer(base_r1.layer_id).await.unwrap();
+        // Delete root 1's root shard only: its pair dies, root 2's pair survives.
+        index
+            .delete_eph_layer(root_shard_r1.layer_id)
+            .await
+            .unwrap();
 
         assert!(
-            index.eph_layer_meta(base_r1.layer_id).await.is_err(),
-            "root 1's base row must be gone"
+            index.eph_layer_meta(root_shard_r1.layer_id).await.is_err(),
+            "root 1's root-shard row must be gone"
         );
         assert!(
-            index.eph_layer_meta(supp_r1.layer_id).await.is_err(),
-            "root 1's supplement must cascade with its base (base_id FK)"
+            index.eph_layer_meta(sel_r1.layer_id).await.is_err(),
+            "root 1's selection shard must cascade with its root shard (root_shard_id FK)"
         );
         assert!(
-            index.eph_layer_meta(base_r2.layer_id).await.is_ok(),
-            "root 2's base is an independent cache entry and must survive"
+            index.eph_layer_meta(root_shard_r2.layer_id).await.is_ok(),
+            "root 2's root shard is an independent cache entry and must survive"
         );
         assert!(
-            index.eph_layer_meta(supp_r2.layer_id).await.is_ok(),
-            "root 2's supplement pairs with root 2's base and must survive"
+            index.eph_layer_meta(sel_r2.layer_id).await.is_ok(),
+            "root 2's selection shard pairs with root 2's root shard and must survive"
         );
         assert!(
             index.eph_layer_meta(prefix_r1.layer_id).await.is_ok()
@@ -6667,10 +6713,10 @@ fn base_delete_cascades_supplement() {
 fn delete_eph_layer_removes_reference_dependents() {
     // The doomed-closure GC: deleting a layer also deletes every layer
     // whose rows reference its symbols, transitively — no layer is left
-    // hollow with populated=true.  The search base here is parented on its
-    // root and is nobody's parent (the chain runs through its supplement),
-    // so only the closure — base_id edge to its supplement, reference/
-    // parent edges to the downstream block's supplement — can clean up the
+    // hollow with populated=true.  The search root shard here is parented on its
+    // root and is nobody's parent (the chain runs through its selection shard),
+    // so only the closure — root_shard_id edge to its selection shard, reference/
+    // parent edges to the downstream block's selection shard — can clean up the
     // dependents.
     use crate::command::ShardRole;
     const QUERY: &str = concat!(
@@ -6684,67 +6730,91 @@ fn delete_eph_layer_removes_reference_dependents() {
     assert_root_roles(
         &acts,
         &[
-            (R1, ShardRole::Root),      // prefix layer block base, root 1
-            (R2, ShardRole::Root),      // prefix layer block base, root 2
-            (R1, ShardRole::Root),      // search base, root 1
-            (R1, ShardRole::Selection), // search supplement, root 1
-            (R2, ShardRole::Root),      // search base, root 2
-            (R2, ShardRole::Selection), // search supplement, root 2
-            (R1, ShardRole::Root),      // eph-ops block: empty base, root 1
+            (R1, ShardRole::Root),      // prefix layer block root shard, root 1
+            (R2, ShardRole::Root),      // prefix layer block root shard, root 2
+            (R1, ShardRole::Root),      // search root shard, root 1
+            (R1, ShardRole::Selection), // search selection shard, root 1
+            (R2, ShardRole::Root),      // search root shard, root 2
+            (R2, ShardRole::Selection), // search selection shard, root 2
+            (R1, ShardRole::Root),      // eph-ops block: empty root shard, root 1
             (R1, ShardRole::Selection), // eph-ops block: @e rows (object 1 ⇒ root 1)
-            (R2, ShardRole::Root),      // eph-ops block: empty base, root 2
-            (R2, ShardRole::Selection), // eph-ops block: empty supplement, root 2
+            (R2, ShardRole::Root),      // eph-ops block: empty root shard, root 2
+            (R2, ShardRole::Selection), // eph-ops block: empty selection shard, root 2
         ],
     );
     let (prefix_r1, prefix_r2) = (acts[0], acts[1]);
-    let (search_base_r1, search_supp_r1, search_base_r2, search_supp_r2) =
+    let (search_root_shard_r1, search_sel_shard_r1, search_root_shard_r2, search_sel_shard_r2) =
         (acts[2], acts[3], acts[4], acts[5]);
-    let (block_base_r1, block_supp_r1, block_base_r2, block_supp_r2) =
+    let (block_root_shard_r1, block_sel_shard_r1, block_root_shard_r2, block_sel_shard_r2) =
         (acts[6], acts[7], acts[8], acts[9]);
 
     let mut rt = tokio::runtime::Runtime::new().unwrap();
     let local = tokio::task::LocalSet::new();
     local.block_on(&mut rt, async {
         let index = get_shared_index(TEST_INPUT_SEARCH).await;
-        // Delete root 1's search base: the closure takes exactly root 1's
+        // Delete root 1's search root shard: the closure takes exactly root 1's
         // dependents; root 2's chain is untouched.
         index
-            .delete_eph_layer(search_base_r1.layer_id)
+            .delete_eph_layer(search_root_shard_r1.layer_id)
             .await
             .unwrap();
 
         assert!(
-            index.eph_layer_meta(search_base_r1.layer_id).await.is_err(),
+            index
+                .eph_layer_meta(search_root_shard_r1.layer_id)
+                .await
+                .is_err(),
             "seed must be gone"
         );
         assert!(
-            index.eph_layer_meta(search_supp_r1.layer_id).await.is_err(),
-            "root 1's search supplement dies with its base"
+            index
+                .eph_layer_meta(search_sel_shard_r1.layer_id)
+                .await
+                .is_err(),
+            "root 1's search selection shard dies with its root shard"
         );
         assert!(
-            index.eph_layer_meta(block_supp_r1.layer_id).await.is_err(),
-            "layer referencing the deleted base's symbols must be deleted, \
+            index
+                .eph_layer_meta(block_sel_shard_r1.layer_id)
+                .await
+                .is_err(),
+            "layer referencing the deleted root shard's symbols must be deleted, \
              not left hollow with populated=true"
         );
         assert!(
             index.eph_layer_meta(prefix_r1.layer_id).await.is_ok()
                 && index.eph_layer_meta(prefix_r2.layer_id).await.is_ok(),
-            "prefix layers have no dependency on root 1's search base"
+            "prefix layers have no dependency on root 1's search root shard"
         );
         assert!(
-            index.eph_layer_meta(block_base_r1.layer_id).await.is_ok()
-                && index.eph_layer_meta(block_base_r2.layer_id).await.is_ok(),
-            "the eph-ops block's empty bases have no dependency either"
+            index
+                .eph_layer_meta(block_root_shard_r1.layer_id)
+                .await
+                .is_ok()
+                && index
+                    .eph_layer_meta(block_root_shard_r2.layer_id)
+                    .await
+                    .is_ok(),
+            "the eph-ops block's empty root shards have no dependency either"
         );
         assert!(
-            index.eph_layer_meta(search_base_r2.layer_id).await.is_ok()
-                && index.eph_layer_meta(search_supp_r2.layer_id).await.is_ok(),
+            index
+                .eph_layer_meta(search_root_shard_r2.layer_id)
+                .await
+                .is_ok()
+                && index
+                    .eph_layer_meta(search_sel_shard_r2.layer_id)
+                    .await
+                    .is_ok(),
             "root 2's search pair is an independent cache entry and must survive"
         );
         assert!(
-            index.eph_layer_meta(block_supp_r2.layer_id).await.is_ok(),
-            "root 2's block supplement holds no rows referencing root 1's \
-             base (object 1 is project 1's) and must survive"
+            index
+                .eph_layer_meta(block_sel_shard_r2.layer_id)
+                .await
+                .is_ok(),
+            "root 2's block selection shard holds no rows referencing root 1's \
+             root shard (object 1 is project 1's) and must survive"
         );
     });
 }
@@ -6752,7 +6822,7 @@ fn delete_eph_layer_removes_reference_dependents() {
 #[test]
 fn ttl_purge_takes_dependent_closure() {
     // Same closure property through the TTL path: rewind only the search
-    // base's last_used; purge_old_eph_layers must take the base plus its
+    // root shard's last_used; purge_old_eph_layers must take the root shard plus its
     // dependents and nothing else.  Safe on the shared fixture: the seed
     // set is exactly the rewound row (everything else is fresh) and the
     // closure only contains this test's own layers.
@@ -6769,22 +6839,22 @@ fn ttl_purge_takes_dependent_closure() {
     assert_root_roles(
         &acts,
         &[
-            (R1, ShardRole::Root),      // prefix layer block base, root 1
-            (R2, ShardRole::Root),      // prefix layer block base, root 2
-            (R1, ShardRole::Root),      // search base, root 1
-            (R1, ShardRole::Selection), // search supplement, root 1
-            (R2, ShardRole::Root),      // search base, root 2
-            (R2, ShardRole::Selection), // search supplement, root 2
-            (R1, ShardRole::Root),      // eph-ops block: empty base, root 1
+            (R1, ShardRole::Root),      // prefix layer block root shard, root 1
+            (R2, ShardRole::Root),      // prefix layer block root shard, root 2
+            (R1, ShardRole::Root),      // search root shard, root 1
+            (R1, ShardRole::Selection), // search selection shard, root 1
+            (R2, ShardRole::Root),      // search root shard, root 2
+            (R2, ShardRole::Selection), // search selection shard, root 2
+            (R1, ShardRole::Root),      // eph-ops block: empty root shard, root 1
             (R1, ShardRole::Selection), // eph-ops block: @e rows (object 1 ⇒ root 1)
-            (R2, ShardRole::Root),      // eph-ops block: empty base, root 2
-            (R2, ShardRole::Selection), // eph-ops block: empty supplement, root 2
+            (R2, ShardRole::Root),      // eph-ops block: empty root shard, root 2
+            (R2, ShardRole::Selection), // eph-ops block: empty selection shard, root 2
         ],
     );
     let (prefix_r1, prefix_r2) = (acts[0], acts[1]);
-    let (search_base_r1, search_supp_r1, search_base_r2, search_supp_r2) =
+    let (search_root_shard_r1, search_sel_shard_r1, search_root_shard_r2, search_sel_shard_r2) =
         (acts[2], acts[3], acts[4], acts[5]);
-    let (_block_base_r1, block_supp_r1, _block_base_r2, block_supp_r2) =
+    let (_block_root_shard_r1, block_sel_shard_r1, _block_root_shard_r2, block_sel_shard_r2) =
         (acts[6], acts[7], acts[8], acts[9]);
 
     let mut rt = tokio::runtime::Runtime::new().unwrap();
@@ -6798,7 +6868,7 @@ fn ttl_purge_takes_dependent_closure() {
             diesel::sql_query(format!(
                 "UPDATE index.layers SET last_used = now() - interval '2 hours' \
                  WHERE id = {}",
-                search_base_r1.layer_id
+                search_root_shard_r1.layer_id
             )),
             &mut conn,
         )
@@ -6812,15 +6882,24 @@ fn ttl_purge_takes_dependent_closure() {
             .unwrap();
 
         assert!(
-            index.eph_layer_meta(search_base_r1.layer_id).await.is_err(),
-            "expired base must be purged"
+            index
+                .eph_layer_meta(search_root_shard_r1.layer_id)
+                .await
+                .is_err(),
+            "expired root shard must be purged"
         );
         assert!(
-            index.eph_layer_meta(search_supp_r1.layer_id).await.is_err(),
-            "its supplement must go with it"
+            index
+                .eph_layer_meta(search_sel_shard_r1.layer_id)
+                .await
+                .is_err(),
+            "its selection shard must go with it"
         );
         assert!(
-            index.eph_layer_meta(block_supp_r1.layer_id).await.is_err(),
+            index
+                .eph_layer_meta(block_sel_shard_r1.layer_id)
+                .await
+                .is_err(),
             "referencing layer must go with it (no hollow survivors)"
         );
         assert!(
@@ -6829,15 +6908,24 @@ fn ttl_purge_takes_dependent_closure() {
             "fresh, unrelated layers must survive the TTL purge"
         );
         assert!(
-            index.eph_layer_meta(search_base_r2.layer_id).await.is_ok()
-                && index.eph_layer_meta(search_supp_r2.layer_id).await.is_ok(),
+            index
+                .eph_layer_meta(search_root_shard_r2.layer_id)
+                .await
+                .is_ok()
+                && index
+                    .eph_layer_meta(search_sel_shard_r2.layer_id)
+                    .await
+                    .is_ok(),
             "root 2's search pair is fresh and dependency-free — it must \
-             survive the purge of root 1's base"
+             survive the purge of root 1's root shard"
         );
         assert!(
-            index.eph_layer_meta(block_supp_r2.layer_id).await.is_ok(),
-            "root 2's block supplement holds no rows referencing the purged \
-             base and must survive"
+            index
+                .eph_layer_meta(block_sel_shard_r2.layer_id)
+                .await
+                .is_ok(),
+            "root 2's block selection shard holds no rows referencing the purged \
+             root shard and must survive"
         );
     });
 }
@@ -6890,12 +6978,12 @@ fn ttl_purge_never_collects_roots() {
 }
 
 #[test]
-fn search_base_reused_with_filters_across_eph_change() {
+fn search_root_shard_reused_with_filters_across_eph_change() {
     // Fence for the objects_expr eph-free contract: a search whose
     // composite filter includes the (only) objects_expr implementation
-    // must still share its base across different upstream eph chains.  If
+    // must still share its root shard across different upstream eph chains.  If
     // any hashed-or-consumed filter component becomes chain-sensitive,
-    // either the base hash diverges (created=true below) or — worse — the
+    // either the input hash diverges (created=true below) or — worse — the
     // key stays while content diverges; this test pins the key side.
     use crate::command::ShardRole;
     const Q_A: &str = concat!(
@@ -6910,33 +6998,33 @@ fn search_base_reused_with_filters_across_eph_change() {
     );
 
     let shape: &[(i64, ShardRole)] = &[
-        (R1, ShardRole::Root),      // layer block base, root 1
-        (R2, ShardRole::Root),      // layer block base, root 2
-        (R1, ShardRole::Root),      // filtered search base, root 1
-        (R1, ShardRole::Selection), // search supplement, root 1
-        (R2, ShardRole::Root),      // filtered search base, root 2 (empty)
-        (R2, ShardRole::Selection), // search supplement, root 2
+        (R1, ShardRole::Root),      // layer block root shard, root 1
+        (R2, ShardRole::Root),      // layer block root shard, root 2
+        (R1, ShardRole::Root),      // filtered search root shard, root 1
+        (R1, ShardRole::Selection), // search selection shard, root 1
+        (R2, ShardRole::Root),      // filtered search root shard, root 2 (empty)
+        (R2, ShardRole::Selection), // search selection shard, root 2
     ];
     let (_res_a, acts_a) = run_query_traced(TEST_INPUT_SEARCH, Q_A);
     assert_root_roles(&acts_a, shape);
-    let (base_a_r1, base_a_r2) = (acts_a[2], acts_a[4]);
+    let (root_shard_a_r1, root_shard_a_r2) = (acts_a[2], acts_a[4]);
     assert!(
-        base_a_r1.created && base_a_r2.created,
-        "cold filtered bases (root 2's is empty — the filter excludes its \
+        root_shard_a_r1.created && root_shard_a_r2.created,
+        "cold filtered root shards (root 2's is empty — the filter excludes its \
          project — but still materialises), got {:?}",
         acts_a
     );
 
     let (_res_b, acts_b) = run_query_traced(TEST_INPUT_SEARCH, Q_B);
     assert_root_roles(&acts_b, shape);
-    let (base_b_r1, base_b_r2) = (acts_b[2], acts_b[4]);
+    let (root_shard_b_r1, root_shard_b_r2) = (acts_b[2], acts_b[4]);
     assert!(
-        !base_b_r1.created && !base_b_r2.created,
-        "filtered search bases must be chain-independent, got {:?}",
+        !root_shard_b_r1.created && !root_shard_b_r2.created,
+        "filtered search root shards must be chain-independent, got {:?}",
         acts_b
     );
-    assert_eq!(base_b_r1.layer_id, base_a_r1.layer_id);
-    assert_eq!(base_b_r2.layer_id, base_a_r2.layer_id);
+    assert_eq!(root_shard_b_r1.layer_id, root_shard_a_r1.layer_id);
+    assert_eq!(root_shard_b_r2.layer_id, root_shard_a_r2.layer_id);
 }
 
 #[test]
@@ -6994,7 +7082,7 @@ fn delete_project_purges_eph_cache() {
 
         const QUERY: &str = r#"loc("main.c", "2", project="test_project")"#;
         let (_res, acts) = run_query_traced_on(index.clone(), QUERY).await.unwrap();
-        assert!(acts[0].created, "cold loc base, got {:?}", acts);
+        assert!(acts[0].created, "cold loc root shard, got {:?}", acts);
         assert!(index.eph_layer_count().await.unwrap() >= 1);
 
         assert!(store.delete_project(1).await.unwrap());
@@ -7015,11 +7103,11 @@ fn delete_project_purges_eph_cache() {
 }
 
 #[test]
-fn per_root_base_reused_under_narrowed_roots() {
-    // The headline property of per-root chains: a root's base is keyed on
+fn per_root_root_shard_reused_under_narrowed_roots() {
+    // The headline property of per-root chains: a root's root shard is keyed on
     // that single root's identity (`root_shard_hash`), so narrowing the
     // visible root set — the future multitenancy/versioning entry point —
-    // reuses the already-cached base instead of repopulating.  Request-level
+    // reuses the already-cached root shard instead of repopulating.  Request-level
     // narrowing doesn't exist yet, so the test constructs the narrowed set
     // directly, exactly as a narrowing entry point would.
     use crate::command::ShardRole;
@@ -7032,17 +7120,17 @@ fn per_root_base_reused_under_narrowed_roots() {
         let index = get_shared_index(TEST_INPUT_SEARCH).await;
         let roots = index.load_root_layers().await.unwrap();
 
-        // Full visibility: one base per root, both freshly created.
+        // Full visibility: one root shard per root, both freshly created.
         let (full_res, full_acts) =
             run_query_traced_with_roots(index.clone(), roots.clone(), QUERY)
                 .await
                 .unwrap();
         assert_root_roles(&full_acts, &[(R1, ShardRole::Root), (R2, ShardRole::Root)]);
         assert!(full_acts.iter().all(|a| a.created), "cold run creates both");
-        let r1_base = full_acts[0].layer_id;
+        let r1_root_shard = full_acts[0].layer_id;
 
         // Narrowed to root 1 only: exactly one activation, a HIT on the
-        // very same base layer — its key never depended on root 2.
+        // very same root shard — its key never depended on root 2.
         let narrowed: Vec<_> = roots.iter().filter(|r| r.id == R1).cloned().collect();
         let (narrow_res, narrow_acts) = run_query_traced_with_roots(index.clone(), narrowed, QUERY)
             .await
@@ -7050,12 +7138,12 @@ fn per_root_base_reused_under_narrowed_roots() {
         assert_root_roles(&narrow_acts, &[(R1, ShardRole::Root)]);
         assert!(
             !narrow_acts[0].created,
-            "narrowed run must hit root 1's cached base, got {:?}",
+            "narrowed run must hit root 1's cached root shard, got {:?}",
             narrow_acts
         );
         assert_eq!(
-            narrow_acts[0].layer_id, r1_base,
-            "same base layer across visibility sets"
+            narrow_acts[0].layer_id, r1_root_shard,
+            "same root shard across visibility sets"
         );
 
         // The narrowed result is exactly project 1's share: 8 substring
@@ -7068,10 +7156,10 @@ fn per_root_base_reused_under_narrowed_roots() {
 
 #[test]
 fn root_deletion_cascades_only_that_projects_chains() {
-    // Root-parented bases: deleting a project's root layer (the tail of
+    // Root-parented root shards: deleting a project's root layer (the tail of
     // delete_project's ordering, after the project row releases the FK)
-    // cascades that project's cached bases via `parent_id` and their
-    // supplements via `base_id` — while the OTHER root's chains survive
+    // cascades that project's cached root shards via `parent_id` and their
+    // selection shards via `root_shard_id` — while the OTHER root's chains survive
     // untouched.  Pinned at the SQL level on an isolated fixture because
     // delete_project's trailing purge_eph_cache would mask the cascade.
     use crate::test_util::{create_isolated_fixture, run_query_traced_on};
@@ -7083,8 +7171,8 @@ fn root_deletion_cascades_only_that_projects_chains() {
     local.block_on(&mut rt, async {
         let index = index::db_diesel::Index::connect(fx.url()).await.unwrap();
 
-        // Two statements → per root: prefix base, then search base +
-        // supplement (chains on both roots).
+        // Two statements → per root: prefix root shard, then search root shard +
+        // selection shard (chains on both roots).
         const QUERY: &str = concat!(
             r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
             r#"start="90000", end="90100", instance_type="1") }; "#,
@@ -7101,7 +7189,11 @@ fn root_deletion_cascades_only_that_projects_chains() {
             .filter(|a| a.root_id == R2)
             .map(|a| a.layer_id)
             .collect();
-        assert_eq!(r1_layers.len(), 3, "prefix base + search base + supplement");
+        assert_eq!(
+            r1_layers.len(),
+            3,
+            "prefix root shard + search root shard + selection shard"
+        );
         assert_eq!(r2_layers.len(), 3);
 
         // Mimic delete_project's tail for project 1: the project row goes
@@ -7143,7 +7235,7 @@ fn purge_blocks_on_inflight_layer_txn() {
     // The LOCK TABLE in purge_eph_cache: a purge must wait for an open
     // layer transaction to finish, and must then see (and delete) the row
     // that transaction committed — the exact visibility race that used to
-    // let a stale base commit after the purge and be served forever.
+    // let a stale root shard commit after the purge and be served forever.
     use crate::test_util::create_isolated_fixture;
     use diesel_async::AsyncConnection;
     let fx = create_isolated_fixture(VERB_TEST);

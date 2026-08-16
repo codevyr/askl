@@ -700,16 +700,16 @@ pub trait FilterLeaf: std::fmt::Debug + FilterLeafClone + Send + Sync {
     /// Returns `None` for filters that only constrain at the symbol/instance layer.
     ///
     /// **Contract — implementations MUST NOT vary with `EphContext`.**  The
-    /// partitioned cache's base layers (search, loc) are keyed WITHOUT the
+    /// partitioned cache's root shards (search, loc) are keyed WITHOUT the
     /// ephemeral chain, on the assumption that everything their populate
     /// SQL consumes — which for `search()` is exactly this expression — is
     /// chain-independent.  An eph-sensitive `objects_expr` would change the
-    /// base's content while its key stays constant: the first chain to
-    /// populate the base would poison it for every other chain.  If a
+    /// root shard's content while its key stays constant: the first chain to
+    /// populate the root shard would poison it for every other chain.  If a
     /// filter genuinely needs eph-scoped object visibility, it must NOT go
-    /// through this hook — it belongs in the supplement half (whose key
+    /// through this hook — it belongs in the selection-shard half (whose key
     /// folds the chain and the verb's `selection_extra`).  The regression
-    /// test `search_base_reused_with_filters_across_eph_change` fences this.
+    /// test `search_root_shard_reused_with_filters_across_eph_change` fences this.
     fn objects_expr(&self) -> Option<ObjectsBoolExpr> {
         None
     }
