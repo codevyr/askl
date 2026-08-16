@@ -49,7 +49,7 @@ pub struct LayerActivation {
 
 /// Result of computing initial selections for a statement's selectors.
 /// Phase R is read-only: chain growth and activation recording happen in
-/// Phase M (`materialise_layers` → the executor's per-tree round push).
+/// Phase M (`materialise_layers` → the executor's per-tree materialisation).
 pub struct ComputeResult {
     pub selections: Vec<(SelectorId, Option<Selection>)>,
     pub warnings: Vec<Diagnostic>,
@@ -66,15 +66,15 @@ impl ComputeResult {
 
 /// Phase-M output of one statement: the layers it materialised (already
 /// created in the DB, NOT yet pushed onto the executor's chains — the
-/// executor folds `round` into its tree's SINGLE round push, so the whole
-/// tree's layers enter visibility together), plus the Phase-M warnings
+/// executor folds `layers` into its tree's SINGLE materialisation, so the
+/// whole tree's layers enter visibility together), plus the Phase-M warnings
 /// (layer truncation) to be carried into the statement's Phase R.
 pub struct MaterialiseOutcome {
     /// All materialised layer ids (root, layer, and selection shards, every
     /// root) — Phase R's layer-union read enumerates rows from exactly these.
     pub layer_ids: Vec<i64>,
-    /// `(root_id, layer_id)` pairs for `EphContext::push_round`.
-    pub round: Vec<(i64, i64)>,
+    /// `(root_id, layer_id)` pairs for `EphContext::push_materialisation`.
+    pub layers: Vec<(i64, i64)>,
     /// Per-layer cache activations, in recording order.
     pub activations: Vec<LayerActivation>,
     /// Phase-M warnings (verb-limit truncation), surfaced via Phase R's
@@ -86,7 +86,7 @@ impl MaterialiseOutcome {
     fn empty() -> Self {
         Self {
             layer_ids: Vec::new(),
-            round: Vec::new(),
+            layers: Vec::new(),
             activations: Vec::new(),
             warnings: Vec::new(),
         }
@@ -716,8 +716,8 @@ impl Command {
     /// once per top-level statement tree): no command sees a tree-mate's
     /// layers at materialise time, so supplements parent on the previous
     /// tree's tip and `has_chain` guards evaluate pre-tree.  The returned
-    /// `round` is NOT pushed here — the executor folds it into the tree's
-    /// single round push, after which every statement's Phase R sees the
+    /// `layers` is NOT pushed here — the executor folds it into the tree's
+    /// single materialisation, after which every statement's Phase R sees the
     /// whole tree's layers.  `parent_scope` carries the enclosing
     /// container's CONDITION for scope-fusion (nothing is computed yet in
     /// Phase M, so it is condition-based by construction).
@@ -778,7 +778,7 @@ impl Command {
         // Chain topology is decided here, not by the verb: per
         // visible root, the root shard parents on the root and the
         // selection shard (created iff that root's pre-tree chain is
-        // non-empty) chains on the root's `chain_last` — the previous
+        // non-empty) chains on the root's `tip` — the previous
         // TREE's tip, since `eph` is the pre-tree snapshot.  The input
         // hash is salted per root (`root_shard_hash`), so each root's
         // cache entry is independent of co-visible projects.
@@ -815,7 +815,7 @@ impl Command {
                 role: layer.role,
             });
             truncated_any |= layer.outcome.truncated;
-            outcome.round.push((layer.root_id, layer.outcome.layer_id));
+            outcome.layers.push((layer.root_id, layer.outcome.layer_id));
             outcome.layer_ids.push(layer.outcome.layer_id);
         }
         // One LRU touch round trip for all roots' hits.
@@ -843,7 +843,8 @@ impl Command {
 
     /// Phase R: build each selector's selection — pure reads.  The layers in
     /// `layer_ids` were materialised by this statement's Phase M, and `eph`
-    /// already contains the tree's single round (tree-complete visibility),
+    /// already contains the tree's single materialisation (tree-complete
+    /// visibility),
     /// so neighbourhood queries see sibling/child layers symmetrically.
     /// `phase1_warnings` carries Phase M's truncation notices into this
     /// statement's `ComputeResult`.  Since ScopeContext contains non-clonable

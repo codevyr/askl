@@ -154,13 +154,13 @@ fn stage_read(
 }
 
 /// Phase-M handoff to the Phase-R batch: one substatement's
-/// materialised layer ids, its `(root, layer)` round entries (pushed by
-/// the executor as part of the TREE's single round), and Phase-M
+/// materialised layer ids, its `(root, layer)` entries (pushed by
+/// the executor as part of the TREE's single materialisation), and Phase-M
 /// warnings.
 struct Staged {
     statement: Rc<Statement>,
     layer_ids: Vec<i64>,
-    round: Vec<(i64, i64)>,
+    layers: Vec<(i64, i64)>,
     warnings: Vec<Diagnostic>,
 }
 
@@ -379,8 +379,9 @@ impl Statement {
     }
 
     /// Compute initial selections for every statement — PHASED (M, P, R),
-    /// per top-level statement tree, trees in source order.  ONE round per
-    /// tree: nesting no longer sequences; `;` is the only time axis.
+    /// per top-level statement tree, trees in source order.  ONE
+    /// materialisation per tree: nesting no longer sequences; `;` is the only
+    /// time axis.
     ///
     /// - **Phase M (materialise, concurrent):** runs per tree — a
     ///   visibility snapshot is taken ONCE before any of the tree's
@@ -392,27 +393,29 @@ impl Statement {
     ///   does not exist), so the calls are independent by construction.
     ///   Outcomes are applied in substatement pre-order — completion order
     ///   is unobservable.  The tree's layers then enter visibility as ONE
-    ///   round, pushed after the batch; each command keeps its own layers
+    ///   materialisation, pushed after the batch; each command keeps its own
+    ///   layers
     ///   (attribution by layer id is load-bearing for per-command
     ///   selections).  Tree-mates with IDENTICAL specs converge on the
     ///   same layer rows via the ON CONFLICT + 2-PC `populated` protocol
     ///   (see `Index::create_eph_layer`).
     ///
-    ///   **Spine advance rule.**  Every supplement-bearing command's
-    ///   supplement parents on the PREVIOUS tree's tip (`chain_last` of the
-    ///   pre-tree snapshot); a tree with ≥2 supplements makes them SIBLINGS
-    ///   — no intra-tree key chaining.  The tree's new tip is, per root,
-    ///   the LAST layer of its round in substatement pre-order: the final
-    ///   layer-bearing substatement's supplement, or — under an empty
-    ///   pre-tree chain, where NO command materialises a supplement
-    ///   (first-round elision, per command) — that substatement's base.
-    ///   This is deterministic: pre-order is source order and each
-    ///   command's internal layer order is canonical (roots ascending;
-    ///   base → per-layer atoms → supplement, sorted by
+    ///   **Spine advance rule.**  Every selection-shard-bearing command's
+    ///   selection shard parents on the PREVIOUS tree's tip (`tip` of the
+    ///   pre-tree snapshot); a tree with ≥2 selection shards makes them
+    ///   SIBLINGS — no intra-tree key chaining.  The tree's new tip is, per
+    ///   root, the LAST layer of its materialisation in substatement
+    ///   pre-order: the final layer-bearing substatement's selection shard,
+    ///   or — under an empty pre-tree chain, where NO command materialises a
+    ///   selection shard (first-materialisation elision, per command) — that
+    ///   substatement's root shard.  This is deterministic: pre-order is
+    ///   source order and each command's internal layer order is canonical
+    ///   (roots ascending; root shard → layer shards → selection shard,
+    ///   sorted by
     ///   [`index::db_diesel::Index::with_partitioned_layers`]), so the tip
     ///   is a pure function of the query text and the pre-tree chain —
-    ///   nothing completion-order-dependent feeds it.  A single-supplement
-    ///   tree parents and tips exactly like the old chained model.
+    ///   nothing completion-order-dependent feeds it.  A single-selection-
+    ///   shard tree parents and tips exactly like the old chained model.
     /// - **Phase P (probe, concurrent):** cardinality probes + refinement
     ///   rounds under the tree-complete visibility — see the inline block
     ///   below for the full contract.
@@ -504,21 +507,21 @@ impl Statement {
                 staged.push(Staged {
                     statement: p.statement,
                     layer_ids: outcome.layer_ids,
-                    round: outcome.round,
+                    layers: outcome.layers,
                     warnings: outcome.warnings,
                 });
             }
 
-            // The tree's layers enter visibility as ONE round: substatement
-            // pre-order, each command's layers in their canonical internal
-            // order — making the last layer per root the tree's new tip
-            // (see the spine advance rule in the doc comment above).
-            let tree_round: Vec<(i64, i64)> = staged
+            // The tree's layers enter visibility as ONE materialisation:
+            // substatement pre-order, each command's layers in their canonical
+            // internal order — making the last layer per root the tree's new
+            // tip (see the spine advance rule in the doc comment above).
+            let tree_materialisation: Vec<(i64, i64)> = staged
                 .iter()
-                .flat_map(|s| s.round.iter().copied())
+                .flat_map(|s| s.layers.iter().copied())
                 .collect();
-            if !tree_round.is_empty() {
-                ctx.eph.push_round(&tree_round);
+            if !tree_materialisation.is_empty() {
+                ctx.eph.push_materialisation(&tree_materialisation);
             }
 
             // ---- Phase P: cardinality probes, concurrent, under
@@ -877,7 +880,7 @@ impl Statement {
         // Top-level sibling-ordering edges.
         //
         // Execution order no longer depends on these: trees run
-        // sequentially and each tree's layers land as ONE round, so
+        // sequentially and each tree's layers land as ONE materialisation, so
         // ordering is structural.  The edges survive for their two
         // remaining readers — the notification pass (`notify`
         // short-circuits every `PreSeed*` edge explicitly) and the

@@ -85,7 +85,7 @@ pub type LayerShardPopulate = Box<
 /// The selection shard is a NO-OP for content scans: the layer shards already
 /// cover every eph content layer, so a scanning selection shard would only
 /// DOUBLE-COUNT.  It survives (empty) purely as the deterministic
-/// chain-continuation marker (`chain_last`).  Results compose by union, valid
+/// chain-continuation marker (`tip`).  Results compose by union, valid
 /// while masking-free.  Ephemeral layers hold no content today, so this is
 /// byte-identical to the old 2-way path until content-in-layers lands.
 ///
@@ -111,7 +111,7 @@ pub type ShardedScan = Box<
 /// (`search`, `loc`, `layer { … }`) implement [`Selector::layer_spec`]
 /// returning `Some(LayerSpec)`.  The executor materializes the layers per
 /// visible root, records them as `LayerActivation`s, folds them into its
-/// tree's single `EphContext` round, and then builds the `Selection`
+/// tree's single `EphContext` materialisation, and then builds the `Selection`
 /// from the layers' instances.  The selector itself does not own the
 /// transaction, the layer ids, or any mutable interior state.
 ///
@@ -159,7 +159,7 @@ impl LayerSpec {
     /// `scan(txn, root, visible_layers, eph_branch)`; the shard→visibility
     /// mapping lives HERE, not in the verb. The selection shard is a NO-OP:
     /// the layer shards carry every eph content layer, so a scanning selection
-    /// shard would double-count; it survives empty only as the `chain_last`
+    /// shard would double-count; it survives empty only as the `tip`
     /// marker.  `selection_extra` is empty (a scan reads no extra key material
     /// beyond parent + root shard).
     pub fn sharded_scan(input_hash: [u8; 32], scan: ShardedScan) -> Self {
