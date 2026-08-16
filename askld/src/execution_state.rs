@@ -22,17 +22,19 @@ pub enum DependencyRole {
     PreSeedSibling,
     /// Label resolution edge from an `@label` argument inside a
     /// layer-creating verb to the labelled statement.  Like
-    /// `PreSeedSibling` this is pure ordering, but additionally
-    /// names the label so `compute_roots` can read out the dep's
-    /// resolved symbol IDs and pass them through `LabelResolutions`
-    /// before pushing the dependent's compute future.
+    /// `PreSeedSibling` this carries no selection-notification
+    /// semantics, but additionally names the label so `compute_roots`
+    /// can read the dep's completed selection (the labelled statement
+    /// always lives in an earlier, fully-run tree — parse-enforced)
+    /// and pass its symbol IDs through `LabelResolutions`.
     PreSeedLabel(Rc<str>),
 }
 
 impl DependencyRole {
-    /// Both `PreSeedSibling` and `PreSeedLabel` trigger a drain in
-    /// `compute_roots` — they share the same scheduler semantic
-    /// even though only the label form carries a payload.
+    /// `PreSeedSibling` and `PreSeedLabel` share the same scheduler
+    /// semantic — ordering satisfied by sequential tree execution, no
+    /// worklist notification — even though only the label form carries
+    /// a payload.
     pub fn is_pre_seed(&self) -> bool {
         matches!(self, Self::PreSeedSibling | Self::PreSeedLabel(_))
     }
