@@ -936,8 +936,8 @@ pub async fn purge_eph_cache(conn: &mut AsyncPgConnection) -> Result<usize, dies
 /// valid cache hits with silently missing results.  The recursive CTE
 /// computes, BEFORE anything cascades, every layer transitively reachable
 /// from the seed through four dependency edges — instance→symbol references,
-/// ref→symbol references, chain parentage (`parent_id`), and pair coupling
-/// (`base_id`) — and deletes the whole closure atomically.  A layer is
+/// ref→symbol references, chain parentage (`parent_id`), and shard coupling
+/// (`root_shard_id`) — and deletes the whole closure atomically.  A layer is
 /// either fully alive or gone; hollow-but-populated is unconstructible
 /// through GC.  (Postgres allows one recursive self-reference, hence the
 /// edge-list UNION inside a single recursive term.)
@@ -970,8 +970,8 @@ fn doomed_closure_delete_sql(seed_where: &str) -> String {
                  SELECT id, parent_id FROM index.layers \
                   WHERE parent_id IS NOT NULL \
                UNION ALL \
-                 SELECT id, base_id FROM index.layers \
-                  WHERE base_id IS NOT NULL \
+                 SELECT id, root_shard_id FROM index.layers \
+                  WHERE root_shard_id IS NOT NULL \
              ) e JOIN doomed d ON e.needed = d.id \
          ) \
          DELETE FROM index.layers \
@@ -2654,14 +2654,14 @@ impl Index {
     /// `parent_id` is recorded only when the row is *first* inserted; the
     /// `ON CONFLICT DO UPDATE` clause only touches `last_used`.  Under
     /// per-root materialisation this is vacuous rather than a caveat: a
-    /// layer's parent is a pure function of its hash (a base's hash folds
-    /// its root's identity and its parent IS that root; a supplement's hash
-    /// folds its parent id), so a cache hit always carries the same
-    /// `parent_id` the caller would have written.
+    /// layer's parent is a pure function of its hash (a root shard's hash
+    /// folds its root's identity and its parent IS that root; a selection
+    /// shard's hash folds its parent id), so a cache hit always carries the
+    /// same `parent_id` the caller would have written.
     pub async fn create_eph_layer(
         &self,
         parent_id: Option<i64>,
-        base_id: Option<i64>,
+        root_shard_id: Option<i64>,
         hash: &[u8],
         kind: EphLayerKind,
     ) -> Result<EphTransaction<'_>> {
@@ -2692,7 +2692,7 @@ impl Index {
         let upsert_result = diesel::insert_into(layers::table)
             .values((
                 layers::parent_id.eq(parent_id),
-                layers::base_id.eq(base_id),
+                layers::root_shard_id.eq(root_shard_id),
                 layers::hash.eq(hash),
                 layers::kind.eq(kind.as_str()),
                 layers::populated.eq(false),
@@ -2791,7 +2791,7 @@ impl Index {
     pub async fn with_eph_layer<'s, F>(
         &'s self,
         parent_id: Option<i64>,
-        base_id: Option<i64>,
+        root_shard_id: Option<i64>,
         hash: &[u8],
         kind: EphLayerKind,
         body: F,
@@ -2800,7 +2800,7 @@ impl Index {
         F: for<'b> FnOnce(&'b mut EphTransaction<'s>) -> EphScopedFut<'b, bool>,
     {
         let mut txn = self
-            .create_eph_layer(parent_id, base_id, hash, kind)
+            .create_eph_layer(parent_id, root_shard_id, hash, kind)
             .await?;
         let layer_id = txn.layer_id();
         let created = txn.created();
@@ -2983,7 +2983,8 @@ impl Index {
                     )
                     .await?;
 
-                // `base_id` couples a delta layer's lifetime to its root shard
+                // `root_shard_id` couples a delta layer's lifetime to its
+                // root shard
                 // (ON DELETE CASCADE): the root shard is always the older
                 // half, so when it ages out the delta — whose key folds the
                 // stable root-shard *hash*, not the id — can no longer hit
