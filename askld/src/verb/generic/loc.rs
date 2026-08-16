@@ -360,9 +360,9 @@ impl Selector for LocSelector {
             base_resolved: tokio::sync::OnceCell::new(),
         });
 
-        let base_inputs = std::sync::Arc::clone(&inputs);
-        let base_populate: crate::verb::LayerPopulate = Box::new(move |txn, root| {
-            let inputs = std::sync::Arc::clone(&base_inputs);
+        let root_shard_inputs = std::sync::Arc::clone(&inputs);
+        let root_shard_populate: crate::verb::RootShardPopulate = Box::new(move |txn, root| {
+            let inputs = std::sync::Arc::clone(&root_shard_inputs);
             Box::pin(async move {
                 let file_matches: &Vec<FileMatch> = inputs
                     .base_resolved
@@ -374,19 +374,19 @@ impl Selector for LocSelector {
             })
         });
 
-        // The fused eph supplement is a NO-OP: the per-layer atoms below carry
-        // every eph content layer's matches, so a scanning supplement would
+        // The selection shard is a NO-OP: the layer shards below carry every
+        // eph content layer's matches, so a scanning selection shard would
         // double-count.  It survives empty as the chain-continuation marker.
-        let supplement_populate: crate::verb::SupplementPopulate =
-            Box::new(|_txn, _root, _base_ref| Box::pin(async { Ok(false) }));
+        let selection_shard_populate: crate::verb::SelectionShardPopulate =
+            Box::new(|_txn, _root, _root_shard_ref| Box::pin(async { Ok(false) }));
 
-        let per_layer_inputs = std::sync::Arc::clone(&inputs);
-        let per_layer_populate: crate::verb::PerLayerPopulate =
-            Box::new(move |txn, root, layer_id, _base_ref| {
-                let inputs = std::sync::Arc::clone(&per_layer_inputs);
+        let layer_shard_inputs = std::sync::Arc::clone(&inputs);
+        let layer_shard_populate: crate::verb::LayerShardPopulate =
+            Box::new(move |txn, root, layer_id, _root_shard_ref| {
+                let inputs = std::sync::Arc::clone(&layer_shard_inputs);
                 Box::pin(async move {
-                    // N-way: each atom resolves ONE eph content layer.  No
-                    // OnceCell — per-layer shards are distinct sets, so resolve
+                    // N-way: each layer shard resolves ONE eph content layer.
+                    // No OnceCell — layer shards are distinct sets, so resolve
                     // fresh per `L_j` (cheap; empty until eph content exists).
                     let file_matches = resolve(txn, &inputs, &[layer_id], true).await?;
                     build_instances(txn, &inputs, &file_matches, root).await?;
@@ -395,20 +395,20 @@ impl Selector for LocSelector {
                 })
             });
 
-        // loc is layer-sharded: the base scans root layers (persistent) and
-        // each per-layer atom scans ONE eph content layer (`objects.layer < 0`);
-        // the fused supplement is an empty chain marker.  With no ephemeral
-        // objects today the eph shards resolve empty, so this is behaviourally
-        // identical to the old persistent-only spec — but the shape is uniform
-        // with search and future ephemeral objects flow through automatically.
-        // `supplement_extra` stays empty: the delta is fully determined by
-        // (parent chain, base).
+        // loc is layer-sharded: the root shard scans root layers (persistent)
+        // and each layer shard scans ONE eph content layer
+        // (`objects.layer < 0`); the selection shard is an empty chain marker.
+        // With no ephemeral objects today the eph shards resolve empty, so this
+        // is behaviourally identical to the old persistent-only spec — but the
+        // shape is uniform with search and future ephemeral objects flow
+        // through automatically.  `selection_extra` stays empty: the delta is
+        // fully determined by (parent chain, root shard).
         Ok(Some(LayerSpec {
-            base_hash: hash,
-            base_populate,
-            supplement_populate,
-            per_layer_populate: Some(per_layer_populate),
-            supplement_extra: Vec::new(),
+            input_hash: hash,
+            root_shard_populate,
+            selection_shard_populate,
+            layer_shard_populate: Some(layer_shard_populate),
+            selection_extra: Vec::new(),
         }))
     }
 }

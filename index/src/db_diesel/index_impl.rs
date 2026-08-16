@@ -1004,7 +1004,7 @@ impl LayerBatch {
 /// Coarse by design: a layer's kind records only what drives behaviour —
 /// whether GC may touch it — not which verb produced it. The producing verb
 /// lives in the layer's hash (each verb folds its own domain tag) and the
-/// layer's role lives in `parent_id` + the executor's `LayerRole`.
+/// layer's role lives in `parent_id` + the executor's `ShardRole`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EphLayerKind {
     /// The leak-detection sentinel layer.  Never created at runtime; inserted
@@ -1014,7 +1014,7 @@ pub enum EphLayerKind {
     /// Any query-time ephemeral cache layer — a base, a `layer { … }` block, a
     /// composite, the fused supplement, or a per-layer content atom.  All are
     /// GC-able; none of these are distinguished by kind (their identity and
-    /// role live in the hash, `parent_id`, and `LayerRole`).
+    /// role live in the hash, `parent_id`, and `ShardRole`).
     Ephemeral,
     /// A project's root layer: the persistent index data itself.  One per
     /// project via `projects.root_layer_id`, created with the project — never
@@ -1059,13 +1059,13 @@ impl std::fmt::Display for EphLayerKind {
     }
 }
 
-/// Identity of a materialized base layer, handed to a supplement's populate
-/// closure by [`Index::with_partitioned_layers`].  Unused today; future
-/// mask/tombstone rows will need to reference the base they mask.  Note the
-/// two fields age differently: `hash` is stable across TTL purge + recreate
-/// of the base row, `layer_id` is not.
+/// Identity of a materialized root shard, handed to a selection shard's
+/// populate closure by [`Index::with_partitioned_layers`].  Unused today;
+/// future mask/tombstone rows will need to reference the root shard they
+/// mask.  Note the two fields age differently: `hash` is stable across TTL
+/// purge + recreate of the root shard's row, `layer_id` is not.
 #[derive(Debug, Clone, Copy)]
-pub struct BaseLayerRef {
+pub struct RootShardRef {
     pub layer_id: i64,
     pub hash: [u8; 32],
 }
@@ -1082,111 +1082,114 @@ pub struct LayerOutcome {
     pub truncated: bool,
 }
 
-/// Which part of a root's cache entry a [`MaterialisedLayer`] is.
+/// Which shard of a root's cache entry a [`MaterialisedLayer`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LayerRole {
-    /// Root-parented base layer of a partitioned entry — keyed on
+pub enum ShardRole {
+    /// Root shard: the root-parented shard of a partitioned entry — keyed on
     /// (root identity, verb inputs), reused under any upstream eph context.
-    Base,
-    /// Eph-chained delta layer of a partitioned entry; ordered last within
-    /// its root, so it is what downstream verbs chain on.
-    Supplement,
-    /// N-way per-layer content atom `V(L_j)`: a content verb's contribution
-    /// restricted to ONE ephemeral content layer, keyed `per_layer_hash(L_j,
-    /// base_hash, extra)` and parented on `L_j` (its lifetime tracks the layer
-    /// it shards).  Additive to base+supplement; zero of these exist until an
-    /// ephemeral layer carries content.
-    PerLayer,
+    Root,
+    /// Selection shard: the eph-chained delta shard of a partitioned entry;
+    /// ordered last within its root, so it is what downstream verbs chain on.
+    Selection,
+    /// Layer shard `V(L_j)`: a content verb's contribution restricted to ONE
+    /// ephemeral content layer, keyed `layer_shard_hash(L_j, input_hash,
+    /// extra)` and parented on `L_j` (its lifetime tracks the layer it
+    /// shards).  Additive to the root and selection shards; zero of these
+    /// exist until an ephemeral layer carries content.
+    Layer,
 }
 
 /// One layer materialised by [`Index::with_partitioned_layers`], in the
 /// exact order the executor records them (and concatenates them into its
-/// tree's round): roots ascending; within a root, base first, then zero or
-/// more N-way per-layer content atoms (`LayerRole::PerLayer`, one per
-/// visible eph content layer, none until eph content exists), then the
-/// supplement LAST — which exists iff that root's upstream (pre-tree) chain
-/// was non-empty (a chain-topology rule, not an overlay-emptiness shortcut:
-/// under a non-empty chain the supplement row is always materialized, even
-/// when its populate inserts zero rows).  The supplement is last so a
-/// command's final layer per root — and with it the tree tip, which is the
-/// LAST command's final layer — is always a supplement (or a base under
-/// first-round elision), never a nondeterministically-ordered atom —
-/// keeping downstream `supplement_hash` keys stable when atoms churn.
+/// tree's round): roots ascending; within a root, the root shard first, then
+/// zero or more N-way layer shards (`ShardRole::Layer`, one per visible eph
+/// content layer, none until eph content exists), then the selection shard
+/// LAST — which exists iff that root's upstream (pre-tree) chain was
+/// non-empty (a chain-topology rule, not an overlay-emptiness shortcut:
+/// under a non-empty chain the selection shard's row is always materialized,
+/// even when its populate inserts zero rows).  The selection shard is last so
+/// a command's final layer per root — and with it the tree tip, which is the
+/// LAST command's final layer — is always a selection shard (or a root shard
+/// under first-round elision), never a nondeterministically-ordered layer
+/// shard — keeping downstream `selection_shard_hash` keys stable when layer
+/// shards churn.
 #[derive(Debug, Clone, Copy)]
 pub struct MaterialisedLayer {
     /// The root whose chain this layer joins.
     pub root_id: i64,
-    pub role: LayerRole,
+    pub role: ShardRole,
     pub outcome: LayerOutcome,
 }
 
-/// Cache key of a supplement layer: parent chain identity + base identity +
-/// the verb's own supplement inputs (`extra`).
+/// Cache key of a selection shard: parent chain identity + root shard
+/// identity + the verb's own selection-shard inputs (`extra`).
 ///
-/// `extra` is whatever the supplement populate reads BEYOND the chain and
-/// the base — empty for verbs whose delta is fully determined by
-/// (parent, base) (search, loc), a hash of the eph-referencing ops for
-/// `layer { … }` blocks.  Without it, two blocks sharing base content under
-/// the same chain but differing in their eph-referencing ops would collide
-/// on the supplement key.  Length-prefixed to keep the encoding injective.
+/// `extra` is whatever the selection shard's populate reads BEYOND the chain
+/// and the root shard — empty for verbs whose delta is fully determined by
+/// (parent, root shard) (search, loc), a hash of the eph-referencing ops for
+/// `layer { … }` blocks.  Without it, two blocks sharing root-shard content
+/// under the same chain but differing in their eph-referencing ops would
+/// collide on the selection-shard key.  Length-prefixed to keep the encoding
+/// injective.
 ///
 /// Folds the parent layer *id*, not its hash — consistent with how verbs
 /// chain today (`hash.update(eph.last())`); ids are stable for the lifetime
 /// of the row, which is exactly the lifetime of the cache entry.  The domain
-/// tag keeps supplement hashes disjoint from every verb-computed hash.
-pub fn supplement_hash(parent_id: i64, base_hash: &[u8; 32], extra: &[u8]) -> [u8; 32] {
+/// tag keeps selection-shard hashes disjoint from every verb-computed hash.
+pub fn selection_shard_hash(parent_id: i64, input_hash: &[u8; 32], extra: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(b"eph-supplement-v1");
     h.update(parent_id.to_le_bytes());
-    h.update(base_hash);
+    h.update(input_hash);
     h.update((extra.len() as u64).to_le_bytes());
     h.update(extra);
     h.finalize().into()
 }
 
-/// Cache key of an N-way per-layer content atom `V(L_j)`: the sharded layer's
-/// id folded with the (already root-salted) base identity.  Unlike
-/// [`supplement_hash`] (which folds the runtime chain tip `chain_last`, so the
-/// fused delta is bound to one chain), this folds only `layer_id` — so for a
-/// single content verb the atom key is a function of `(L_j, verb inputs)`, is
-/// reused by ANY chain containing `L_j`, and adding a new tip re-materialises
-/// only the tip's atoms.  It deliberately carries **no** extra key material: a
-/// content scan reads nothing beyond its layer and its own inputs, so folding a
-/// supplement's `extra` here would only fragment the cache (the source of an
-/// earlier over-keying bug).  Caveat for composites: the `base_hash` passed in
-/// is the *composite* base hash, which folds every part's inputs — so a
-/// `search() layer{}` statement's atoms key on the whole statement, i.e. reuse
-/// across composites is conservative; standalone verbs are keyed tightly.  Its
-/// own domain tag keeps per-layer keys disjoint from fused-supplement and
-/// verb-computed hashes; old keys age out via TTL (no purge on upgrade).
-pub fn per_layer_hash(layer_id: i64, base_hash: &[u8; 32]) -> [u8; 32] {
+/// Cache key of an N-way layer shard `V(L_j)`: the sharded layer's id folded
+/// with the (already root-salted) root-shard identity.  Unlike
+/// [`selection_shard_hash`] (which folds the runtime chain tip `chain_last`,
+/// so the fused delta is bound to one chain), this folds only `layer_id` — so
+/// for a single content verb the layer-shard key is a function of
+/// `(L_j, verb inputs)`, is reused by ANY chain containing `L_j`, and adding a
+/// new tip re-materialises only the tip's layer shards.  It deliberately
+/// carries **no** extra key material: a content scan reads nothing beyond its
+/// layer and its own inputs, so folding a selection shard's `extra` here would
+/// only fragment the cache (the source of an earlier over-keying bug).  Caveat
+/// for composites: the `input_hash` passed in is the *composite* input hash,
+/// which folds every part's inputs — so a `search() layer{}` statement's layer
+/// shards key on the whole statement, i.e. reuse across composites is
+/// conservative; standalone verbs are keyed tightly.  Its own domain tag keeps
+/// layer-shard keys disjoint from selection-shard and verb-computed hashes;
+/// old keys age out via TTL (no purge on upgrade).
+pub fn layer_shard_hash(layer_id: i64, input_hash: &[u8; 32]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(b"eph-perlayer-v1");
     h.update(layer_id.to_le_bytes());
-    h.update(base_hash);
+    h.update(input_hash);
     h.finalize().into()
 }
 
-/// Fold ONE root layer's identity hash into a verb's base hash: the cache
-/// key of that root's base layer under per-root materialisation.  Identical
-/// verb inputs against different roots key different bases, and — the
-/// headline property — a root's base key is independent of which other
-/// roots are co-visible, so cached bases are reused across visibility sets.
-/// The domain tag (`v2`) makes all keys disjoint from the pre-per-root
+/// Fold ONE root layer's identity hash into a verb's input hash: the cache
+/// key of that root's root shard under per-root materialisation.  Identical
+/// verb inputs against different roots key different root shards, and — the
+/// headline property — a root's shard key is independent of which other
+/// roots are co-visible, so cached root shards are reused across visibility
+/// sets.  The domain tag makes all keys disjoint from the pre-per-root
 /// multi-root fold, so no cache purge is needed on upgrade: stale rows
 /// simply never hit again and age out via TTL.
 ///
 /// Invariant preserved: the result is a function of (root identity, verb
 /// inputs) only — never ephemeral chain state.
-pub fn root_salted_hash(root: &super::selection::RootLayer, base_hash: &[u8; 32]) -> [u8; 32] {
+pub fn root_shard_hash(root: &super::selection::RootLayer, input_hash: &[u8; 32]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(b"base-rooted-v2");
     h.update((root.hash.len() as u64).to_le_bytes());
     h.update(&root.hash);
-    h.update(base_hash);
+    h.update(input_hash);
     h.finalize().into()
 }
 
@@ -1450,7 +1453,7 @@ impl Index {
     /// hash — through the SQL result cache, so per-request resolution is a
     /// RAM hit and the same epoch clear that index mutations already perform
     /// invalidates it.  Ids feed visibility binds via [`EphContext::rooted`];
-    /// hashes feed the base-hash salt (see [`root_salted_hash`]).
+    /// hashes feed the base-hash salt (see [`root_shard_hash`]).
     pub async fn load_root_layers(&self) -> Result<Vec<RootLayer>> {
         use crate::schema_diesel::{layers, projects};
 
@@ -2838,13 +2841,14 @@ impl Index {
 
     /// The ephemeral *content* layers visible in this request that carry
     /// `objects` rows, grouped by project.  This is the N-way shard set: the
-    /// logical content layers (root is the always-present base atom, handled
-    /// separately), NOT the derived per-layer atoms — atoms hold instances,
-    /// never `objects`, so they are visible-for-read but never re-sharded,
-    /// which is what keeps the shard set from growing multiplicatively.
-    /// Filters `layer < 0` (ephemeral) and groups by project so each root
-    /// shards only over its own content.  Returns `{}` today (no eph layer
-    /// carries content) ⇒ zero atoms ⇒ production byte-identical.
+    /// logical content layers (root is the always-present root shard, handled
+    /// separately), NOT the derived layer shards — layer shards hold
+    /// instances, never `objects`, so they are visible-for-read but never
+    /// re-sharded, which is what keeps the shard set from growing
+    /// multiplicatively.  Filters `layer < 0` (ephemeral) and groups by
+    /// project so each root shards only over its own content.  Returns `{}`
+    /// today (no eph layer carries content) ⇒ zero layer shards ⇒ production
+    /// byte-identical.
     async fn eph_content_layers_grouped(
         &self,
         visible: &[i64],
@@ -2856,8 +2860,8 @@ impl Index {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
         // ORDER BY makes the per-project layer order deterministic (SELECT
-        // DISTINCT alone does not), so the resulting atom materialisation and
-        // activation-trace order are stable across runs.
+        // DISTINCT alone does not), so the resulting layer-shard
+        // materialisation and activation-trace order are stable across runs.
         let rows = objects::table
             .filter(objects::layer.eq_any(visible))
             .filter(objects::layer.lt(0))
@@ -2876,21 +2880,21 @@ impl Index {
     }
 
     /// Materialize a verb's partitioned cache entries, ONE PER VISIBLE ROOT:
-    /// for each root, a *base* layer parented on the root, keyed on
-    /// `root_salted_hash(root, base_hash)` and holding only that project's
-    /// rows (persistent data only, unmasked — masks are composed at read
-    /// time, never applied here) plus, iff that root's chain is non-empty, a
-    /// *supplement* layer chained on the root's `chain_last` holding the
-    /// eph-derived delta.  `eph` is the executor's PRE-TREE snapshot, so
-    /// supplements parent on the previous top-level statement's tip —
-    /// commands of one tree never chain on each other.  The supplement is
-    /// always materialized under a non-empty chain — even with zero rows —
-    /// so downstream chaining keys stay deterministic.  Results are sorted
-    /// by root id, so activation traces are deterministic.
+    /// for each root, a *root shard* parented on the root, keyed on
+    /// `root_shard_hash(root, input_hash)` and holding only that project's
+    /// rows (unmasked — masks are composed at read time, never applied here)
+    /// plus, iff that root's chain is non-empty, a *selection shard* chained
+    /// on the root's `chain_last` holding the eph-derived delta.  `eph` is the
+    /// executor's PRE-TREE snapshot, so selection shards parent on the
+    /// previous top-level statement's tip — commands of one tree never chain
+    /// on each other.  The selection shard is always materialized under a
+    /// non-empty chain — even with zero rows — so downstream chaining keys
+    /// stay deterministic.  Results are sorted by root id, so activation
+    /// traces are deterministic.
     ///
-    /// Root-parenting the base means a project's cached chains die with its
-    /// root (`parent_id ON DELETE CASCADE` + the doomed-closure parent
-    /// edge); a base's parent is a pure function of its hash, since the
+    /// Root-parenting the root shard means a project's cached chains die with
+    /// its root (`parent_id ON DELETE CASCADE` + the doomed-closure parent
+    /// edge); a root shard's parent is a pure function of its hash, since the
     /// hash folds the root's identity.
     ///
     /// Each layer runs the full 2-PC populated protocol via
@@ -2900,8 +2904,8 @@ impl Index {
     /// Accepted limitation (single-user tool, mirrors the torn-read note on
     /// [`Index::cached_load_partitioned`]): per-root layers commit in
     /// SEPARATE transactions at different instants, so a purge racing this
-    /// statement can delete an earlier root's just-committed base before a
-    /// later root's is created — the statement then reads a silently
+    /// statement can delete an earlier root's just-committed root shard
+    /// before a later root's is created — the statement then reads a silently
     /// PARTIAL, mixed-epoch union (the dead layer contributes zero rows).
     /// The epoch check prevents such reads from being cached, not from
     /// being returned once.  Because populate closures run the
@@ -2909,35 +2913,36 @@ impl Index {
     /// lock is held: concurrent identical requests serialize per (root,
     /// hash) and the losers get cache hits instead of duplicating the
     /// computation.
-    pub async fn with_partitioned_layers<'s, FB, FS, FP>(
+    pub async fn with_partitioned_layers<'s, FR, FS, FL>(
         &'s self,
         eph: &'s EphContext,
-        base_hash: &[u8; 32],
-        supplement_extra: &[u8],
-        base_populate: FB,
-        supplement_populate: FS,
-        per_layer_populate: Option<FP>,
+        input_hash: &[u8; 32],
+        selection_extra: &[u8],
+        root_shard_populate: FR,
+        selection_shard_populate: FS,
+        layer_shard_populate: Option<FL>,
     ) -> Result<Vec<MaterialisedLayer>>
     where
-        FB: for<'b> Fn(&'b mut EphTransaction<'s>, &'b RootLayer) -> EphScopedFut<'b, bool>,
+        FR: for<'b> Fn(&'b mut EphTransaction<'s>, &'b RootLayer) -> EphScopedFut<'b, bool>,
         FS: for<'b> Fn(
             &'b mut EphTransaction<'s>,
             &'b RootLayer,
-            BaseLayerRef,
+            RootShardRef,
         ) -> EphScopedFut<'b, bool>,
-        FP: for<'b> Fn(
+        FL: for<'b> Fn(
             &'b mut EphTransaction<'s>,
             &'b RootLayer,
             i64,
-            BaseLayerRef,
+            RootShardRef,
         ) -> EphScopedFut<'b, bool>,
     {
         use futures::stream::StreamExt;
 
         // Roots materialise CONCURRENTLY: their chains, cache rows, and row
         // locks are disjoint, and each per-root task holds at most one pool
-        // connection at a time (the base commits and returns its connection
-        // before the supplement checkout), so a bounded fan-out cannot
+        // connection at a time (the root shard commits and returns its
+        // connection before the selection shard's checkout), so a bounded
+        // fan-out cannot
         // deadlock against the pool — it just queues.  Keep the bound
         // comfortably under the bb8 pool size (default 10).  Works on a
         // LocalSet with !Send futures: nothing is spawned, the stream polls
@@ -2945,17 +2950,17 @@ impl Index {
         const ROOT_FANOUT: usize = 4;
 
         // Shared by reference across the per-root futures (`Fn` closures).
-        let base_populate = &base_populate;
-        let supplement_populate = &supplement_populate;
-        let per_layer_populate = per_layer_populate.as_ref();
+        let root_shard_populate = &root_shard_populate;
+        let selection_shard_populate = &selection_shard_populate;
+        let layer_shard_populate = layer_shard_populate.as_ref();
 
         // N-way shard set, computed ONCE (a function of the visible set, not
         // the root): the eph content layers grouped by project.  Skipped
-        // entirely when the verb exposes no per-layer scan (`layer { … }`) or
+        // entirely when the verb exposes no layer-shard scan (`layer { … }`) or
         // when there is no eph chain at all — with only root layers visible
         // the set is necessarily empty (roots are positive), so a bare
         // `search()` does zero extra work and stays byte-identical.
-        let content_by_project = if per_layer_populate.is_some() && eph.has_chain() {
+        let content_by_project = if layer_shard_populate.is_some() && eph.has_chain() {
             self.eph_content_layers_grouped(&eph.visible_ids()).await?
         } else {
             std::collections::HashMap::new()
@@ -2964,95 +2969,97 @@ impl Index {
 
         let results = futures::stream::iter(eph.roots())
             .map(|root| async move {
-                let salted = root_salted_hash(root, base_hash);
+                let root_shard_key = root_shard_hash(root, input_hash);
 
-                let base = self
+                let root_shard = self
                     .with_eph_layer(
                         Some(root.id),
                         None,
-                        &salted,
+                        &root_shard_key,
                         EphLayerKind::Ephemeral,
-                        |txn| base_populate(txn, root),
+                        |txn| root_shard_populate(txn, root),
                     )
                     .await?;
 
-                // `base_id` couples a delta layer's lifetime to its base (ON
-                // DELETE CASCADE): the base is always the older half, so when
-                // it ages out the delta — whose key folds the stable base
-                // *hash*, not the id — can no longer hit against a recreated
-                // base of a different incarnation.  Shared by the fused
-                // supplement and every per-layer atom.
-                let base_ref = BaseLayerRef {
-                    layer_id: base.layer_id,
-                    hash: salted,
+                // `base_id` couples a delta layer's lifetime to its root shard
+                // (ON DELETE CASCADE): the root shard is always the older
+                // half, so when it ages out the delta — whose key folds the
+                // stable root-shard *hash*, not the id — can no longer hit
+                // against a recreated root shard of a different incarnation.
+                // Shared by the selection shard and every layer shard.
+                let root_shard_ref = RootShardRef {
+                    layer_id: root_shard.layer_id,
+                    hash: root_shard_key,
                 };
 
-                let supplement = match eph.chain_last(root.id) {
+                let selection_shard = match eph.chain_last(root.id) {
                     None => None,
                     Some(parent) => {
-                        let s_hash = supplement_hash(parent, &salted, supplement_extra);
+                        let sel_hash =
+                            selection_shard_hash(parent, &root_shard_key, selection_extra);
                         Some(
                             self.with_eph_layer(
                                 Some(parent),
-                                Some(base.layer_id),
-                                &s_hash,
+                                Some(root_shard.layer_id),
+                                &sel_hash,
                                 EphLayerKind::Ephemeral,
-                                |txn| supplement_populate(txn, root, base_ref),
+                                |txn| selection_shard_populate(txn, root, root_shard_ref),
                             )
                             .await?,
                         )
                     }
                 };
 
-                // N-way per-layer content atoms (additive to base+supplement).
-                // One atom per visible eph content layer for THIS root's
-                // project, keyed `per_layer_hash(L_j, …)` and parented on the
-                // layer it shards (so the atom dies with `L_j`).  The layer is
-                // already committed (it is an earlier round's content), so no
-                // intra-statement ordering constraint applies.  Empty content
-                // set ⇒ no atoms.
-                let mut atoms = Vec::new();
-                if let Some(per_layer) = per_layer_populate {
+                // N-way layer shards (additive to the root and selection
+                // shards).  One layer shard per visible eph content layer for
+                // THIS root's project, keyed `layer_shard_hash(L_j, …)` and
+                // parented on the layer it shards (so it dies with `L_j`).
+                // The layer is already committed (it is an earlier
+                // materialisation's content), so no intra-statement ordering
+                // constraint applies.  Empty content set ⇒ no layer shards.
+                let mut layer_shards = Vec::new();
+                if let Some(layer_populate) = layer_shard_populate {
                     if let Some(layer_ids) = content_by_project.get(&root.project_id) {
                         for &lj in layer_ids {
-                            let a_hash = per_layer_hash(lj, &salted);
-                            let atom = self
+                            let shard_hash = layer_shard_hash(lj, &root_shard_key);
+                            let layer_shard = self
                                 .with_eph_layer(
                                     Some(lj),
-                                    Some(base.layer_id),
-                                    &a_hash,
+                                    Some(root_shard.layer_id),
+                                    &shard_hash,
                                     EphLayerKind::Ephemeral,
-                                    |txn| per_layer(txn, root, lj, base_ref),
+                                    |txn| layer_populate(txn, root, lj, root_shard_ref),
                                 )
                                 .await?;
-                            atoms.push(atom);
+                            layer_shards.push(layer_shard);
                         }
                     }
                 }
 
-                // Order within a root: base → per-layer atoms → supplement.
-                // The (empty) supplement goes LAST so IT — not a
-                // nondeterministically-ordered atom — is the root's
-                // `chain_last`, keeping downstream `supplement_hash` keys stable
-                // and atom-order-independent.  Atoms stay visible in the chain
-                // (their content is read), just never the tip.
-                let mut layers = Vec::with_capacity(2 + atoms.len());
+                // Order within a root: root shard → layer shards → selection
+                // shard.  The (empty) selection shard goes LAST so IT — not a
+                // nondeterministically-ordered layer shard — is the root's
+                // `chain_last`, keeping downstream `selection_shard_hash` keys
+                // stable and layer-shard-order-independent.  Layer shards stay
+                // visible in the chain (their content is read), just never the
+                // tip.
+                let mut layers = Vec::with_capacity(2 + layer_shards.len());
                 layers.push(MaterialisedLayer {
                     root_id: root.id,
-                    role: LayerRole::Base,
-                    outcome: base,
+                    role: ShardRole::Root,
+                    outcome: root_shard,
                 });
-                for outcome in atoms {
+                for outcome in layer_shards {
                     layers.push(MaterialisedLayer {
                         root_id: root.id,
-                        role: LayerRole::PerLayer,
+                        role: ShardRole::Layer,
                         outcome,
                     });
                 }
-                if let Some(outcome) = supplement {
+                if let Some(outcome) = selection_shard {
                     layers.push(MaterialisedLayer {
                         root_id: root.id,
-                        role: LayerRole::Supplement,
+                        role: ShardRole::Selection,
                         outcome,
                     });
                 }
@@ -4024,13 +4031,13 @@ mod tests {
             hash: vec![0x22; 32],
         };
 
-        let k1 = root_salted_hash(&r1, &verb_hash);
-        let k2 = root_salted_hash(&r2, &verb_hash);
+        let k1 = root_shard_hash(&r1, &verb_hash);
+        let k2 = root_shard_hash(&r2, &verb_hash);
         assert_ne!(k1, k2, "different roots must key different bases");
         assert_ne!(k1, verb_hash, "salting must change the verb hash");
         assert_eq!(
             k1,
-            root_salted_hash(&r1, &verb_hash),
+            root_shard_hash(&r1, &verb_hash),
             "same (root, verb hash) must fold deterministically"
         );
     }
@@ -4041,25 +4048,25 @@ mod tests {
     #[test]
     fn per_layer_hash_is_layer_scoped_and_disjoint() {
         let base = [9u8; 32];
-        let k1 = per_layer_hash(-1001, &base);
-        let k2 = per_layer_hash(-1002, &base);
+        let k1 = layer_shard_hash(-1001, &base);
+        let k2 = layer_shard_hash(-1002, &base);
         assert_ne!(k1, k2, "different layers must key different atoms");
         assert_eq!(
             k1,
-            per_layer_hash(-1001, &base),
+            layer_shard_hash(-1001, &base),
             "same (layer, base) must fold deterministically"
         );
         // Different base (different verb inputs) ⇒ different atom key.
         assert_ne!(
             k1,
-            per_layer_hash(-1001, &[1u8; 32]),
+            layer_shard_hash(-1001, &[1u8; 32]),
             "different base hash must key a different atom"
         );
         // Disjoint from the fused-supplement key over the SAME ids — the domain
         // tags (`eph-perlayer-v1` vs `eph-supplement-v1`) keep them apart.
         assert_ne!(
             k1,
-            supplement_hash(-1001, &base, &[]),
+            selection_shard_hash(-1001, &base, &[]),
             "per-layer and fused-supplement keys must never collide"
         );
         assert_ne!(
@@ -4205,7 +4212,7 @@ mod tests {
     fn nway_noop_supp<'b>(
         _txn: &'b mut EphTransaction<'_>,
         _root: &'b RootLayer,
-        _base: BaseLayerRef,
+        _base: RootShardRef,
     ) -> EphScopedFut<'b, bool> {
         Box::pin(async { Ok(false) })
     }
@@ -4213,7 +4220,7 @@ mod tests {
         _txn: &'b mut EphTransaction<'_>,
         _root: &'b RootLayer,
         _layer_id: i64,
-        _base: BaseLayerRef,
+        _base: RootShardRef,
     ) -> EphScopedFut<'b, bool> {
         Box::pin(async { Ok(false) })
     }
@@ -4359,7 +4366,7 @@ mod tests {
         let index = Index::connect(&url).await?;
         seed_nway_content(&index).await?;
 
-        let base_hash = [42u8; 32];
+        let input_hash = [42u8; 32];
 
         // Run A: chain = [L=-1001].
         let mut eph_a = EphContext::rooted(vec![nway_root()]);
@@ -4367,7 +4374,7 @@ mod tests {
         let a = index
             .with_partitioned_layers(
                 &eph_a,
-                &base_hash,
+                &input_hash,
                 &[],
                 nway_noop_base,
                 nway_noop_supp,
@@ -4377,10 +4384,10 @@ mod tests {
 
         let base_a = a
             .iter()
-            .find(|l| l.role == LayerRole::Base)
+            .find(|l| l.role == ShardRole::Root)
             .expect("a base layer");
         assert!(base_a.outcome.created, "base is cold on first run");
-        let atoms_a: Vec<_> = a.iter().filter(|l| l.role == LayerRole::PerLayer).collect();
+        let atoms_a: Vec<_> = a.iter().filter(|l| l.role == ShardRole::Layer).collect();
         assert_eq!(
             atoms_a.len(),
             1,
@@ -4403,13 +4410,13 @@ mod tests {
         // supplement is the deterministic chain_last (not the atom).
         assert_eq!(
             a.get(0).map(|l| l.role),
-            Some(LayerRole::Base),
+            Some(ShardRole::Root),
             "base must be first, got {:?}",
             a
         );
         assert_eq!(
             a.last().map(|l| l.role),
-            Some(LayerRole::Supplement),
+            Some(ShardRole::Selection),
             "supplement must be last (chain_last) on run A, got {:?}",
             a
         );
@@ -4421,7 +4428,7 @@ mod tests {
         let b = index
             .with_partitioned_layers(
                 &eph_b,
-                &base_hash,
+                &input_hash,
                 &[],
                 nway_noop_base,
                 nway_noop_supp,
@@ -4432,7 +4439,7 @@ mod tests {
         // The base is chain-independent, so it is reused unchanged.
         let base_b = b
             .iter()
-            .find(|l| l.role == LayerRole::Base)
+            .find(|l| l.role == ShardRole::Root)
             .expect("a base layer");
         assert!(
             !base_b.outcome.created,
@@ -4443,7 +4450,7 @@ mod tests {
         // The headline: the -1001 atom reappears by the SAME layer_id as a
         // cache hit; only the newly-appended -1002 layer's atom is cold.
         // Under 2-way the whole fused supplement went cold here.
-        let atoms_b: Vec<_> = b.iter().filter(|l| l.role == LayerRole::PerLayer).collect();
+        let atoms_b: Vec<_> = b.iter().filter(|l| l.role == ShardRole::Layer).collect();
         assert_eq!(
             atoms_b.len(),
             2,
@@ -4488,16 +4495,14 @@ mod tests {
         // chain_last, keeping downstream supplement keys stable.
         assert_eq!(
             b.last().map(|l| l.role),
-            Some(LayerRole::Supplement),
+            Some(ShardRole::Selection),
             "the supplement must be the last (chain_last) layer, got {:?}",
             b
         );
         assert!(
-            b.iter()
-                .rposition(|l| l.role == LayerRole::PerLayer)
-                .unwrap()
+            b.iter().rposition(|l| l.role == ShardRole::Layer).unwrap()
                 < b.iter()
-                    .rposition(|l| l.role == LayerRole::Supplement)
+                    .rposition(|l| l.role == ShardRole::Selection)
                     .unwrap(),
             "every per-layer atom must precede the supplement, got {:?}",
             b
@@ -4514,7 +4519,7 @@ mod tests {
         txn: &'b mut EphTransaction<'_>,
         root: &'b RootLayer,
         layer_id: i64,
-        _base: BaseLayerRef,
+        _base: RootShardRef,
     ) -> EphScopedFut<'b, bool> {
         Box::pin(async move {
             let filter = CompositeFilter::and(vec![]);
@@ -4589,7 +4594,7 @@ mod tests {
         // layer's single match.
         let supp = layers
             .iter()
-            .find(|l| l.role == LayerRole::Supplement)
+            .find(|l| l.role == ShardRole::Selection)
             .expect("a supplement marker");
         assert_eq!(
             index
@@ -4600,7 +4605,7 @@ mod tests {
         );
         let atoms: Vec<_> = layers
             .iter()
-            .filter(|l| l.role == LayerRole::PerLayer)
+            .filter(|l| l.role == ShardRole::Layer)
             .collect();
         assert_eq!(atoms.len(), 2, "one atom per content layer");
         for atom in &atoms {

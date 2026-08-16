@@ -3863,9 +3863,9 @@ fn layer_block_cache_hit() {
     // One layer-bearing statement, materialised per visible root: one base
     // per fixture project (project 2's base is empty — the op references
     // project 1's object — but goes through the same cache gate).
-    use crate::command::LayerRole;
-    assert_root_roles(&acts1, &[(R1, LayerRole::Base), (R2, LayerRole::Base)]);
-    assert_root_roles(&acts2, &[(R1, LayerRole::Base), (R2, LayerRole::Base)]);
+    use crate::command::ShardRole;
+    assert_root_roles(&acts1, &[(R1, ShardRole::Root), (R2, ShardRole::Root)]);
+    assert_root_roles(&acts2, &[(R1, ShardRole::Root), (R2, ShardRole::Root)]);
     assert!(
         acts1.iter().all(|a| a.created),
         "first run must create each root's layer, got {:?}",
@@ -4965,8 +4965,8 @@ fn search_truncation_warning_surfaces_on_cache_miss() {
 
     // One layer-bearing statement, one base per visible root (no upstream
     // chain, so no supplements).
-    use crate::command::LayerRole;
-    assert_root_roles(&acts, &[(R1, LayerRole::Base), (R2, LayerRole::Base)]);
+    use crate::command::ShardRole;
+    assert_root_roles(&acts, &[(R1, ShardRole::Root), (R2, ShardRole::Root)]);
     assert!(
         acts.iter().all(|a| a.created),
         "unique limit must produce a cache miss on every root, got {:?}",
@@ -5341,11 +5341,11 @@ fn search_first_call_reports_created_and_populated() {
     // populated=true (2-phase commit completed) and truncated=false, whose
     // instance rows hold exactly that project's matches — summing to the
     // returned nodes 1:1.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const QUERY: &str = r#"search("foo", limit="397")"#;
     let (res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
 
-    assert_root_roles(&acts, &[(R1, LayerRole::Base), (R2, LayerRole::Base)]);
+    assert_root_roles(&acts, &[(R1, ShardRole::Root), (R2, ShardRole::Root)]);
     for act in &acts {
         assert!(
             act.created,
@@ -5537,7 +5537,7 @@ const R2: i64 = 1000002;
 /// supplement.
 fn assert_root_roles(
     acts: &[crate::command::LayerActivation],
-    expected: &[(i64, crate::command::LayerRole)],
+    expected: &[(i64, crate::command::ShardRole)],
 ) {
     let got: Vec<_> = acts.iter().map(|a| (a.root_id, a.role)).collect();
     assert_eq!(got, expected, "unexpected activation shape: {:?}", acts);
@@ -5551,7 +5551,7 @@ fn search_base_reused_across_eph_prefix_change() {
     // (created=false, same layer_id on the second run) while each gets its
     // own supplement (chained on its own prefix).  Before partitioning,
     // run B's search layer was a full cache miss.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const Q_A: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
         r#"start="60000", end="60100", instance_type="1") }; "#,
@@ -5567,13 +5567,13 @@ fn search_base_reused_across_eph_prefix_change() {
     // partitioned now) contributes a base per root; the search statement
     // contributes base + supplement per root (every root's chain is
     // non-empty by then).
-    let shape: &[(i64, LayerRole)] = &[
-        (R1, LayerRole::Base),       // layer block base, root 1
-        (R2, LayerRole::Base),       // layer block base, root 2 (empty)
-        (R1, LayerRole::Base),       // search base, root 1
-        (R1, LayerRole::Supplement), // search supplement, root 1
-        (R2, LayerRole::Base),       // search base, root 2
-        (R2, LayerRole::Supplement), // search supplement, root 2
+    let shape: &[(i64, ShardRole)] = &[
+        (R1, ShardRole::Root),      // layer block base, root 1
+        (R2, ShardRole::Root),      // layer block base, root 2 (empty)
+        (R1, ShardRole::Root),      // search base, root 1
+        (R1, ShardRole::Selection), // search supplement, root 1
+        (R2, ShardRole::Root),      // search base, root 2
+        (R2, ShardRole::Selection), // search supplement, root 2
     ];
     let (res_a, acts_a) = run_query_traced(TEST_INPUT_SEARCH, Q_A);
     assert_root_roles(&acts_a, shape);
@@ -5639,11 +5639,11 @@ fn search_without_upstream_creates_only_base() {
     // Chain-topology rule: with an empty upstream eph chain there is no
     // supplement — a bare search materialises exactly one activation per
     // visible root, the root-parented base, and repeat runs hit both.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const QUERY: &str = r#"search("foo", limit="22")"#;
 
     let (_res, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
-    assert_root_roles(&acts1, &[(R1, LayerRole::Base), (R2, LayerRole::Base)]);
+    assert_root_roles(&acts1, &[(R1, ShardRole::Root), (R2, ShardRole::Root)]);
     assert!(
         acts1.iter().all(|a| a.created),
         "unique limit ⇒ cold bases, got {:?}",
@@ -5662,7 +5662,7 @@ fn search_without_upstream_creates_only_base() {
     }
 
     let (_res, acts2) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
-    assert_root_roles(&acts2, &[(R1, LayerRole::Base), (R2, LayerRole::Base)]);
+    assert_root_roles(&acts2, &[(R1, ShardRole::Root), (R2, ShardRole::Root)]);
     assert!(
         acts2.iter().all(|a| !a.created),
         "repeat run must hit on every root, got {:?}",
@@ -5681,7 +5681,7 @@ fn search_supplement_empty_but_materialized() {
     // populated and committed — even though search's eph-derived delta is
     // structurally empty today (search reads only persistent content).
     // The row's existence is what keeps downstream chaining deterministic.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const QUERY: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
         r#"start="62000", end="62100", instance_type="1") }; "#,
@@ -5692,12 +5692,12 @@ fn search_supplement_empty_but_materialized() {
     assert_root_roles(
         &acts,
         &[
-            (R1, LayerRole::Base),       // layer block base, root 1
-            (R2, LayerRole::Base),       // layer block base, root 2
-            (R1, LayerRole::Base),       // search base, root 1
-            (R1, LayerRole::Supplement), // search supplement, root 1
-            (R2, LayerRole::Base),       // search base, root 2
-            (R2, LayerRole::Supplement), // search supplement, root 2
+            (R1, ShardRole::Root),      // layer block base, root 1
+            (R2, ShardRole::Root),      // layer block base, root 2
+            (R1, ShardRole::Root),      // search base, root 1
+            (R1, ShardRole::Selection), // search supplement, root 1
+            (R2, ShardRole::Root),      // search base, root 2
+            (R2, ShardRole::Selection), // search supplement, root 2
         ],
     );
 
@@ -5764,7 +5764,7 @@ fn search_truncation_on_base_survives_eph_change() {
     // truncated).  A truncating search under prefix A rerun under prefix B
     // hits the bases and must still surface the warning — the warning
     // survives BOTH cache dimensions (hit, and changed prefix).
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const Q_A: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
         r#"start="63000", end="63100", instance_type="1") }; "#,
@@ -5776,13 +5776,13 @@ fn search_truncation_on_base_survives_eph_change() {
         r#"search("foo", whole_word="true", limit="4")"#,
     );
 
-    let shape: &[(i64, LayerRole)] = &[
-        (R1, LayerRole::Base),       // layer block base, root 1
-        (R2, LayerRole::Base),       // layer block base, root 2
-        (R1, LayerRole::Base),       // search base, root 1
-        (R1, LayerRole::Supplement), // search supplement, root 1
-        (R2, LayerRole::Base),       // search base, root 2
-        (R2, LayerRole::Supplement), // search supplement, root 2
+    let shape: &[(i64, ShardRole)] = &[
+        (R1, ShardRole::Root),      // layer block base, root 1
+        (R2, ShardRole::Root),      // layer block base, root 2
+        (R1, ShardRole::Root),      // search base, root 1
+        (R1, ShardRole::Selection), // search supplement, root 1
+        (R2, ShardRole::Root),      // search base, root 2
+        (R2, ShardRole::Selection), // search supplement, root 2
     ];
     let (_res_a, acts_a) = run_query_traced(TEST_INPUT_SEARCH, Q_A);
     assert_root_roles(&acts_a, shape);
@@ -5866,18 +5866,18 @@ fn downstream_chaining_keys_deterministic() {
     // layer block contributes a base per root; the search and the trailing
     // layer block each contribute base + supplement per root (both sit
     // under a non-empty per-root chain).
-    use crate::command::LayerRole;
-    let shape: &[(i64, LayerRole)] = &[
-        (R1, LayerRole::Base), // leading layer block
-        (R2, LayerRole::Base),
-        (R1, LayerRole::Base), // search
-        (R1, LayerRole::Supplement),
-        (R2, LayerRole::Base),
-        (R2, LayerRole::Supplement),
-        (R1, LayerRole::Base), // trailing layer block
-        (R1, LayerRole::Supplement),
-        (R2, LayerRole::Base),
-        (R2, LayerRole::Supplement),
+    use crate::command::ShardRole;
+    let shape: &[(i64, ShardRole)] = &[
+        (R1, ShardRole::Root), // leading layer block
+        (R2, ShardRole::Root),
+        (R1, ShardRole::Root), // search
+        (R1, ShardRole::Selection),
+        (R2, ShardRole::Root),
+        (R2, ShardRole::Selection),
+        (R1, ShardRole::Root), // trailing layer block
+        (R1, ShardRole::Selection),
+        (R2, ShardRole::Root),
+        (R2, ShardRole::Selection),
     ];
     let (_res1, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
     assert_root_roles(&acts1, shape);
@@ -5929,17 +5929,17 @@ fn nested_search_no_intra_tree_supplements() {
     // other's output and search's eph delta is structurally empty, so
     // composition happens entirely in Phase R under tree-complete
     // visibility.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const QUERY: &str = r#"search("hello foo") { search("foo") }"#;
     let (res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
 
     assert_root_roles(
         &acts,
         &[
-            (R1, LayerRole::Base), // outer search base, root 1
-            (R2, LayerRole::Base), // outer search base, root 2
-            (R1, LayerRole::Base), // inner search base, root 1
-            (R2, LayerRole::Base), // inner search base, root 2
+            (R1, ShardRole::Root), // outer search base, root 1
+            (R2, ShardRole::Root), // outer search base, root 2
+            (R1, ShardRole::Root), // inner search base, root 1
+            (R2, ShardRole::Root), // inner search base, root 2
         ],
     );
 
@@ -5969,7 +5969,7 @@ fn multi_supplement_tree_sibling_parents_and_deterministic_tip() {
     //    (block B's supplement), which tree 2's supplements parent on;
     //  - the whole pipeline is deterministic: a repeat run is a full cache
     //    hit with identical layer ids on every root.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const QUERY: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
         r#"start="86000", end="86100", instance_type="1") }; "#,
@@ -5980,27 +5980,27 @@ fn multi_supplement_tree_sibling_parents_and_deterministic_tip() {
         r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
         r#"start="86600", end="86700", instance_type="1") }"#,
     );
-    let shape: &[(i64, LayerRole)] = &[
+    let shape: &[(i64, ShardRole)] = &[
         // tree 0 (seed): empty pre-tree chain → bases only.
-        (R1, LayerRole::Base),
-        (R2, LayerRole::Base),
+        (R1, ShardRole::Root),
+        (R2, ShardRole::Root),
         // tree 1, block A (pre-order): non-empty pre-tree chain → base +
         // supplement per root.
-        (R1, LayerRole::Base),
-        (R1, LayerRole::Supplement),
-        (R2, LayerRole::Base),
-        (R2, LayerRole::Supplement),
+        (R1, ShardRole::Root),
+        (R1, ShardRole::Selection),
+        (R2, ShardRole::Root),
+        (R2, ShardRole::Selection),
         // tree 1, block B: same shape — its materialisation is independent
         // of block A's.
-        (R1, LayerRole::Base),
-        (R1, LayerRole::Supplement),
-        (R2, LayerRole::Base),
-        (R2, LayerRole::Supplement),
+        (R1, ShardRole::Root),
+        (R1, ShardRole::Selection),
+        (R2, ShardRole::Root),
+        (R2, ShardRole::Selection),
         // tree 2: chains on tree 1's tip.
-        (R1, LayerRole::Base),
-        (R1, LayerRole::Supplement),
-        (R2, LayerRole::Base),
-        (R2, LayerRole::Supplement),
+        (R1, ShardRole::Root),
+        (R1, ShardRole::Selection),
+        (R2, ShardRole::Root),
+        (R2, ShardRole::Selection),
     ];
 
     let (_res1, acts1) = run_query_traced(VERB_TEST, QUERY);
@@ -6074,7 +6074,7 @@ fn first_round_multi_block_tree_tip_is_last_base() {
     // second block would have seen the first's round and grown one).  The
     // tree's tip is then the last layer-bearing substatement's BASE (last
     // in pre-order), which the next tree's supplements parent on.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const QUERY: &str = concat!(
         r#"{ layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
         r#"start="87000", end="87100", instance_type="1") } ; "#,
@@ -6090,15 +6090,15 @@ fn first_round_multi_block_tree_tip_is_last_base() {
         &[
             // tree 0, blocks E then F: bases only — no supplements anywhere
             // in the first round.
-            (R1, LayerRole::Base),
-            (R2, LayerRole::Base),
-            (R1, LayerRole::Base),
-            (R2, LayerRole::Base),
+            (R1, ShardRole::Root),
+            (R2, ShardRole::Root),
+            (R1, ShardRole::Root),
+            (R2, ShardRole::Root),
             // tree 1: base + supplement per root.
-            (R1, LayerRole::Base),
-            (R1, LayerRole::Supplement),
-            (R2, LayerRole::Base),
-            (R2, LayerRole::Supplement),
+            (R1, ShardRole::Root),
+            (R1, ShardRole::Selection),
+            (R2, ShardRole::Root),
+            (R2, ShardRole::Selection),
         ],
     );
 
@@ -6126,18 +6126,18 @@ fn identical_tree_mates_converge_on_same_layers() {
     // the race: the loser blocks on the winner's row lock and unblocks as
     // a cache hit on the SAME layer id — never a duplicate row, never a
     // half-built layer.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     // `limit="44"` is unique to this test, so the first run is cold: the
     // race is a genuine create-vs-create, not two cache hits.
     const QUERY: &str = r#"{ search("foo", limit="44") ; search("foo", limit="44") }"#;
 
-    let shape: &[(i64, LayerRole)] = &[
+    let shape: &[(i64, ShardRole)] = &[
         // ONE tree, empty pre-tree chain → first-round elision: bases
         // only, in substatement pre-order.
-        (R1, LayerRole::Base), // first search, root 1
-        (R2, LayerRole::Base), // first search, root 2
-        (R1, LayerRole::Base), // second search, root 1
-        (R2, LayerRole::Base), // second search, root 2
+        (R1, ShardRole::Root), // first search, root 1
+        (R2, ShardRole::Root), // first search, root 2
+        (R1, ShardRole::Root), // second search, root 1
+        (R2, ShardRole::Root), // second search, root 2
     ];
 
     let (res1, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
@@ -6197,7 +6197,7 @@ fn three_content_verb_tree_deterministic_across_runs() {
     // pinning under concurrency).  Three runs: identical
     // (root, role, layer_id) sequences every time, runs 2..3 full cache
     // hits.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const QUERY: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
         r#"start="88000", end="88100", instance_type="1") }; "#,
@@ -6205,24 +6205,24 @@ fn three_content_verb_tree_deterministic_across_runs() {
         r#"search("foo", limit="42") }"#,
     );
 
-    let shape: &[(i64, LayerRole)] = &[
+    let shape: &[(i64, ShardRole)] = &[
         // tree 0 (seed): empty pre-tree chain → base only, per root.
-        (R1, LayerRole::Base),
-        (R2, LayerRole::Base),
+        (R1, ShardRole::Root),
+        (R2, ShardRole::Root),
         // tree 1, substatement pre-order; per command: base + supplement
         // per root (every root's chain is non-empty by now).
-        (R1, LayerRole::Base),
-        (R1, LayerRole::Supplement),
-        (R2, LayerRole::Base),
-        (R2, LayerRole::Supplement),
-        (R1, LayerRole::Base),
-        (R1, LayerRole::Supplement),
-        (R2, LayerRole::Base),
-        (R2, LayerRole::Supplement),
-        (R1, LayerRole::Base),
-        (R1, LayerRole::Supplement),
-        (R2, LayerRole::Base),
-        (R2, LayerRole::Supplement),
+        (R1, ShardRole::Root),
+        (R1, ShardRole::Selection),
+        (R2, ShardRole::Root),
+        (R2, ShardRole::Selection),
+        (R1, ShardRole::Root),
+        (R1, ShardRole::Selection),
+        (R2, ShardRole::Root),
+        (R2, ShardRole::Selection),
+        (R1, ShardRole::Root),
+        (R1, ShardRole::Selection),
+        (R2, ShardRole::Root),
+        (R2, ShardRole::Selection),
     ];
 
     let (_res1, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
@@ -6278,13 +6278,13 @@ fn three_content_verb_tree_deterministic_across_runs() {
 // After the migration every layer-creating verb is partitioned.  These tests
 // pin the per-verb contracts: loc base reuse, layer{} op classification
 // (persistent ops → base, eph-referencing ops → supplement), and the
-// supplement-key collision guard (supplement_extra).
+// supplement-key collision guard (selection_extra).
 
 #[test]
 fn loc_base_reused_across_eph_prefix_change() {
     // Same contract as search: loc reads only persistent data, so its base
     // must be reused when the upstream ephemeral prefix changes.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const Q_A: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
         r#"start="70000", end="70100", instance_type="1") }; "#,
@@ -6296,13 +6296,13 @@ fn loc_base_reused_across_eph_prefix_change() {
         r#"loc("main.c", "2")"#,
     );
 
-    let shape: &[(i64, LayerRole)] = &[
-        (R1, LayerRole::Base),       // layer block base, root 1
-        (R2, LayerRole::Base),       // layer block base, root 2
-        (R1, LayerRole::Base),       // loc base, root 1 (/main.c)
-        (R1, LayerRole::Supplement), // loc supplement, root 1
-        (R2, LayerRole::Base),       // loc base, root 2 (/src/main.c)
-        (R2, LayerRole::Supplement), // loc supplement, root 2
+    let shape: &[(i64, ShardRole)] = &[
+        (R1, ShardRole::Root),      // layer block base, root 1
+        (R2, ShardRole::Root),      // layer block base, root 2
+        (R1, ShardRole::Root),      // loc base, root 1 (/main.c)
+        (R1, ShardRole::Selection), // loc supplement, root 1
+        (R2, ShardRole::Root),      // loc base, root 2 (/src/main.c)
+        (R2, ShardRole::Selection), // loc supplement, root 2
     ];
     let (_res_a, acts_a) = run_query_traced(VERB_TEST, Q_A);
     assert_root_roles(&acts_a, shape);
@@ -6350,7 +6350,7 @@ fn layer_block_base_reused_across_eph_prefix_change() {
     // A layer{} block whose ops reference only persistent ids is itself a
     // partitioned entry: its base is keyed on the resolved op content, not
     // the chain, so changing the upstream prefix reuses it.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const Q_A: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
         r#"start="71000", end="71100", instance_type="1") }; "#,
@@ -6364,13 +6364,13 @@ fn layer_block_base_reused_across_eph_prefix_change() {
         r#"start="72000", end="72100", instance_type="1") }"#,
     );
 
-    let shape: &[(i64, LayerRole)] = &[
-        (R1, LayerRole::Base),       // first layer block base, root 1
-        (R2, LayerRole::Base),       // first layer block base, root 2
-        (R1, LayerRole::Base),       // second layer block base, root 1
-        (R1, LayerRole::Supplement), // second layer block supplement, root 1
-        (R2, LayerRole::Base),       // second layer block base, root 2
-        (R2, LayerRole::Supplement), // second layer block supplement, root 2
+    let shape: &[(i64, ShardRole)] = &[
+        (R1, ShardRole::Root),      // first layer block base, root 1
+        (R2, ShardRole::Root),      // first layer block base, root 2
+        (R1, ShardRole::Root),      // second layer block base, root 1
+        (R1, ShardRole::Selection), // second layer block supplement, root 1
+        (R2, ShardRole::Root),      // second layer block base, root 2
+        (R2, ShardRole::Selection), // second layer block supplement, root 2
     ];
     let (_res_a, acts_a) = run_query_traced(VERB_TEST, Q_A);
     assert_root_roles(&acts_a, shape);
@@ -6415,7 +6415,7 @@ fn layer_block_eph_ops_split_into_supplement() {
     // is eph instances of search's eph symbol — negative symbol ids).
     // The persistent op's rows must land in the base, the eph-referencing
     // op's rows in the supplement.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const QUERY: &str = concat!(
         r#"@e search("foo", limit="26"); "#,
         r#"layer { "#,
@@ -6429,12 +6429,12 @@ fn layer_block_eph_ops_split_into_supplement() {
     assert_root_roles(
         &acts,
         &[
-            (R1, LayerRole::Base),       // search base, root 1 (no chain yet)
-            (R2, LayerRole::Base),       // search base, root 2
-            (R1, LayerRole::Base),       // mixed block base, root 1
-            (R1, LayerRole::Supplement), // mixed block supplement, root 1
-            (R2, LayerRole::Base),       // mixed block base, root 2
-            (R2, LayerRole::Supplement), // mixed block supplement, root 2
+            (R1, ShardRole::Root),      // search base, root 1 (no chain yet)
+            (R2, ShardRole::Root),      // search base, root 2
+            (R1, ShardRole::Root),      // mixed block base, root 1
+            (R1, ShardRole::Selection), // mixed block supplement, root 1
+            (R2, ShardRole::Root),      // mixed block base, root 2
+            (R2, ShardRole::Selection), // mixed block supplement, root 2
         ],
     );
     let (mixed_base_r1, mixed_supp_r1, mixed_base_r2, mixed_supp_r2) =
@@ -6486,14 +6486,14 @@ fn layer_block_eph_ops_split_into_supplement() {
 
 #[test]
 fn supplement_collision_guard_extra_disambiguates() {
-    // THE collision the supplement_extra fix exists for: two blocks with
+    // THE collision the selection_extra fix exists for: two blocks with
     // identical base halves (here: empty — every op references eph ids)
     // under the SAME upstream chain, differing only in their
-    // eph-referencing ops.  parent_id and base_hash are identical for
-    // both, so without supplement_extra the second query would silently
+    // eph-referencing ops.  parent_id and input_hash are identical for
+    // both, so without selection_extra the second query would silently
     // HIT the first query's supplement and serve its rows.  With the fix,
     // the differing op content flows into the supplement key.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const Q_1: &str = concat!(
         r#"@c search("foo", limit="27"); "#,
         r#"layer { ephemeral_ref(to_symbol="@c", from_object="1", "#,
@@ -6505,13 +6505,13 @@ fn supplement_collision_guard_extra_disambiguates() {
         r#"start="75000", end="75001") }"#,
     );
 
-    let shape: &[(i64, LayerRole)] = &[
-        (R1, LayerRole::Base),       // search base, root 1 (no chain yet)
-        (R2, LayerRole::Base),       // search base, root 2
-        (R1, LayerRole::Base),       // layer block (empty) base, root 1
-        (R1, LayerRole::Supplement), // layer block supplement, root 1
-        (R2, LayerRole::Base),       // layer block (empty) base, root 2
-        (R2, LayerRole::Supplement), // layer block supplement, root 2
+    let shape: &[(i64, ShardRole)] = &[
+        (R1, ShardRole::Root),      // search base, root 1 (no chain yet)
+        (R2, ShardRole::Root),      // search base, root 2
+        (R1, ShardRole::Root),      // layer block (empty) base, root 1
+        (R1, ShardRole::Selection), // layer block supplement, root 1
+        (R2, ShardRole::Root),      // layer block (empty) base, root 2
+        (R2, ShardRole::Selection), // layer block supplement, root 2
     ];
     let (_res1, acts1) = run_query_traced(TEST_INPUT_SEARCH, Q_1);
     assert_root_roles(&acts1, shape);
@@ -6545,7 +6545,7 @@ fn supplement_collision_guard_extra_disambiguates() {
 
     // The load-bearing assertion, per root: same parent, same base hash,
     // different eph-referencing ops ⇒ DIFFERENT supplement.  Without the
-    // supplement_extra fold this was created=false with Q_1's supplement id.
+    // selection_extra fold this was created=false with Q_1's supplement id.
     assert!(
         final_supp_2_r1.created && final_supp_2_r2.created,
         "differing eph ops must produce fresh supplements, got {:?}",
@@ -6611,7 +6611,7 @@ fn base_delete_cascades_supplement() {
     // The base_id FK: deleting a base takes its supplement with it, so a
     // cached supplement can never pair with a recreated base of a
     // different incarnation.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const QUERY: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
         r#"start="80000", end="80100", instance_type="1") }; "#,
@@ -6621,12 +6621,12 @@ fn base_delete_cascades_supplement() {
     assert_root_roles(
         &acts,
         &[
-            (R1, LayerRole::Base),       // prefix layer block base, root 1
-            (R2, LayerRole::Base),       // prefix layer block base, root 2
-            (R1, LayerRole::Base),       // search base, root 1
-            (R1, LayerRole::Supplement), // search supplement, root 1
-            (R2, LayerRole::Base),       // search base, root 2
-            (R2, LayerRole::Supplement), // search supplement, root 2
+            (R1, ShardRole::Root),      // prefix layer block base, root 1
+            (R2, ShardRole::Root),      // prefix layer block base, root 2
+            (R1, ShardRole::Root),      // search base, root 1
+            (R1, ShardRole::Selection), // search supplement, root 1
+            (R2, ShardRole::Root),      // search base, root 2
+            (R2, ShardRole::Selection), // search supplement, root 2
         ],
     );
     let (prefix_r1, prefix_r2) = (acts[0], acts[1]);
@@ -6672,7 +6672,7 @@ fn delete_eph_layer_removes_reference_dependents() {
     // so only the closure — base_id edge to its supplement, reference/
     // parent edges to the downstream block's supplement — can clean up the
     // dependents.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const QUERY: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
         r#"start="82000", end="82100", instance_type="1") }; "#,
@@ -6684,16 +6684,16 @@ fn delete_eph_layer_removes_reference_dependents() {
     assert_root_roles(
         &acts,
         &[
-            (R1, LayerRole::Base),       // prefix layer block base, root 1
-            (R2, LayerRole::Base),       // prefix layer block base, root 2
-            (R1, LayerRole::Base),       // search base, root 1
-            (R1, LayerRole::Supplement), // search supplement, root 1
-            (R2, LayerRole::Base),       // search base, root 2
-            (R2, LayerRole::Supplement), // search supplement, root 2
-            (R1, LayerRole::Base),       // eph-ops block: empty base, root 1
-            (R1, LayerRole::Supplement), // eph-ops block: @e rows (object 1 ⇒ root 1)
-            (R2, LayerRole::Base),       // eph-ops block: empty base, root 2
-            (R2, LayerRole::Supplement), // eph-ops block: empty supplement, root 2
+            (R1, ShardRole::Root),      // prefix layer block base, root 1
+            (R2, ShardRole::Root),      // prefix layer block base, root 2
+            (R1, ShardRole::Root),      // search base, root 1
+            (R1, ShardRole::Selection), // search supplement, root 1
+            (R2, ShardRole::Root),      // search base, root 2
+            (R2, ShardRole::Selection), // search supplement, root 2
+            (R1, ShardRole::Root),      // eph-ops block: empty base, root 1
+            (R1, ShardRole::Selection), // eph-ops block: @e rows (object 1 ⇒ root 1)
+            (R2, ShardRole::Root),      // eph-ops block: empty base, root 2
+            (R2, ShardRole::Selection), // eph-ops block: empty supplement, root 2
         ],
     );
     let (prefix_r1, prefix_r2) = (acts[0], acts[1]);
@@ -6756,7 +6756,7 @@ fn ttl_purge_takes_dependent_closure() {
     // dependents and nothing else.  Safe on the shared fixture: the seed
     // set is exactly the rewound row (everything else is fresh) and the
     // closure only contains this test's own layers.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     use diesel_async::AsyncConnection;
     const QUERY: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
@@ -6769,16 +6769,16 @@ fn ttl_purge_takes_dependent_closure() {
     assert_root_roles(
         &acts,
         &[
-            (R1, LayerRole::Base),       // prefix layer block base, root 1
-            (R2, LayerRole::Base),       // prefix layer block base, root 2
-            (R1, LayerRole::Base),       // search base, root 1
-            (R1, LayerRole::Supplement), // search supplement, root 1
-            (R2, LayerRole::Base),       // search base, root 2
-            (R2, LayerRole::Supplement), // search supplement, root 2
-            (R1, LayerRole::Base),       // eph-ops block: empty base, root 1
-            (R1, LayerRole::Supplement), // eph-ops block: @e rows (object 1 ⇒ root 1)
-            (R2, LayerRole::Base),       // eph-ops block: empty base, root 2
-            (R2, LayerRole::Supplement), // eph-ops block: empty supplement, root 2
+            (R1, ShardRole::Root),      // prefix layer block base, root 1
+            (R2, ShardRole::Root),      // prefix layer block base, root 2
+            (R1, ShardRole::Root),      // search base, root 1
+            (R1, ShardRole::Selection), // search supplement, root 1
+            (R2, ShardRole::Root),      // search base, root 2
+            (R2, ShardRole::Selection), // search supplement, root 2
+            (R1, ShardRole::Root),      // eph-ops block: empty base, root 1
+            (R1, ShardRole::Selection), // eph-ops block: @e rows (object 1 ⇒ root 1)
+            (R2, ShardRole::Root),      // eph-ops block: empty base, root 2
+            (R2, ShardRole::Selection), // eph-ops block: empty supplement, root 2
         ],
     );
     let (prefix_r1, prefix_r2) = (acts[0], acts[1]);
@@ -6897,7 +6897,7 @@ fn search_base_reused_with_filters_across_eph_change() {
     // any hashed-or-consumed filter component becomes chain-sensitive,
     // either the base hash diverges (created=true below) or — worse — the
     // key stays while content diverges; this test pins the key side.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     const Q_A: &str = concat!(
         r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
         r#"start="85000", end="85100", instance_type="1") }; "#,
@@ -6909,13 +6909,13 @@ fn search_base_reused_with_filters_across_eph_change() {
         r#"project("search_proj_1") search("foo", limit="30")"#,
     );
 
-    let shape: &[(i64, LayerRole)] = &[
-        (R1, LayerRole::Base),       // layer block base, root 1
-        (R2, LayerRole::Base),       // layer block base, root 2
-        (R1, LayerRole::Base),       // filtered search base, root 1
-        (R1, LayerRole::Supplement), // search supplement, root 1
-        (R2, LayerRole::Base),       // filtered search base, root 2 (empty)
-        (R2, LayerRole::Supplement), // search supplement, root 2
+    let shape: &[(i64, ShardRole)] = &[
+        (R1, ShardRole::Root),      // layer block base, root 1
+        (R2, ShardRole::Root),      // layer block base, root 2
+        (R1, ShardRole::Root),      // filtered search base, root 1
+        (R1, ShardRole::Selection), // search supplement, root 1
+        (R2, ShardRole::Root),      // filtered search base, root 2 (empty)
+        (R2, ShardRole::Selection), // search supplement, root 2
     ];
     let (_res_a, acts_a) = run_query_traced(TEST_INPUT_SEARCH, Q_A);
     assert_root_roles(&acts_a, shape);
@@ -7017,12 +7017,12 @@ fn delete_project_purges_eph_cache() {
 #[test]
 fn per_root_base_reused_under_narrowed_roots() {
     // The headline property of per-root chains: a root's base is keyed on
-    // that single root's identity (`root_salted_hash`), so narrowing the
+    // that single root's identity (`root_shard_hash`), so narrowing the
     // visible root set — the future multitenancy/versioning entry point —
     // reuses the already-cached base instead of repopulating.  Request-level
     // narrowing doesn't exist yet, so the test constructs the narrowed set
     // directly, exactly as a narrowing entry point would.
-    use crate::command::LayerRole;
+    use crate::command::ShardRole;
     use crate::test_util::run_query_traced_with_roots;
     const QUERY: &str = r#"search("foo", limit="97")"#; // unique limit → own cache rows
 
@@ -7037,7 +7037,7 @@ fn per_root_base_reused_under_narrowed_roots() {
             run_query_traced_with_roots(index.clone(), roots.clone(), QUERY)
                 .await
                 .unwrap();
-        assert_root_roles(&full_acts, &[(R1, LayerRole::Base), (R2, LayerRole::Base)]);
+        assert_root_roles(&full_acts, &[(R1, ShardRole::Root), (R2, ShardRole::Root)]);
         assert!(full_acts.iter().all(|a| a.created), "cold run creates both");
         let r1_base = full_acts[0].layer_id;
 
@@ -7047,7 +7047,7 @@ fn per_root_base_reused_under_narrowed_roots() {
         let (narrow_res, narrow_acts) = run_query_traced_with_roots(index.clone(), narrowed, QUERY)
             .await
             .unwrap();
-        assert_root_roles(&narrow_acts, &[(R1, LayerRole::Base)]);
+        assert_root_roles(&narrow_acts, &[(R1, ShardRole::Root)]);
         assert!(
             !narrow_acts[0].created,
             "narrowed run must hit root 1's cached base, got {:?}",
