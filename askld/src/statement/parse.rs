@@ -9,6 +9,7 @@ use crate::scope::{build_scope, EmptyScope, Scope};
 use crate::span::Span;
 use crate::verb::{build_verb, DefaultTypeFilter, VerbTag};
 use pest::error::Error;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::Statement;
@@ -133,6 +134,7 @@ pub fn build_empty_statement(ctx: Rc<ParserContext>, span: Span) -> Rc<Statement
 pub fn build_dependency_graph(
     statement: Rc<Statement>,
     labeled_statements_map: &LabeledStatements,
+    tree_of: &HashMap<*const Statement, usize>,
 ) -> Result<(), pest::error::Error<Rule>> {
     let mut state = statement.get_state_mut();
     if let Some(parent) = statement.parent().and_then(|p| p.upgrade()) {
@@ -210,17 +212,18 @@ pub fn build_dependency_graph(
     // The verb itself isn't a user-selector — its label reference is
     // buried inside its arguments — so it doesn't get picked up by the
     // selector iteration above.  Surface them as `PreSeedLabel` edges
-    // so (a) `compute_roots` pre-drains pending before pushing this
-    // statement, and (b) the label name travels with the edge for
-    // resolution at push time without needing the `labeled_statements`
-    // map at execution time.
+    // so (a) the label name travels with the edge and `compute_roots`
+    // can resolve it from the dependency's completed selection without
+    // needing the `labeled_statements` map at execution time, and
+    // (b) the budget gate in `stage_read` sees that the labelled
+    // statement's selection is consumed.
     //
     // We use `PreSeedLabel`, not `User`, because the notification path
     // (`run_worklist` → `derive_from_provider`) is a no-op for
     // layer-using statements (their selection is already determined by
     // `compute_selected` once the layer materialises).  `User` would
     // fire pointless notifications.  `PreSeedLabel` is the right
-    // semantic name for "drain before me, and bring this label's IDs."
+    // semantic name for "bring this label's IDs from an earlier tree."
     for label in statement.command().layer_label_refs() {
         let labeled_statements =
             if let Some(labeled_statements) = labeled_statements_map.get_statements(&label) {
@@ -236,6 +239,44 @@ pub fn build_dependency_graph(
                     statement.command().span().as_pest_span(),
                 ));
             };
+
+        // Parse-time ordering rule: a layer's `@label` may only reference
+        // a label defined by an EARLIER top-level statement.  Trees run
+        // sequentially (M, P, R per tree), so an earlier tree's selection
+        // is always complete when this tree materialises.  A same-tree or
+        // forward reference would need a mid-phase read and is rejected
+        // here instead — groundwork for per-statement rounds.
+        let ref_tree = tree_of.get(&Rc::as_ptr(&statement)).copied();
+        for labeled_statement in labeled_statements {
+            let def_tree = tree_of.get(&Rc::as_ptr(labeled_statement)).copied();
+            let (Some(ref_tree), Some(def_tree)) = (ref_tree, def_tree) else {
+                continue;
+            };
+            if def_tree == ref_tree {
+                return Err(Error::new_from_span(
+                    pest::error::ErrorVariant::CustomError {
+                        message: format!(
+                            "label '@{}' is defined in the same statement; a label may \
+                             only reference an earlier statement — split with `;`",
+                            label
+                        ),
+                    },
+                    statement.command().span().as_pest_span(),
+                ));
+            }
+            if def_tree > ref_tree {
+                return Err(Error::new_from_span(
+                    pest::error::ErrorVariant::CustomError {
+                        message: format!(
+                            "label '@{}' is defined in a later statement; a label may \
+                             only reference an earlier statement",
+                            label
+                        ),
+                    },
+                    statement.command().span().as_pest_span(),
+                ));
+            }
+        }
 
         let label_rc: Rc<str> = Rc::from(label.as_str());
         for labeled_statement in labeled_statements {

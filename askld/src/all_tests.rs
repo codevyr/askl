@@ -4587,6 +4587,53 @@ fn ephemeral_instance_label_hash_matches_equivalent_literal() {
     );
 }
 
+#[test]
+fn ephemeral_instance_same_tree_label_rejected() {
+    // Parse-time label ordering rule (per-statement rounds groundwork):
+    // a layer's `@label` must reference a label defined by an EARLIER
+    // top-level statement.  Label and reference living in the same
+    // top-level statement tree is a structured error with a
+    // split-with-`;` hint.
+    const QUERY: &str = concat!(
+        r#"@target "foo" { layer { ephemeral_instance(symbol_id="@target", "#,
+        r#"object_id="1", start="50000", end="50100", instance_type="1") } }"#,
+    );
+    let res = run_query_err(VERB_TEST, QUERY);
+    let err = match res {
+        Ok(_) => panic!("same-tree label reference must be rejected"),
+        Err(e) => e,
+    };
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("split with `;`"),
+        "error should carry the split-with-; hint, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn ephemeral_instance_forward_label_rejected() {
+    // Forward reference: the layer statement precedes the statement that
+    // defines the label.  Must be a structured error, not an empty
+    // resolution.
+    const QUERY: &str = concat!(
+        r#"layer { ephemeral_instance(symbol_id="@target", object_id="1", "#,
+        r#"start="50000", end="50100", instance_type="1") }; "#,
+        r#"@target "foo""#,
+    );
+    let res = run_query_err(VERB_TEST, QUERY);
+    let err = match res {
+        Ok(_) => panic!("forward label reference must be rejected"),
+        Err(e) => e,
+    };
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("later statement"),
+        "error should say the label is defined in a later statement, got: {}",
+        msg
+    );
+}
+
 // ============================================================================
 // search() verb tests (Step 6: skeleton — defaults only)
 // ============================================================================

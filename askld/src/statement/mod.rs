@@ -153,6 +153,80 @@ fn stage_read(
     (eph, parent_scope, children_scope)
 }
 
+/// Phase-M handoff to the Phase-R batch: one substatement's
+/// materialised layer ids + Phase-M warnings.
+struct Staged {
+    statement: Rc<Statement>,
+    layer_ids: Vec<i64>,
+    warnings: Vec<Diagnostic>,
+}
+
+/// The per-substatement materialise step of Phase M: `@label`
+/// resolution, [`Command::materialise_layers`], pushing the round,
+/// recording activations, and staging the outcome for Phase R.
+/// Extracted so the per-statement-rounds switch can swap the Phase-M
+/// loop body without touching this step.
+async fn materialise_substatement(
+    ctx: &mut ExecutionContext,
+    cfg: &ControlFlowGraph,
+    statement: &Rc<Statement>,
+) -> Result<Staged, pest::error::Error<Rule>> {
+    // `@label` resolution.  The parse-time ordering rule
+    // guarantees every label dep lives in an EARLIER tree,
+    // fully run (M, P, R) before this tree started — just read
+    // its completed selection.
+    let mut resolved = LabelResolutions::new();
+    let label_deps: Vec<(Rc<Statement>, Rc<str>)> = statement
+        .get_state()
+        .dependencies
+        .iter()
+        .filter_map(|d| match &d.dependency_role {
+            DependencyRole::PreSeedLabel(label) => Some((d.dependency.clone(), label.clone())),
+            _ => None,
+        })
+        .collect();
+    for (dep_stmt, label) in label_deps {
+        if let Some(sel) = dep_stmt.get_selection(ctx) {
+            let ids = canonical_ids(sel.nodes.iter().map(|n| n.symbol.id));
+            if ids.is_empty() {
+                tracing::warn!(
+                    label = %label,
+                    "ephemeral verb '@{}' resolved to 0 symbols; \
+                     layer will emit no rows",
+                    label,
+                );
+            }
+            resolved.insert(label, ids);
+        } else {
+            tracing::warn!(
+                label = %label,
+                "ephemeral verb '@{}' labelled statement has no \
+                 selection at resolution time; layer will emit no rows",
+                label,
+            );
+        }
+    }
+
+    let eph_m = ctx.eph.clone();
+    // Condition-based by construction: nothing in this tree has a
+    // selection yet, so the fused scope is the parent's filter.
+    let parent_scope = build_parent_scope(statement, ctx, &eph_m);
+    let outcome = statement
+        .command()
+        .materialise_layers(cfg, &eph_m, &resolved, &parent_scope)
+        .await?;
+    if !outcome.round.is_empty() {
+        ctx.eph.push_round(&outcome.round);
+    }
+    ctx.layer_activations
+        .extend(outcome.activations.iter().copied());
+    Ok(Staged {
+        statement: statement.clone(),
+        layer_ids: outcome.layer_ids,
+        warnings: outcome.warnings,
+    })
+}
+
 /// True when a statement may re-probe in a refinement round: every
 /// selector is either fusable (its emission is the shared statement
 /// query) or non-constraining (unit verbs, bare filter-only type
@@ -162,34 +236,6 @@ fn refinable(command: &Command) -> bool {
     command
         .selectors()
         .all(|s| s.fusable() || s.is_non_constraining_selector())
-}
-
-/// Run one statement's READ phase inline and apply it — the same-tree
-/// `@label` sub-barrier in `compute_roots`.
-async fn read_statement(
-    ctx: &mut ExecutionContext,
-    cfg: &ControlFlowGraph,
-    statement: &Rc<Statement>,
-    layer_ids: &[i64],
-    warnings: Vec<Diagnostic>,
-) -> Result<(), pest::error::Error<Rule>> {
-    let (eph, parent_scope, children_scope) = stage_read(ctx, statement);
-    // The label sub-barrier runs during Phase M, before this tree's probe
-    // wave — no probe result exists yet.
-    let cr = statement
-        .command()
-        .compute_selection(
-            cfg,
-            parent_scope,
-            children_scope,
-            &eph,
-            layer_ids,
-            warnings,
-            None,
-        )
-        .await?;
-    cr.apply(ctx, statement);
-    Ok(())
 }
 
 #[derive(Debug)]
@@ -331,14 +377,15 @@ impl Statement {
     /// Compute initial selections for every statement — TWO-PHASE, per
     /// top-level statement tree, trees in source order:
     ///
-    /// - **Phase M (materialise, sequential):** every statement in the tree
-    ///   runs [`Command::materialise_layers`] in pre-order; each round is
-    ///   pushed onto the shared `ctx.eph` immediately, so later
-    ///   materialisations chain on earlier ones and the tree ends with ONE
-    ///   complete visibility set.  Materialisation is independent of any
-    ///   statement's *selection* (scope-fusion is condition-based) — the
-    ///   sequencing exists only for chain identity; parallelising
-    ///   independent materialisations is future work.
+    /// - **Phase M (materialise, sequential):** runs per tree — every
+    ///   substatement runs [`materialise_substatement`] in pre-order and its
+    ///   round is pushed onto the shared `ctx.eph` as it lands (per-statement
+    ///   rounds are future work), so later materialisations chain on earlier
+    ///   ones and the tree ends with ONE complete visibility set.
+    ///   Materialisation is independent of any statement's *selection*
+    ///   (scope-fusion is condition-based) — the sequencing exists only for
+    ///   chain identity; parallelising independent materialisations is
+    ///   future work.
     /// - **Phase R (read, concurrent):** every statement's selection +
     ///   neighbourhood queries run via [`Command::compute_selection`] under
     ///   the tree-complete visibility, overlapped with `join_all` and applied
@@ -350,10 +397,12 @@ impl Statement {
     /// Trees run sequentially, so cross-tree `@label` deps and layer chaining
     /// always see prior trees fully applied — this subsumes the old
     /// PreSeedSibling pre-drains (the edges still exist for the notification
-    /// pass and the budget gate).  A SAME-tree `@label` dep is a genuine
-    /// M↔R circularity: the labelled statement's READ phase runs early (its
-    /// layers, if any, are already materialised — pre-order precedes the
-    /// user) before the using statement's Phase M.
+    /// pass and the budget gate).  A `@label` always references a statement
+    /// from an EARLIER tree (enforced at parse time by
+    /// `build_dependency_graph`'s ordering rule), which has fully run
+    /// (M, P, R) by the time the referencing tree starts — so label
+    /// resolution just reads the dependency's completed selection, never
+    /// needing a mid-phase read.
     async fn compute_roots(
         &self,
         ctx: &mut ExecutionContext,
@@ -361,14 +410,6 @@ impl Statement {
         _statements: &Vec<Rc<Statement>>,
     ) -> Result<(), pest::error::Error<Rule>> {
         let _span = tracing::info_span!("compute_roots").entered();
-
-        struct Staged {
-            statement: Rc<Statement>,
-            /// Phase-M handoff (layer ids + Phase-M warnings); taken when the
-            /// statement's READ phase runs — early (label sub-barrier) or in
-            /// the main Phase-R batch.
-            payload: Option<(Vec<i64>, Vec<Diagnostic>)>,
-        }
 
         let top_level: Vec<Rc<Statement>> = self.scope().statements().collect();
         for top in top_level {
@@ -382,74 +423,12 @@ impl Statement {
             })?;
 
             // ---- Phase M: materialise, sequential, rounds applied as they
-            // land so chaining and `has_chain` see prior statements. ----
+            // land so chaining and `has_chain` see prior statements.  The
+            // per-substatement outcomes are collected into the tree's
+            // `staged` batch — the rounds belonging to this tree. ----
             let mut staged: Vec<Staged> = Vec::with_capacity(tree.len());
             for statement in &tree {
-                // `@label` resolution.  Cross-tree deps are fully applied
-                // (trees are sequential); a same-tree dep gets its READ phase
-                // early so its selection exists before this layer's inputs
-                // are hashed.
-                let mut resolved = LabelResolutions::new();
-                let label_deps: Vec<(Rc<Statement>, Rc<str>)> = statement
-                    .get_state()
-                    .dependencies
-                    .iter()
-                    .filter_map(|d| match &d.dependency_role {
-                        DependencyRole::PreSeedLabel(label) => {
-                            Some((d.dependency.clone(), label.clone()))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                for (dep_stmt, label) in label_deps {
-                    if !dep_stmt.is_computed(ctx) {
-                        if let Some(m) = staged
-                            .iter_mut()
-                            .find(|m| Rc::ptr_eq(&m.statement, &dep_stmt))
-                        {
-                            if let Some((layer_ids, warnings)) = m.payload.take() {
-                                read_statement(ctx, cfg, &dep_stmt, &layer_ids, warnings).await?;
-                            }
-                        }
-                    }
-                    if let Some(sel) = dep_stmt.get_selection(ctx) {
-                        let ids = canonical_ids(sel.nodes.iter().map(|n| n.symbol.id));
-                        if ids.is_empty() {
-                            tracing::warn!(
-                                label = %label,
-                                "ephemeral verb '@{}' resolved to 0 symbols; \
-                                 layer will emit no rows",
-                                label,
-                            );
-                        }
-                        resolved.insert(label, ids);
-                    } else {
-                        tracing::warn!(
-                            label = %label,
-                            "ephemeral verb '@{}' labelled statement has no \
-                             selection at resolution time; layer will emit no rows",
-                            label,
-                        );
-                    }
-                }
-
-                let eph_m = ctx.eph.clone();
-                // Condition-based by construction: nothing in this tree has a
-                // selection yet, so the fused scope is the parent's filter.
-                let parent_scope = build_parent_scope(statement, ctx, &eph_m);
-                let outcome = statement
-                    .command()
-                    .materialise_layers(cfg, &eph_m, &resolved, &parent_scope)
-                    .await?;
-                if !outcome.round.is_empty() {
-                    ctx.eph.push_round(&outcome.round);
-                }
-                ctx.layer_activations
-                    .extend(outcome.activations.iter().copied());
-                staged.push(Staged {
-                    statement: statement.clone(),
-                    payload: Some((outcome.layer_ids, outcome.warnings)),
-                });
+                staged.push(materialise_substatement(ctx, cfg, statement).await?);
             }
 
             // ---- Phase P: cardinality probes, concurrent, under
@@ -577,9 +556,6 @@ impl Statement {
                 Vec<index::db_diesel::ProbeRole>,
             )> = Vec::new();
             for m in &staged {
-                if m.payload.is_none() {
-                    continue; // read early by the label sub-barrier
-                }
                 let Some(predicate) = m.statement.command().probe_predicate(&ctx.eph) else {
                     continue;
                 };
@@ -599,9 +575,6 @@ impl Statement {
                     Vec<index::db_diesel::ProbeRole>,
                 )> = Vec::new();
                 for m in &staged {
-                    if m.payload.is_none() {
-                        continue;
-                    }
                     let stmt = &m.statement;
                     let key = statement_key(stmt);
                     if ctx.probe_resolved.contains_key(&key) {
@@ -729,8 +702,8 @@ impl Statement {
                 }
             }
 
-            // ---- Phase R: concurrent reads under tree-complete visibility;
-            // statements already read early (label sub-barrier) are skipped. ----
+            // ---- Phase R: concurrent reads under tree-complete
+            // visibility. ----
             struct PendingRead<'a> {
                 statement: Rc<Statement>,
                 future: Pin<
@@ -739,9 +712,7 @@ impl Statement {
             }
             let mut pending: Vec<PendingRead<'_>> = Vec::new();
             for m in staged {
-                let Some((layer_ids, warnings)) = m.payload else {
-                    continue;
-                };
+                let (layer_ids, warnings) = (m.layer_ids, m.warnings);
                 let (eph, parent_scope, children_scope) = stage_read(ctx, &m.statement);
                 let probe_ids = ctx
                     .probe_resolved
@@ -787,11 +758,29 @@ impl Statement {
         labeled_statements_map: &LabeledStatements,
     ) -> Result<(), pest::error::Error<Rule>> {
         let _span = tracing::debug_span!("build_dependency_graph").entered();
+
+        // Map every statement to the source-order index of its top-level
+        // tree.  `build_dependency_graph` uses it to enforce the label
+        // ordering rule: a `@label` may only reference a label defined by
+        // an EARLIER top-level statement.
+        let top_level: Vec<Rc<Statement>> = self.scope().statements().collect();
+        let mut tree_of: HashMap<*const Statement, usize> = HashMap::new();
+        for (i, top) in top_level.iter().enumerate() {
+            tree_of.insert(Rc::as_ptr(top), i);
+            crate::scope::visit(top.scope(), &mut |s| -> Result<
+                bool,
+                pest::error::Error<Rule>,
+            > {
+                tree_of.insert(Rc::as_ptr(&s), i);
+                Ok(true)
+            })?;
+        }
+
         crate::scope::visit(self.scope(), &mut |statement| -> Result<
             bool,
             pest::error::Error<Rule>,
         > {
-            build_dependency_graph(statement, &labeled_statements_map)?;
+            build_dependency_graph(statement, &labeled_statements_map, &tree_of)?;
             Ok(true)
         })?;
 
@@ -820,12 +809,11 @@ impl Statement {
         // they remain free to run concurrently.
         //
         // We only consider top-level statements (no parent); nested
-        // siblings still rely on Parent/Child edges, plus the
-        // label-refs pre-drain in `compute_roots` for the
-        // nested-layer-using-a-label case.  This is a deliberate
+        // siblings still rely on Parent/Child edges, and a nested
+        // layer's `@label` refs point at earlier trees (parse-enforced),
+        // which are fully applied.  This is a deliberate
         // scoping choice (per the design discussion); a nested
         // `loc(...) ; loc(...)` pair does NOT get a Sibling edge.
-        let top_level: Vec<Rc<Statement>> = self.scope().statements().collect();
         let mut last_layer_creator: Option<usize> = None;
         for j in 0..top_level.len() {
             if let Some(i) = last_layer_creator {
@@ -966,12 +954,12 @@ impl Statement {
             Ok(true)
         })?;
 
-        // Build the dependency graph first — `compute_roots` consults
-        // `DependencyRole::PreSeed*` edges to decide when to pre-drain
-        // pending compute futures so each statement's `eph` capture
-        // reflects every prior layer-creating sibling's materialised
-        // layer.  See `Self::build_dependency_graph` (sibling edges)
-        // and `compute_roots` (pre-drain).
+        // Build the dependency graph first — `compute_roots` reads
+        // `DependencyRole::PreSeedLabel` edges to resolve `@label`
+        // references (each dependency lives in an earlier, fully-run
+        // tree — the parse-time ordering rule), and the budget gate in
+        // `stage_read` consults all edges.  See
+        // `Self::build_dependency_graph`.
         self.build_dependency_graph(&labeled_statements)?;
 
         // Every component (top-level tree ∪ label-connected trees) must
@@ -981,11 +969,10 @@ impl Statement {
 
         self.mark_weak_statements(&statements);
 
-        // Compute initial selections.  `compute_roots` consults the
-        // `PreSeed*` edges installed above to (a) pre-drain pending
-        // futures before any statement whose `eph` capture must
-        // reflect prior layer materialisation, and (b) resolve any
-        // `@label` references that come bundled with those edges.
+        // Compute initial selections.  `compute_roots` resolves `@label`
+        // references via the `PreSeedLabel` edges installed above — each
+        // dependency lives in an earlier, fully-run tree, so its
+        // completed selection is simply read.
         self.compute_roots(ctx, cfg, &statements).await?;
 
         self.run_worklist(ctx, cfg, &statements).await?;
@@ -1404,10 +1391,11 @@ impl Statement {
 
         // PreSeed edges carry no selection data — they exist only to
         // express "compute me after this dep's selection has applied."
-        // The pre-drain happens in `compute_roots`; by the time
-        // `run_worklist` is calling `notify`, the receiver's
-        // `compute_selected` has already run with the right `eph` and
-        // resolved labels.  Nothing to propagate.
+        // Ordering is guaranteed by sequential tree execution (labels
+        // reference earlier trees only); by the time `run_worklist` is
+        // calling `notify`, the receiver's `compute_selected` has
+        // already run with the right `eph` and resolved labels.
+        // Nothing to propagate.
         if dependent.dependency_role.is_pre_seed() {
             return Ok(PropagationResult { changed: false });
         }
