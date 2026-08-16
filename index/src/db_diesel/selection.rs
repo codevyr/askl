@@ -29,12 +29,13 @@ pub struct RootLayer {
 /// Roots are fixed at construction ([`EphContext::rooted`] is the only
 /// constructor — a context cannot exist without an explicit root set); each
 /// root's chain grows via [`EphContext::push`].  Chain topology is linear
-/// per root: a root's next layer parents on [`EphContext::chain_last`] of
-/// that root, and base layers parent on the root itself.
+/// per root: a root's next layer parents on [`EphContext::tip`] of
+/// that root, and root shards parent on the root itself.
 ///
 /// Lockstep invariant: every layer-creating command materialises for every
-/// visible root, and chains grow only through [`EphContext::push_round`],
-/// which appends one top-level statement's (tree's) layers for EVERY root
+/// visible root, and chains grow only through
+/// [`EphContext::push_materialisation`], which appends one top-level
+/// statement's (tree's) layers for EVERY root
 /// atomically — so out-of-lockstep states are unrepresentable and "has a
 /// chain" is a request-level property by construction.
 ///
@@ -93,7 +94,7 @@ pub struct EphContext {
     roots: Vec<RootLayer>,
     /// Per-root ephemeral chains, parallel to `roots` — every root always
     /// has a chain slot (a missing entry is unrepresentable), and growth
-    /// happens only through [`EphContext::push_round`].
+    /// happens only through [`EphContext::push_materialisation`].
     chains: Vec<Vec<i64>>,
     /// Result budget for this request; default unlimited, set once per request
     /// via [`EphContext::set_result_budget`].  Read by `find_symbol` to bound a
@@ -122,7 +123,7 @@ impl EphContext {
     }
 
     /// Set the result budget for this request.  Called once, at the root, from
-    /// the API layer; `clone()`/`push_round` carry it forward unchanged.
+    /// the API layer; `clone()`/`push_materialisation` carry it forward unchanged.
     pub fn set_result_budget(&mut self, budget: ResultBudget) {
         self.result_budget = budget;
     }
@@ -134,39 +135,40 @@ impl EphContext {
     /// Append one top-level statement's (tree's) freshly materialised layers
     /// to the chains: every layer-bearing command's contribution in
     /// substatement pre-order, each in its canonical internal order (roots
-    /// ascending; base → per-layer atoms → supplement).  A round contributes
-    /// one OR MORE layers per root — per command a base, zero or more
-    /// per-layer content atoms, then a supplement iff the pre-tree chain was
-    /// non-empty — so per root the round's LAST layer becomes the tree's
-    /// tip.  This is the ONLY growth path, so lockstep is enforced at
-    /// the source: a round that misses a root entirely, or names an unknown
-    /// one, is a programming error and panics.
-    pub fn push_round(&mut self, layers: &[(i64, i64)]) {
+    /// ascending; root shard → layer shards → selection shard).  A
+    /// materialisation contributes one OR MORE layers per root — per command a
+    /// root shard, zero or more layer shards, then a selection shard iff the
+    /// pre-tree chain was non-empty — so per root the materialisation's LAST
+    /// layer becomes the tree's tip.  This is the ONLY growth path, so
+    /// lockstep is enforced at the source: a materialisation that misses a
+    /// root entirely, or names an unknown one, is a programming error and
+    /// panics.
+    pub fn push_materialisation(&mut self, layers: &[(i64, i64)]) {
         for r in &self.roots {
             assert!(
                 layers.iter().any(|(root_id, _)| *root_id == r.id),
-                "push_round is missing layers for root {}",
+                "push_materialisation is missing layers for root {}",
                 r.id
             );
         }
         for (root_id, layer_id) in layers {
             let idx = self
                 .root_index(*root_id)
-                .unwrap_or_else(|| panic!("push_round onto unknown root {root_id}"));
+                .unwrap_or_else(|| panic!("push_materialisation onto unknown root {root_id}"));
             self.chains[idx].push(*layer_id);
         }
     }
 
     /// Most recently materialised ephemeral layer on `root_id`'s chain (the
-    /// parent for that root's next supplement).  `None` under an empty
-    /// chain — the next base then parents on the root itself.
-    pub fn chain_last(&self, root_id: i64) -> Option<i64> {
+    /// parent for that root's next selection shard).  `None` under an empty
+    /// chain — the next root shard then parents on the root itself.
+    pub fn tip(&self, root_id: i64) -> Option<i64> {
         self.root_index(root_id)
             .and_then(|idx| self.chains[idx].last().copied())
     }
 
     /// True if the request has materialised any layers yet.  Chains grow in
-    /// lockstep (see [`EphContext::push_round`]), so checking the first
+    /// lockstep (see [`EphContext::push_materialisation`]), so checking the first
     /// root's chain answers for all of them.
     pub fn has_chain(&self) -> bool {
         self.chains.first().is_some_and(|c| !c.is_empty())
@@ -635,7 +637,7 @@ mod tests {
     fn eph_row_in_chain_no_leak() {
         let s = selection_with_node(-1, -1);
         let mut eph = test_root_ctx();
-        eph.push_round(&[(TEST_ROOT, -1)]);
+        eph.push_materialisation(&[(TEST_ROOT, -1)]);
         assert!(!s.has_eph_leak(&eph));
     }
 
@@ -657,7 +659,7 @@ mod tests {
     fn canary_row_detected() {
         let s = selection_with_node(CANARY_LAYER_ID, CANARY_LAYER_ID);
         let mut eph = test_root_ctx();
-        eph.push_round(&[(TEST_ROOT, -1)]);
+        eph.push_materialisation(&[(TEST_ROOT, -1)]);
         assert!(s.has_eph_leak(&eph));
     }
 

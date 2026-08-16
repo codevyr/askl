@@ -7490,8 +7490,9 @@ fn edges_pick_min_instance_across_branches() {
             .expect("layer created an eph instance");
         let mut eph =
             index::db_diesel::EphContext::rooted(index.load_root_layers().await.unwrap());
-        let round: Vec<(i64, i64)> = acts.iter().map(|a| (a.root_id, a.layer_id)).collect();
-        eph.push_round(&round);
+        let materialisation: Vec<(i64, i64)> =
+            acts.iter().map(|a| (a.root_id, a.layer_id)).collect();
+        eph.push_materialisation(&materialisation);
 
         // Candidates: foo's instance (91), foo.bar's persistent instance
         // (92), and the eph instance of foo.bar.  Two persistent refs run

@@ -245,7 +245,7 @@ pub fn build_dependency_graph(
         // sequentially (M, P, R per tree), so an earlier tree's selection
         // is always complete when this tree materialises.  A same-tree or
         // forward reference would need a mid-phase read and is rejected
-        // here instead — groundwork for per-statement rounds.
+        // here instead — groundwork for per-statement materialisations.
         let ref_tree = tree_of.get(&Rc::as_ptr(&statement)).copied();
         for labeled_statement in labeled_statements {
             let def_tree = tree_of.get(&Rc::as_ptr(labeled_statement)).copied();

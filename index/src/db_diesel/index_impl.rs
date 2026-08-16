@@ -1101,7 +1101,8 @@ pub enum ShardRole {
 
 /// One layer materialised by [`Index::with_partitioned_layers`], in the
 /// exact order the executor records them (and concatenates them into its
-/// tree's round): roots ascending; within a root, the root shard first, then
+/// tree's materialisation): roots ascending; within a root, the root shard
+/// first, then
 /// zero or more N-way layer shards (`ShardRole::Layer`, one per visible eph
 /// content layer, none until eph content exists), then the selection shard
 /// LAST — which exists iff that root's upstream (pre-tree) chain was
@@ -1110,7 +1111,8 @@ pub enum ShardRole {
 /// even when its populate inserts zero rows).  The selection shard is last so
 /// a command's final layer per root — and with it the tree tip, which is the
 /// LAST command's final layer — is always a selection shard (or a root shard
-/// under first-round elision), never a nondeterministically-ordered layer
+/// under first-materialisation elision), never a nondeterministically-ordered
+/// layer
 /// shard — keeping downstream `selection_shard_hash` keys stable when layer
 /// shards churn.
 #[derive(Debug, Clone, Copy)]
@@ -1149,7 +1151,7 @@ pub fn selection_shard_hash(parent_id: i64, input_hash: &[u8; 32], extra: &[u8])
 
 /// Cache key of an N-way layer shard `V(L_j)`: the sharded layer's id folded
 /// with the (already root-salted) root-shard identity.  Unlike
-/// [`selection_shard_hash`] (which folds the runtime chain tip `chain_last`,
+/// [`selection_shard_hash`] (which folds the runtime chain tip `tip`,
 /// so the fused delta is bound to one chain), this folds only `layer_id` — so
 /// for a single content verb the layer-shard key is a function of
 /// `(L_j, verb inputs)`, is reused by ANY chain containing `L_j`, and adding a
@@ -2884,7 +2886,7 @@ impl Index {
     /// `root_shard_hash(root, input_hash)` and holding only that project's
     /// rows (unmasked — masks are composed at read time, never applied here)
     /// plus, iff that root's chain is non-empty, a *selection shard* chained
-    /// on the root's `chain_last` holding the eph-derived delta.  `eph` is the
+    /// on the root's `tip` holding the eph-derived delta.  `eph` is the
     /// executor's PRE-TREE snapshot, so selection shards parent on the
     /// previous top-level statement's tip — commands of one tree never chain
     /// on each other.  The selection shard is always materialized under a
@@ -2992,7 +2994,7 @@ impl Index {
                     hash: root_shard_key,
                 };
 
-                let selection_shard = match eph.chain_last(root.id) {
+                let selection_shard = match eph.tip(root.id) {
                     None => None,
                     Some(parent) => {
                         let sel_hash =
@@ -3039,7 +3041,7 @@ impl Index {
                 // Order within a root: root shard → layer shards → selection
                 // shard.  The (empty) selection shard goes LAST so IT — not a
                 // nondeterministically-ordered layer shard — is the root's
-                // `chain_last`, keeping downstream `selection_shard_hash` keys
+                // `tip`, keeping downstream `selection_shard_hash` keys
                 // stable and layer-shard-order-independent.  Layer shards stay
                 // visible in the chain (their content is read), just never the
                 // tip.
@@ -4089,7 +4091,7 @@ mod tests {
             id: 424242,
             hash: vec![0x42; 32],
         }]);
-        eph.push_round(&[(424242, -7)]);
+        eph.push_materialisation(&[(424242, -7)]);
 
         let evis = EphVisibility::eph_touching(&eph);
         let eq = build_parents_query(vec![1, 2], &evis).filter(evis.guard());
@@ -4370,7 +4372,7 @@ mod tests {
 
         // Run A: chain = [L=-1001].
         let mut eph_a = EphContext::rooted(vec![nway_root()]);
-        eph_a.push_round(&[(1000001, -1001)]);
+        eph_a.push_materialisation(&[(1000001, -1001)]);
         let a = index
             .with_partitioned_layers(
                 &eph_a,
@@ -4407,7 +4409,7 @@ mod tests {
         let base_a_id = base_a.outcome.layer_id;
 
         // Ordering even for a single-atom run: base → atom → supplement, so the
-        // supplement is the deterministic chain_last (not the atom).
+        // supplement is the deterministic tip (not the atom).
         assert_eq!(
             a.get(0).map(|l| l.role),
             Some(ShardRole::Root),
@@ -4417,14 +4419,14 @@ mod tests {
         assert_eq!(
             a.last().map(|l| l.role),
             Some(ShardRole::Selection),
-            "supplement must be last (chain_last) on run A, got {:?}",
+            "supplement must be last (tip) on run A, got {:?}",
             a
         );
 
         // Run B: chain = [L=-1001, L=-1002] — a new tip appended.
         let mut eph_b = EphContext::rooted(vec![nway_root()]);
-        eph_b.push_round(&[(1000001, -1001)]);
-        eph_b.push_round(&[(1000001, -1002)]);
+        eph_b.push_materialisation(&[(1000001, -1001)]);
+        eph_b.push_materialisation(&[(1000001, -1002)]);
         let b = index
             .with_partitioned_layers(
                 &eph_b,
@@ -4490,13 +4492,13 @@ mod tests {
             "the fresh atom shards the newly-appended tip L=-1002"
         );
 
-        // Ordering / chain_last: the (empty) supplement is emitted LAST, so it
+        // Ordering / tip: the (empty) supplement is emitted LAST, so it
         // — not a nondeterministically-ordered atom — is the root's
-        // chain_last, keeping downstream supplement keys stable.
+        // tip, keeping downstream supplement keys stable.
         assert_eq!(
             b.last().map(|l| l.role),
             Some(ShardRole::Selection),
-            "the supplement must be the last (chain_last) layer, got {:?}",
+            "the supplement must be the last (tip) layer, got {:?}",
             b
         );
         assert!(
@@ -4577,8 +4579,8 @@ mod tests {
         // Chain over both content layers; atoms carry the content, supplement
         // is the no-op marker.
         let mut eph = EphContext::rooted(vec![nway_root()]);
-        eph.push_round(&[(1000001, -1001)]);
-        eph.push_round(&[(1000001, -1002)]);
+        eph.push_materialisation(&[(1000001, -1001)]);
+        eph.push_materialisation(&[(1000001, -1002)]);
         let layers = index
             .with_partitioned_layers(
                 &eph,

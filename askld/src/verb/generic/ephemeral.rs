@@ -695,7 +695,7 @@ impl Selector for LayerVerb {
             selection_shard_populate,
             // `layer { … }` is chain-dependent ops, not a per-layer content
             // scan, so it exposes no N-way layer shard: its delta stays the
-            // selection shard keyed on `chain_last`.
+            // selection shard keyed on `tip`.
             layer_shard_populate: None,
             selection_extra,
         }))
