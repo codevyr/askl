@@ -609,7 +609,7 @@ impl Selector for LayerVerb {
                 Vec::new()
             } else {
                 let mut he = Sha256::new();
-                he.update(b"layer-supplement-ops-v1");
+                he.update(b"selection-shard-ops-v1");
                 for op in &sel_ops {
                     op.hash_params(&mut he, resolved);
                 }

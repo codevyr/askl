@@ -1141,7 +1141,7 @@ pub struct MaterialisedLayer {
 pub fn selection_shard_hash(parent_id: i64, input_hash: &[u8; 32], extra: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(b"eph-supplement-v1");
+    h.update(b"selection-shard-v1");
     h.update(parent_id.to_le_bytes());
     h.update(input_hash);
     h.update((extra.len() as u64).to_le_bytes());
@@ -1168,7 +1168,7 @@ pub fn selection_shard_hash(parent_id: i64, input_hash: &[u8; 32], extra: &[u8])
 pub fn layer_shard_hash(layer_id: i64, input_hash: &[u8; 32]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(b"eph-perlayer-v1");
+    h.update(b"layer-shard-v1");
     h.update(layer_id.to_le_bytes());
     h.update(input_hash);
     h.finalize().into()
@@ -1188,7 +1188,7 @@ pub fn layer_shard_hash(layer_id: i64, input_hash: &[u8; 32]) -> [u8; 32] {
 pub fn root_shard_hash(root: &super::selection::RootLayer, input_hash: &[u8; 32]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
-    h.update(b"base-rooted-v2");
+    h.update(b"root-shard-v1");
     h.update((root.hash.len() as u64).to_le_bytes());
     h.update(&root.hash);
     h.update(input_hash);
@@ -4047,7 +4047,7 @@ mod tests {
 
     /// Per-layer atom keys: distinct per (layer, base), deterministic, and
     /// disjoint from the fused-supplement key family and the raw base hash —
-    /// the property the `eph-perlayer-v1` domain tag exists to guarantee.
+    /// the property the `layer-shard-v1` domain tag exists to guarantee.
     #[test]
     fn per_layer_hash_is_layer_scoped_and_disjoint() {
         let base = [9u8; 32];
@@ -4066,7 +4066,7 @@ mod tests {
             "different base hash must key a different atom"
         );
         // Disjoint from the fused-supplement key over the SAME ids — the domain
-        // tags (`eph-perlayer-v1` vs `eph-supplement-v1`) keep them apart.
+        // tags (`layer-shard-v1` vs `selection-shard-v1`) keep them apart.
         assert_ne!(
             k1,
             selection_shard_hash(-1001, &base, &[]),

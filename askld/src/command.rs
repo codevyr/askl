@@ -385,7 +385,7 @@ impl Command {
     /// composite selection shard.  Truncation ORs across parts per half.
     fn partitioned_composite(parts: Vec<LayerSpec>) -> LayerSpec {
         let mut h = Sha256::new();
-        h.update(b"composite-base-v1");
+        h.update(b"composite-input-v1");
         for p in &parts {
             h.update(p.input_hash);
         }
