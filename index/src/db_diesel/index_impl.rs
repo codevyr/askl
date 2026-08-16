@@ -1100,16 +1100,18 @@ pub enum LayerRole {
 }
 
 /// One layer materialised by [`Index::with_partitioned_layers`], in the
-/// exact order the executor records and pushes them: roots ascending; within a
-/// root, base first, then zero or more N-way per-layer content atoms
-/// (`LayerRole::PerLayer`, one per visible eph content layer, none until eph
-/// content exists), then the supplement LAST — which exists iff that root's
-/// upstream chain was non-empty (a chain-topology rule, not an
-/// overlay-emptiness shortcut: under a non-empty chain the supplement row is
-/// always materialized, even when its populate inserts zero rows).  The
-/// supplement is last so IT is the root's deterministic `chain_last`, never a
-/// nondeterministically-ordered atom — keeping downstream `supplement_hash`
-/// keys stable when atoms churn.
+/// exact order the executor records them (and concatenates them into its
+/// tree's round): roots ascending; within a root, base first, then zero or
+/// more N-way per-layer content atoms (`LayerRole::PerLayer`, one per
+/// visible eph content layer, none until eph content exists), then the
+/// supplement LAST — which exists iff that root's upstream (pre-tree) chain
+/// was non-empty (a chain-topology rule, not an overlay-emptiness shortcut:
+/// under a non-empty chain the supplement row is always materialized, even
+/// when its populate inserts zero rows).  The supplement is last so a
+/// command's final layer per root — and with it the tree tip, which is the
+/// LAST command's final layer — is always a supplement (or a base under
+/// first-round elision), never a nondeterministically-ordered atom —
+/// keeping downstream `supplement_hash` keys stable when atoms churn.
 #[derive(Debug, Clone, Copy)]
 pub struct MaterialisedLayer {
     /// The root whose chain this layer joins.
@@ -2879,10 +2881,12 @@ impl Index {
     /// rows (persistent data only, unmasked — masks are composed at read
     /// time, never applied here) plus, iff that root's chain is non-empty, a
     /// *supplement* layer chained on the root's `chain_last` holding the
-    /// eph-derived delta.  The supplement is always materialized under a
-    /// non-empty chain — even with zero rows — so downstream chaining keys
-    /// stay deterministic.  Results are sorted by root id, so activation
-    /// traces are deterministic.
+    /// eph-derived delta.  `eph` is the executor's PRE-TREE snapshot, so
+    /// supplements parent on the previous top-level statement's tip —
+    /// commands of one tree never chain on each other.  The supplement is
+    /// always materialized under a non-empty chain — even with zero rows —
+    /// so downstream chaining keys stay deterministic.  Results are sorted
+    /// by root id, so activation traces are deterministic.
     ///
     /// Root-parenting the base means a project's cached chains die with its
     /// root (`parent_id ON DELETE CASCADE` + the doomed-closure parent
