@@ -164,27 +164,31 @@ struct Staged {
     warnings: Vec<Diagnostic>,
 }
 
-/// The per-substatement materialise step of Phase M: `@label`
-/// resolution, [`Command::materialise_layers`], recording activations,
-/// and staging the outcome for Phase R.
+/// The sequential prep half of one substatement's Phase M: everything
+/// that reads `ExecutionContext` — `@label` resolution and parent-scope
+/// construction — done up front so the materialise fan-out itself needs
+/// no `ctx` at all (the concurrent futures borrow only `cfg`, the
+/// pre-tree snapshot, and this struct).
+struct PreparedMaterialise {
+    statement: Rc<Statement>,
+    resolved: LabelResolutions,
+    parent_scope: ScopeContext,
+}
+
+/// Prepare one substatement of Phase M: `@label` resolution and scope
+/// construction, both cheap immutable reads of `ctx`.
 ///
-/// Runs against `pre_tree_eph` — the visibility snapshot taken ONCE
-/// before any of the tree's materialisations — so every command in a
-/// tree materialises independently of its tree-mates: supplements
-/// parent on the PREVIOUS tree's tip, and per-layer shards enumerate
-/// only pre-tree content layers.  The round is NOT pushed here; the
-/// executor pushes the whole tree's layers as one round after the
-/// tree's Phase-M loop.
-async fn materialise_substatement(
-    ctx: &mut ExecutionContext,
-    cfg: &ControlFlowGraph,
+/// The parse-time ordering rule guarantees every label dep lives in an
+/// EARLIER tree, fully run (M, P, R) before this tree started — so
+/// resolution just reads the dependency's completed selection; nothing
+/// a tree-mate's materialisation could change.  That independence is
+/// what lets the executor prepare ALL of a tree's substatements before
+/// fanning their materialisations out concurrently.
+fn prepare_materialise(
+    ctx: &ExecutionContext,
     statement: &Rc<Statement>,
     pre_tree_eph: &EphContext,
-) -> Result<Staged, pest::error::Error<Rule>> {
-    // `@label` resolution.  The parse-time ordering rule
-    // guarantees every label dep lives in an EARLIER tree,
-    // fully run (M, P, R) before this tree started — just read
-    // its completed selection.
+) -> PreparedMaterialise {
     let mut resolved = LabelResolutions::new();
     let label_deps: Vec<(Rc<Statement>, Rc<str>)> = statement
         .get_state()
@@ -220,18 +224,11 @@ async fn materialise_substatement(
     // Condition-based by construction: nothing in this tree has a
     // selection yet, so the fused scope is the parent's filter.
     let parent_scope = build_parent_scope(statement, ctx, pre_tree_eph);
-    let outcome = statement
-        .command()
-        .materialise_layers(cfg, pre_tree_eph, &resolved, &parent_scope)
-        .await?;
-    ctx.layer_activations
-        .extend(outcome.activations.iter().copied());
-    Ok(Staged {
+    PreparedMaterialise {
         statement: statement.clone(),
-        layer_ids: outcome.layer_ids,
-        round: outcome.round,
-        warnings: outcome.warnings,
-    })
+        resolved,
+        parent_scope,
+    }
 }
 
 /// True when a statement may re-probe in a refinement round: every
@@ -385,14 +382,21 @@ impl Statement {
     /// per top-level statement tree, trees in source order.  ONE round per
     /// tree: nesting no longer sequences; `;` is the only time axis.
     ///
-    /// - **Phase M (materialise):** runs per tree — a visibility snapshot
-    ///   is taken ONCE before any of the tree's materialisations, and every
-    ///   substatement runs [`materialise_substatement`] in pre-order against
-    ///   that same PRE-TREE snapshot: no command sees a tree-mate's layers
-    ///   at materialise time (intra-tree chaining does not exist).  The
-    ///   tree's layers then enter visibility as ONE round, pushed after the
-    ///   loop; each command keeps its own layers (attribution by layer id
-    ///   is load-bearing for per-command selections).
+    /// - **Phase M (materialise, concurrent):** runs per tree — a
+    ///   visibility snapshot is taken ONCE before any of the tree's
+    ///   materialisations, every substatement is prepared sequentially
+    ///   ([`prepare_materialise`]: label resolution + scopes, the `ctx`
+    ///   reads), and the [`Command::materialise_layers`] calls then run
+    ///   CONCURRENTLY against that same PRE-TREE snapshot: no command sees
+    ///   a tree-mate's layers at materialise time (intra-tree chaining
+    ///   does not exist), so the calls are independent by construction.
+    ///   Outcomes are applied in substatement pre-order — completion order
+    ///   is unobservable.  The tree's layers then enter visibility as ONE
+    ///   round, pushed after the batch; each command keeps its own layers
+    ///   (attribution by layer id is load-bearing for per-command
+    ///   selections).  Tree-mates with IDENTICAL specs converge on the
+    ///   same layer rows via the ON CONFLICT + 2-PC `populated` protocol
+    ///   (see `Index::create_eph_layer`).
     ///
     ///   **Spine advance rule.**  Every supplement-bearing command's
     ///   supplement parents on the PREVIOUS tree's tip (`chain_last` of the
@@ -452,12 +456,57 @@ impl Statement {
             // snapshot (no intra-tree chaining; `has_chain` and the
             // eph-referencing guards evaluate against it — correct by
             // construction, since labels may only reference earlier trees).
-            // The per-substatement outcomes are collected into the tree's
-            // `staged` batch. ----
+            //
+            // CONCURRENT since the calls are mutually independent: the
+            // sequential prep pass below does every `ctx` read (label
+            // resolution, parent scopes), then the materialise futures
+            // overlap via `join_all` exactly like Phase R's reads.  No
+            // explicit fan-out bound, matching Phase R: the DB pool
+            // (bb8, default 10 connections) bounds concurrency — each
+            // in-flight layer holds ONE connection, blocked hash-race
+            // losers wait on a row lock whose winner already owns its
+            // connection, and pool-queued tasks hold no locks, so
+            // exhaustion queues rather than deadlocks.  Two tree-mates
+            // with IDENTICAL specs race on the same `(root, hash)` rows;
+            // `create_eph_layer`'s ON CONFLICT + 2-PC `populated`
+            // protocol serialises them and the loser becomes a cache
+            // hit on the SAME layer id.
+            //
+            // Results are applied strictly IN PRE-ORDER below, so
+            // completion order is unobservable: keys, parents, tip,
+            // activation order, and warnings order all follow
+            // substatement pre-order. ----
             let pre_tree_eph = ctx.eph.clone();
+            let prepared: Vec<PreparedMaterialise> = tree
+                .iter()
+                .map(|statement| prepare_materialise(ctx, statement, &pre_tree_eph))
+                .collect();
+            let futs = prepared.iter().map(|p| {
+                p.statement.command().materialise_layers(
+                    cfg,
+                    &pre_tree_eph,
+                    &p.resolved,
+                    &p.parent_scope,
+                )
+            });
+            let results = futures::future::join_all(futs).await;
+            // Check all results before applying any — avoid partial ctx
+            // mutation on error (same contract as Phase R).  `join_all`
+            // drives every future to completion, so no sibling's layer
+            // transaction is cancelled mid-populate by another's error.
+            let outcomes = results
+                .into_iter()
+                .collect::<Result<Vec<_>, pest::error::Error<Rule>>>()?;
             let mut staged: Vec<Staged> = Vec::with_capacity(tree.len());
-            for statement in &tree {
-                staged.push(materialise_substatement(ctx, cfg, statement, &pre_tree_eph).await?);
+            for (p, outcome) in prepared.into_iter().zip(outcomes) {
+                ctx.layer_activations
+                    .extend(outcome.activations.iter().copied());
+                staged.push(Staged {
+                    statement: p.statement,
+                    layer_ids: outcome.layer_ids,
+                    round: outcome.round,
+                    warnings: outcome.warnings,
+                });
             }
 
             // The tree's layers enter visibility as ONE round: substatement

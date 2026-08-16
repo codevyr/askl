@@ -6117,6 +6117,160 @@ fn first_round_multi_block_tree_tip_is_last_base() {
     }
 }
 
+#[test]
+fn identical_tree_mates_converge_on_same_layers() {
+    // F3: a tree's materialisations run CONCURRENTLY, so two tree-mates
+    // with IDENTICAL specs (same verb, same inputs, same parent scope)
+    // race to create the same `(root, hash)` layer rows.  The ON CONFLICT
+    // + 2-PC `populated` protocol (`Index::create_eph_layer`) serialises
+    // the race: the loser blocks on the winner's row lock and unblocks as
+    // a cache hit on the SAME layer id — never a duplicate row, never a
+    // half-built layer.
+    use crate::command::LayerRole;
+    // `limit="44"` is unique to this test, so the first run is cold: the
+    // race is a genuine create-vs-create, not two cache hits.
+    const QUERY: &str = r#"{ search("foo", limit="44") ; search("foo", limit="44") }"#;
+
+    let shape: &[(i64, LayerRole)] = &[
+        // ONE tree, empty pre-tree chain → first-round elision: bases
+        // only, in substatement pre-order.
+        (R1, LayerRole::Base), // first search, root 1
+        (R2, LayerRole::Base), // first search, root 2
+        (R1, LayerRole::Base), // second search, root 1
+        (R2, LayerRole::Base), // second search, root 2
+    ];
+
+    let (res1, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
+    assert_root_roles(&acts1, shape);
+
+    // Both commands resolve to the SAME layer per root.
+    for (a, b) in [(acts1[0], acts1[2]), (acts1[1], acts1[3])] {
+        assert_eq!(
+            a.layer_id, b.layer_id,
+            "identical tree-mates must converge on one layer row per \
+             root, got {:?}",
+            acts1
+        );
+        // Exactly one racer created the row (cold DB: the hash is unique
+        // to this test).  WHICH of the two carries `created` is
+        // completion order — deliberately not asserted.
+        assert!(
+            a.created ^ b.created,
+            "exactly one of two identical racers creates the layer, the \
+             other must hit it, got {:?}",
+            acts1
+        );
+    }
+
+    // The suite stays deterministic: a repeat run is a full cache hit
+    // with the same ids in the same pre-order positions.
+    let (res2, acts2) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
+    assert_root_roles(&acts2, shape);
+    assert!(
+        acts2.iter().all(|a| !a.created),
+        "repeat run must hit every layer, got {:?}",
+        acts2
+    );
+    assert_eq!(
+        acts1.iter().map(|a| a.layer_id).collect::<Vec<_>>(),
+        acts2.iter().map(|a| a.layer_id).collect::<Vec<_>>(),
+        "layer ids must be stable across runs"
+    );
+
+    // And the duplicate command changes nothing about the result: both
+    // runs select the same node set.
+    let ids = |res: &crate::statement::ExecutionResult| {
+        let mut v: Vec<i64> = res.nodes.as_vec().iter().map(|id| (*id).into()).collect();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(ids(&res1), ids(&res2), "node sets must match across runs");
+}
+
+#[test]
+fn three_content_verb_tree_deterministic_across_runs() {
+    // F3 determinism: THREE content verbs materialise concurrently within
+    // one tree, yet keys, parents, activation order, and the tree's tip
+    // remain a pure function of the query text and the pre-tree chain.
+    // Tree 0 seeds the chain so every tree-mate grows a supplement (the
+    // half whose key folds the previous tree's tip — the part worth
+    // pinning under concurrency).  Three runs: identical
+    // (root, role, layer_id) sequences every time, runs 2..3 full cache
+    // hits.
+    use crate::command::LayerRole;
+    const QUERY: &str = concat!(
+        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
+        r#"start="88000", end="88100", instance_type="1") }; "#,
+        r#"{ search("foo", limit="41") ; search("hello", limit="41") ; "#,
+        r#"search("foo", limit="42") }"#,
+    );
+
+    let shape: &[(i64, LayerRole)] = &[
+        // tree 0 (seed): empty pre-tree chain → base only, per root.
+        (R1, LayerRole::Base),
+        (R2, LayerRole::Base),
+        // tree 1, substatement pre-order; per command: base + supplement
+        // per root (every root's chain is non-empty by now).
+        (R1, LayerRole::Base),
+        (R1, LayerRole::Supplement),
+        (R2, LayerRole::Base),
+        (R2, LayerRole::Supplement),
+        (R1, LayerRole::Base),
+        (R1, LayerRole::Supplement),
+        (R2, LayerRole::Base),
+        (R2, LayerRole::Supplement),
+        (R1, LayerRole::Base),
+        (R1, LayerRole::Supplement),
+        (R2, LayerRole::Base),
+        (R2, LayerRole::Supplement),
+    ];
+
+    let (_res1, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
+    assert_root_roles(&acts1, shape);
+    let ids1: Vec<i64> = acts1.iter().map(|a| a.layer_id).collect();
+
+    // All three tree-mates' supplements are SIBLINGS under tree 0's tip
+    // (its base, per root) — concurrency must not re-introduce
+    // intra-tree chaining.
+    let (seed_r1, seed_r2) = (acts1[0], acts1[1]);
+    for (seed, supp) in [
+        (seed_r1, acts1[3]),
+        (seed_r2, acts1[5]),
+        (seed_r1, acts1[7]),
+        (seed_r2, acts1[9]),
+        (seed_r1, acts1[11]),
+        (seed_r2, acts1[13]),
+    ] {
+        let (meta, _) = eph_layer_state(TEST_INPUT_SEARCH, supp.layer_id);
+        assert_eq!(
+            meta.parent_id,
+            Some(seed.layer_id),
+            "every tree-mate's supplement parents the PREVIOUS tree's \
+             tip, got {:?}",
+            meta
+        );
+    }
+
+    for run in 2..=3 {
+        let (_res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
+        assert_root_roles(&acts, shape);
+        assert!(
+            acts.iter().all(|a| !a.created),
+            "run {} must be a full cache hit on every layer, got {:?}",
+            run,
+            acts
+        );
+        let ids: Vec<i64> = acts.iter().map(|a| a.layer_id).collect();
+        assert_eq!(
+            ids1, ids,
+            "run {}: the (root, role, layer_id) sequence — and with it \
+             the tree's tip, its round's last pre-order layer per root — \
+             must be identical across runs",
+            run
+        );
+    }
+}
+
 // ============================================================================
 // Chained-variant removal: loc/layer{} partitioning tests
 // ============================================================================
