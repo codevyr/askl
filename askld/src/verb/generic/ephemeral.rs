@@ -539,7 +539,7 @@ impl Selector for LayerVerb {
         // synchronously, then release the lock before any .await points.
         // The `Mutex` is uncontended at this point — see `EphemeralOps`
         // rustdoc for why the lock exists at all.
-        let (base_hash, supplement_extra, base_batch, supp_batch) = {
+        let (input_hash, selection_extra, root_batch, sel_batch) = {
             let ops = self.ops.lock().unwrap();
             if ops.is_empty() {
                 bail!("layer block must contain at least one ephemeral verb");
@@ -549,36 +549,36 @@ impl Selector for LayerVerb {
             // per-op trait override: collect its rows into a probe batch and
             // check every id-bearing field for eph (negative) ids.  Ops
             // whose rows reference only persistent ids (or nothing) form
-            // the base half — keyed by their resolved content, so the base
-            // is shared across any upstream chains under which the labels
-            // resolve identically.  Ops emitting rows that reference eph
-            // ids form the supplement half.  Deriving this from the rows in
-            // one place means a future op (or a new id-bearing row field,
-            // once added to `batch_references_eph`) cannot be silently
-            // mis-classified into the chain-independent shared base by a
+            // the root-shard half — keyed by their resolved content, so the
+            // root shard is shared across any upstream chains under which the
+            // labels resolve identically.  Ops emitting rows that reference
+            // eph ids form the selection-shard half.  Deriving this from the
+            // rows in one place means a future op (or a new id-bearing row
+            // field, once added to `batch_references_eph`) cannot be silently
+            // mis-classified into the chain-independent shared root shard by a
             // forgotten override.  (`EphSymbolRow` carries no id
             // references — `symbol_scope` is a Local/Global discriminator,
             // not a symbol id.)
-            let mut base_ops = Vec::new();
-            let mut supp_ops = Vec::new();
-            let mut base_batch = LayerBatch::new();
-            let mut supp_batch = LayerBatch::new();
+            let mut root_ops = Vec::new();
+            let mut sel_ops = Vec::new();
+            let mut root_batch = LayerBatch::new();
+            let mut sel_batch = LayerBatch::new();
             for op in ops.iter() {
                 let mut probe = LayerBatch::new();
                 op.collect_rows(&mut probe, resolved);
                 if batch_references_eph(&probe) {
-                    supp_ops.push(op);
-                    merge_batch(&mut supp_batch, probe);
+                    sel_ops.push(op);
+                    merge_batch(&mut sel_batch, probe);
                 } else {
-                    base_ops.push(op);
-                    merge_batch(&mut base_batch, probe);
+                    root_ops.push(op);
+                    merge_batch(&mut root_batch, probe);
                 }
             }
 
-            if !supp_ops.is_empty() && !eph.has_chain() {
+            if !sel_ops.is_empty() && !eph.has_chain() {
                 // Only reachable via a literal negative id: labels cannot
                 // resolve to eph rows without chain layers to supply them.
-                // Without a chain the executor creates no supplement, so
+                // Without a chain the executor creates no selection shard, so
                 // these rows would be silently dropped — error instead.
                 bail!(
                     "layer block references ephemeral (negative) ids but no \
@@ -591,7 +591,7 @@ impl Selector for LayerVerb {
             // `EphLayerKind::Layer.as_str()`) so `layer{}` hashes stay disjoint
             // even though the layer kind is now the coarse `Ephemeral`.
             h.update(b"layer");
-            for op in &base_ops {
+            for op in &root_ops {
                 // Op insertion order is significant for the cache key by
                 // design (within each half); two layers with the same ops in
                 // different order will not share cache state.  Resolved
@@ -599,23 +599,24 @@ impl Selector for LayerVerb {
                 // the cache key reflects the actual rows.
                 op.hash_params(&mut h, resolved);
             }
-            let base_hash: [u8; 32] = h.finalize().into();
+            let input_hash: [u8; 32] = h.finalize().into();
 
-            // The supplement key must fold the supplement ops' resolved
-            // content: (parent, base_hash) alone cannot distinguish two
-            // blocks that share base ops but differ in eph-referencing ops.
-            let supplement_extra: Vec<u8> = if supp_ops.is_empty() {
+            // The selection-shard key must fold the selection ops' resolved
+            // content: (parent, input_hash) alone cannot distinguish two
+            // blocks that share root-shard ops but differ in eph-referencing
+            // ops.
+            let selection_extra: Vec<u8> = if sel_ops.is_empty() {
                 Vec::new()
             } else {
                 let mut he = Sha256::new();
                 he.update(b"layer-supplement-ops-v1");
-                for op in &supp_ops {
+                for op in &sel_ops {
                     op.hash_params(&mut he, resolved);
                 }
                 he.finalize().to_vec()
             };
 
-            (base_hash, supplement_extra, base_batch, supp_batch)
+            (input_hash, selection_extra, root_batch, sel_batch)
         }; // lock released here
 
         // Validate op references against the visible root set BEFORE any
@@ -626,7 +627,7 @@ impl Selector for LayerVerb {
         // the pre-scoping inserts raised a loud FK error.
         let visible_projects: std::collections::HashSet<i32> =
             eph.roots().iter().map(|r| r.project_id).collect();
-        for row in base_batch.symbols.iter().chain(supp_batch.symbols.iter()) {
+        for row in root_batch.symbols.iter().chain(sel_batch.symbols.iter()) {
             if !visible_projects.contains(&row.project_id) {
                 bail!(
                     "ephemeral_symbol: project_id {} does not match any visible project",
@@ -634,16 +635,16 @@ impl Selector for LayerVerb {
                 );
             }
         }
-        let mut object_ids: Vec<i32> = base_batch
+        let mut object_ids: Vec<i32> = root_batch
             .instances
             .iter()
-            .chain(supp_batch.instances.iter())
+            .chain(sel_batch.instances.iter())
             .map(|r| r.object_id)
             .chain(
-                base_batch
+                root_batch
                     .refs
                     .iter()
-                    .chain(supp_batch.refs.iter())
+                    .chain(sel_batch.refs.iter())
                     .map(|r| r.from_object),
             )
             .collect();
@@ -669,19 +670,19 @@ impl Selector for LayerVerb {
         // rows of several projects — are shared via `Arc`, and the scoped
         // insert's SQL partitions each root's share (symbols by their
         // explicit project_id, instances/refs by their object's project).
-        let base_batch = std::sync::Arc::new(base_batch);
-        let supp_batch = std::sync::Arc::new(supp_batch);
-        let base_populate: crate::verb::LayerPopulate = Box::new(move |txn, root| {
-            let batch = std::sync::Arc::clone(&base_batch);
+        let root_batch = std::sync::Arc::new(root_batch);
+        let sel_batch = std::sync::Arc::new(sel_batch);
+        let root_shard_populate: crate::verb::RootShardPopulate = Box::new(move |txn, root| {
+            let batch = std::sync::Arc::clone(&root_batch);
             Box::pin(async move {
                 txn.insert_batch(&batch, root.project_id).await?;
                 // `layer { … }` blocks never truncate; truncated = false.
                 Ok(false)
             })
         });
-        let supplement_populate: crate::verb::SupplementPopulate =
-            Box::new(move |txn, root, _base| {
-                let batch = std::sync::Arc::clone(&supp_batch);
+        let selection_shard_populate: crate::verb::SelectionShardPopulate =
+            Box::new(move |txn, root, _root_shard_ref| {
+                let batch = std::sync::Arc::clone(&sel_batch);
                 Box::pin(async move {
                     txn.insert_batch(&batch, root.project_id).await?;
                     Ok(false)
@@ -689,14 +690,14 @@ impl Selector for LayerVerb {
             });
 
         Ok(Some(crate::verb::LayerSpec {
-            base_hash,
-            base_populate,
-            supplement_populate,
+            input_hash,
+            root_shard_populate,
+            selection_shard_populate,
             // `layer { … }` is chain-dependent ops, not a per-layer content
-            // scan, so it exposes no N-way atom: its delta stays the fused
-            // supplement keyed on `chain_last`.
-            per_layer_populate: None,
-            supplement_extra,
+            // scan, so it exposes no N-way layer shard: its delta stays the
+            // selection shard keyed on `chain_last`.
+            layer_shard_populate: None,
+            selection_extra,
         }))
     }
 }

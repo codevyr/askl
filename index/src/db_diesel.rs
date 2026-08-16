@@ -10,11 +10,12 @@ mod selection;
 mod sql_cache;
 
 pub use index_impl::{
-    eph_pool_manager_config, per_layer_hash, purge_eph_cache, supplement_hash, BaseLayerRef,
+    eph_pool_manager_config, layer_shard_hash, purge_eph_cache, selection_shard_hash,
     EphInstanceRow, EphLayerKind, EphLayerMeta, EphRefRow, EphScopedFut, EphSymbolRow,
-    EphTransaction, ImplicitEdge, Index, LayerBatch, LayerOutcome, LayerRole, MaterialisedLayer,
-    NameSuggestionRow, ProbeOutcome, ProbeRole, ResolvedSourceFile, ScopeContext, SearchMatchRow,
-    DEFAULT_SQL_CACHE_BYTES, EPH_POOL_IDLE_IN_TXN_TIMEOUT, EPH_POOL_RECYCLING_QUERY,
+    EphTransaction, ImplicitEdge, Index, LayerBatch, LayerOutcome, MaterialisedLayer,
+    NameSuggestionRow, ProbeOutcome, ProbeRole, ResolvedSourceFile, RootShardRef, ScopeContext,
+    SearchMatchRow, ShardRole, DEFAULT_SQL_CACHE_BYTES, EPH_POOL_IDLE_IN_TXN_TIMEOUT,
+    EPH_POOL_RECYCLING_QUERY,
 };
 pub use mixins::{
     CompositeFilter, CompoundNameMixin, CurrentQuery, DefaultSymbolTypeMixin, DirectOnlyMixin,

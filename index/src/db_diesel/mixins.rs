@@ -708,7 +708,7 @@ pub trait FilterLeaf: std::fmt::Debug + FilterLeafClone + Send + Sync {
     /// populate the base would poison it for every other chain.  If a
     /// filter genuinely needs eph-scoped object visibility, it must NOT go
     /// through this hook — it belongs in the supplement half (whose key
-    /// folds the chain and the verb's `supplement_extra`).  The regression
+    /// folds the chain and the verb's `selection_extra`).  The regression
     /// test `search_base_reused_with_filters_across_eph_change` fences this.
     fn objects_expr(&self) -> Option<ObjectsBoolExpr> {
         None

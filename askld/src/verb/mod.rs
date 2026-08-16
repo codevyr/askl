@@ -9,15 +9,16 @@ use crate::statement::Statement;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
-    BaseLayerRef, CompositeFilter, DirectOnlyMixin, EphContext, EphScopedFut, EphTransaction,
-    Index, InnermostOnlyMixin, OuterParentFilterMixin, RootLayer, ScopeContext, Selection,
+    CompositeFilter, DirectOnlyMixin, EphContext, EphScopedFut, EphTransaction, Index,
+    InnermostOnlyMixin, OuterParentFilterMixin, RootLayer, RootShardRef, ScopeContext, Selection,
     SymbolInstanceIdMixin,
 };
 
-/// Populate-callback type used by [`LayerSpec`].  Called by the statement-
-/// execution layer inside [`Index::with_eph_layer`] — once PER VISIBLE ROOT
-/// (each root gets its own base layer holding only that project's rows) and
-/// only when that root's layer is freshly inserted (cache miss); on hit the
+/// Root-shard populate callback used by [`LayerSpec`].  Called by the
+/// statement-execution layer inside [`Index::with_eph_layer`] — once PER
+/// VISIBLE ROOT (each root gets its own root shard holding only that
+/// project's rows) and only when that root's layer is freshly inserted
+/// (cache miss); on hit the
 /// executor skips it.  `Fn`, not `FnOnce`: the same closure runs for every
 /// root, so verbs capture their inputs in `Arc`/cheap clones and clone them
 /// into each returned future (the HRTB means the future cannot borrow the
@@ -32,42 +33,43 @@ use index::db_diesel::{
 /// have a notion of truncation (e.g. `loc`, manual `layer { … }` blocks)
 /// always return `false`.  The flag is persisted to `layers.truncated`
 /// so cache hits propagate it without re-running the populate batch.
-pub type LayerPopulate =
+pub type RootShardPopulate =
     Box<dyn for<'b> Fn(&'b mut EphTransaction<'_>, &'b RootLayer) -> EphScopedFut<'b, bool>>;
 
-/// Supplement-populate callback used by [`LayerSpec`].  Same contract as
-/// [`LayerPopulate`], plus the identity of that root's already-committed
-/// base layer so future mask/tombstone rows can reference what they mask.
-/// The returned `bool` is the supplement's own `truncated` flag; verbs whose
-/// result limit fences the persistent scan return `false` here.
+/// Selection-shard populate callback used by [`LayerSpec`].  Same contract as
+/// [`RootShardPopulate`], plus the identity of that root's already-committed
+/// root shard so future mask/tombstone rows can reference what they mask.
+/// The returned `bool` is the selection shard's own `truncated` flag; verbs
+/// whose result limit fences the persistent scan return `false` here.
 ///
 /// Mask-milestone caveat: under a multi-selector composite the executor
 /// merges all parts into ONE partitioned entry per root, so every part's
-/// supplement closure receives the COMPOSITE base's `BaseLayerRef` — not the
-/// ref of the base the part's own verb would have produced standalone.
-/// Closures that start reading `BaseLayerRef` must account for this.
-pub type SupplementPopulate = Box<
+/// selection-shard closure receives the COMPOSITE root shard's
+/// `RootShardRef` — not the ref of the root shard the part's own verb would
+/// have produced standalone.  Closures that start reading `RootShardRef` must
+/// account for this.
+pub type SelectionShardPopulate = Box<
     dyn for<'b> Fn(
         &'b mut EphTransaction<'_>,
         &'b RootLayer,
-        BaseLayerRef,
+        RootShardRef,
     ) -> EphScopedFut<'b, bool>,
 >;
 
-/// Per-layer populate callback for N-way content sharding.  Same contract as
-/// [`SupplementPopulate`], plus the id of the ONE ephemeral content layer
-/// `L_j` this atom shards — the executor invokes it once per visible eph
+/// Layer-shard populate callback for N-way content sharding.  Same contract as
+/// [`SelectionShardPopulate`], plus the id of the ONE ephemeral content layer
+/// `L_j` this shard covers — the executor invokes it once per visible eph
 /// content layer (see [`Index::with_partitioned_layers`]) so the verb's
 /// contribution `V(L_j)` caches independently on `(verb inputs, L_j)`.  A verb
 /// exposes this by binding its layer-agnostic scan to `visible_layers=[L_j],
 /// eph_branch=true`; `layer { … }` blocks (chain-dependent ops, not a
-/// content scan) leave [`LayerSpec::per_layer_populate`] `None`.
-pub type PerLayerPopulate = Box<
+/// content scan) leave [`LayerSpec::layer_shard_populate`] `None`.
+pub type LayerShardPopulate = Box<
     dyn for<'b> Fn(
         &'b mut EphTransaction<'_>,
         &'b RootLayer,
         i64,
-        BaseLayerRef,
+        RootShardRef,
     ) -> EphScopedFut<'b, bool>,
 >;
 
@@ -75,19 +77,19 @@ pub type PerLayerPopulate = Box<
 /// [`LayerSpec::sharded_scan`].  The verb provides ONE layer-agnostic scan;
 /// the executor invokes it per visible root (chains run in parallel) with a
 /// `(visible_layers, eph_branch)` shard:
-///   * the persistent base shard `(vec![root.id], false)`, and
-///   * one N-way per-layer atom `(vec![L_j], true)` per visible eph *content*
+///   * the root shard `(vec![root.id], false)`, and
+///   * one N-way layer shard `(vec![L_j], true)` per visible eph *content*
 ///     layer — so each layer's contribution `V(L_j)` caches independently on
 ///     `(verb inputs, L_j)` and is reused by any chain containing `L_j`.
 ///
-/// The fused eph supplement is a NO-OP for content scans: the per-layer atoms
-/// already cover every eph content layer, so a scanning supplement would only
+/// The selection shard is a NO-OP for content scans: the layer shards already
+/// cover every eph content layer, so a scanning selection shard would only
 /// DOUBLE-COUNT.  It survives (empty) purely as the deterministic
 /// chain-continuation marker (`chain_last`).  Results compose by union, valid
 /// while masking-free.  Ephemeral layers hold no content today, so this is
 /// byte-identical to the old 2-way path until content-in-layers lands.
 ///
-/// Boxed AS an explicit `dyn for<'b> Fn` (like [`LayerPopulate`]) so the HRTB
+/// Boxed AS an explicit `dyn for<'b> Fn` (like [`RootShardPopulate`]) so the HRTB
 /// check is driven by the trait-object type rather than by closure inference —
 /// a plain closure is not higher-ranked over the `txn`/`root` input lifetime
 /// and cannot satisfy the bound.
@@ -103,8 +105,8 @@ pub type ShardedScan = Box<
 /// Specification for an ephemeral cache entry that a [`Selector`] wants the
 /// statement-execution layer to materialize before its query runs.
 ///
-/// Every cached verb produces a base layer keyed only on its inputs and,
-/// under a non-empty eph chain, a supplement layer holding the eph-derived
+/// Every cached verb produces a root shard keyed only on its inputs and,
+/// under a non-empty eph chain, a selection shard holding the eph-derived
 /// delta (see [`Index::with_partitioned_layers`]).  Layer-creating selectors
 /// (`search`, `loc`, `layer { … }`) implement [`Selector::layer_spec`]
 /// returning `Some(LayerSpec)`.  The executor materializes the layers per
@@ -117,71 +119,74 @@ pub type ShardedScan = Box<
 /// reads the live eph context), which removes the parent-disagreement
 /// failure mode entirely.
 pub struct LayerSpec {
-    /// Keyed ONLY on verb inputs + composite-filter hash — never on the
-    /// eph chain.  That independence is what lets the base survive any
-    /// upstream ephemeral change.  (The executor additionally salts this
-    /// per root — `root_salted_hash` — so each root's base is keyed on that
-    /// single root's identity, independent of co-visible projects.)
-    pub base_hash: [u8; 32],
-    /// Populates the root-layer shard — the verb's scan bound to the root's
-    /// own layer, unmasked (mask composition happens at read time, never here).
+    /// The command's input hash H(c): keyed ONLY on verb inputs +
+    /// composite-filter hash — never on the eph chain.  That independence is
+    /// what lets the root shard survive any upstream ephemeral change.  (The
+    /// executor additionally salts this per root — `root_shard_hash` — so each
+    /// root's shard is keyed on that single root's identity, independent of
+    /// co-visible projects.)
+    pub input_hash: [u8; 32],
+    /// Populates the root shard — the verb's scan bound to the root's own
+    /// layer, unmasked (mask composition happens at read time, never here).
     /// Not a "persistent-only" contract: the verb is layer-agnostic; this shard
     /// is simply scoped to the root layer by the executor.
-    pub base_populate: LayerPopulate,
+    pub root_shard_populate: RootShardPopulate,
     /// The eph-derived delta.  Provided unconditionally (uniform shape);
     /// the executor runs it iff an upstream chain exists.
-    pub supplement_populate: SupplementPopulate,
+    pub selection_shard_populate: SelectionShardPopulate,
     /// N-way content sharding: the verb's per-layer contribution `V(L_j)`,
     /// invoked once per visible eph *content* layer.  `Some` for content
     /// scans (search, loc) that decompose as `V(⋃L)=⋃V(L)`; `None` for
-    /// `layer { … }` blocks, whose supplement is genuinely chain-dependent,
-    /// not a per-layer content scan.  Additive to base+supplement: today no
-    /// eph layer carries content, so the executor materialises zero atoms and
-    /// production is byte-identical.  See [`Index::with_partitioned_layers`].
-    pub per_layer_populate: Option<PerLayerPopulate>,
-    /// Hash fragment covering whatever the supplement populate reads BEYOND
-    /// the chain and the base (folded into the supplement key by
-    /// `index::db_diesel::supplement_hash`).  Empty when the delta is fully
-    /// determined by (parent, base) — search, loc; the resolved
+    /// `layer { … }` blocks, whose selection shard is genuinely
+    /// chain-dependent, not a per-layer content scan.  Additive to the root
+    /// and selection shards: today no eph layer carries content, so the
+    /// executor materialises zero layer shards and production is
+    /// byte-identical.  See [`Index::with_partitioned_layers`].
+    pub layer_shard_populate: Option<LayerShardPopulate>,
+    /// Hash fragment covering whatever the selection-shard populate reads
+    /// BEYOND the chain and the root shard (folded into the selection-shard
+    /// key by `index::db_diesel::selection_shard_hash`).  Empty when the delta
+    /// is fully determined by (parent, root shard) — search, loc; the resolved
     /// eph-referencing ops for `layer { … }` blocks.
-    pub supplement_extra: Vec<u8>,
+    pub selection_extra: Vec<u8>,
 }
 
 impl LayerSpec {
     /// A verb whose result is a content scan the executor SHARDS by layer:
-    /// base = the root-only shard (chain-independent); one per-layer atom per
-    /// visible eph *content* layer (`vec![L_j]`, chain-independent key). The
-    /// verb stays layer-agnostic — it provides one
+    /// the root shard is the root-only shard (chain-independent); one layer
+    /// shard per visible eph *content* layer (`vec![L_j]`, chain-independent
+    /// key). The verb stays layer-agnostic — it provides one
     /// `scan(txn, root, visible_layers, eph_branch)`; the shard→visibility
-    /// mapping lives HERE, not in the verb. The fused eph supplement is a
-    /// NO-OP: the atoms carry every eph content layer, so a scanning supplement
-    /// would double-count; it survives empty only as the `chain_last` marker.
-    /// `supplement_extra` is empty (a scan reads no extra key material beyond
-    /// parent+base).
-    pub fn sharded_scan(base_hash: [u8; 32], scan: ShardedScan) -> Self {
+    /// mapping lives HERE, not in the verb. The selection shard is a NO-OP:
+    /// the layer shards carry every eph content layer, so a scanning selection
+    /// shard would double-count; it survives empty only as the `chain_last`
+    /// marker.  `selection_extra` is empty (a scan reads no extra key material
+    /// beyond parent + root shard).
+    pub fn sharded_scan(input_hash: [u8; 32], scan: ShardedScan) -> Self {
         let scan = std::sync::Arc::new(scan);
-        let scan_base = scan.clone();
-        let scan_per_layer = scan;
-        let base_populate: LayerPopulate =
-            Box::new(move |txn, root| scan_base(txn, root, vec![root.id], false));
-        // NO-OP fused supplement (see the type-level and `sharded_scan` docs):
-        // the per-layer atoms below are the sole content holders, so scanning
+        let scan_root_shard = scan.clone();
+        let scan_layer_shard = scan;
+        let root_shard_populate: RootShardPopulate =
+            Box::new(move |txn, root| scan_root_shard(txn, root, vec![root.id], false));
+        // NO-OP selection shard (see the type-level and `sharded_scan` docs):
+        // the layer shards below are the sole content holders, so scanning
         // here would double-count.  It survives empty as the chain marker.
-        let supplement_populate: SupplementPopulate =
-            Box::new(|_txn, _root, _base_ref| Box::pin(async { Ok(false) }));
-        // N-way: each atom scans exactly ONE eph content layer `[layer_id]`.
-        // Binding the same layer-agnostic scan to a singleton visible set is
-        // what makes `V(L_j)` a stand-alone, per-layer-cacheable unit.
-        let per_layer_populate: PerLayerPopulate =
-            Box::new(move |txn, root, layer_id, _base_ref| {
-                scan_per_layer(txn, root, vec![layer_id], true)
+        let selection_shard_populate: SelectionShardPopulate =
+            Box::new(|_txn, _root, _root_shard_ref| Box::pin(async { Ok(false) }));
+        // N-way: each layer shard scans exactly ONE eph content layer
+        // `[layer_id]`.  Binding the same layer-agnostic scan to a singleton
+        // visible set is what makes `V(L_j)` a stand-alone, per-layer-cacheable
+        // unit.
+        let layer_shard_populate: LayerShardPopulate =
+            Box::new(move |txn, root, layer_id, _root_shard_ref| {
+                scan_layer_shard(txn, root, vec![layer_id], true)
             });
         Self {
-            base_hash,
-            base_populate,
-            supplement_populate,
-            per_layer_populate: Some(per_layer_populate),
-            supplement_extra: Vec::new(),
+            input_hash,
+            root_shard_populate,
+            selection_shard_populate,
+            layer_shard_populate: Some(layer_shard_populate),
+            selection_extra: Vec::new(),
         }
     }
 }

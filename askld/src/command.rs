@@ -7,8 +7,8 @@ use crate::span::Span;
 use crate::statement::Statement;
 use crate::verb::{
     add_verb, find_symbol_by_instance_id, ConstraintAction, DeriveMethod, Filter, LabelResolutions,
-    Labeler, LayerPopulate, LayerSpec, NotificationContext, OwnPredicate, PerLayerPopulate,
-    Selector, SelectorId, SupplementPopulate, Verb, VerbTag,
+    Labeler, LayerShardPopulate, LayerSpec, NotificationContext, OwnPredicate, RootShardPopulate,
+    SelectionShardPopulate, Selector, SelectorId, Verb, VerbTag,
 };
 use anyhow::Result;
 use core::fmt::Debug;
@@ -22,10 +22,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// Which half of a root's cache entry a [`LayerActivation`] refers to —
+/// Which shard of a root's cache entry a [`LayerActivation`] refers to —
 /// re-exported from the index crate, which produces the layers in this
 /// exact role order.
-pub use index::db_diesel::LayerRole;
+pub use index::db_diesel::ShardRole;
 
 /// One ephemeral-layer touch by a statement: either the layer was freshly
 /// created and populated in this call (`created = true`), or the statement
@@ -35,8 +35,8 @@ pub use index::db_diesel::LayerRole;
 /// Recorded on [`ExecutionContext::layer_activations`] so tests can assert
 /// cache behaviour (populate vs reuse) directly instead of inferring it
 /// from eph instance IDs.  A layer-creating statement records activations
-/// per visible root, roots ascending; within a root, base first, then
-/// supplement.
+/// per visible root, roots ascending; within a root, the root shard first,
+/// then the selection shard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LayerActivation {
     /// The root whose chain this layer joined.
@@ -44,7 +44,7 @@ pub struct LayerActivation {
     pub layer_id: i64,
     pub created: bool,
     pub truncated: bool,
-    pub role: LayerRole,
+    pub role: ShardRole,
 }
 
 /// Result of computing initial selections for a statement's selectors.
@@ -70,8 +70,8 @@ impl ComputeResult {
 /// tree's layers enter visibility together), plus the Phase-M warnings
 /// (layer truncation) to be carried into the statement's Phase R.
 pub struct MaterialiseOutcome {
-    /// All materialised layer ids (bases, atoms, supplements, every root) —
-    /// Phase R's layer-union read enumerates rows from exactly these.
+    /// All materialised layer ids (root, layer, and selection shards, every
+    /// root) — Phase R's layer-union read enumerates rows from exactly these.
     pub layer_ids: Vec<i64>,
     /// `(root_id, layer_id)` pairs for `EphContext::push_round`.
     pub round: Vec<(i64, i64)>,
@@ -379,72 +379,73 @@ impl Command {
         }
     }
 
-    /// Merge ≥2 specs into one composite: the base halves combine into one
-    /// composite base (keyed on the part base hashes in source order —
-    /// still eph-independent), the supplement halves into one composite
-    /// supplement.  Truncation ORs across parts per half.
+    /// Merge ≥2 specs into one composite: the root-shard halves combine into
+    /// one composite root shard (keyed on the part input hashes in source
+    /// order — still eph-independent), the selection-shard halves into one
+    /// composite selection shard.  Truncation ORs across parts per half.
     fn partitioned_composite(parts: Vec<LayerSpec>) -> LayerSpec {
         let mut h = Sha256::new();
         h.update(b"composite-base-v1");
         for p in &parts {
-            h.update(p.base_hash);
+            h.update(p.input_hash);
         }
-        let base_hash: [u8; 32] = h.finalize().into();
+        let input_hash: [u8; 32] = h.finalize().into();
 
         tracing::debug!(
-            composite_base_hash = ?&base_hash[..8],
+            composite_input_hash = ?&input_hash[..8],
             parts = ?parts
                 .iter()
-                .map(|p| &p.base_hash[..8])
+                .map(|p| &p.input_hash[..8])
                 .collect::<Vec<_>>(),
             "partitioned composite layer synthesised",
         );
 
-        // Composite supplement key: fold every part's extra (length-prefixed,
-        // source order) so parts that differ only in their supplement inputs
-        // produce distinct composite supplements.  `supplement_extra` is the
-        // extra cache-key material a part's chain-dependent delta reads beyond
-        // (parent, base); a part whose delta is fully determined by (parent,
-        // base) — search, loc today — contributes nothing to key on.  When
-        // *every* part is empty the composite has no extra either, but
-        // `finalize()` is unconditionally 32 bytes, so hashing here would
-        // fabricate a key the guard in `compute_selected` then rejects on an
-        // empty chain ("supplement inputs but no ephemeral context").  Stay
-        // empty so the parts just union.
-        let supplement_extra: Vec<u8> = if parts.iter().all(|p| p.supplement_extra.is_empty()) {
+        // Composite selection-shard key: fold every part's extra
+        // (length-prefixed, source order) so parts that differ only in their
+        // selection-shard inputs produce distinct composite selection shards.
+        // `selection_extra` is the extra cache-key material a part's
+        // chain-dependent delta reads beyond (parent, root shard); a part whose
+        // delta is fully determined by (parent, root shard) — search, loc today
+        // — contributes nothing to key on.  When *every* part is empty the
+        // composite has no extra either, but `finalize()` is unconditionally 32
+        // bytes, so hashing here would fabricate a key the guard in
+        // `compute_selected` then rejects on an empty chain ("selection-shard
+        // inputs but no ephemeral context").  Stay empty so the parts just
+        // union.
+        let selection_extra: Vec<u8> = if parts.iter().all(|p| p.selection_extra.is_empty()) {
             Vec::new()
         } else {
             let mut he = Sha256::new();
             he.update(b"composite-extra-v1");
             for p in &parts {
-                he.update((p.supplement_extra.len() as u64).to_le_bytes());
-                he.update(&p.supplement_extra);
+                he.update((p.selection_extra.len() as u64).to_le_bytes());
+                he.update(&p.selection_extra);
             }
             he.finalize().to_vec()
         };
 
-        let mut base_populates = Vec::with_capacity(parts.len());
-        let mut supplement_populates = Vec::with_capacity(parts.len());
-        // Only content-scan parts (search, loc) expose a per-layer populate;
+        let mut root_shard_populates = Vec::with_capacity(parts.len());
+        let mut selection_shard_populates = Vec::with_capacity(parts.len());
+        // Only content-scan parts (search, loc) expose a layer-shard populate;
         // a `layer { … }` part contributes none.  Collect just the present
-        // ones so the composite atom is the union of the content scans.
-        let mut per_layer_populates = Vec::with_capacity(parts.len());
+        // ones so the composite layer shard is the union of the content scans.
+        let mut layer_shard_populates = Vec::with_capacity(parts.len());
         for p in parts {
-            base_populates.push(p.base_populate);
-            supplement_populates.push(p.supplement_populate);
-            if let Some(pl) = p.per_layer_populate {
-                per_layer_populates.push(pl);
+            root_shard_populates.push(p.root_shard_populate);
+            selection_shard_populates.push(p.selection_shard_populate);
+            if let Some(pl) = p.layer_shard_populate {
+                layer_shard_populates.push(pl);
             }
         }
 
         // `Fn` closures run once per root; the parts are shared across those
         // runs via `Arc` (the returned future cannot borrow the closure's
         // environment under the HRTB, so each call clones the handle in).
-        let base_populates = std::sync::Arc::new(base_populates);
-        let supplement_populates = std::sync::Arc::new(supplement_populates);
+        let root_shard_populates = std::sync::Arc::new(root_shard_populates);
+        let selection_shard_populates = std::sync::Arc::new(selection_shard_populates);
 
-        let base_populate: LayerPopulate = Box::new(move |txn, root| {
-            let populates = std::sync::Arc::clone(&base_populates);
+        let root_shard_populate: RootShardPopulate = Box::new(move |txn, root| {
+            let populates = std::sync::Arc::clone(&root_shard_populates);
             Box::pin(async move {
                 let mut truncated = false;
                 for populate in populates.iter() {
@@ -453,43 +454,47 @@ impl Command {
                 Ok(truncated)
             })
         });
-        let supplement_populate: SupplementPopulate = Box::new(move |txn, root, base_ref| {
-            let populates = std::sync::Arc::clone(&supplement_populates);
-            Box::pin(async move {
-                let mut truncated = false;
-                for populate in populates.iter() {
-                    truncated |= populate(&mut *txn, root, base_ref).await?;
-                }
-                Ok(truncated)
-            })
-        });
-
-        // Composite per-layer scan: union every content-scan part at each
-        // shard layer `L_j`.  `None` iff no part is a content scan (e.g. a
-        // lone `layer { … }` block), so the executor materialises no atoms.
-        let per_layer_populate: Option<PerLayerPopulate> = if per_layer_populates.is_empty() {
-            None
-        } else {
-            let per_layer_populates = std::sync::Arc::new(per_layer_populates);
-            let closure: PerLayerPopulate = Box::new(move |txn, root, layer_id, base_ref| {
-                let populates = std::sync::Arc::clone(&per_layer_populates);
+        let selection_shard_populate: SelectionShardPopulate =
+            Box::new(move |txn, root, root_shard_ref| {
+                let populates = std::sync::Arc::clone(&selection_shard_populates);
                 Box::pin(async move {
                     let mut truncated = false;
                     for populate in populates.iter() {
-                        truncated |= populate(&mut *txn, root, layer_id, base_ref).await?;
+                        truncated |= populate(&mut *txn, root, root_shard_ref).await?;
                     }
                     Ok(truncated)
                 })
             });
+
+        // Composite layer-shard scan: union every content-scan part at each
+        // shard layer `L_j`.  `None` iff no part is a content scan (e.g. a
+        // lone `layer { … }` block), so the executor materialises no layer
+        // shards.
+        let layer_shard_populate: Option<LayerShardPopulate> = if layer_shard_populates.is_empty() {
+            None
+        } else {
+            let layer_shard_populates = std::sync::Arc::new(layer_shard_populates);
+            let closure: LayerShardPopulate =
+                Box::new(move |txn, root, layer_id, root_shard_ref| {
+                    let populates = std::sync::Arc::clone(&layer_shard_populates);
+                    Box::pin(async move {
+                        let mut truncated = false;
+                        for populate in populates.iter() {
+                            truncated |=
+                                populate(&mut *txn, root, layer_id, root_shard_ref).await?;
+                        }
+                        Ok(truncated)
+                    })
+                });
             Some(closure)
         };
 
         LayerSpec {
-            base_hash,
-            base_populate,
-            supplement_populate,
-            per_layer_populate,
-            supplement_extra,
+            input_hash,
+            root_shard_populate,
+            selection_shard_populate,
+            layer_shard_populate,
+            selection_extra,
         }
     }
 
@@ -755,15 +760,15 @@ impl Command {
         };
 
         // Defense in depth, uniform across verbs: non-empty
-        // supplement inputs under an empty chain means the verb
-        // computed eph-derived content that no supplement will ever
+        // selection-shard inputs under an empty chain means the verb
+        // computed eph-derived content that no selection shard will ever
         // materialize — those rows would be silently dropped.  The
         // check runs against the pre-tree snapshot, which is correct
         // by construction: labels may only reference earlier trees,
         // so no eph input can originate from a tree-mate.  The
         // verb-side guards (with better spans) should have caught
         // this; reaching here is an internal invariant violation.
-        if !eph.has_chain() && !spec.supplement_extra.is_empty() {
+        if !eph.has_chain() && !spec.selection_extra.is_empty() {
             return Err(to_pest(anyhow::anyhow!(
                 "internal error: layer spec carries supplement inputs \
                  but no ephemeral context exists before this statement"
@@ -771,21 +776,21 @@ impl Command {
         }
 
         // Chain topology is decided here, not by the verb: per
-        // visible root, the base parents on the root and the
-        // supplement (created iff that root's pre-tree chain is
+        // visible root, the root shard parents on the root and the
+        // selection shard (created iff that root's pre-tree chain is
         // non-empty) chains on the root's `chain_last` — the previous
-        // TREE's tip, since `eph` is the pre-tree snapshot.  The base
-        // hash is salted per root (`root_salted_hash`), so each root's
+        // TREE's tip, since `eph` is the pre-tree snapshot.  The input
+        // hash is salted per root (`root_shard_hash`), so each root's
         // cache entry is independent of co-visible projects.
         let results = cfg
             .index
             .with_partitioned_layers(
                 eph,
-                &spec.base_hash,
-                &spec.supplement_extra,
-                spec.base_populate,
-                spec.supplement_populate,
-                spec.per_layer_populate,
+                &spec.input_hash,
+                &spec.selection_extra,
+                spec.root_shard_populate,
+                spec.selection_shard_populate,
+                spec.layer_shard_populate,
             )
             .await
             .map_err(to_pest)?;
@@ -794,10 +799,10 @@ impl Command {
         let mut hit_ids = Vec::with_capacity(results.len());
         let mut truncated_any = false;
         // Results arrive in recording order (roots ascending; within a
-        // root: base → per-layer atoms → supplement), so this command's
-        // final layer per root is its supplement — and when this command
-        // is the tree's last layer-bearing substatement, that supplement
-        // is the tree's new tip.
+        // root: root shard → layer shards → selection shard), so this
+        // command's final layer per root is its selection shard — and when
+        // this command is the tree's last layer-bearing substatement, that
+        // selection shard is the tree's new tip.
         for layer in results {
             if !layer.outcome.created {
                 hit_ids.push(layer.outcome.layer_id);
@@ -1111,25 +1116,25 @@ impl LabeledStatements {
 mod tests {
     use super::*;
 
-    fn noop_base() -> LayerPopulate {
+    fn noop_base() -> RootShardPopulate {
         Box::new(|_txn, _root| Box::pin(async { Ok(false) }))
     }
 
-    fn noop_supplement() -> SupplementPopulate {
+    fn noop_supplement() -> SelectionShardPopulate {
         Box::new(|_txn, _root, _base| Box::pin(async { Ok(false) }))
     }
 
-    /// A content-scan-less part with an empty `supplement_extra` and no
+    /// A content-scan-less part with an empty `selection_extra` and no
     /// per-layer populate (`None`) — the shape a lone `layer { … }` with only
     /// base ops produces. (A real `search()` differs: it sets
-    /// `per_layer_populate: Some(..)` via `LayerSpec::sharded_scan`.)
+    /// `layer_shard_populate: Some(..)` via `LayerSpec::sharded_scan`.)
     fn empty_part() -> LayerSpec {
         LayerSpec {
-            base_hash: [0u8; 32],
-            base_populate: noop_base(),
-            supplement_populate: noop_supplement(),
-            per_layer_populate: None,
-            supplement_extra: Vec::new(),
+            input_hash: [0u8; 32],
+            root_shard_populate: noop_base(),
+            selection_shard_populate: noop_supplement(),
+            layer_shard_populate: None,
+            selection_extra: Vec::new(),
         }
     }
 
@@ -1137,11 +1142,11 @@ mod tests {
     /// references ephemeral ids.
     fn part_with_supplement(extra: Vec<u8>) -> LayerSpec {
         LayerSpec {
-            base_hash: [0u8; 32],
-            base_populate: noop_base(),
-            supplement_populate: noop_supplement(),
-            per_layer_populate: None,
-            supplement_extra: extra,
+            input_hash: [0u8; 32],
+            root_shard_populate: noop_base(),
+            selection_shard_populate: noop_supplement(),
+            layer_shard_populate: None,
+            selection_extra: extra,
         }
     }
 
@@ -1153,7 +1158,7 @@ mod tests {
         // ephemeral context". Regression test for that internal error.
         let composite = Command::partitioned_composite(vec![empty_part(), empty_part()]);
         assert!(
-            composite.supplement_extra.is_empty(),
+            composite.selection_extra.is_empty(),
             "two persistent-only parts must not fabricate a supplement"
         );
     }
@@ -1164,12 +1169,12 @@ mod tests {
         // supplement key that still distinguishes source order.
         let a =
             Command::partitioned_composite(vec![empty_part(), part_with_supplement(vec![1, 2, 3])]);
-        assert!(!a.supplement_extra.is_empty());
+        assert!(!a.selection_extra.is_empty());
         let b =
             Command::partitioned_composite(vec![part_with_supplement(vec![1, 2, 3]), empty_part()]);
-        assert!(!b.supplement_extra.is_empty());
+        assert!(!b.selection_extra.is_empty());
         assert_ne!(
-            a.supplement_extra, b.supplement_extra,
+            a.selection_extra, b.selection_extra,
             "supplement key must fold parts in source order"
         );
     }
