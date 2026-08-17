@@ -280,10 +280,30 @@ impl Command {
         self.selectors().all(|verb| verb.is_unit())
     }
 
-    /// Whether all selectors in this command are non-constraining.
+    /// Whether this command constrains nothing of its own — the weakness
+    /// candidate test (see `Statement::mark_weak_statements`).  Two
+    /// conditions, because a constraint can arrive as either kind of verb:
+    /// every selector is non-constraining (units, bare type selectors), AND
+    /// no verb carries a name constraint.
+    ///
+    /// The second clause is what a selector-only scan missed: a filter-only
+    /// command (`filter("exact_name","foo") { … }`) has no selector but the
+    /// parser's `UnitVerb`, so it used to come out non-constraining — and
+    /// therefore weak — while `is_anchored` reported it as anchored on the
+    /// very same name.  A weak statement "does not constrain the selection
+    /// of its dependencies", yet the probe path binds a resolved
+    /// neighbour's role regardless of weakness, so the two disagreed about
+    /// one query.  Requiring "no name constraint" makes `anchored ⇒ not
+    /// weak` hold by construction: every other [`crate::verb::AnchorKind`]
+    /// belongs to a verb that is already a constraining selector.
+    ///
+    /// Type predicates stay structural — bare `func` and `filter("type", …)`
+    /// carry no name constraint and remain weakness candidates, so a caller
+    /// chain typed from the top still derives instead of pruning itself.
     pub fn is_non_constraining(&self) -> bool {
         self.selectors()
             .all(|verb| verb.is_non_constraining_selector())
+            && !self.verbs.iter().any(|verb| verb.has_name_constraint())
     }
 
     fn labels<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Labeler> + 'a> {

@@ -710,10 +710,10 @@ fn project_double_parent_query() {
     // Tests mod filter with double parent query pattern.
     // filter("compound_name", "test", inherit="true") acts as a namespace filter
     // that propagates into child scopes via inherit="true".
-    // `select` keeps the outer command strong (the old namespace filter was
-    // constraining); by the weakness propagation rule the bare middle scope
-    // is then sandwiched between a strong parent and a strong child and
-    // stays strong too — reproducing the old constrained result.
+    // The outer command is strong twice over — `select` is a real selector,
+    // and the name filter is a constraint in its own right — so the bare
+    // middle scope is sandwiched between a strong parent and a strong child
+    // and stays strong too.
     const QUERY: &str = r#"select filter("compound_name", "test", inherit="true") {{"b"}}"#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
@@ -730,17 +730,18 @@ fn project_double_parent_query() {
     let edges = format_edges(res.edges);
     assert_eq!(edges, vec!["91-92", "942-91", "942-92"]);
 
-    // Without `select` the outer command is unit+filter → non-constraining →
-    // weak (root parent), and weakness propagates through the bare middle:
-    // the echo keeps every namespace-matching caller, including test.c (93).
-    const WEAK_QUERY: &str = r#"filter("compound_name", "test", inherit="true") {{"b"}}"#;
-    let res = run_query(TEST_INPUT_MODULES, WEAK_QUERY);
+    // Dropping `select` must not change the answer: the outer command is
+    // unit+filter, but a name filter is a constraint, so the statement is
+    // still not weak and the same three-level composition applies.  (While
+    // it was weak, the echo also kept test.c (93) — a caller of test.b that
+    // nothing in the namespace calls.)
+    const UNSELECTED_QUERY: &str = r#"filter("compound_name", "test", inherit="true") {{"b"}}"#;
+    let res = run_query(TEST_INPUT_MODULES, UNSELECTED_QUERY);
     assert_eq!(
         res.nodes.as_vec(),
         vec![
             SymbolInstanceId::new(91),
             SymbolInstanceId::new(92),
-            SymbolInstanceId::new(93),
             SymbolInstanceId::new(942)
         ]
     );
@@ -1971,26 +1972,32 @@ fn generic_filter_compound_name_inherit() {
     // constraining grandchildren to also match "test" in their name search.
     // Without the filter, "b" matches both test.b (92) and other.b (202).
     // With the filter, only test.* symbols survive.
+    //
+    // A name filter is a constraint, so the outer statement is NOT weak (see
+    // `Command::is_non_constraining`) and the query composes as the
+    // three-level chain it reads as: test.* calls test.* calls test.b.
+    // Callers of test.b are test.a, test.c and test.main, but only test.a has
+    // a caller of its own inside the namespace (test.main) — so test.c drops
+    // out at the middle level, exactly as it does when the same query is
+    // written with an explicit `select` (see `project_double_parent_query`).
     const QUERY: &str = r#"filter("compound_name", "test", inherit="true") {{"b"}}"#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     let nodes = res.nodes.as_vec();
     assert!(res.warnings.is_empty(), "Should produce no warnings");
-    // Grandchild "b" matches test.b (92). Intermediate derives callers of test.b:
-    // test.a (91), test.c (93), test.main (942). Inherited "test" filter excludes other.*.
-    assert_eq!(nodes.len(), 4);
+    assert_eq!(nodes.len(), 3);
     assert!(nodes.contains(&SymbolInstanceId::new(92)), "test.b");
     assert!(
         nodes.contains(&SymbolInstanceId::new(91)),
-        "test.a (caller of test.b)"
+        "test.a (caller of test.b, called by test.main)"
     );
     assert!(
-        nodes.contains(&SymbolInstanceId::new(93)),
-        "test.c (caller of test.b)"
+        !nodes.contains(&SymbolInstanceId::new(93)),
+        "test.c calls test.b but nothing in the namespace calls test.c"
     );
     assert!(
         nodes.contains(&SymbolInstanceId::new(942)),
-        "test.main (caller of test.b)"
+        "test.main (caller of test.a)"
     );
     // Verify the filter actually excluded other.* symbols
     assert!(
@@ -8010,5 +8017,80 @@ fn refinement_cascades_through_unanchored_middle() {
     assert!(
         refined.nodes.as_vec().contains(&SymbolInstanceId::new(96)),
         "f (caller of g) must be in the result"
+    );
+}
+
+// ============================================================================
+// Anchored ⇒ not weak: a name filter is a constraint, a type filter is not
+// ============================================================================
+
+#[test]
+fn name_filter_constrains_its_scope_like_a_name_selector() {
+    // `filter("exact_name", …)` anchors by name (`AnchorKind::Name`), but
+    // weakness was decided by scanning SELECTORS only — and a filter-only
+    // command has no selector of its own (the parser adds a `UnitVerb`).
+    // So the statement came out anchored AND weak, and "weak" means "does
+    // not constrain the selection of its dependencies".  The two halves of
+    // the engine then answered the same query differently: the refinement
+    // round bound the child's role for that weak parent and resolved it to
+    // the EMPTY set, while the worklist — which declines to apply a weak
+    // statement's constraint — kept the child anyway.
+    //
+    // `d` does not call `b`, so both spellings of the one constraint must
+    // answer "nothing".
+    const FILTERED: &str = r#"filter("exact_name","d") { "b" }"#;
+    const SELECTED: &str = r#"func("d") { "b" }"#;
+
+    let selected = run_query(TEST_INPUT_A, SELECTED);
+    assert!(
+        selected.nodes.as_vec().is_empty(),
+        "the selector spelling answers nothing: {:?}",
+        selected.nodes.as_vec(),
+    );
+
+    let (filtered, acts) = run_query_probe_traced(TEST_INPUT_A, FILTERED, 1000);
+    let outer = acts
+        .iter()
+        .find(|a| a.query_statement.starts_with("filter"))
+        .expect("the anchored filter statement refines under the child's role");
+    assert_eq!(
+        outer.resolved,
+        Some(0),
+        "the probe binds the child's role and finds no caller named d: {:?}",
+        acts,
+    );
+    assert_eq!(
+        filtered.nodes.as_vec(),
+        selected.nodes.as_vec(),
+        "a name filter must constrain its scope exactly like a name selector",
+    );
+
+    // Probing is a cost decision, never a semantic one.
+    let (unprobed, _) = run_query_probe_traced(TEST_INPUT_A, FILTERED, 0);
+    assert_eq!(
+        filtered.nodes.as_vec(),
+        unprobed.nodes.as_vec(),
+        "the answer must not depend on whether the probe resolved",
+    );
+}
+
+#[test]
+fn type_filter_alone_stays_non_constraining() {
+    // The companion of `name_filter_constrains_its_scope_like_a_name_selector`:
+    // a type predicate is structural, so a type-filter-only command stays a
+    // weakness candidate and does NOT prune its scope.  There are no macros
+    // in the fixture — the outer probes to the empty set — and `e` survives
+    // regardless, exactly as bare `func` leaves a caller chain alone.
+    const QUERY: &str = r#"filter("type","macro") { "e" }"#;
+    let (res, acts) = run_query_probe_traced(TEST_INPUT_A, QUERY, 1000);
+    let outer = acts
+        .iter()
+        .find(|a| a.query_statement.starts_with("filter"))
+        .expect("the type-filter statement refines under the child's role");
+    assert_eq!(outer.resolved, Some(0), "no macro calls e: {:?}", acts);
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![SymbolInstanceId::new(95)],
+        "a weak type filter must not constrain its child away",
     );
 }

@@ -456,6 +456,22 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
     fn anchor_kind(&self) -> Option<AnchorKind> {
         None
     }
+
+    /// Whether this verb constrains by NAME.  Selectors answer this through
+    /// [`Verb::is_non_constraining_selector`]; the predicate exists for the
+    /// verbs a selector scan cannot see — today `filter("exact_name"/
+    /// "compound_name", …)`, which is a *filter* yet names a set as tightly
+    /// as `"foo"` does.  It is the same condition
+    /// [`Verb::anchor_kind`] reports as [`AnchorKind::Name`], which is what
+    /// makes `anchored ⇒ not weak` hold by construction (see
+    /// [`crate::command::Command::is_non_constraining`]).
+    ///
+    /// Type predicates are structural, not naming: bare `func` and
+    /// `filter("type", …)` stay `false`, so they remain weakness candidates
+    /// and go on deriving their selection from their neighbours.
+    fn has_name_constraint(&self) -> bool {
+        false
+    }
 }
 
 /// Filter trait for verbs that constrain symbol selection.
