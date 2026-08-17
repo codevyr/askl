@@ -406,6 +406,10 @@ impl Verb for GenericFilter {
         self.kind.has_name_constraint().then_some(AnchorKind::Name)
     }
 
+    fn has_name_constraint(&self) -> bool {
+        self.kind.has_name_constraint()
+    }
+
     fn derive_method(&self) -> DeriveMethod {
         if self.inherit {
             DeriveMethod::Clone
