@@ -23,13 +23,24 @@ separate statements; a `{` must be on the same line as its verb to attach.
   only for non-symbol text. `>=3` chars, smart-case, options `whole_word="true"`,
   `case="sensitive"|"insensitive"`, `limit=500`.
 - Several selectors in one statement are **ORed** (union): `"a" "b"` (or
-  `func("a") func("b")`) selects symbols matching *either*.
+  `func("a") func("b")`) selects symbols matching *either*. Inside a scope this
+  is exactly the contrast with `;` — `X { A B }` disjoins, `X { A ; B }`
+  conjoins. See Scopes.
 
 ## Scopes — relationships
 - `"x" { }`  callees: what `x` calls/references (references are the default).
 - `{ "x" }`  callers: what calls `x`.
 - `"a" { "b" { "c" } }`  a calls b, b calls c.
 - `has { }`  containment (by source byte-range) instead of references.
+- **`;` inside a scope conjoins — `A B` disjoins.** `X { A ; B }` are two
+  *statements* in one scope and keep `X` only where it relates to *both*:
+  `dir("/proj") has { mod ; file }` lists directories holding a module **and**
+  a file. `X { A B }` is one statement with two selectors and keeps `X` if it
+  relates to *either*: `dir("/proj") has { mod file }` lists directories
+  holding a module **or** a file. A child that matches nothing empties the
+  whole conjunction, so `"x" { "b" ; "typo" }` returns nothing.
+  (At the **top level**, `;` just separates statements and their results are
+  unioned into one answer — it only conjoins inside `{ }`.)
 - Container selectors `mod`/`file`/`dir` imply refs+has for children, so
   `file("/proj/x.c") { func }` lists functions in the file — no explicit `has`.
 - `unnest { }`  transitive (all levels), not just direct. Does not inherit.
