@@ -518,8 +518,16 @@ impl Command {
         }
     }
 
-    /// Notify all selectors using a pre-built merged selection (constraint + derivation).
-    /// Used when a parent is notified by the union of all its children's selections.
+    /// Notify all selectors from a pre-built selection (constraint + derivation).
+    ///
+    /// This is the parent's side of the bottom-up notification, called ONCE
+    /// PER PARTICIPATING CHILD with that child's own selection — sibling
+    /// children conjoin.  Both paths compose correctly under repetition:
+    /// `constrain_by_child`'s `retain` is a pure monotone filter, so applying
+    /// child after child yields their intersection, and derivation happens
+    /// only on the call that finds a selector still empty (the first), the
+    /// rest constraining what it produced.  Deriving per child and unioning
+    /// would re-introduce the disjunction.
     pub async fn notify_from_selection(
         &self,
         ctx: &mut ExecutionContext,
