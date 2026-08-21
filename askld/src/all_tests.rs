@@ -1884,26 +1884,28 @@ fn directory_has_empty_scope_with_file_test_data() {
 }
 
 #[test]
-fn has_sibling_children_different_types() {
+fn has_sibling_children_of_different_types_conjoin() {
     // dir("/") has { mod ; file }
-    // Test that sibling children of different types use UNION logic.
-    // Directory "/" contains both modules and files via different instances.
-    // Both sibling children should be found.
+    // Sibling children CONJOIN: the directory is kept because it contains a
+    // module AND a file — not because it contains either.  "/" in
+    // TEST_INPUT_CONTAINMENT contains both (the module testmodule and the
+    // file /main.go, on different instances), so it satisfies both
+    // conjuncts and survives together with the two children it matched.
     const QUERY: &str = r#"dir("/") has { mod ; file }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("{:#?}", res.nodes);
     println!("{:#?}", res.edges);
 
-    // Directory "/" should contain:
-    // - module (testmodule) via one instance
-    // - file (/main.go) via possibly another instance
-    // The parent directory should NOT be filtered out by the union of both children
-    assert!(
-        res.nodes.as_vec().len() >= 2,
-        "dir('/') has {{ mod ; file }} should return directory + module + file (union of both). Got {} nodes.",
-        res.nodes.as_vec().len()
-    );
+    let names: Vec<_> = res.nodes.0.iter().map(|n| n.symbol.name.as_str()).collect();
+    for expected in ["/", "testmodule", "/main.go"] {
+        assert!(
+            names.contains(&expected),
+            "dir('/') has {{ mod ; file }} keeps the directory only if it \
+             contains a module AND a file, and shows both: {expected} \
+             missing from {names:?}",
+        );
+    }
 }
 
 // =============================================================================
@@ -8093,4 +8095,210 @@ fn type_filter_alone_stays_non_constraining() {
         vec![SymbolInstanceId::new(95)],
         "a weak type filter must not constrain its child away",
     );
+}
+
+#[test]
+fn sibling_children_conjoin_while_sibling_selectors_disjoin() {
+    // The discriminator between the two spellings of "two children".
+    //
+    // `X { A ; B }` CONJOINS: the parent survives only where it has
+    // evidence with EVERY participating child.  On TEST_INPUT_A the callers
+    // of b are a (91) and main (942); the only caller of e is d (94); the
+    // file (1001) and the two directory instances (1002, 1003) contain
+    // both.  So `select { "b" ; "e" }` keeps the containers and drops all
+    // three callers — d most pointedly, since it calls e but not b.
+    //
+    // `X { A B }` — several selectors in ONE command — stays a
+    // DISJUNCTION, and on the same fixture keeps every caller.  Two
+    // spellings, two operators; this pair is what pins them apart.
+    const AND: &str = r#"select { "b" ; "e" }"#;
+    const OR: &str = r#"select { "b" "e" }"#;
+
+    let conj = |cap| {
+        let (res, _) = run_query_probe_traced(TEST_INPUT_A, AND, cap);
+        let mut nodes: Vec<i64> = res.nodes.as_vec().iter().map(|id| (*id).into()).collect();
+        nodes.sort_unstable();
+        let mut edges = format_edges(res.edges);
+        edges.sort();
+        (nodes, edges)
+    };
+
+    // Probing is a COST decision, never a semantic one: the unprobed
+    // regime (0), a cap that resolves the children but not the parent (5),
+    // and a cap that resolves everything in wave 0 (1000) must agree on
+    // the nodes AND on the edges.
+    let (nodes, edges) = conj(0);
+    assert_eq!(
+        nodes,
+        vec![92, 95, 1001, 1002, 1003],
+        "the conjunction keeps b, e and the containers of both — not a \
+         (91), main (942) or d (94)",
+    );
+    assert!(
+        !nodes.contains(&94),
+        "d calls e but not b, so the conjunction must drop it: {nodes:?}",
+    );
+    for cap in [5, 1000] {
+        assert_eq!(
+            conj(cap),
+            (nodes.clone(), edges.clone()),
+            "probe cap {cap} changed the answer",
+        );
+    }
+
+    // Sibling SELECTORS keep the OR, at every cap.
+    for cap in [0, 5, 1000] {
+        let (res, _) = run_query_probe_traced(TEST_INPUT_A, OR, cap);
+        let mut disj: Vec<i64> = res.nodes.as_vec().iter().map(|id| (*id).into()).collect();
+        disj.sort_unstable();
+        assert_eq!(
+            disj,
+            vec![91, 92, 94, 95, 942, 1001, 1002, 1003],
+            "`{OR}` is one command with two selectors — a disjunction, so \
+             every caller of either survives (cap {cap})",
+        );
+    }
+
+    // A conjunction is a set operation, so the order of the conjuncts
+    // cannot matter.
+    let (swapped, _) = run_query_probe_traced(TEST_INPUT_A, r#"select { "e" ; "b" }"#, 0);
+    let mut swapped_nodes: Vec<i64> = swapped
+        .nodes
+        .as_vec()
+        .iter()
+        .map(|id| (*id).into())
+        .collect();
+    swapped_nodes.sort_unstable();
+    assert_eq!(swapped_nodes, nodes, "conjuncts commute");
+
+    // `;` conjoins only INSIDE a scope.  At the TOP level it separates
+    // whole statements, whose answers are unioned into one result — so the
+    // two halves written side by side reproduce the disjunction exactly.
+    // Worth pinning: it is the sentence the user docs make, and it is what
+    // keeps `;` from reading as one operator with two meanings.
+    let (split, _) = run_query_probe_traced(TEST_INPUT_A, r#"select { "b" } ; select { "e" }"#, 0);
+    let mut split_nodes: Vec<i64> = split.nodes.as_vec().iter().map(|id| (*id).into()).collect();
+    split_nodes.sort_unstable();
+    assert_eq!(
+        split_nodes,
+        vec![91, 92, 94, 95, 942, 1001, 1002, 1003],
+        "a top-level `;` separates statements and unions their answers",
+    );
+}
+
+#[test]
+fn an_empty_sibling_empties_the_parent() {
+    // What a conjunction means when one conjunct is false, and the exact
+    // behaviour a single child already has (`"x" { "nonexistent" }`): there
+    // is no node with evidence for a child that selected nothing, so the
+    // parent — and with it the whole query — is empty.  Under the old
+    // union the non-empty sibling carried the parent through.
+    for cap in [0, 5, 1000] {
+        let (res, _) =
+            run_query_probe_traced(TEST_INPUT_A, r#"select { "b" ; "nonexistent" }"#, cap);
+        assert!(
+            res.nodes.as_vec().is_empty(),
+            "an empty conjunct empties the parent (cap {cap}): {:?}",
+            res.nodes.as_vec(),
+        );
+    }
+}
+
+#[test]
+fn refinement_binds_one_participant_of_the_conjunction() {
+    // Cost side of the conjunction.  A candidate has two neighbour groups
+    // and the refinement round binds the SMALLEST resolved neighbour into
+    // the re-probe.  With conjoining siblings, binding ONE participant is
+    // a RELAXATION of the conjunction — it demands evidence with that
+    // child, which every surviving parent has anyway — so the refined set
+    // is a sound superset that the worklist then narrows the rest of the
+    // way.  (Binding every participant would be tighter still, but
+    // `MAX_ROLE_BRANCHES` caps the probe's Cartesian product at four
+    // branches, so three or more children would silently decline to bind.)
+    const QUERY: &str = r#"select { "b" ; "e" }"#;
+    let (refined, acts) = run_query_probe_traced(TEST_INPUT_A, QUERY, 6);
+
+    for name in [r#""b""#, r#""e""#] {
+        let child = acts
+            .iter()
+            .find(|a| a.query_statement.trim() == name)
+            .unwrap_or_else(|| panic!("{name} must probe in wave 0: {acts:?}"));
+        assert_eq!(child.resolved, Some(1), "{name} is exactly one instance");
+    }
+    let outer: Vec<_> = acts
+        .iter()
+        .filter(|a| a.query_statement.starts_with("select"))
+        .collect();
+    assert_eq!(outer.len(), 2, "wave-0 cap + one refinement: {acts:?}");
+    assert_eq!(outer[0].resolved, None, "select's 11 instances cap at 6");
+    assert_eq!(
+        outer[1].resolved,
+        Some(5),
+        "one child's callers/containers — a superset of the conjunction, \
+         which the worklist narrows to the 3 containers: {acts:?}",
+    );
+
+    // The refined regime must still answer like the unprobed one.
+    let (unprobed, _) = run_query_probe_traced(TEST_INPUT_A, QUERY, 0);
+    assert_eq!(refined.nodes.as_vec(), unprobed.nodes.as_vec());
+    assert_eq!(format_edges(refined.edges), format_edges(unprobed.edges));
+}
+
+#[test]
+fn refinement_binds_a_participant_with_an_unresolved_sibling() {
+    // Under the union a partial merge was unusable — an unresolved sibling
+    // could only add ids, so binding what had resolved so far
+    // under-approximated and deleted answers.  A conjunction has no such
+    // obligation: every conjunct is an independently sound upper bound, so
+    // one resolved participant binds even while its sibling is still
+    // capped.  Here `select` (11 instances) caps at 6, `"g"` resolves, and
+    // the outer refines off `"g"` alone to g's 4 callers/containers.
+    const QUERY: &str = r#"select { select ; "g" }"#;
+    let (refined, acts) = run_query_probe_traced(TEST_INPUT_A, QUERY, 6);
+    assert!(
+        acts.iter()
+            .filter(|a| a.query_statement.trim() == "select")
+            .all(|a| a.resolved.is_none()),
+        "the inner bare select must stay capped: {acts:?}",
+    );
+    let outer: Vec<_> = acts
+        .iter()
+        .filter(|a| a.query_statement.starts_with("select {"))
+        .collect();
+    assert_eq!(
+        outer.last().and_then(|a| a.resolved),
+        Some(4),
+        "the outer binds the one resolved participant rather than waiting \
+         for its sibling: {acts:?}",
+    );
+
+    let (unprobed, _) = run_query_probe_traced(TEST_INPUT_A, QUERY, 0);
+    assert_eq!(refined.nodes.as_vec(), unprobed.nodes.as_vec());
+    assert_eq!(format_edges(refined.edges), format_edges(unprobed.edges));
+}
+
+#[test]
+fn func_scope_conjoins_siblings_but_disjoins_selectors() {
+    // The same discriminator in the shape a user actually writes: a type
+    // selector as the parent rather than `select`.
+    //
+    // TEST_INPUT_A has main -> {a, b}, a -> b, d -> {e, f}, f -> g, so the
+    // callers of b are {a, main} and the only caller of e is d.  Nothing
+    // calls both, which is what makes the two spellings diverge sharply:
+    //
+    //   func { "b" ; "e" }   the parent is the empty conjunction, and only
+    //                        the two children remain
+    //   func { "b"   "e" }   one command, two selectors — a disjunction, so
+    //                        every caller of either survives
+    for cap in [0, 5, 1000] {
+        let (conj, _) = run_query_probe_traced(TEST_INPUT_A, r#"func { "b" ; "e" }"#, cap);
+        let mut nodes: Vec<i64> = conj.nodes.as_vec().iter().map(|id| (*id).into()).collect();
+        nodes.sort_unstable();
+        assert_eq!(nodes, vec![92, 95], "cap {cap}: conjunction");
+
+        let (disj, _) = run_query_probe_traced(TEST_INPUT_A, r#"func { "b" "e" }"#, cap);
+        let mut nodes: Vec<i64> = disj.nodes.as_vec().iter().map(|id| (*id).into()).collect();
+        nodes.sort_unstable();
+        assert_eq!(nodes, vec![91, 92, 94, 95, 942], "cap {cap}: disjunction");
+    }
 }

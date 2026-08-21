@@ -365,19 +365,6 @@ impl Statement {
             .all(|s| ctx.registry.contains(&s.id()))
     }
 
-    fn is_selection_some(&self, ctx: &ExecutionContext) -> bool {
-        let mut has_selector = false;
-        let mut has_any_selection = false;
-        ctx.registry
-            .for_each_selector(self.command().selectors(), |selector, sel_state| {
-                has_selector = true;
-                if selector.get_selection(sel_state).is_some() {
-                    has_any_selection = true;
-                }
-            });
-        !has_selector || has_any_selection
-    }
-
     /// Compute initial selections for every statement — PHASED (M, P, R),
     /// per top-level statement tree, trees in source order.  ONE
     /// materialisation per tree: nesting no longer sequences; `;` is the only
@@ -1455,11 +1442,19 @@ impl Statement {
     /// Notify the dependent statement's execution state about change in the
     /// state of a dependency.
     ///
-    /// When a child notifies its parent (role=Parent), we defer the constraint
-    /// until ALL children have resolved. This prevents over-constraining the
-    /// parent when multiple sibling children exist (e.g., `has { dir ; file }`).
-    /// The parent is constrained against the **union** of all children's selections,
-    /// so it retains nodes that match ANY child.
+    /// When children notify their parent (role=Parent) they **conjoin**: the
+    /// parent is constrained once per participating child, against that
+    /// child's own selection, so it retains only nodes that have evidence
+    /// with EVERY one of them.  `X { A ; B }` means *has evidence with A and
+    /// with B*; the disjunction is spelled `X { A B }`, several selectors in
+    /// one command.  An empty participant therefore empties the parent, just
+    /// as a lone empty child does today.
+    ///
+    /// No deferral: each conjunct is an independently sound upper bound and
+    /// `retain` is monotone and idempotent, so children may constrain in any
+    /// order, as they resolve, and re-constraining by an already-applied
+    /// sibling is a no-op.  The worklist reschedules the parent on every
+    /// child's change, which is what makes the fixpoint the full conjunction.
     pub async fn notify(
         &self,
         ctx: &mut ExecutionContext,
@@ -1481,32 +1476,25 @@ impl Statement {
         }
 
         if dependent.dependency_role == DependencyRole::Parent {
-            // Child notifying parent — defer until all children have selections.
-            let all_children_resolved = dependent
+            // A child takes part iff it has selectors and is not a
+            // display-only weak unit — the membership test is unchanged;
+            // only what we do with the members is.  Collect the
+            // participants' selections up front: they are owned clones, so
+            // the immutable `ctx` read is over before the mutable
+            // `notify_from_selection` calls begin.
+            let selections: Vec<Selection> = dependent
                 .statement
                 .children()
-                .all(|child| child.is_selection_some(ctx));
-            if !all_children_resolved {
-                return Ok(PropagationResult { changed: false });
-            }
+                .filter(|child| {
+                    child.command().has_selectors() && !should_skip_in_parent_merge(child)
+                })
+                .filter_map(|child| child.get_selection(ctx))
+                .collect();
 
-            // Merge all children's selections into one (union).
-            let mut merged = Selection::new();
-            let mut any_has_selection = false;
-            for child in dependent.statement.children() {
-                if !child.command().has_selectors() {
-                    continue;
-                }
-                if should_skip_in_parent_merge(&child) {
-                    continue;
-                }
-                if let Some(sel) = child.get_selection(ctx) {
-                    merged.extend(sel.clone());
-                    any_has_selection = true;
-                }
-            }
-
-            if !any_has_selection {
+            // Nothing to conjoin yet — an unresolved participant simply has
+            // not spoken.  It will notify when it resolves, and its conjunct
+            // will narrow the parent then.
+            if selections.is_empty() {
                 return Ok(PropagationResult { changed: false });
             }
 
@@ -1515,31 +1503,50 @@ impl Statement {
 
             let unnest = dependent.statement.is_unnest();
             let parent_scope = build_parent_scope(&dependent.statement, ctx, &ctx.eph);
+            // The children scope stays the UNION of the participants' ids.
+            // It bounds the neighbourhood PREFETCH, not the semantics: the
+            // gate is the per-child constrain below.  Intersecting it would
+            // drop the edges to the siblings the parent is displayed with.
+            let mut scope_ids: Vec<i64> = selections
+                .iter()
+                .flat_map(|sel| sel.get_instance_ids())
+                .collect();
+            scope_ids.sort_unstable();
+            scope_ids.dedup();
             let children_scope = ScopeContext::Scope {
-                ids: merged.get_instance_ids(),
+                ids: scope_ids,
                 filter: None,
             };
-            let res = dependent
-                .statement
-                .command()
-                .notify_from_selection(
-                    ctx,
-                    &cfg.index,
-                    &merged,
-                    DependencyRole::Parent,
-                    rel_type,
-                    unnest,
-                    parent_scope,
-                    children_scope,
-                )
-                .await?;
 
-            let changed = res.changed;
-            dependent
-                .statement
-                .get_state_mut()
-                .warnings
-                .extend(res.warnings);
+            // One constrain per participant.  The FIRST call may find the
+            // parent without a selection and derive it from that child
+            // alone; every later call sees a selection and constrains it, so
+            // the fixpoint is the intersection — and derivation runs at most
+            // once, with no extra SQL for the conjunction.
+            let mut changed = false;
+            for selection in &selections {
+                let res = dependent
+                    .statement
+                    .command()
+                    .notify_from_selection(
+                        ctx,
+                        &cfg.index,
+                        selection,
+                        DependencyRole::Parent,
+                        rel_type,
+                        unnest,
+                        parent_scope.clone(),
+                        children_scope.clone(),
+                    )
+                    .await?;
+
+                changed |= res.changed;
+                dependent
+                    .statement
+                    .get_state_mut()
+                    .warnings
+                    .extend(res.warnings);
+            }
             return Ok(PropagationResult { changed });
         }
 
