@@ -22,10 +22,17 @@ Containment
 - Fields of a struct:         `type("file_operations") has { field }`
 - Dispatch through a field:   `{ field("file_operations.read") }`
 
+Combining children — `;` is AND, a space is OR
+- Relates to BOTH (AND):      `func { "vfs_read" ; "vfs_write" }`  (`;` inside `{ }` makes each child a separate statement and all must match — here: functions calling both)
+- Relates to EITHER (OR):     `func { "vfs_read" "vfs_write" }`  (one statement, two selectors)
+- Contains both kinds:        `dir("/proj") has { mod ; file }`  (vs `has { mod file }` = either)
+- A child that matches nothing empties the AND: `"x" { "b" ; "typo" }` returns nothing.
+- At the TOP level `;` is not AND — `"a" { } ; "b" { }` runs both statements and unions their results.
+
 Full-text (raw source bytes — for text that is NOT a symbol name; to find a symbol prefer `g"*foo*"`)
 - Find a literal:             `search("mmap_lock")`
 - Whole word, scoped:         `project("linux") search("EXPORT_SYMBOL", whole_word="true")`
-- Several literals (OR):      `search("foo") search("bar")`  (or `;`-separated — both union; `search()` is literal, `search("a|b")` matches the text `a|b`, not a regex)
+- Several literals (OR):      `search("foo") search("bar")`  (or as two top-level statements, `search("foo"); search("bar")` — both union; `search()` is literal, `search("a|b")` matches the text `a|b`, not a regex)
 - Children of each hit:       `search("kmalloc") { }`
 
 Scope and hygiene
