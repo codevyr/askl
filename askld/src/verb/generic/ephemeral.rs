@@ -507,6 +507,17 @@ impl Verb for LayerVerb {
         VerbClass::Predicate
     }
 
+    /// Layer-materialising: the emission is a layer read, not a single
+    /// predicate query, so it cannot be an expression atom.
+    fn compound_admission(&self) -> Result<(), String> {
+        Err(
+            "`layer` materialises a layer; its emission is not a single \
+             predicate query, so it cannot appear in a filter expression \
+             (write it beside the expression instead)"
+                .to_string(),
+        )
+    }
+
     fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
         Some(self)
     }

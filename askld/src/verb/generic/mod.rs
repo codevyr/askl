@@ -159,6 +159,24 @@ pub(crate) fn build_generic_verb(
                 Ok(UnitVerb::new(verb_span))
             }),
         "_" => Ok(UnitVerb::new(verb_span)),
+        // An operator in verb position means the line began with it: the
+        // grammar continues an expression across a newline only after a
+        // TRAILING operator, so say that instead of "unknown verb".  The
+        // span error is returned DIRECTLY rather than through the
+        // construction wrapper below: nothing failed to build here, and
+        // "Failed to create a generic verb" would misdescribe it.
+        op @ ("or" | "and") => {
+            return Err(Error::new_from_span(
+                CustomError {
+                    message: format!(
+                        "`{op}` starts this line, but a boolean expression continues \
+                         across lines only from a trailing operator — move `{op}` to \
+                         the end of the previous line"
+                    ),
+                },
+                span,
+            ))
+        }
         unknown => Err(anyhow::anyhow!("unknown verb : {}", unknown)),
     };
 

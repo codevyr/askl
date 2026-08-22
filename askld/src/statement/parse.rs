@@ -7,7 +7,7 @@ use crate::parser::Rule;
 use crate::parser_context::ParserContext;
 use crate::scope::{build_scope, EmptyScope, Scope};
 use crate::span::Span;
-use crate::verb::{build_verb, DefaultTypeFilter};
+use crate::verb::{build_compound_filter, DefaultTypeFilter};
 use pest::error::Error;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -32,9 +32,9 @@ pub fn build_statement<'a>(
 
     for pair in iter.by_ref() {
         match pair.as_rule() {
-            Rule::verb => {
+            Rule::compound_filter => {
                 last_verb_end = Some(pair.as_span().end());
-                build_verb(sub_ctx.clone(), pair)?;
+                build_compound_filter(sub_ctx.clone(), pair)?;
             }
             Rule::scope => {
                 scope_has_real_children = pair.clone().into_inner().next().is_some();
@@ -59,7 +59,7 @@ pub fn build_statement<'a>(
             }
             _ => Err(Error::new_from_span(
                 pest::error::ErrorVariant::ParsingError {
-                    positives: vec![Rule::verb, Rule::scope],
+                    positives: vec![Rule::compound_filter, Rule::scope],
                     negatives: vec![pair.as_rule()],
                 },
                 pair.as_span(),

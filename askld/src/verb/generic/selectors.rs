@@ -67,6 +67,10 @@ impl Verb for NameSelector {
         Some(AnchorKind::Name)
     }
 
+    fn compound_admission(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     fn name(&self) -> &str {
         NameSelector::NAME
     }
@@ -160,6 +164,16 @@ impl Verb for ForcedVerb {
 
     fn class(&self) -> VerbClass {
         VerbClass::Predicate
+    }
+
+    /// Forced selection caches its match set and emits no rows of its own,
+    /// so it is not one predicate query.
+    fn compound_admission(&self) -> Result<(), String> {
+        Err(
+            "forced selection (`!\"...\"`) is not a predicate and cannot \
+             appear in a filter expression"
+                .to_string(),
+        )
     }
 
     fn anchor_kind(&self) -> Option<AnchorKind> {
@@ -300,6 +314,10 @@ impl UnitVerb {
 impl Verb for UnitVerb {
     fn name(&self) -> &str {
         "unit"
+    }
+
+    fn compound_admission(&self) -> Result<(), String> {
+        Err("`_` constrains nothing and cannot appear in a filter expression".to_string())
     }
 
     fn span(&self) -> pest::Span<'_> {
@@ -607,6 +625,21 @@ impl Verb for TypeSelector {
         Some(Dimension::Type)
     }
 
+    /// Bare `any` constrains nothing (its filter compiles to no constraint),
+    /// so it fails the concreteness gate; every other form denotes one
+    /// concrete predicate.
+    fn compound_admission(&self) -> Result<(), String> {
+        if self.symbol_type_id.is_some() || self.name_pattern.is_some() {
+            Ok(())
+        } else {
+            Err(
+                "bare `any` constrains nothing; drop it from the expression \
+                 (write `any` beside it instead)"
+                    .to_string(),
+            )
+        }
+    }
+
     /// Set default symbol types and relationship type for child scopes.
     /// Container types (dir, file, mod) implicitly set refs+has with inherit.
     /// func explicitly sets REFS to override any inherited refs+has.
@@ -768,6 +801,14 @@ impl Verb for GenericSelector {
 
     fn class(&self) -> VerbClass {
         VerbClass::Predicate
+    }
+
+    fn compound_admission(&self) -> Result<(), String> {
+        Err(
+            "`select` constrains nothing of its own and cannot appear in a \
+             filter expression"
+                .to_string(),
+        )
     }
 
     fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
