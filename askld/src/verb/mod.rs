@@ -369,7 +369,7 @@ pub enum VerbClass {
     /// slated for removal with the filter-expressions work).
     Predicate,
     /// Relationship-mode modifiers: `has`, `refs`, `derive` (consumed at
-    /// parse time) and `unnest` (a marker read via its tag).
+    /// parse time) and `unnest` (a marker read via [`Verb::is_unnest`]).
     Relationship,
     /// Label plumbing: `label`/`@x` define, `use`/`#x` consume.  `use` is
     /// operationally a selector (it holds execution state), which is why
@@ -379,13 +379,33 @@ pub enum VerbClass {
     Env,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum VerbTag {
-    ProjectFilter,
-    NameSelector,
-    GenericFilter(&'static str),
-    GenericSelector,
-    Unnest,
+/// The dimension a predicate verb constrains — the slot key of the
+/// filter-expressions design.  Within a statement (and across a scope
+/// boundary via inheritance), writing a dimension REPLACES the previous
+/// holder of that dimension wholesale; verbs with no dimension (name
+/// anchors, `ignore`, `search`, `loc`, layer literals, units) accumulate.
+/// This is the entire conflict-resolution law: no verb knows about any
+/// other verb.
+///
+/// Note the deliberate split from [`Verb::suppresses_default_type_filter`]:
+/// that method answers the parse-time question "should the scope's default
+/// type filter be injected?", which `search`/`loc`/`layer` answer yes to
+/// without occupying the type dimension — a later type verb must not evict
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dimension {
+    /// `project(...)`.
+    Project,
+    /// `select`.
+    Select,
+    /// Bare and named type selectors (`func`, `data("x")`, `any`) and
+    /// `filter("type", ...)` — one dimension, so they replace each other
+    /// symmetrically.
+    Type,
+    /// `filter("exact_name", ...)`.
+    FilterExactName,
+    /// `filter("compound_name", ...)`.
+    FilterCompoundName,
 }
 
 /// Bundles the notification parameters that always travel together through
@@ -401,19 +421,6 @@ pub struct NotificationContext {
     pub role: DependencyRole,
     pub rel_type: RelationshipType,
     pub unnest: bool,
-}
-
-pub fn add_verb(existing_verbs: Vec<Arc<dyn Verb>>, new_verb: Arc<dyn Verb>) -> Vec<Arc<dyn Verb>> {
-    let mut verbs = existing_verbs;
-    verbs.push(new_verb);
-
-    let mut updated_verbs = vec![];
-    for verb in verbs.into_iter() {
-        updated_verbs = verb.add_verb(updated_verbs);
-        updated_verbs.push(verb);
-    }
-
-    updated_verbs
 }
 
 /// What kind of anchor a verb contributes (see [`Verb::anchor_kind`]).
@@ -454,27 +461,19 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
         None
     }
 
-    fn extend_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
-        existing_verbs
-    }
-
-    fn replace_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
-        existing_verbs
-            .into_iter()
-            .filter(|v| self.get_tag() != v.get_tag())
-            .collect()
-    }
-
-    fn add_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
-        self.extend_verb(existing_verbs)
+    /// The dimension this verb constrains, if it is a slot-holding predicate
+    /// verb (see [`Dimension`]).  `None` = accumulate.
+    fn dimension(&self) -> Option<Dimension> {
+        None
     }
 
     fn update_context(&self, _ctx: &ParserContext) -> Result<bool> {
         Ok(false)
     }
 
-    fn get_tag(&self) -> Option<VerbTag> {
-        None
+    /// Whether this verb is the `unnest` marker (transitive traversal).
+    fn is_unnest(&self) -> bool {
+        false
     }
 
     fn is_unit(&self) -> bool {

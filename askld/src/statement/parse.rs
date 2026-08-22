@@ -7,7 +7,7 @@ use crate::parser::Rule;
 use crate::parser_context::ParserContext;
 use crate::scope::{build_scope, EmptyScope, Scope};
 use crate::span::Span;
-use crate::verb::{build_verb, DefaultTypeFilter, VerbTag};
+use crate::verb::{build_verb, DefaultTypeFilter};
 use pest::error::Error;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -102,7 +102,7 @@ pub fn build_statement<'a>(
         }
     }
     let relationship_type = sub_ctx.get_relationship_type();
-    let unnest = command.has_verb_tag(&VerbTag::Unnest);
+    let unnest = command.has_unnest();
     let statement = Statement::new_full(command, scope.clone(), relationship_type, unnest);
     scope.set_parent(Rc::downgrade(&statement));
 

@@ -364,3 +364,94 @@ fn verb_classes_are_declared_per_aspect() {
     let preamble = PreambleVerb::new(span(), &vec![], &no_named).unwrap();
     assert_eq!(preamble.class(), VerbClass::Env);
 }
+
+/// The slot cascade at the Command level: writing a dimension replaces the
+/// previous holder wholesale; dimensionless verbs accumulate.
+#[test]
+fn slot_cascade_replaces_within_a_dimension() {
+    use super::generic::{IgnoreVerb, ProjectFilter, TypeSelector};
+    use crate::command::Command;
+    use crate::parser_context::{SYMBOL_TYPE_DATA, SYMBOL_TYPE_FUNCTION};
+
+    let span = || Span::synthetic("v");
+    let no_named = HashMap::new();
+
+    // project(a) project(b) -> b holds the project slot alone.
+    let mut cmd = Command::new(span());
+    cmd.extend(ProjectFilter::new(span(), &vec![Value::plain("a")], &no_named).unwrap());
+    cmd.extend(ProjectFilter::new(span(), &vec![Value::plain("b")], &no_named).unwrap());
+    let filters: Vec<String> = cmd.filters().map(|f| format!("{}", f)).collect();
+    assert_eq!(filters, vec!["ProjectFilter(project=b)".to_string()]);
+
+    // func data -> data holds the type slot alone.
+    let mut cmd = Command::new(span());
+    cmd.extend(TypeSelector::new(span(), &vec![], &no_named, Some(SYMBOL_TYPE_FUNCTION)).unwrap());
+    cmd.extend(TypeSelector::new(span(), &vec![], &no_named, Some(SYMBOL_TYPE_DATA)).unwrap());
+    let filters: Vec<String> = cmd.filters().map(|f| format!("{}", f)).collect();
+    assert_eq!(filters, vec!["TypeSelector(data)".to_string()]);
+
+    // Exclusions have no dimension: ignore(a) ignore(b) both survive.
+    let mut cmd = Command::new(span());
+    cmd.extend(IgnoreVerb::new(span(), &vec![Value::plain("a")], &no_named).unwrap());
+    cmd.extend(IgnoreVerb::new(span(), &vec![Value::plain("b")], &no_named).unwrap());
+    assert_eq!(cmd.filters().count(), 2);
+}
+
+/// `filter("type", ...)` and the bare type verbs share the type dimension,
+/// so they replace each other SYMMETRICALLY — under the old per-verb merge
+/// hooks `func filter("type","data")` kept both (an always-false
+/// conjunction) while the reverse order replaced.
+#[test]
+fn slot_cascade_type_dimension_is_symmetric() {
+    use super::generic::{GenericFilter, TypeSelector};
+    use crate::command::Command;
+    use crate::parser_context::SYMBOL_TYPE_FUNCTION;
+
+    let span = || Span::synthetic("v");
+    let no_named = HashMap::new();
+    let type_filter = |v: &str| {
+        GenericFilter::new(
+            span(),
+            &vec![Value::plain("type"), Value::plain(v)],
+            &no_named,
+        )
+        .unwrap()
+    };
+    let func =
+        || TypeSelector::new(span(), &vec![], &no_named, Some(SYMBOL_TYPE_FUNCTION)).unwrap();
+
+    let mut cmd = Command::new(span());
+    cmd.extend(type_filter("data"));
+    cmd.extend(func());
+    let filters: Vec<String> = cmd.filters().map(|f| format!("{}", f)).collect();
+    assert_eq!(filters, vec!["TypeSelector(function)".to_string()]);
+
+    let mut cmd = Command::new(span());
+    cmd.extend(func());
+    cmd.extend(type_filter("data"));
+    let filters: Vec<String> = cmd.filters().map(|f| format!("{}", f)).collect();
+    assert_eq!(filters, vec!["GenericFilter(type=[6])".to_string()]);
+}
+
+/// A type verb no longer evicts layer-backed anchors: `search`/`loc`/`layer`
+/// suppress the DEFAULT type filter (a parse-time injection question) but do
+/// not occupy the type dimension.  Under the old hooks `search("x") func`
+/// silently dropped the search anchor.
+#[test]
+fn slot_cascade_type_write_keeps_layer_backed_anchors() {
+    use super::generic::{SearchSelector, TypeSelector};
+    use crate::command::Command;
+    use crate::parser_context::SYMBOL_TYPE_FUNCTION;
+
+    let span = || Span::synthetic("v");
+    let no_named = HashMap::new();
+
+    let mut cmd = Command::new(span());
+    cmd.extend(SearchSelector::new(span(), &vec![Value::plain("xyz")], &no_named).unwrap());
+    cmd.extend(TypeSelector::new(span(), &vec![], &no_named, Some(SYMBOL_TYPE_FUNCTION)).unwrap());
+    assert!(
+        cmd.has_layer_spec(),
+        "the search anchor must survive a type-dimension write"
+    );
+    assert_eq!(cmd.filters().count(), 1);
+}
