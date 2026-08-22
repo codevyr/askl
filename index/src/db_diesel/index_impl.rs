@@ -2188,15 +2188,22 @@ impl Index {
             rows
         };
 
-        // Any leaf that filled its budget LIMIT may have dropped rows — flag
-        // the selection so the owning command surfaces a truncation warning.
-        // Budget truncation is acceptable, silent budget truncation is not.
-        // (Branch-level limits mean a full branch is only *probably* truncated;
-        // over-warning is the safe direction.)
-        let budget_bounded = leaf_limit.is_some_and(|l| {
-            let l = l as usize;
-            current.len() >= l || parents.len() >= l || children.len() >= l
-        });
+        // `current` is what becomes the answer, so a `current` that filled its
+        // LIMIT means symbols the user asked for were dropped: flag the
+        // selection and let the owning command warn.  Budget truncation is
+        // acceptable, silent budget truncation is not.
+        //
+        // The neighbourhood families are deliberately NOT consulted, though
+        // they carry the same LIMIT.  They are bounded only for a statement
+        // nobody composes with (`stage_read` clears the budget otherwise), so
+        // their rows reach the user in exactly one way: an edge between two
+        // nodes that are BOTH in the result, which `collect_ref_edges` also
+        // discovers independently through the unbounded `find_edges_between`.
+        // Warning on them reported "may be incomplete" for answers that were
+        // complete — `"i915_ggtt"` returns one symbol while its parents family
+        // runs to 2540 rows — which is how a truncation warning gets trained
+        // out of a user's attention.
+        let budget_bounded = leaf_limit.is_some_and(|l| current.len() >= l as usize);
 
         let selection: Result<Selection> = {
             let _collect_span: tracing::span::EnteredSpan =

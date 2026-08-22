@@ -4856,6 +4856,34 @@ fn budget_truncation_surfaces_warning() {
 }
 
 #[test]
+fn bounded_neighbourhood_alone_does_not_warn() {
+    // cap=1 → leaf LIMIT 8.  `"b"` selects exactly ONE instance, so the answer
+    // is complete — but its parents family is 3 reference sites × 3 enclosing
+    // declarations each (the calling function, the file, the directory) = 9
+    // rows, which fills the same LIMIT.
+    //
+    // The warning used to fire on that: a bounded NEIGHBOURHOOD reported as a
+    // possibly-incomplete RESULT.  On the live index the same false alarm
+    // greeted `"i915_ggtt"`, one symbol whose parents family runs to 2540
+    // rows.  Families are bounded only for statements nobody composes with,
+    // and their rows reach the user solely as edges between result nodes,
+    // which `find_edges_between` rediscovers unbounded.
+    let res = run_query_with_budget(TEST_INPUT_A, r#""b""#, 1);
+
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(92)]);
+    assert!(
+        !res.warnings
+            .iter()
+            .any(|w| w.message.contains("result budget")),
+        "a complete result must not warn about its neighbourhood, got {:?}",
+        res.warnings
+            .iter()
+            .map(|w| w.message.clone())
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn search_skeleton_no_match_returns_empty() {
     // Nonexistent needle ≥ 3 chars: helper returns an empty match set, the
     // verb should not bail.  Step 6 returns Ok(Some(LayerSpec)) regardless,
