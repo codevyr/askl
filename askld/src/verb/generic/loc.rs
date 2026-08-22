@@ -20,7 +20,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 /// on every `loc(...)` call, which drowned operator logs.
 static CRLF_WARNED: LazyLock<Mutex<HashSet<i32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
-use super::super::{AnchorKind, DeriveMethod, Selector, Verb};
+use super::super::{AnchorKind, DeriveMethod, Selector, Verb, VerbClass};
 
 /// LocSelector - creates an ephemeral symbol at a specific file location.
 ///
@@ -96,8 +96,12 @@ impl Verb for LocSelector {
         DeriveMethod::Skip
     }
 
-    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
-        Ok(self)
+    fn class(&self) -> VerbClass {
+        VerbClass::Predicate
+    }
+
+    fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
+        Some(self)
     }
 }
 

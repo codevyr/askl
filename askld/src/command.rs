@@ -8,7 +8,8 @@ use crate::statement::Statement;
 use crate::verb::{
     add_verb, find_symbol_by_instance_id, weak_notifier_blocks, ConstraintAction, DeriveMethod,
     Filter, LabelResolutions, Labeler, LayerShardPopulate, LayerSpec, NotificationContext,
-    OwnPredicate, RootShardPopulate, SelectionShardPopulate, Selector, SelectorId, Verb, VerbTag,
+    OwnPredicate, RootShardPopulate, SelectionShardPopulate, Selector, SelectorId, Verb, VerbClass,
+    VerbTag,
 };
 use anyhow::Result;
 use core::fmt::Debug;
@@ -131,41 +132,69 @@ pub(crate) fn fuse_predicate(
     CompositeFilter::and(filter_parts)
 }
 
+/// A statement's command, stored as a record of aspects: every verb is
+/// routed by its declared [`VerbClass`] into the matching field.  The merge
+/// fold (per-tag override, type replacement) is a predicate-aspect law and
+/// runs only there; the other aspects accumulate.  Iteration order within
+/// each aspect is source order.
 #[derive(Debug, Default)]
 pub struct Command {
-    verbs: Vec<Arc<dyn Verb>>,
+    /// Filters and anchors — the truth-valued aspect.
+    predicate: Vec<Arc<dyn Verb>>,
+    /// `unnest` marker (`has`/`refs`/`derive` are consumed at parse time).
+    relationship: Vec<Arc<dyn Verb>>,
+    /// Label plumbing: `label`/`@x` definitions, `use`/`#x` references.
+    bindings: Vec<Arc<dyn Verb>>,
+    /// Environment configuration (`preamble` is normally consumed at parse
+    /// time; the field exists so the routing in `extend` is total).
+    env: Vec<Arc<dyn Verb>>,
     span: Option<Span>,
     verb_span: Option<Span>,
+}
+
+fn derive_aspect(verbs: &[Arc<dyn Verb>]) -> Vec<Arc<dyn Verb>> {
+    let mut derived = vec![];
+    for verb in verbs.iter() {
+        match verb.derive_method() {
+            DeriveMethod::Clone => {
+                // Use derive_new_instance if available to create an independent
+                // copy, avoiding shared registry state between parent and child.
+                derived.push(verb.derive_new_instance().unwrap_or_else(|| verb.clone()));
+            }
+            DeriveMethod::Skip => {}
+        }
+    }
+    derived
 }
 
 impl Command {
     pub fn new(span: Span) -> Command {
         Self {
-            verbs: vec![],
+            span: Some(span),
+            ..Default::default()
+        }
+    }
+
+    pub fn derive(&self, span: Span) -> Self {
+        Self {
+            predicate: derive_aspect(&self.predicate),
+            relationship: derive_aspect(&self.relationship),
+            bindings: derive_aspect(&self.bindings),
+            env: derive_aspect(&self.env),
             span: Some(span),
             verb_span: None,
         }
     }
 
-    pub fn derive(&self, span: Span) -> Self {
-        let mut verbs = vec![];
-        for verb in self.verbs.iter() {
-            match verb.derive_method() {
-                DeriveMethod::Clone => {
-                    // Use derive_new_instance if available to create an independent
-                    // copy, avoiding shared registry state between parent and child.
-                    let derived = verb.derive_new_instance().unwrap_or_else(|| verb.clone());
-                    verbs.push(derived);
-                }
-                DeriveMethod::Skip => {}
-            }
-        }
-
-        Self {
-            verbs: verbs,
-            span: Some(span),
-            verb_span: None,
-        }
+    /// All verbs across every aspect, predicate first.  For aspect-agnostic
+    /// set-properties (anchoring, tags); relative order across aspects is
+    /// not source order and nothing may depend on it.
+    fn all_verbs<'a>(&'a self) -> impl Iterator<Item = &'a Arc<dyn Verb>> + 'a {
+        self.predicate
+            .iter()
+            .chain(self.relationship.iter())
+            .chain(self.bindings.iter())
+            .chain(self.env.iter())
     }
 
     pub fn span(&self) -> &Span {
@@ -185,16 +214,47 @@ impl Command {
     }
 
     pub fn extend(&mut self, other: Arc<dyn Verb>) {
-        let verbs = std::mem::take(&mut self.verbs);
-        self.verbs = add_verb(verbs, other);
+        // A verb's declared class must agree with the roles it exposes:
+        // predicate verbs filter or select; bindings label or select (`use`
+        // holds selector state); relationship/env verbs never filter.
+        debug_assert!(
+            match other.class() {
+                VerbClass::Predicate =>
+                    other.as_filter().is_some() || other.as_selector().is_some(),
+                VerbClass::Binding => other.as_labeler().is_some() || other.as_selector().is_some(),
+                VerbClass::Relationship | VerbClass::Env => other.as_filter().is_none(),
+            },
+            "verb `{}` declares class {:?} inconsistent with its roles",
+            other.name(),
+            other.class(),
+        );
+        match other.class() {
+            // The merge fold (per-tag override, type replacement) is a
+            // predicate-aspect law; only predicate verbs carry merge hooks.
+            VerbClass::Predicate => {
+                let verbs = std::mem::take(&mut self.predicate);
+                self.predicate = add_verb(verbs, other);
+            }
+            VerbClass::Relationship => self.relationship.push(other),
+            VerbClass::Binding => self.bindings.push(other),
+            VerbClass::Env => self.env.push(other),
+        }
     }
 
     pub(crate) fn filters<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Filter> + 'a> {
-        Box::new(self.verbs.iter().filter_map(|verb| verb.as_filter().ok()))
+        Box::new(self.predicate.iter().filter_map(|verb| verb.as_filter()))
     }
 
+    /// Selectors span two aspects: the predicate's anchors/branches and the
+    /// binding aspect's `use` verbs, which hold execution state like any
+    /// selector.  Relative order across the two aspects carries no meaning.
     pub fn selectors<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Selector> + 'a> {
-        Box::new(self.verbs.iter().filter_map(|verb| verb.as_selector().ok()))
+        Box::new(
+            self.predicate
+                .iter()
+                .chain(self.bindings.iter())
+                .filter_map(|verb| verb.as_selector()),
+        )
     }
 
     /// True when any verb contributes an anchor (see [`Verb::anchor_kind`]):
@@ -202,7 +262,7 @@ impl Command {
     /// execution on its own.  Non-anchored statements only ever derive from
     /// their neighbours.
     pub fn is_anchored(&self) -> bool {
-        self.verbs.iter().any(|v| v.anchor_kind().is_some())
+        self.all_verbs().any(|v| v.anchor_kind().is_some())
     }
 
     /// True when this command carries a real constraint: a filter verb, or
@@ -212,8 +272,9 @@ impl Command {
     /// statements end up unit-only by construction (their verbs are
     /// redirected to the global context), so directives never demand.
     pub fn demands_anchoring(&self) -> bool {
-        self.verbs.iter().any(|v| {
-            v.as_filter().is_ok() || (v.as_selector().is_ok() && !v.is_non_constraining_selector())
+        self.all_verbs().any(|v| {
+            v.as_filter().is_some()
+                || (v.as_selector().is_some() && !v.is_non_constraining_selector())
         })
     }
 
@@ -254,13 +315,11 @@ impl Command {
 
     /// Check if any verb suppresses the default type filter.
     pub fn has_suppress_default_type_filter(&self) -> bool {
-        self.verbs
-            .iter()
-            .any(|v| v.suppresses_default_type_filter())
+        self.all_verbs().any(|v| v.suppresses_default_type_filter())
     }
 
     pub fn has_selectors(&self) -> bool {
-        self.verbs.iter().any(|verb| verb.as_selector().is_ok())
+        self.selectors().next().is_some()
     }
 
     /// Whether any selector in this command materializes an ephemeral layer.
@@ -273,7 +332,7 @@ impl Command {
 
     /// Check if any verb has the given tag.
     pub fn has_verb_tag(&self, tag: &VerbTag) -> bool {
-        self.verbs.iter().any(|v| v.get_tag().as_ref() == Some(tag))
+        self.all_verbs().any(|v| v.get_tag().as_ref() == Some(tag))
     }
 
     pub fn is_unit(&self) -> bool {
@@ -303,11 +362,11 @@ impl Command {
     pub fn is_non_constraining(&self) -> bool {
         self.selectors()
             .all(|verb| verb.is_non_constraining_selector())
-            && !self.verbs.iter().any(|verb| verb.has_name_constraint())
+            && !self.all_verbs().any(|verb| verb.has_name_constraint())
     }
 
     fn labels<'a>(&'a self) -> Box<dyn Iterator<Item = &'a dyn Labeler> + 'a> {
-        Box::new(self.verbs.iter().filter_map(|verb| verb.as_labeler().ok()))
+        Box::new(self.bindings.iter().filter_map(|verb| verb.as_labeler()))
     }
 
     pub fn get_labels(&self) -> Vec<String> {

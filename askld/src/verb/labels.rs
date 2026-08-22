@@ -19,7 +19,7 @@ use crate::{cfg::ControlFlowGraph, execution_context::ExecutionContext, statemen
 
 use super::{
     weak_notifier_blocks, ConstraintAction, DeriveMethod, Labeler, NotificationContext, Selector,
-    SelectorState, Verb,
+    SelectorState, Verb, VerbClass,
 };
 use crate::verb::Filter;
 
@@ -75,6 +75,10 @@ impl Verb for LabelVerb {
         self.span.as_pest_span()
     }
 
+    fn class(&self) -> VerbClass {
+        VerbClass::Binding
+    }
+
     fn derive_method(&self) -> DeriveMethod {
         if self.inherit {
             DeriveMethod::Clone
@@ -83,8 +87,8 @@ impl Verb for LabelVerb {
         }
     }
 
-    fn as_labeler<'a>(&'a self) -> Result<&'a dyn Labeler> {
-        Ok(self)
+    fn as_labeler<'a>(&'a self) -> Option<&'a dyn Labeler> {
+        Some(self)
     }
 }
 
@@ -146,12 +150,16 @@ impl Verb for UserVerb {
         self.span.as_pest_span()
     }
 
+    fn class(&self) -> VerbClass {
+        VerbClass::Binding
+    }
+
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Skip
     }
 
-    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
-        Ok(self)
+    fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
+        Some(self)
     }
 }
 

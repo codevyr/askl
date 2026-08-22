@@ -3,7 +3,7 @@ use anyhow::{bail, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::{DeriveMethod, Verb};
+use super::{DeriveMethod, Verb, VerbClass};
 
 #[derive(Debug)]
 pub(super) struct PreambleVerb {
@@ -37,6 +37,10 @@ impl Verb for PreambleVerb {
 
     fn span(&self) -> pest::Span<'_> {
         self.span.as_pest_span()
+    }
+
+    fn class(&self) -> VerbClass {
+        VerbClass::Env
     }
 
     fn derive_method(&self) -> DeriveMethod {

@@ -326,3 +326,41 @@ fn constraining_by_a_truncated_dependency_is_a_bug() {
 
     state.constrain_selection(&truncated, &DependencyRole::Child, RelationshipType::REFS);
 }
+
+#[test]
+fn verb_classes_are_declared_per_aspect() {
+    use super::generic::{HasModifier, ProjectFilter, TypeSelector, UnnestModifier};
+    use super::labels::{LabelVerb, UserVerb};
+    use super::preamble::PreambleVerb;
+    use crate::parser_context::SYMBOL_TYPE_FUNCTION;
+
+    let span = || Span::synthetic("v");
+    let no_named = HashMap::new();
+
+    let named_name = HashMap::from([("name".to_string(), Value::plain("foo"))]);
+    let name = NameSelector::new(span(), &vec![], &named_name).unwrap();
+    assert_eq!(name.class(), VerbClass::Predicate);
+
+    let func = TypeSelector::new(span(), &vec![], &no_named, Some(SYMBOL_TYPE_FUNCTION)).unwrap();
+    assert_eq!(func.class(), VerbClass::Predicate);
+    // A bare inherited type selector is filter-only: the selector role is
+    // instance-conditional, the class is not.
+    assert!(func.as_filter().is_some());
+    assert!(func.as_selector().is_none());
+
+    let project = ProjectFilter::new(span(), &vec![Value::plain("p")], &no_named).unwrap();
+    assert_eq!(project.class(), VerbClass::Predicate);
+
+    let unnest = UnnestModifier::new(span(), &vec![], &no_named).unwrap();
+    assert_eq!(unnest.class(), VerbClass::Relationship);
+    let has = HasModifier::new(span(), &vec![], &no_named).unwrap();
+    assert_eq!(has.class(), VerbClass::Relationship);
+
+    let label = LabelVerb::new(span(), &vec![Value::plain("l")], &no_named).unwrap();
+    assert_eq!(label.class(), VerbClass::Binding);
+    let user = UserVerb::new(span(), &vec![Value::plain("l")], &no_named).unwrap();
+    assert_eq!(user.class(), VerbClass::Binding);
+
+    let preamble = PreambleVerb::new(span(), &vec![], &no_named).unwrap();
+    assert_eq!(preamble.class(), VerbClass::Env);
+}

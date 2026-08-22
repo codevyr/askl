@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use super::super::{AnchorKind, DeriveMethod, Selector, Verb};
+use super::super::{AnchorKind, DeriveMethod, Selector, Verb, VerbClass};
 
 /// Default per-project cap when the caller omits `limit=`.  Predictable
 /// cost; explicit `limit=N` overrides it.  Aligns with how interactive
@@ -167,8 +167,12 @@ impl Verb for SearchSelector {
         DeriveMethod::Skip
     }
 
-    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
-        Ok(self)
+    fn class(&self) -> VerbClass {
+        VerbClass::Predicate
+    }
+
+    fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
+        Some(self)
     }
 }
 

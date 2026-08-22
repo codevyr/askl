@@ -6,7 +6,7 @@ use crate::parser::{Rule, Value};
 use crate::parser_context::ParserContext;
 use crate::span::Span;
 use crate::statement::Statement;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use index::db_diesel::{
     CompositeFilter, DirectOnlyMixin, EphContext, EphScopedFut, EphTransaction, Index,
@@ -317,7 +317,8 @@ pub fn build_verb(
         // `func("foo")`, `search(...)`, `loc(...)`, a layer literal,
         // `select`, `use(...)` — is a statement's reason to exist, and a
         // preamble is not a statement.
-        if ctx.redirects_to_global() && verb.as_selector().is_ok() && verb.anchor_kind().is_some() {
+        if ctx.redirects_to_global() && verb.as_selector().is_some() && verb.anchor_kind().is_some()
+        {
             return Err(Error::new_from_span(
                 CustomError {
                     message: format!(
@@ -349,6 +350,33 @@ pub fn derive_verb(verb: &Arc<dyn Verb>) -> Option<Arc<dyn Verb>> {
 pub enum DeriveMethod {
     Clone,
     Skip,
+}
+
+/// Which aspect of a statement this verb contributes to.  A statement is a
+/// record of aspects (see the filter-expressions design page): the predicate
+/// is the only truth-valued one, relationship mode configures how a scope
+/// relates to its children, bindings name and reference result sets, and env
+/// verbs configure the query's execution environment.  The class is DECLARED
+/// per verb and never inferred from role probing — [`crate::command::Command`]
+/// partitions its verbs by it, and the boolean-operator work keys its
+/// admission rules on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerbClass {
+    /// Filters and anchors — the truth-valued aspect.  This includes the
+    /// runtime shape of `layer { … }` (an anchor branch denoting the layer's
+    /// rows; the block's ephemeral-ops machinery is parse-context state, not
+    /// a command verb) and the `scope(...)` stub (a selector operationally,
+    /// slated for removal with the filter-expressions work).
+    Predicate,
+    /// Relationship-mode modifiers: `has`, `refs`, `derive` (consumed at
+    /// parse time) and `unnest` (a marker read via its tag).
+    Relationship,
+    /// Label plumbing: `label`/`@x` define, `use`/`#x` consume.  `use` is
+    /// operationally a selector (it holds execution state), which is why
+    /// selector iteration spans this class too.
+    Binding,
+    /// Query-environment configuration: `preamble` (consumed at parse time).
+    Env,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -412,6 +440,11 @@ pub enum AnchorKind {
 pub trait Verb: std::fmt::Debug + Send + Sync {
     fn name(&self) -> &str;
 
+    /// The aspect this verb contributes to.  Required — every verb declares
+    /// its class explicitly; nothing derives it from which role casts
+    /// succeed.
+    fn class(&self) -> VerbClass;
+
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Skip
     }
@@ -463,16 +496,22 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
         None
     }
 
-    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
-        bail!("Not a selector verb")
+    /// This verb's selector contribution, if it has one.  A declared role,
+    /// not an error path: `None` simply means "no selector aspect".  May
+    /// depend on instance state (a bare inherited type selector is
+    /// filter-only).
+    fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
+        None
     }
 
-    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
-        bail!("Not a filter verb")
+    /// This verb's filter contribution, if it has one.
+    fn as_filter<'a>(&'a self) -> Option<&'a dyn Filter> {
+        None
     }
 
-    fn as_labeler<'a>(&'a self) -> Result<&'a dyn Labeler> {
-        bail!("Not a marker verb")
+    /// This verb's label-definition contribution, if it has one.
+    fn as_labeler<'a>(&'a self) -> Option<&'a dyn Labeler> {
+        None
     }
 
     fn suppresses_default_type_filter(&self) -> bool {
