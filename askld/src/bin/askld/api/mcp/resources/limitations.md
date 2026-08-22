@@ -11,6 +11,9 @@
   calls (function pointers, virtual dispatch) may be missing; `field`/`method`
   and `!forced` help model dispatch, but coverage is not guaranteed.
 - **`search()` is literal.** No regex — the query matches an exact byte sequence.
+- **Boolean operators cover predicate verbs only.** `search`/`loc`/layer
+  literals cannot appear inside `or`/`and`/`not`; union searches by
+  juxtaposition (`search("a") search("b")`).
 - **Result caps.** Results are capped (default 100 distinct symbols; override with
   the `limit` argument). When a result is truncated the report says so — narrow
   the query rather than raising the cap blindly.

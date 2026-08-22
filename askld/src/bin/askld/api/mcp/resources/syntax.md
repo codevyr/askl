@@ -23,9 +23,10 @@ separate statements; a `{` must be on the same line as its verb to attach.
   only for non-symbol text. `>=3` chars, smart-case, options `whole_word="true"`,
   `case="sensitive"|"insensitive"`, `limit=500`.
 - Several selectors in one statement are **ORed** (union): `"a" "b"` (or
-  `func("a") func("b")`) selects symbols matching *either*. Inside a scope this
-  is exactly the contrast with `;` — `X { A B }` disjoins, `X { A ; B }`
-  conjoins. See Scopes.
+  `func("a") func("b")`) selects symbols matching *either*; `"a" or "b"` is
+  the explicit spelling (one no-match warning for the group — see Boolean
+  operators). Inside a scope this is exactly the contrast with `;` —
+  `X { A B }` disjoins, `X { A ; B }` conjoins. See Scopes.
 
 ## Scopes — relationships
 - `"x" { }`  callees: what `x` calls/references (references are the default).
@@ -56,12 +57,41 @@ separate statements; a `{` must be on the same line as its verb to attach.
   is a *filter* that constrains. This is the most common point of confusion.
   `any` follows the same rule: `any("x")` queries, bare `any` constrains.
 - `project("name")` restrict to one project (list names with the `askl_projects`
-  tool). `ignore("pat")` exclude matches.
+  tool). `package("path")` keep only symbols under a package path.
+  `ignore("pat")` exclude matches.
 - **Scoping to a project is cheaper as an argument than as a verb:** pass
   `projects: ["linux"]` to `askl_run` and the other projects stop existing for
   that call, instead of being filtered out of the results afterwards. Use
   `project("name")` inside the query when a single query must span projects and
   name one of them.
+
+## Boolean operators — or / and / not / ( )
+- Precedence `not` > `and` > `or`; parentheses group. Operators bind tighter
+  than whitespace: `func or method "foo"` is the type group plus a separate,
+  juxtaposed selector `"foo"`.
+- Anchors: `"open" or "close"` is ONE branch (one no-match warning);
+  juxtaposed `"open" "close"` warns per name. Same rows either way.
+- Filters: the operands of one `or` must share a dimension —
+  `project("a") or project("b")`, `func or method`. Cross-dimension filters
+  conjoin by **juxtaposition**, never by `and`/`or`; a cross-dimension
+  disjunction is written as sibling statements.
+- `not` excludes by negating the SAME predicate the positive verb uses:
+  `not "test"` excludes symbols whose **leaf** is `test`, while
+  `ignore("test")` is broader — it excludes anything carrying the path label
+  `test` anywhere (so `ignore("foo")` drops `foo.bar`, `not "foo"` keeps it).
+  They coincide on plain leaf names. `func and not g"test_*"` = functions
+  except test_*. Exclusions accumulate and inherit.
+- A filter group inherits into `{ }` as a unit and is **replaced wholesale**
+  by a child writing the same dimension: `func or method { data "x" }` finds
+  `x` as data.
+- **One line per expression, unless a `(` is open**: an operator at the END
+  of a line continues onto the next (`"a" or` ⏎ `"b"`), but a line STARTING
+  with `or`/`and` is a new statement and errors. Newlines are free inside
+  `( )`.
+- Not allowed inside expressions: `search`/`loc`/`layer` (not a single
+  predicate query), `has`/`refs`/labels (not predicates), bare `any` and
+  `select` (constrain nothing), `!"..."` (forced). Union searches by
+  juxtaposition instead: `search("a") search("b")`.
 
 ## Paths
 - `file()`/`dir()` arguments starting with `/` are **exact** and paths are
