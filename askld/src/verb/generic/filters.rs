@@ -199,6 +199,90 @@ impl Display for ProjectFilter {
     }
 }
 
+/// PackageFilter — keep only symbols strictly under a package path: the
+/// positive form of `ignore(package=...)`.  With `not`, the old
+/// `ignore("f", package="p")` is expressible as `not (g"f" and
+/// package("p"))`; `ignore` remains for compatibility.
+#[derive(Debug)]
+pub(in crate::verb) struct PackageFilter {
+    span: Span,
+    /// Kept for diagnostics only — the predicate comes from `leaf`.
+    package: String,
+    /// The VALIDATED leaf: constructing it here (and failing the parse if it
+    /// cannot be built) makes "this verb always compiles to a predicate" a
+    /// structural property rather than a comment, which is exactly what the
+    /// compound admission gate promises.
+    leaf: PackageDescendantLeaf,
+}
+
+impl PackageFilter {
+    pub(in crate::verb) const NAME: &'static str = "package";
+
+    pub fn new(
+        span: Span,
+        positional: &Vec<Value>,
+        named: &HashMap<String, Value>,
+    ) -> Result<Arc<dyn Verb>> {
+        if !named.is_empty() {
+            bail!("Unexpected named arguments");
+        }
+        if positional.len() != 1 {
+            bail!("package requires exactly one positional argument: the package path");
+        }
+        let package = positional[0].as_plain()?.to_string();
+        let Some(leaf) = PackageDescendantLeaf::new(&package) else {
+            bail!("'{}' does not name a package path", package);
+        };
+        Ok(Arc::new(Self {
+            span,
+            package,
+            leaf,
+        }))
+    }
+}
+
+impl Verb for PackageFilter {
+    fn name(&self) -> &str {
+        PackageFilter::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn class(&self) -> VerbClass {
+        VerbClass::Predicate
+    }
+
+    fn compound_admission(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn as_filter<'a>(&'a self) -> Option<&'a dyn Filter> {
+        Some(self)
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Clone
+    }
+
+    fn dimension(&self) -> Option<Dimension> {
+        Some(Dimension::Package)
+    }
+}
+
+impl Filter for PackageFilter {
+    fn get_composite_filter(&self, _eph: &index::db_diesel::EphContext) -> Option<CompositeFilter> {
+        Some(CompositeFilter::leaf(self.leaf.clone()))
+    }
+}
+
+impl Display for PackageFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PackageFilter(package={})", self.package)
+    }
+}
+
 /// DefaultTypeFilter - filters symbols by multiple types (OR).
 /// Used when a child scope inherits default types from parent without explicit type selector.
 #[derive(Debug)]
