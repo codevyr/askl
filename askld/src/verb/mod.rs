@@ -423,6 +423,8 @@ pub enum Dimension {
     FilterExactName,
     /// `filter("compound_name", ...)`.
     FilterCompoundName,
+    /// `package(...)` — the positive form of `ignore(package=...)`.
+    Package,
 }
 
 /// Bundles the notification parameters that always travel together through

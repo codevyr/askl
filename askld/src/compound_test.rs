@@ -1,7 +1,7 @@
 //! Boolean filter expressions: parsing, admission errors, and execution.
 
 use crate::parser::parse;
-use crate::test_util::{run_query, TEST_INPUT_A};
+use crate::test_util::{run_query, TEST_INPUT_A, VERB_TEST};
 use index::symbols::SymbolInstanceId;
 
 fn parse_err(query: &str) -> String {
@@ -289,4 +289,66 @@ fn anchor_group_forwards_a_suggestion_token() {
 fn expressions_are_rejected_inside_layer_blocks() {
     let err = parse_err(r#"layer { ephemeral_symbol(name="a") or ephemeral_symbol(name="b") }"#);
     assert!(err.contains("not allowed inside layer blocks"), "{}", err);
+}
+
+// ---------------------------------------------------------------------------
+// `not` versus `ignore`, and the positive package filter
+// ---------------------------------------------------------------------------
+
+/// `not "x"` negates the SAME predicate the positive selector `"x"` uses —
+/// a leaf-name match.  `ignore("x")` is broader: it excludes anything whose
+/// compound path carries the label `x` at any position.  On plain leaf names
+/// the two coincide, which is why they read as aliases.
+#[test]
+fn not_name_and_ignore_agree_on_leaf_names() {
+    for (with_ignore, with_not) in [
+        (r#""a" {ignore("b")}"#, r#""a" {not "b"}"#),
+        (r#""d" {ignore("e")}"#, r#""d" {not "e"}"#),
+    ] {
+        let old = run_query(TEST_INPUT_A, with_ignore);
+        let new = run_query(TEST_INPUT_A, with_not);
+        assert_eq!(
+            sorted(old.nodes.as_vec()),
+            sorted(new.nodes.as_vec()),
+            "`{}` and `{}` must select the same nodes",
+            with_ignore,
+            with_not
+        );
+    }
+}
+
+/// ...but they are NOT interchangeable in general, and the docs must not
+/// call them aliases: `foo.bar` carries the label `foo` inside its path, so
+/// `ignore("foo")` drops it while `not "foo"` (leaf match) keeps it.
+#[test]
+fn not_name_is_narrower_than_ignore_on_compound_names() {
+    let ignored = run_query(VERB_TEST, r#""foo.bar" ignore("foo")"#);
+    assert_eq!(
+        ignored.nodes.as_vec(),
+        vec![],
+        "ignore() excludes on any path label"
+    );
+
+    let negated = run_query(VERB_TEST, r#""foo.bar" not "foo""#);
+    assert_eq!(
+        negated.nodes.as_vec(),
+        vec![SymbolInstanceId::new(92)],
+        "not \"foo\" excludes only symbols whose LEAF is foo"
+    );
+}
+
+#[test]
+fn package_filter_parses_and_holds_its_slot() {
+    parse(r#"package("k8s.io/klog") "a""#).unwrap();
+    parse(r#"not (g"kl*" and package("k8s.io/klog")) "a""#).unwrap();
+
+    // package() writes its own dimension: a later write replaces it.
+    let ast = parse(r#"package("k8s.io/x") package("k8s.io/y") "a""#).unwrap();
+    let stmts: Vec<_> = ast.scope().statements().collect();
+    let filters: Vec<String> = stmts[0]
+        .command()
+        .filters()
+        .map(|f| format!("{}", f))
+        .collect();
+    assert_eq!(filters, vec!["PackageFilter(package=k8s.io/y)".to_string()]);
 }
