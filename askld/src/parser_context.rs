@@ -140,6 +140,16 @@ impl ParserContext {
         *self.alternative_context.borrow_mut() = Some(alternative);
     }
 
+    /// True once `preamble` has redirected this context's verbs to the global
+    /// one — including inside a `preamble { … }` scope, since `derive`
+    /// carries the redirection down.  A verb landing here configures every
+    /// statement in the query rather than joining a statement of its own,
+    /// which is why [`build_verb`](crate::verb::build_verb) refuses selectors
+    /// at this point.
+    pub fn redirects_to_global(&self) -> bool {
+        self.alternative_context.borrow().is_some()
+    }
+
     pub fn get_prev(&self) -> Option<Weak<ParserContext>> {
         self.prev.clone()
     }

@@ -166,6 +166,48 @@ fn preamble_scope_with_semicolons() {
     assert_eq!(ast.scope().statements().count(), 2);
 }
 
+#[test]
+fn preamble_rejects_a_selector() {
+    // Issue #19: the name used to be swallowed — redirected into the global
+    // context, where it selects nothing — and the query ran as though it had
+    // never been written.
+    let err = parse("preamble project(\"p\") \"main\"\n\"bar\"").unwrap_err();
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("preamble cannot select"),
+        "expected a preamble-selector error, got: {msg}"
+    );
+}
+
+#[test]
+fn preamble_scope_rejects_a_selector() {
+    // Same rule inside the scope form: `derive` carries the redirection down.
+    let err = parse("preamble {\nignore(package=\"foo\")\nsearch(\"xyz\")\n}").unwrap_err();
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("preamble cannot select"),
+        "expected a preamble-selector error, got: {msg}"
+    );
+}
+
+#[test]
+fn preamble_keeps_constraints_and_directives() {
+    // What a preamble is FOR must keep parsing: filters — including the NAME
+    // filters, which scope every statement instead of selecting on their own
+    // — a bare type selector, and the modifier verbs, which are selectors
+    // that never originate a row.
+    for query in [
+        "preamble project(\"p\") ignore(\"builtin\")\n\"bar\"",
+        "preamble filter(\"type\", \"func\")\n\"bar\"",
+        "preamble filter(\"compound_name\", \"test\", inherit=\"true\")\n\"bar\"",
+        "preamble filter(\"exact_name\", \"foo\")\n\"bar\"",
+        "preamble func\n\"bar\"",
+        "preamble scope(isolated=\"true\")\n\"bar\"",
+    ] {
+        assert!(parse(query).is_ok(), "must still parse: {query}");
+    }
+}
+
 // === Multi-line argument list tests ===
 
 #[test]
