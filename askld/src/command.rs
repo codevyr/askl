@@ -688,29 +688,21 @@ impl Command {
                         )
                         .await
                 }
-                DependencyRole::Parent => {
-                    selector
-                        .derive_from_child(
-                            ctx,
-                            index,
-                            &selector_filters,
-                            notifier,
-                            &notif_ctx,
-                            parent_scope.clone(),
-                            children_scope.clone(),
-                        )
-                        .await
-                }
                 DependencyRole::User => {
                     selector
                         .derive_from_provider(ctx, index, &selector_filters, notifier)
                         .await
                 }
-                // PreSeed* notifications never reach this dispatch —
-                // they're short-circuited to a no-op in
-                // `Statement::notify`.  If they somehow do, treat as a
-                // no-op (no selection produced).
-                DependencyRole::PreSeedSibling | DependencyRole::PreSeedLabel(_) => Ok(None),
+                // Parent notifications never reach this dispatch: since
+                // siblings conjoin, `Statement::notify` handles the
+                // child→parent edge itself, constraining the parent once per
+                // participating child through `notify_from_selection` (which
+                // derives from the first child that finds it empty).  PreSeed*
+                // are short-circuited to a no-op there as well.  If either
+                // somehow arrives, produce no selection.
+                DependencyRole::Parent
+                | DependencyRole::PreSeedSibling
+                | DependencyRole::PreSeedLabel(_) => Ok(None),
             }
             .map_err(|e| {
                 pest::error::Error::new_from_span(
