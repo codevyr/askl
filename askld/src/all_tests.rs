@@ -1122,16 +1122,12 @@ fn preamble_inner_command() {
 }
 
 #[test]
-fn preamble_isolated_scope() {
-    const QUERY: &str = r#"preamble scope(isolated="true")"#;
-    let res = run_query(TEST_INPUT_A, QUERY);
-
-    println!("{:#?}", res.nodes);
-    println!("{:#?}", res.edges);
-
-    assert_eq!(res.nodes.as_vec(), vec![]);
-    let edges = format_edges(res.edges);
-    assert_eq!(edges, Vec::<String>::new());
+fn scope_isolated_stub_is_gone() {
+    // The never-implemented `scope(isolated=)` stub is removed; dimension
+    // resets fall out of the slot cascade instead (see the
+    // filter-expressions design).
+    let err = crate::parser::parse(r#"scope(isolated="true")"#).unwrap_err();
+    assert!(err.to_string().contains("unknown verb"), "{}", err);
 }
 
 #[test]

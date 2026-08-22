@@ -202,7 +202,6 @@ fn preamble_keeps_constraints_and_directives() {
         "preamble filter(\"compound_name\", \"test\", inherit=\"true\")\n\"bar\"",
         "preamble filter(\"exact_name\", \"foo\")\n\"bar\"",
         "preamble func\n\"bar\"",
-        "preamble scope(isolated=\"true\")\n\"bar\"",
     ] {
         assert!(parse(query).is_ok(), "must still parse: {query}");
     }

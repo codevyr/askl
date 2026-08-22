@@ -1,99 +1,13 @@
-use crate::cfg::ControlFlowGraph;
 use crate::execution_state::RelationshipType;
 use crate::parser::Value;
 use crate::parser_context::ParserContext;
 use crate::span::Span;
 use anyhow::{anyhow, bail, Result};
-use async_trait::async_trait;
-use index::db_diesel::{CompositeFilter, EphContext, ScopeContext, Selection};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use super::super::{DeriveMethod, Selector, Verb, VerbClass};
-
-#[derive(Debug)]
-pub(in crate::verb) struct IsolatedScope {
-    span: Span,
-    _isolated: bool,
-}
-
-impl IsolatedScope {
-    pub(in crate::verb) const NAME: &'static str = "scope";
-
-    pub fn new(
-        span: Span,
-        positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
-        if !positional.is_empty() {
-            bail!("Unexpected positional arguments");
-        }
-
-        let isolated = if let Some(isolated_str) = named.get("isolated") {
-            let isolated_str = isolated_str.as_plain()?;
-            if isolated_str == "true" {
-                true
-            } else if isolated_str == "false" {
-                false
-            } else {
-                bail!("Unexpected value for isolated parameter: {}", isolated_str);
-            }
-        } else {
-            false
-        };
-
-        Ok(Arc::new(Self {
-            span,
-            _isolated: isolated,
-        }))
-    }
-}
-
-impl Verb for IsolatedScope {
-    fn name(&self) -> &str {
-        IsolatedScope::NAME
-    }
-
-    fn span(&self) -> pest::Span<'_> {
-        self.span.as_pest_span()
-    }
-
-    // Operationally a (no-op) selector, so it lives in the predicate aspect
-    // to keep its current behaviour.  The `isolated` flag was never wired up;
-    // the filter-expressions design supersedes this verb and removes it.
-    fn class(&self) -> VerbClass {
-        VerbClass::Predicate
-    }
-
-    fn derive_method(&self) -> DeriveMethod {
-        DeriveMethod::Skip
-    }
-
-    fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
-        Some(self)
-    }
-}
-
-#[async_trait(?Send)]
-impl Selector for IsolatedScope {
-    async fn select_from_all_impl(
-        &self,
-        _cfg: &ControlFlowGraph,
-        _filter: CompositeFilter,
-        _parent_scope: ScopeContext,
-        _children_scope: ScopeContext,
-        _eph: &EphContext,
-    ) -> Result<Option<Selection>> {
-        Ok(Some(Selection::new()))
-    }
-}
-
-impl Display for IsolatedScope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "IsolatedScope")
-    }
-}
+use super::super::{DeriveMethod, Verb, VerbClass};
 
 /// HasModifier - sets the relationship type to Has (containment) for child scopes
 #[derive(Debug)]
