@@ -360,7 +360,12 @@ impl Display for UnitVerb {
 #[derive(Debug)]
 pub(in crate::verb) struct TypeSelector {
     span: Span,
-    symbol_type_id: i32,
+    /// The symbol type this verb constrains to, or `None` for `any` — the
+    /// member of the family that constrains no type at all.  `any` is not a
+    /// separate kind of verb: it selects, anchors, globs, strips inherited
+    /// type filters and weakens exactly like its typed siblings, and differs
+    /// only in contributing no type predicate.
+    symbol_type_id: Option<i32>,
     name_pattern: Option<NamePattern>,
     /// If true, don't select from all - only act as a filter when deriving from parent.
     /// This is much more efficient for queries like `file has { func }`.
@@ -382,12 +387,13 @@ impl TypeSelector {
     pub(in crate::verb) const NAME_MACRO: &'static str = "macro";
     pub(in crate::verb) const NAME_FIELD: &'static str = "field";
     pub(in crate::verb) const NAME_METHOD: &'static str = "method";
+    pub(in crate::verb) const NAME_ANY: &'static str = "any";
 
     pub fn new(
         span: Span,
         positional: &Vec<Value>,
         named: &HashMap<String, Value>,
-        symbol_type_id: i32,
+        symbol_type_id: Option<i32>,
     ) -> Result<Arc<dyn Verb>> {
         let name_pattern = positional
             .first()
@@ -416,8 +422,13 @@ impl TypeSelector {
         let leaf_anchored = match crate::parser::named_plain(named, "match")? {
             Some("contains") => false,
             // Files and directories anchor to the leaf by default; code
-            // symbols (where '.' separates labels) do not.
-            _ => !index::symbols::dot_is_separator(symbol_type_id),
+            // symbols (where '.' separates labels) do not.  `any` follows the
+            // type-agnostic convention of `name_filter`, which anchors — that
+            // is what makes `any("foo")` and `any "foo"` the same query.
+            _ => match symbol_type_id {
+                Some(id) => !index::symbols::dot_is_separator(id),
+                None => true,
+            },
         };
 
         Ok(Arc::new(Self {
@@ -476,16 +487,21 @@ impl TypeSelector {
     }
 
     /// Build composite filter parts for this type selector.
+    ///
+    /// `any` contributes no type part, and takes its name predicate from
+    /// [`super::name_filter`] — the same helper a bare `"name"` selector uses —
+    /// so `any("foo")` and `any "foo"` are one query, not two spellings that
+    /// can drift apart.
     fn build_filter_parts(&self) -> Vec<CompositeFilter> {
-        let mut parts: Vec<CompositeFilter> = vec![CompositeFilter::leaf(SymbolTypeMixin::new(
-            self.symbol_type_id,
-        ))];
+        let mut parts: Vec<CompositeFilter> = Vec::new();
+        if let Some(id) = self.symbol_type_id {
+            parts.push(CompositeFilter::leaf(SymbolTypeMixin::new(id)));
+        }
         if let Some(ref name) = self.name_pattern {
-            parts.push(Self::name_filter_leaf(
-                name,
-                self.symbol_type_id,
-                self.leaf_anchored,
-            ));
+            parts.push(match self.symbol_type_id {
+                Some(id) => Self::name_filter_leaf(name, id, self.leaf_anchored),
+                None => super::name_filter(name),
+            });
         }
         parts
     }
@@ -493,7 +509,10 @@ impl TypeSelector {
 
 impl Verb for TypeSelector {
     fn name(&self) -> &str {
-        match self.symbol_type_id {
+        let Some(id) = self.symbol_type_id else {
+            return TypeSelector::NAME_ANY;
+        };
+        match id {
             SYMBOL_TYPE_FUNCTION => TypeSelector::NAME_FUNCTION,
             SYMBOL_TYPE_FILE => TypeSelector::NAME_FILE,
             SYMBOL_TYPE_MODULE => TypeSelector::NAME_MODULE,
@@ -576,15 +595,20 @@ impl Verb for TypeSelector {
     /// Container types (dir, file, mod) implicitly set refs+has with inherit.
     /// func explicitly sets REFS to override any inherited refs+has.
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
+        // `any` asks for no type, and that answer propagates: an EMPTY default
+        // list means child scopes get no `DefaultTypeFilter` at all.  Falling
+        // into the catch-all arm below would silently constrain `any`'s
+        // children to functions, which is the opposite of what it means.
         let default_types = match self.symbol_type_id {
-            SYMBOL_TYPE_FUNCTION => vec![SYMBOL_TYPE_FUNCTION],
-            SYMBOL_TYPE_TYPE => vec![SYMBOL_TYPE_TYPE],
-            SYMBOL_TYPE_FIELD => vec![SYMBOL_TYPE_FUNCTION],
-            SYMBOL_TYPE_MACRO => vec![SYMBOL_TYPE_MACRO, SYMBOL_TYPE_FUNCTION],
-            SYMBOL_TYPE_MODULE => vec![SYMBOL_TYPE_MODULE, SYMBOL_TYPE_FUNCTION],
-            SYMBOL_TYPE_FILE => vec![SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MODULE],
-            SYMBOL_TYPE_DIRECTORY => vec![SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FILE],
-            _ => vec![SYMBOL_TYPE_FUNCTION],
+            None => vec![],
+            Some(SYMBOL_TYPE_FUNCTION) => vec![SYMBOL_TYPE_FUNCTION],
+            Some(SYMBOL_TYPE_TYPE) => vec![SYMBOL_TYPE_TYPE],
+            Some(SYMBOL_TYPE_FIELD) => vec![SYMBOL_TYPE_FUNCTION],
+            Some(SYMBOL_TYPE_MACRO) => vec![SYMBOL_TYPE_MACRO, SYMBOL_TYPE_FUNCTION],
+            Some(SYMBOL_TYPE_MODULE) => vec![SYMBOL_TYPE_MODULE, SYMBOL_TYPE_FUNCTION],
+            Some(SYMBOL_TYPE_FILE) => vec![SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MODULE],
+            Some(SYMBOL_TYPE_DIRECTORY) => vec![SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FILE],
+            Some(_) => vec![SYMBOL_TYPE_FUNCTION],
         };
         ctx.set_default_symbol_types(default_types);
 
@@ -609,7 +633,15 @@ impl Filter for TypeSelector {
         // under `filter="true"`) went with the `filter=` toggle; namespace
         // scoping is composition (`mod("x") has { … }`) or
         // filter("compound_name", …) now.
-        Some(CompositeFilter::and(self.build_filter_parts()))
+        //
+        // Bare `any` constrains neither, and says so with `None` rather than
+        // an empty `AND` — a filter that means "no restriction" should be
+        // absent from the tree, not a node in it.
+        let parts = self.build_filter_parts();
+        if parts.is_empty() {
+            return None;
+        }
+        Some(CompositeFilter::and(parts))
     }
 }
 
@@ -671,7 +703,10 @@ impl Selector for TypeSelector {
 
 impl Display for TypeSelector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.symbol_type_id {
+        let Some(id) = self.symbol_type_id else {
+            return write!(f, "TypeSelector(any)");
+        };
+        match id {
             SYMBOL_TYPE_FUNCTION => write!(f, "TypeSelector(function)"),
             SYMBOL_TYPE_FILE => write!(f, "TypeSelector(file)"),
             SYMBOL_TYPE_MODULE => write!(f, "TypeSelector(module)"),
@@ -680,7 +715,7 @@ impl Display for TypeSelector {
             SYMBOL_TYPE_DATA => write!(f, "TypeSelector(data)"),
             SYMBOL_TYPE_MACRO => write!(f, "TypeSelector(macro)"),
             SYMBOL_TYPE_FIELD => write!(f, "TypeSelector(field)"),
-            _ => write!(f, "TypeSelector({})", self.symbol_type_id),
+            _ => write!(f, "TypeSelector({id})"),
         }
     }
 }

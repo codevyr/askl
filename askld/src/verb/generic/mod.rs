@@ -33,7 +33,7 @@ pub(crate) use self::ephemeral::{EphemeralOps, LabelResolutions};
 pub(super) use self::filters::{IgnoreVerb, ProjectFilter};
 pub(super) use self::loc::LocSelector;
 pub(super) use self::modifiers::{
-    AnyModifier, DeriveModifier, HasModifier, IsolatedScope, RefsModifier, UnnestModifier,
+    DeriveModifier, HasModifier, IsolatedScope, RefsModifier, UnnestModifier,
 };
 pub(super) use self::search::SearchSelector;
 pub(super) use self::selectors::{ForcedVerb, TypeSelector};
@@ -106,30 +106,30 @@ pub(crate) fn build_generic_verb(
         RefsModifier::NAME => RefsModifier::new(verb_span, &positional, &named),
         DeriveModifier::NAME => DeriveModifier::new(verb_span, &positional, &named),
         UnnestModifier::NAME => UnnestModifier::new(verb_span, &positional, &named),
-        AnyModifier::NAME => AnyModifier::new(verb_span, &positional, &named),
+        TypeSelector::NAME_ANY => TypeSelector::new(verb_span, &positional, &named, None),
         TypeSelector::NAME_FUNCTION => {
-            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FUNCTION)
+            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_FUNCTION))
         }
         TypeSelector::NAME_FILE => {
-            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FILE)
+            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_FILE))
         }
         TypeSelector::NAME_MODULE => {
-            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_MODULE)
+            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_MODULE))
         }
         TypeSelector::NAME_DIRECTORY => {
-            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_DIRECTORY)
+            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_DIRECTORY))
         }
         TypeSelector::NAME_TYPE => {
-            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_TYPE)
+            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_TYPE))
         }
         TypeSelector::NAME_DATA => {
-            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_DATA)
+            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_DATA))
         }
         TypeSelector::NAME_MACRO => {
-            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_MACRO)
+            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_MACRO))
         }
         TypeSelector::NAME_FIELD | TypeSelector::NAME_METHOD => {
-            TypeSelector::new(verb_span, &positional, &named, SYMBOL_TYPE_FIELD)
+            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_FIELD))
         }
         LocSelector::NAME => LocSelector::new(verb_span, &positional, &named),
         SearchSelector::NAME => SearchSelector::new(verb_span, &positional, &named),

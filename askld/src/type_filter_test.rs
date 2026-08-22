@@ -341,3 +341,102 @@ fn unnest_all_parents_from_data_d() {
         "file_x should appear (unnest returns all parents)"
     );
 }
+
+// ============================================================================
+// `any` — the type-agnostic member of the type-verb family.
+// ============================================================================
+
+#[test]
+fn any_with_a_name_ignores_the_symbol_type() {
+    // `macro_m` is a macro, so the typed member of the family finds nothing
+    // while `any` finds it.  The name used to have to be written OUTSIDE the
+    // parentheses (`any "macro_m"`); written inside, it was silently
+    // discarded and the statement then failed the anchor check complaining
+    // that no name was given.
+    let named = run_query(TEST_INPUT_TYPE_FILTER, r#"any("macro_m")"#);
+    assert_eq!(
+        named.nodes.as_vec(),
+        vec![SymbolInstanceId::new(105)],
+        "any(name) must match whatever type carries that name"
+    );
+
+    let typed = run_query(TEST_INPUT_TYPE_FILTER, r#"func("macro_m")"#);
+    assert!(
+        typed.nodes.as_vec().is_empty(),
+        "func(name) still constrains by type"
+    );
+}
+
+#[test]
+fn any_name_inside_and_outside_the_parentheses_agree() {
+    // The two spellings share `name_filter`, so they are one query.  This is
+    // the invariant that keeps them from drifting: if the predicate for
+    // `any(...)` is ever built somewhere else, this fails.
+    for name in ["macro_m", "func_a", "data_macro_only"] {
+        let inside = run_query(TEST_INPUT_TYPE_FILTER, &format!(r#"any("{name}")"#));
+        let outside = run_query(TEST_INPUT_TYPE_FILTER, &format!(r#"any "{name}""#));
+        assert_eq!(
+            inside.nodes.as_vec(),
+            outside.nodes.as_vec(),
+            "any(\"{name}\") and any \"{name}\" must be the same query"
+        );
+    }
+}
+
+#[test]
+fn any_takes_globs_like_the_rest_of_the_family() {
+    // Glob support is not special-cased for `any`; it comes from the shared
+    // `NamePattern`.  `data_*` spans two data symbols.
+    let res = run_query(TEST_INPUT_TYPE_FILTER, r#"any(g"data_*")"#);
+    let nodes = res.nodes.as_vec();
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(106)) && nodes.contains(&SymbolInstanceId::new(107)),
+        "any(glob) must match across the index, got {nodes:?}"
+    );
+}
+
+#[test]
+fn bare_any_still_drops_the_inherited_type_filter() {
+    // The behaviour `any` already had: a child scope of a function sees only
+    // functions by default, and `any` removes that constraint.  func_a
+    // references data_d (106) and macro_m (105), neither of them functions.
+    let constrained = run_query(TEST_INPUT_TYPE_FILTER, r#"func("func_a") { func }"#);
+    assert!(
+        !constrained
+            .nodes
+            .as_vec()
+            .contains(&SymbolInstanceId::new(105)),
+        "a func-typed child must not match the macro"
+    );
+
+    let unconstrained = run_query(TEST_INPUT_TYPE_FILTER, r#"func("func_a") { any }"#);
+    let nodes = unconstrained.nodes.as_vec();
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(105)) && nodes.contains(&SymbolInstanceId::new(106)),
+        "bare `any` must let the macro and the data symbol through, got {nodes:?}"
+    );
+}
+
+#[test]
+fn bare_any_does_not_anchor() {
+    // `any` alone denotes the whole index, so it is a constraint and not a
+    // reason for a statement to exist — same as bare `func`.  `select` is the
+    // verb that means "enumerate".
+    let err = crate::test_util::run_query_err(TEST_INPUT_TYPE_FILTER, r#"any"#);
+    assert!(err.is_err(), "bare `any` must still fail the anchor check");
+}
+
+#[test]
+fn bare_any_propagates_the_absence_of_a_type() {
+    // `func` propagates its type to descendants; `any` propagates the absence
+    // of one, so a scope under `any` is unconstrained without having to
+    // repeat it.  macro_m (105) sits under func_a and is reached through a
+    // plain `{ }` grandchild.
+    const QUERY: &str = r#"func("func_a") { any { } }"#;
+    let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
+    let nodes = res.nodes.as_vec();
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(105)),
+        "a grandchild under `any` must not inherit the function filter, got {nodes:?}"
+    );
+}
