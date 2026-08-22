@@ -4856,6 +4856,49 @@ fn budget_truncation_surfaces_warning() {
 }
 
 #[test]
+fn multi_instance_target_keeps_its_reference_edges() {
+    // `test.f` has TWO definition instances — 86 in /bar.c, 96 in /main.c —
+    // and is referenced twice, from `test.d` (94) and `test.e` (95).
+    //
+    // The parents query used to return one row per (reference, enclosing
+    // declaration, INSTANCE OF THE TARGET), so two rows per reference here,
+    // and the edge kept whichever the planner returned first.  It now returns
+    // one row per (reference, enclosing declaration) and the target instance
+    // is chosen explicitly.  Both edges must survive, once each.
+    const QUERY: &str = r#"{ "test.f" }"#;
+    let res = run_query(TEST_INPUT_MODULES, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    for id in [86, 94, 95, 96] {
+        assert!(
+            nodes.contains(&SymbolInstanceId::new(id)),
+            "expected instance {id} among {nodes:?}"
+        );
+    }
+
+    let edges = format_edges(res.edges);
+    let to_f: Vec<&String> = edges
+        .iter()
+        .filter(|e| e.ends_with("-86") || e.ends_with("-96"))
+        .collect();
+    assert!(
+        to_f.contains(&&"94-86".to_string()) && to_f.contains(&&"95-86".to_string()),
+        "both callers must keep their edge to test.f, got {to_f:?}"
+    );
+    // Both instances are definitions, so the tiebreak is the lowest id: every
+    // edge lands on 86.  The point is not that 86 is the better answer — it is
+    // that the answer no longer depends on which row the planner returned
+    // first.  See `multi_instance_edges_do_not_fan_out` for the row-level
+    // fence, and note that an instance in the REFERENCING object (96 lives in
+    // /main.c with both call sites; 86 is in /bar.c) may be the more useful
+    // choice if this is ever revisited.
+    assert!(
+        !edges.iter().any(|e| e.ends_with("-96")),
+        "a single deterministic instance must carry the edges, got {edges:?}"
+    );
+}
+
+#[test]
 fn bounded_neighbourhood_alone_does_not_warn() {
     // cap=1 → leaf LIMIT 8.  `"b"` selects exactly ONE instance, so the answer
     // is complete — but its parents family is 3 reference sites × 3 enclosing
