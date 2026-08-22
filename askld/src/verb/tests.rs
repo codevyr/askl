@@ -304,3 +304,22 @@ fn test_preamble_empty_scope() {
     let res = run_query("verb_test.sql", query);
     assert!(!res.nodes.as_vec().is_empty());
 }
+
+#[test]
+#[should_panic(expected = "budget_bounded")]
+fn constraining_by_a_truncated_dependency_is_a_bug() {
+    // The fence for `perf/BUDGET_GATE.md`: composition retains against a
+    // dependency's rows, so consuming one that stopped at a LIMIT would prune
+    // neighbours of the rows it never fetched.  `stage_read` keeps this
+    // unreachable today by clearing the result budget for every composed
+    // statement; when that gate is retired in favour of predicate-carrying
+    // composition, this is the assertion that must stay satisfied.
+    use crate::execution_state::{DependencyRole, RelationshipType};
+    use index::db_diesel::Selection;
+
+    let mut state = SelectorState::new();
+    let mut truncated = Selection::new();
+    truncated.budget_bounded = true;
+
+    state.constrain_selection(&truncated, &DependencyRole::Child, RelationshipType::REFS);
+}
