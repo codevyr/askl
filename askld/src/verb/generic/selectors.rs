@@ -21,7 +21,7 @@ use std::fmt::Display;
 use std::sync::{Arc, OnceLock};
 
 use super::super::{
-    AnchorKind, DeriveMethod, Filter, OwnPredicate, Selector, Verb, VerbClass, VerbTag,
+    AnchorKind, DeriveMethod, Dimension, Filter, OwnPredicate, Selector, Verb, VerbClass,
 };
 use super::name_filter;
 
@@ -598,18 +598,13 @@ impl Verb for TypeSelector {
         }))
     }
 
-    fn get_tag(&self) -> Option<VerbTag> {
-        None
-    }
-
-    fn add_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
-        // Any type selector replaces inherited type selectors.
-        // e.g. `data` or `data("foo")` inside a `func` scope replaces the
-        // inherited func filter rather than AND'ing with it.
-        existing_verbs
-            .into_iter()
-            .filter(|v| !v.suppresses_default_type_filter())
-            .collect()
+    /// Any type selector — bare or named — writes the type dimension, so it
+    /// replaces an earlier type constraint (`data` or `data("foo")` inside a
+    /// `func` scope replaces the inherited func filter rather than AND'ing
+    /// with it).  It no longer evicts `search`/`loc`/`layer`: those suppress
+    /// the DEFAULT type filter but do not occupy the type dimension.
+    fn dimension(&self) -> Option<Dimension> {
+        Some(Dimension::Type)
     }
 
     /// Set default symbol types and relationship type for child scopes.
@@ -787,12 +782,8 @@ impl Verb for GenericSelector {
         Some(AnchorKind::All)
     }
 
-    fn get_tag(&self) -> Option<VerbTag> {
-        Some(VerbTag::GenericSelector)
-    }
-
-    fn add_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
-        self.replace_verb(existing_verbs)
+    fn dimension(&self) -> Option<Dimension> {
+        Some(Dimension::Select)
     }
 }
 

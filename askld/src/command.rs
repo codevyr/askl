@@ -6,10 +6,9 @@ use crate::parser::Rule;
 use crate::span::Span;
 use crate::statement::Statement;
 use crate::verb::{
-    add_verb, find_symbol_by_instance_id, weak_notifier_blocks, ConstraintAction, DeriveMethod,
-    Filter, LabelResolutions, Labeler, LayerShardPopulate, LayerSpec, NotificationContext,
-    OwnPredicate, RootShardPopulate, SelectionShardPopulate, Selector, SelectorId, Verb, VerbClass,
-    VerbTag,
+    find_symbol_by_instance_id, weak_notifier_blocks, ConstraintAction, DeriveMethod, Filter,
+    LabelResolutions, Labeler, LayerShardPopulate, LayerSpec, NotificationContext, OwnPredicate,
+    RootShardPopulate, SelectionShardPopulate, Selector, SelectorId, Verb, VerbClass,
 };
 use anyhow::Result;
 use core::fmt::Debug;
@@ -145,8 +144,10 @@ pub struct Command {
     relationship: Vec<Arc<dyn Verb>>,
     /// Label plumbing: `label`/`@x` definitions, `use`/`#x` references.
     bindings: Vec<Arc<dyn Verb>>,
-    /// Environment configuration (`preamble` is normally consumed at parse
-    /// time; the field exists so the routing in `extend` is total).
+    /// Environment configuration.  Today its only member (`preamble`) is
+    /// ALWAYS consumed at parse time, so this vec is empty in every
+    /// reachable command; the field keeps the routing in `extend` total and
+    /// mirrors the statement record of the filter-expressions design.
     env: Vec<Arc<dyn Verb>>,
     span: Option<Span>,
     verb_span: Option<Span>,
@@ -229,11 +230,15 @@ impl Command {
             other.class(),
         );
         match other.class() {
-            // The merge fold (per-tag override, type replacement) is a
-            // predicate-aspect law; only predicate verbs carry merge hooks.
+            // The slot cascade, in full: writing a dimension replaces the
+            // previous holder of that dimension wholesale; dimensionless
+            // predicate verbs (anchors, exclusions, layer-backed selectors)
+            // accumulate.  Verbs never inspect each other.
             VerbClass::Predicate => {
-                let verbs = std::mem::take(&mut self.predicate);
-                self.predicate = add_verb(verbs, other);
+                if let Some(dim) = other.dimension() {
+                    self.predicate.retain(|v| v.dimension() != Some(dim));
+                }
+                self.predicate.push(other);
             }
             VerbClass::Relationship => self.relationship.push(other),
             VerbClass::Binding => self.bindings.push(other),
@@ -330,9 +335,9 @@ impl Command {
         self.selectors().any(|s| s.has_layer_spec())
     }
 
-    /// Check if any verb has the given tag.
-    pub fn has_verb_tag(&self, tag: &VerbTag) -> bool {
-        self.all_verbs().any(|v| v.get_tag().as_ref() == Some(tag))
+    /// Whether the `unnest` marker is present.
+    pub fn has_unnest(&self) -> bool {
+        self.relationship.iter().any(|v| v.is_unnest())
     }
 
     pub fn is_unit(&self) -> bool {

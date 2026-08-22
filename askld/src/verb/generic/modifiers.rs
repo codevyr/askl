@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use super::super::{DeriveMethod, Selector, Verb, VerbClass, VerbTag};
+use super::super::{DeriveMethod, Selector, Verb, VerbClass};
 
 #[derive(Debug)]
 pub(in crate::verb) struct IsolatedScope {
@@ -313,8 +313,8 @@ impl Verb for UnnestModifier {
         DeriveMethod::Skip
     }
 
-    fn get_tag(&self) -> Option<VerbTag> {
-        Some(VerbTag::Unnest)
+    fn is_unnest(&self) -> bool {
+        true
     }
 }
 

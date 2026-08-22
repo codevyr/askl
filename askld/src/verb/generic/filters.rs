@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use super::super::{AnchorKind, DeriveMethod, Filter, Verb, VerbClass, VerbTag};
+use super::super::{AnchorKind, DeriveMethod, Dimension, Filter, Verb, VerbClass};
 use super::selectors::TypeSelector;
 
 #[derive(Debug)]
@@ -160,12 +160,8 @@ impl Verb for ProjectFilter {
         DeriveMethod::Clone
     }
 
-    fn get_tag(&self) -> Option<VerbTag> {
-        Some(VerbTag::ProjectFilter)
-    }
-
-    fn add_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
-        self.replace_verb(existing_verbs)
+    fn dimension(&self) -> Option<Dimension> {
+        Some(Dimension::Project)
     }
 }
 
@@ -215,6 +211,12 @@ impl Verb for DefaultTypeFilter {
 
     fn as_filter<'a>(&'a self) -> Option<&'a dyn Filter> {
         Some(self)
+    }
+
+    // Semantically a type-dimension constraint.  By construction it can
+    // never conflict: it is injected last and only when no type verb exists.
+    fn dimension(&self) -> Option<Dimension> {
+        Some(Dimension::Type)
     }
 
     fn derive_method(&self) -> DeriveMethod {
@@ -286,14 +288,6 @@ impl FilterKind {
                 "Unknown filter kind: '{}'. Expected 'type', 'exact_name', or 'compound_name'",
                 other
             ),
-        }
-    }
-
-    fn tag_name(&self) -> &'static str {
-        match self {
-            FilterKind::Type { .. } => "type",
-            FilterKind::ExactName { .. } => "exact_name",
-            FilterKind::CompoundName { .. } => "compound_name",
         }
     }
 
@@ -446,12 +440,12 @@ impl Verb for GenericFilter {
         }
     }
 
-    fn get_tag(&self) -> Option<VerbTag> {
-        Some(VerbTag::GenericFilter(self.kind.tag_name()))
-    }
-
-    fn add_verb(&self, existing_verbs: Vec<Arc<dyn Verb>>) -> Vec<Arc<dyn Verb>> {
-        self.replace_verb(existing_verbs)
+    fn dimension(&self) -> Option<Dimension> {
+        Some(match self.kind {
+            FilterKind::Type { .. } => Dimension::Type,
+            FilterKind::ExactName { .. } => Dimension::FilterExactName,
+            FilterKind::CompoundName { .. } => Dimension::FilterCompoundName,
+        })
     }
 
     fn suppresses_default_type_filter(&self) -> bool {
