@@ -83,6 +83,10 @@ struct AsklRunArgs {
     projection: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    /// Project names to make visible for this run; empty = every indexed
+    /// project.
+    #[serde(default)]
+    projects: Vec<String>,
 }
 
 /// `askl_run` — execute a raw askl query and return the markdown report. Uses
@@ -106,7 +110,7 @@ async fn tool_askl_run(data: &web::Data<AsklData>, arguments: Value) -> ToolOutp
         },
     };
 
-    match build_result_graph(data, &args.query, args.limit).await {
+    match build_result_graph(data, &args.query, args.limit, &args.projects).await {
         Ok(graph) => {
             ToolOutput::ok(render_graph_markdown(data, &args.query, &graph, projection).await)
         }
@@ -350,6 +354,14 @@ accumulated context.",
                         "type": "integer",
                         "description": "Max distinct symbols in the result (0 = unlimited). Defaults to \
             the server cap; the report says when results were truncated."
+                    },
+                    "projects": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Names (from `askl_projects`) of the projects to search; omit \
+            to search all of them. This is the cheap way to scope a query — the other projects stop \
+            existing for this run, rather than being filtered out of the results afterwards. An \
+            unknown name is an error, never a silently empty answer."
                     }
                 },
                 "required": ["query"]

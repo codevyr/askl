@@ -4051,6 +4051,7 @@ fn canary_filtered_by_find_symbol() {
         canary_roots.push(index::db_diesel::RootLayer {
             id: CANARY_LAYER_ID,
             project_id: -999999,
+            name: "canary".to_string(),
             hash: vec![],
         });
         let canary_eph = EphContext::rooted(canary_roots);
@@ -4142,6 +4143,7 @@ fn canary_leak_detected_by_has_eph_leak() {
     let other = EphContext::rooted(vec![index::db_diesel::RootLayer {
         id: -1,
         project_id: 1,
+        name: "p1".to_string(),
         hash: vec![],
     }]);
     assert!(
@@ -4153,6 +4155,7 @@ fn canary_leak_detected_by_has_eph_leak() {
     let canary_visible = EphContext::rooted(vec![index::db_diesel::RootLayer {
         id: CANARY_LAYER_ID,
         project_id: -999999,
+        name: "canary".to_string(),
         hash: vec![],
     }]);
     assert!(
@@ -7115,10 +7118,11 @@ fn delete_project_purges_eph_cache() {
 fn per_root_root_shard_reused_under_narrowed_roots() {
     // The headline property of per-root chains: a root's root shard is keyed on
     // that single root's identity (`root_shard_hash`), so narrowing the
-    // visible root set — the future multitenancy/versioning entry point —
-    // reuses the already-cached root shard instead of repopulating.  Request-level
-    // narrowing doesn't exist yet, so the test constructs the narrowed set
-    // directly, exactly as a narrowing entry point would.
+    // visible root set reuses the already-cached root shard instead of
+    // repopulating.  The request-level entry point is `narrow_roots` in the
+    // askld binary (`/query?projects=…`, `askl_run`'s `projects`); this test
+    // constructs the narrowed set directly, which is exactly what that
+    // resolver hands to `ExecutionContext::new`.
     use crate::command::ShardRole;
     use crate::test_util::run_query_traced_with_roots;
     const QUERY: &str = r#"search("foo", limit="97")"#; // unique limit → own cache rows

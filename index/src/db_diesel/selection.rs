@@ -9,15 +9,22 @@ use std::hash::{Hash, Hasher};
 pub const CANARY_LAYER_ID: i64 = -999999;
 
 /// A project root layer visible to the current request: the persistent layer
-/// id (positive, one per project), the owning project's id, and the root's
-/// identity hash.  The layer id feeds visibility binds; the project id scopes
-/// per-root populate reads/writes; the hash is folded into root-shard cache
-/// keys so cache identity tracks root identity (and, once roots become
-/// version-hashed, content).
+/// id (positive, one per project), the owning project's id, the project's
+/// name, and the root's identity hash.  The layer id feeds visibility binds;
+/// the project id scopes per-root populate reads/writes; the hash is folded
+/// into root-shard cache keys so cache identity tracks root identity (and,
+/// once roots become version-hashed, content).
+///
+/// `name` is the project name a request narrows by (`project("…")` takes the
+/// same string).  It is metadata only: [`root_shard_hash`] folds `hash`, so
+/// carrying the name here changes no cache key.
+///
+/// [`root_shard_hash`]: crate::db_diesel::root_shard_hash
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RootLayer {
     pub id: i64,
     pub project_id: i32,
+    pub name: String,
     pub hash: Vec<u8>,
 }
 
@@ -540,6 +547,7 @@ mod tests {
         EphContext::rooted(vec![RootLayer {
             project_id: 1,
             id: TEST_ROOT,
+            name: "p1".to_string(),
             hash: vec![0xab; 32],
         }])
     }
@@ -713,16 +721,19 @@ mod tests {
             RootLayer {
                 project_id: 1,
                 id: 7,
+                name: "p1".to_string(),
                 hash: vec![7; 32],
             },
             RootLayer {
                 project_id: 1,
                 id: 3,
+                name: "p1".to_string(),
                 hash: vec![3; 32],
             },
             RootLayer {
                 project_id: 1,
                 id: 7,
+                name: "p1".to_string(),
                 hash: vec![7; 32],
             },
         ]);

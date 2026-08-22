@@ -1459,22 +1459,28 @@ impl Index {
     pub async fn load_root_layers(&self) -> Result<Vec<RootLayer>> {
         use crate::schema_diesel::{layers, projects};
 
-        let rows: std::sync::Arc<Vec<(i64, i32, Vec<u8>)>> = self
+        let rows: std::sync::Arc<Vec<(i64, i32, String, Vec<u8>)>> = self
             .cached_load(
                 projects::table
                     .inner_join(layers::table.on(layers::id.eq(projects::root_layer_id)))
                     .filter(projects::id.gt(0))
                     .order(projects::root_layer_id.asc())
-                    .select((projects::root_layer_id, projects::id, layers::hash)),
+                    .select((
+                        projects::root_layer_id,
+                        projects::id,
+                        projects::project_name,
+                        layers::hash,
+                    )),
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to load root layers: {}", e))?;
 
         Ok(rows
             .iter()
-            .map(|(id, project_id, hash)| RootLayer {
+            .map(|(id, project_id, name, hash)| RootLayer {
                 id: *id,
                 project_id: *project_id,
+                name: name.clone(),
                 hash: hash.clone(),
             })
             .collect())
@@ -4028,11 +4034,13 @@ mod tests {
         let r1 = RootLayer {
             project_id: 1,
             id: 1,
+            name: "p1".to_string(),
             hash: vec![0x11; 32],
         };
         let r2 = RootLayer {
             project_id: 2,
             id: 2,
+            name: "p2".to_string(),
             hash: vec![0x22; 32],
         };
 
@@ -4094,6 +4102,7 @@ mod tests {
         let mut eph = EphContext::rooted(vec![RootLayer {
             project_id: 1,
             id: 424242,
+            name: "p1".to_string(),
             hash: vec![0x42; 32],
         }]);
         eph.push_materialisation(&[(424242, -7)]);
@@ -4204,6 +4213,7 @@ mod tests {
         RootLayer {
             project_id: 1,
             id: 1000001,
+            name: "p1".to_string(),
             hash: vec![0x11; 32],
         }
     }
