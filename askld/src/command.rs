@@ -6,9 +6,9 @@ use crate::parser::Rule;
 use crate::span::Span;
 use crate::statement::Statement;
 use crate::verb::{
-    add_verb, find_symbol_by_instance_id, ConstraintAction, DeriveMethod, Filter, LabelResolutions,
-    Labeler, LayerShardPopulate, LayerSpec, NotificationContext, OwnPredicate, RootShardPopulate,
-    SelectionShardPopulate, Selector, SelectorId, Verb, VerbTag,
+    add_verb, find_symbol_by_instance_id, weak_notifier_blocks, ConstraintAction, DeriveMethod,
+    Filter, LabelResolutions, Labeler, LayerShardPopulate, LayerSpec, NotificationContext,
+    OwnPredicate, RootShardPopulate, SelectionShardPopulate, Selector, SelectorId, Verb, VerbTag,
 };
 use anyhow::Result;
 use core::fmt::Debug;
@@ -528,11 +528,18 @@ impl Command {
     /// only on the call that finds a selector still empty (the first), the
     /// rest constraining what it produced.  Deriving per child and unioning
     /// would re-introduce the disjunction.
+    ///
+    /// `notifier_weak` is the notifying child's weakness, which gates the
+    /// constrain half exactly as it does on the parent→child edge — see
+    /// [`weak_notifier_blocks`].  The derivation half below is deliberately
+    /// left open to weak children: supplying a selection is not narrowing
+    /// one.
     pub async fn notify_from_selection(
         &self,
         ctx: &mut ExecutionContext,
         index: &Index,
         dependency: &Selection,
+        notifier_weak: bool,
         role: DependencyRole,
         rel_type: RelationshipType,
         unnest: bool,
@@ -544,6 +551,17 @@ impl Command {
         let selector_filters: Vec<&dyn Filter> = self.filters().collect();
         let mut derivation_ids = None;
         for selector in self.selectors() {
+            // A weak child may seed a selector that has nothing (the
+            // derivation below), but must not narrow one that has already
+            // resolved — the same rule the parent→child edge applies in
+            // `Selector::try_constrain_notification`.
+            let has_selection = selector_state_with(&mut ctx.registry, selector, |state| {
+                state.selection.is_some()
+            });
+            if weak_notifier_blocks(notifier_weak, has_selection) {
+                continue;
+            }
+
             let span = Span::from_pest(selector.span(), self.span().input());
             let (constrained, sel_changed, sel_warnings) =
                 selector_state_with(&mut ctx.registry, selector, |state| {

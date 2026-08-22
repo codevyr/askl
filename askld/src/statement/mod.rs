@@ -1481,14 +1481,19 @@ impl Statement {
             // only what we do with the members is.  Collect the
             // participants' selections up front: they are owned clones, so
             // the immutable `ctx` read is over before the mutable
-            // `notify_from_selection` calls begin.
-            let selections: Vec<Selection> = dependent
+            // `notify_from_selection` calls begin.  Each carries its own
+            // weakness, because a weak participant may seed the parent but
+            // may not narrow it (`weak_notifier_blocks`).
+            let selections: Vec<(bool, Selection)> = dependent
                 .statement
                 .children()
                 .filter(|child| {
                     child.command().has_selectors() && !should_skip_in_parent_merge(child)
                 })
-                .filter_map(|child| child.get_selection(ctx))
+                .filter_map(|child| {
+                    let weak = child.get_state().weak;
+                    child.get_selection(ctx).map(|sel| (weak, sel))
+                })
                 .collect();
 
             // Nothing to conjoin yet — an unresolved participant simply has
@@ -1509,7 +1514,7 @@ impl Statement {
             // drop the edges to the siblings the parent is displayed with.
             let mut scope_ids: Vec<i64> = selections
                 .iter()
-                .flat_map(|sel| sel.get_instance_ids())
+                .flat_map(|(_, sel)| sel.get_instance_ids())
                 .collect();
             scope_ids.sort_unstable();
             scope_ids.dedup();
@@ -1524,7 +1529,7 @@ impl Statement {
             // the fixpoint is the intersection — and derivation runs at most
             // once, with no extra SQL for the conjunction.
             let mut changed = false;
-            for selection in &selections {
+            for (child_weak, selection) in &selections {
                 let res = dependent
                     .statement
                     .command()
@@ -1532,6 +1537,7 @@ impl Statement {
                         ctx,
                         &cfg.index,
                         selection,
+                        *child_weak,
                         DependencyRole::Parent,
                         rel_type,
                         unnest,

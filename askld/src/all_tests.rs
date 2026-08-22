@@ -2075,6 +2075,59 @@ fn generic_filter_with_select_constrains_parent() {
 }
 
 #[test]
+fn weak_child_does_not_eliminate_parent() {
+    // `data(inherit="false")` is a bare type selector that does NOT inherit,
+    // so unlike plain `data` it IS a selector — non-unit and
+    // non-constraining, i.e. weak and yet a participant in the parent
+    // conjunction.  The fixture has no data symbols, so the child resolves
+    // empty.  A weak child is a display echo: its emptiness must not take
+    // the parent with it.
+    const QUERY: &str = r#""foo" { data(inherit="false") }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(20)),
+        "foo must survive an empty WEAK child; got {:?}",
+        nodes
+    );
+}
+
+#[test]
+fn weak_parent_does_not_eliminate_child() {
+    // The mirror of `weak_child_does_not_eliminate_parent`, and the reason
+    // it is a bug rather than a preference: written on the other side of the
+    // braces, the same weak statement asserting the same absent evidence has
+    // always left its neighbour alone.  Both spellings must agree.
+    const QUERY: &str = r#"data(inherit="false") { "foo" }"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(20)),
+        "foo must survive an empty WEAK parent; got {:?}",
+        nodes
+    );
+}
+
+#[test]
+fn bare_and_explicit_type_children_agree() {
+    // `data` and `data(inherit="false")` differ only in whether the type
+    // constraint is inherited into child scopes — neither constrains a
+    // parent.  Bare `data` reaches the parent merge as unit+filter and is
+    // skipped outright; the explicit form arrives as a weak selector.  Two
+    // routes, one answer.
+    let bare = run_query(TEST_INPUT_CONTAINMENT, r#""foo" { data }"#);
+    let explicit = run_query(TEST_INPUT_CONTAINMENT, r#""foo" { data(inherit="false") }"#);
+
+    assert_eq!(
+        bare.nodes.as_vec(),
+        explicit.nodes.as_vec(),
+        "the two spellings of a weak type child must return the same nodes"
+    );
+}
+
+#[test]
 fn generic_select_alone_enumerates() {
     // Bare `select` is the bindness verb with the All anchor: it declares
     // the tree binding and enumerates everything its filters allow,
