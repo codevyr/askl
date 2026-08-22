@@ -339,14 +339,6 @@ impl Command {
         }
     }
 
-    pub fn filter(&self, selection: &mut Selection) {
-        let _command_filter: tracing::span::EnteredSpan =
-            tracing::debug_span!("command_filter").entered();
-        for verb in self.filters() {
-            verb.filter(selection);
-        }
-    }
-
     /// Aggregate every layer-creating selector's `LayerSpec` into a single
     /// per-statement `LayerSpec`.  Returns:
     /// - `None` when no selector contributes a layer (statement inherits
@@ -590,7 +582,7 @@ impl Command {
             }
             let decl_ids = derivation_ids.as_ref().unwrap();
 
-            let mut selection = find_symbol_by_instance_id(
+            let selection = find_symbol_by_instance_id(
                 index,
                 &selector_filters,
                 decl_ids,
@@ -607,10 +599,6 @@ impl Command {
                     selector.span(),
                 )
             })?;
-
-            selector_filters.iter().for_each(|f| {
-                f.filter(&mut selection);
-            });
 
             selector_state_with(&mut ctx.registry, selector, |state| {
                 state.selection = Some(selection);
@@ -674,7 +662,7 @@ impl Command {
             }
 
             // Derive selection: dispatch based on dependency role
-            let mut selection = match notif_ctx.role {
+            let selection = match notif_ctx.role {
                 DependencyRole::Child => {
                     selector
                         .derive_from_parent(
@@ -720,12 +708,6 @@ impl Command {
                     selector.span(),
                 )
             })?;
-
-            if let Some(ref mut sel) = selection {
-                selector_filters.iter().for_each(|f| {
-                    f.filter(sel);
-                });
-            }
 
             selector_state_with(&mut ctx.registry, selector, |state| {
                 state.selection = selection;
@@ -1003,7 +985,6 @@ impl Command {
             };
 
             if let Some(selection) = &mut current_selection {
-                self.filter(selection);
                 // Budget truncation must SURFACE: a leaf query hit the
                 // request's result-budget LIMIT, so this selection may be
                 // missing rows.  One warning per statement, attributed to the
@@ -1052,13 +1033,12 @@ impl Command {
                 ]);
             }
             let _fused_span = tracing::debug_span!("select_fused", n = fused.len()).entered();
-            let mut selection = cfg
+            let selection = cfg
                 .index
                 .find_symbol(&filter, parent_scope.clone(), children_scope.clone(), eph)
                 .await
                 .map_err(to_pest)?
                 .into_inner();
-            self.filter(&mut selection);
 
             if selection.budget_bounded && !budget_warned {
                 let bound = eph.result_budget().leaf_limit().unwrap_or(0);

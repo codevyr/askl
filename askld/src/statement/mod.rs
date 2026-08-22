@@ -966,15 +966,14 @@ impl Statement {
         }
 
         while let Some(current_statement) = worklist.pop_next(ctx) {
-            // Apply update_state + filter to narrow the selection.
+            // Let each selector refresh its own state before it propagates
+            // (`UserVerb` adopts its forced selection here).  Filtering is
+            // NOT re-applied: a command's filters are part of the predicate
+            // its rows were selected with, so re-running them Rust-side would
+            // be a no-op over rows that already satisfy them.
             ctx.registry.for_each_selector_mut(
                 current_statement.command().selectors(),
-                |selector, state| {
-                    selector.update_state(state);
-                    if let Some(selection) = selector.get_selection_mut(state) {
-                        current_statement.command().filter(selection);
-                    }
-                },
+                |selector, state| selector.update_state(state),
             );
 
             // No selection → nothing to propagate.
