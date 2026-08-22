@@ -405,3 +405,69 @@ async fn test_probe_instance_ids() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// The parents family carries one row per *(reference site, enclosing
+/// declaration)* — never one per instance of the referenced symbol.
+///
+/// `test.f` in the modules fixture is defined twice (instance 86 in /bar.c,
+/// 96 in /main.c) and referenced twice, so the old query — which joined the
+/// referenced symbol's instances to obtain a candidate `to_instance` —
+/// returned two rows for every (site, enclosing) pair.  On the real index the
+/// same fan-out turned 508 pairs into 2540 rows for `i915_ggtt`, enough to
+/// fill the result budget's row limit with duplicates.
+#[tokio::test(flavor = "current_thread")]
+async fn multi_instance_edges_do_not_fan_out() -> anyhow::Result<()> {
+    use crate::db_diesel::Index;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_MODULES).await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+
+    let selection = index
+        .find_symbol(
+            &CompositeFilter::leaf(CompoundNameMixin::new("test.f")),
+            ScopeContext::Unscoped,
+            ScopeContext::Skip,
+            &eph,
+        )
+        .await?
+        .into_inner();
+
+    // Both definitions are selected...
+    let mut instances: Vec<i64> = selection
+        .nodes
+        .iter()
+        .map(|n| n.symbol_instance.id)
+        .collect();
+    instances.sort_unstable();
+    assert_eq!(instances, vec![86, 96], "test.f is defined twice");
+
+    // ...but each (reference, enclosing declaration) appears exactly once.
+    let mut pairs: Vec<(i64, i64)> = selection
+        .parents
+        .iter()
+        .map(|p| (p.symbol_ref.id, p.from_instance.id))
+        .collect();
+    let total = pairs.len();
+    pairs.sort_unstable();
+    pairs.dedup();
+    assert_eq!(
+        pairs.len(),
+        total,
+        "a (reference, enclosing declaration) pair must not repeat per target instance"
+    );
+
+    // And every row resolves to the same, deliberately chosen instance.
+    let targets: std::collections::HashSet<i64> =
+        selection.parents.iter().map(|p| p.to_instance.id).collect();
+    assert_eq!(
+        targets,
+        std::collections::HashSet::from([86]),
+        "the target instance is chosen once (definition, then lowest id), not per row"
+    );
+
+    Ok(())
+}

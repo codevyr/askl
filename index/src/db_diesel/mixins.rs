@@ -87,10 +87,17 @@ type SymbolColumnsSqlType = (
     BigInt,
 ); // (id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name, layer)
 
+/// The parents query returns one row per *(reference site, enclosing
+/// declaration)* and nothing about the referenced symbol beyond
+/// `symbol_refs.to_symbol`.
+///
+/// It used to carry the target `Symbol` and `SymbolInstance` too, which forced
+/// a join to every instance of the referenced symbol — the row count was
+/// multiplied by that instance count for information the caller already holds.
+/// `find_symbol` reconstructs the target side from `current`, whose instances
+/// ARE the query's `source_ids`.
 type ParentSelectionTuple = (
     AsSelect<SymbolRef, Pg>,
-    AsSelect<Symbol, Pg>,
-    AsSelect<SymbolInstance, Pg>,
     SymbolInstanceColumnsSqlType, // We cannot use AsSelect<SymbolInstance, Pg> here due to ambiguity
 );
 
@@ -111,12 +118,8 @@ type ParentDeclOn = Eq<
     index_schema::symbol_refs::columns::from_object,
 >;
 
-pub type ParentsQuery<'a> = BoxedSelectStatement<
-    'a,
-    ParentSelectionTuple,
-    FromClause<SymbolRefSymbolInstanceParentInstanceParentSymbolJoin>,
-    Pg,
->;
+pub type ParentsQuery<'a> =
+    BoxedSelectStatement<'a, ParentSelectionTuple, FromClause<ParentsJoinSource>, Pg>;
 
 type ChildSelectionTuple = (
     SymbolColumnsSqlType,
@@ -145,6 +148,17 @@ type SymbolRefSymbolInstanceParentInstanceParentSymbolJoin = InnerJoinQuerySourc
     Alias<ParentSymbolsAlias>,
     ParentSymbolOn,
 >;
+
+/// `symbol_refs ⋈ parent_decls ⋈ parent_symbols` — the parents query's FROM
+/// clause.  The referenced symbol's own rows are deliberately absent: joining
+/// them fanned every reference out across all instances of that symbol (see
+/// [`ParentSelectionTuple`]).  `parent_symbols` stays because the enclosing
+/// declaration's symbol must pass the ephemeral-visibility predicate.
+type SymbolRefParentInstanceJoin =
+    InnerJoinQuerySource<index_schema::symbol_refs::table, Alias<ParentDeclsAlias>, ParentDeclOn>;
+
+type ParentsJoinSource =
+    InnerJoinQuerySource<SymbolRefParentInstanceJoin, Alias<ParentSymbolsAlias>, ParentSymbolOn>;
 
 type SymbolRefSymbolInstanceParentInstanceParentSymbolObjectJoin = InnerJoinQuerySource<
     SymbolRefSymbolInstanceParentInstanceParentSymbolJoin,
@@ -616,7 +630,7 @@ impl<ST: 'static + Send + diesel::sql_types::SingleValue, GB> ValidGrouping<GB>
 // ============================================================================
 
 type CurrentQS = SymbolInstanceProjectObjectJoin;
-type ParentsQS = SymbolRefSymbolInstanceParentInstanceParentSymbolJoin;
+type ParentsQS = ParentsJoinSource;
 type ChildrenQS = SymbolRefSymbolInstanceParentInstanceParentSymbolObjectJoin;
 type HasParentsQS = HasParentsJoinSource;
 type HasChildrenQS = HasChildrenJoinSource;

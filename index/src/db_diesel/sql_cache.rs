@@ -230,11 +230,14 @@ impl RowKey for (Symbol, SymbolInstance, Object, Project) {
     }
 }
 
-/// select_parents rows: (ref, symbol, declaration instance, parent instance).
-impl RowKey for (SymbolRef, Symbol, SymbolInstance, SymbolInstance) {
-    type Key = (i64, i64, i64);
+/// select_parents rows: (reference, enclosing declaration instance).  The pair
+/// is the natural key — one row per reference site per declaration containing
+/// it.  The referenced symbol used to appear here as well, which meant one row
+/// per instance of it; `find_symbol` now takes that side from `current`.
+impl RowKey for (SymbolRef, SymbolInstance) {
+    type Key = (i64, i64);
     fn row_key(&self) -> Self::Key {
-        (self.0.id, self.2.id, self.3.id)
+        (self.0.id, self.1.id)
     }
 }
 

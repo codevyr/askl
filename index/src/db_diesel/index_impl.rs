@@ -12,6 +12,7 @@ use diesel_migrations::MigrationHarness;
 
 use crate::models_diesel::{ContentRow, Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::symbols::FileId;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -27,7 +28,7 @@ use super::cte::{
 use super::mixins::{
     ChildrenQuery, CompositeFilter, CurrentIdQuery, CurrentQuery, EphVisibility, HasParentsQuery,
     ParentsQuery, CONTAINER_INSTANCE_ALIAS, CONTAINER_SYMBOL_ALIAS, CONTAINER_TYPE_ALIAS,
-    PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
+    INSTANCE_TYPE_DEFINITION, PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
 };
 use super::selection::{
     is_eph_leak, ChildReference, EphContext, HasChildReference, HasParentReference,
@@ -501,12 +502,12 @@ fn build_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ParentsQuer
     let parent_decls = PARENT_DECLS_ALIAS;
     let parent_symbols = PARENT_SYMBOLS_ALIAS;
 
-    // Redundant by the joins (sr.to_symbol = symbols.id = si.symbol), but
-    // it hands the planner the cheap probe route: without it the 5-way
-    // join hash-joins a full symbol_refs scan against the source side
-    // (measured 933ms for 0 rows from ~900 sources); with it a nested
-    // loop drives symbol_refs_to_symbol_idx from the source symbols
-    // (10ms).  Semantically a no-op in every scope mode.
+    // This is now the ONLY thing tying the references to the caller's
+    // instances: the query no longer joins the referenced symbol's own rows,
+    // so `to_symbol ∈ symbols(source_ids)` is load bearing rather than the
+    // redundant planner hint it used to be.  It keeps that role too — it is
+    // what drives `symbol_refs_to_symbol_idx` from the source symbols
+    // (measured 933ms → 10ms when it was introduced).
     let to_symbol_probe = EphSqlFragment::<Bool>::builder()
         .sql(
             "symbol_refs.to_symbol IN (\
@@ -514,16 +515,11 @@ fn build_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ParentsQuer
         )
         .eph_visibility("si2.layer", vis)
         .sql(" AND si2.id = ANY(")
-        .bind(source_ids.clone())
+        .bind(source_ids)
         .sql("))")
         .build();
 
     symbol_refs::dsl::symbol_refs
-        .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::dsl::id)))
-        .inner_join(
-            symbol_instances::dsl::symbol_instances
-                .on(symbols::dsl::id.eq(symbol_instances::dsl::symbol)),
-        )
         .inner_join(
             parent_decls.on(parent_decls
                 .field(symbol_instances::dsl::object_id)
@@ -539,19 +535,18 @@ fn build_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ParentsQuer
                 .field(symbol_instances::dsl::offset_range)
                 .contains_range(symbol_refs::dsl::from_offset_range),
         )
-        .filter(symbol_instances::dsl::id.eq_any(source_ids))
         .filter(to_symbol_probe)
         // Ephemeral visibility — canonical and aliased tables, rendered by
         // the partition token (records columns for the eph-branch guard).
+        // The referenced symbol's own visibility is not checked here because
+        // its rows are not read here: `to_symbol_probe` resolves it through
+        // `source_ids`, whose instances passed this same predicate in
+        // `select_current`.
         .filter(vis.pred("symbol_refs.layer"))
-        .filter(vis.pred("symbols.layer"))
-        .filter(vis.pred("symbol_instances.layer"))
         .filter(vis.pred("parent_decls.layer"))
         .filter(vis.pred("parent_symbols.layer"))
         .select((
             SymbolRef::as_select(),
-            Symbol::as_select(),
-            SymbolInstance::as_select(),
             parent_decls.fields(crate::schema_diesel::symbol_instances::all_columns),
         ))
         .into_boxed::<Pg>()
@@ -1928,7 +1923,7 @@ impl Index {
                 )
                 .entered();
                 let t0 = std::time::Instant::now();
-                let rows: Vec<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)> = self
+                let rows: Vec<(SymbolRef, SymbolInstance)> = self
                     .cached_load_partitioned(eph, chain_dependent, |vis| {
                         let mut q = build_parents_query(current_instance_ids.clone(), vis);
                         if let Some(expr) = filter.compose_parents(vis) {
@@ -1968,7 +1963,7 @@ impl Index {
                     .resolve_scope_ids(ids, scope_filter, Some(&role), eph)
                     .await?;
 
-                let rows: Vec<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)> = self
+                let rows: Vec<(SymbolRef, SymbolInstance)> = self
                     .cached_load_partitioned(eph, chain_dependent, |vis| {
                         let mut q = build_parents_query(current_instance_ids.clone(), vis);
                         if let Some(expr) = filter.compose_parents(vis) {
@@ -2209,6 +2204,52 @@ impl Index {
             let _collect_span: tracing::span::EnteredSpan =
                 tracing::debug_span!("collect").entered();
 
+            // Rebuild the target side of each reference from `current`.  The
+            // parents query is filtered by `to_symbol ∈ symbols(source_ids)`,
+            // and `source_ids` are `current`'s instances, so every referenced
+            // symbol is one we already hold — no query, no fan-out.
+            //
+            // Which instance a reference terminates on is a genuine choice
+            // (a symbol declared in five headers has five), and every
+            // candidate is in the result by construction.  Prefer the
+            // definition, then the lowest id, so the same query draws the
+            // same edge twice running; the old join left it to whichever row
+            // the planner happened to return first.
+            let mut target: HashMap<i64, (Symbol, SymbolInstance)> = HashMap::new();
+            for (sym, inst, _, _) in &current {
+                match target.entry(sym.id) {
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert((sym.clone(), inst.clone()));
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut slot) => {
+                        let best = &slot.get().1;
+                        let better = (
+                            inst.instance_type == INSTANCE_TYPE_DEFINITION,
+                            std::cmp::Reverse(inst.id),
+                        ) > (
+                            best.instance_type == INSTANCE_TYPE_DEFINITION,
+                            std::cmp::Reverse(best.id),
+                        );
+                        if better {
+                            slot.insert((sym.clone(), inst.clone()));
+                        }
+                    }
+                }
+            }
+
+            let parents: Vec<_> = parents
+                .into_iter()
+                .filter_map(|(symbol_ref, from_instance)| {
+                    let (to_symbol, to_instance) = target.get(&symbol_ref.to_symbol)?;
+                    Some(ParentReference {
+                        symbol_ref,
+                        to_symbol: to_symbol.clone(),
+                        to_instance: to_instance.clone(),
+                        from_instance,
+                    })
+                })
+                .collect();
+
             let nodes: Vec<_> = current
                 .into_iter()
                 .map(|(sym, instance, object, project)| SelectionNode {
@@ -2218,18 +2259,6 @@ impl Index {
                     project,
                     query_statements: vec![],
                 })
-                .collect();
-
-            let parents: Vec<_> = parents
-                .into_iter()
-                .map(
-                    |(symbol_ref, to_symbol, to_instance, from_instance)| ParentReference {
-                        symbol_ref,
-                        to_symbol,
-                        to_instance,
-                        from_instance,
-                    },
-                )
                 .collect();
 
             let mut children: Vec<_> = children
@@ -2468,7 +2497,7 @@ impl Index {
             )
             .entered();
             let t0 = std::time::Instant::now();
-            let results: Vec<(SymbolRef, Symbol, SymbolInstance, SymbolInstance)> = self
+            let results: Vec<(SymbolRef, SymbolInstance)> = self
                 .cached_load_partitioned(eph, chain_dependent, |vis| {
                     let mut q = build_parents_query(source_ids.clone(), vis);
                     if let Some(expr) = filter.compose_parents(vis) {
@@ -2484,17 +2513,16 @@ impl Index {
                 result_bytes = super::sql_cache::vec_weight(&results),
                 "find_parent_instance_ids (refs) completed",
             );
-            for (sr, s, ci, pi) in &results {
-                if is_eph_leak(sr.layer, eph_ids)
-                    || is_eph_leak(s.layer, eph_ids)
-                    || is_eph_leak(ci.layer, eph_ids)
-                    || is_eph_leak(pi.layer, eph_ids)
-                {
+            // This caller only ever wanted the enclosing instances, so the
+            // narrowed query serves it directly; the referenced symbol's rows
+            // it used to carry (and leak-check) were never read.
+            for (sr, parent_inst) in &results {
+                if is_eph_leak(sr.layer, eph_ids) || is_eph_leak(parent_inst.layer, eph_ids) {
                     tracing::error!(?eph_ids, "layer leak in find_parent_instance_ids (refs)");
                     anyhow::bail!("internal error: ephemeral layer isolation violation");
                 }
             }
-            all_ids.extend(results.iter().map(|(_, _, _, parent_inst)| parent_inst.id));
+            all_ids.extend(results.iter().map(|(_, parent_inst)| parent_inst.id));
         }
 
         if include_has {
@@ -4117,12 +4145,15 @@ mod tests {
         let evis = EphVisibility::eph_touching(&eph);
         let eq = build_parents_query(vec![1, 2], &evis).filter(evis.guard());
         let esql = format!("{:?}", diesel::debug_query::<Pg, _>(&eq));
+        // Three tables, because the query no longer joins the referenced
+        // symbol's own rows — `si2` inside the `to_symbol` probe resolves that
+        // side instead, and carries its own visibility predicate, so the
+        // property is unchanged: every table the query reads is covered.
         for col in [
             "symbol_refs.layer",
-            "symbols.layer",
-            "symbol_instances.layer",
             "parent_decls.layer",
             "parent_symbols.layer",
+            "si2.layer",
         ] {
             assert!(
                 esql.contains(&format!("{col} = ANY(")),
@@ -4131,19 +4162,18 @@ mod tests {
         }
         assert!(
             esql.contains(
-                "NOT (symbol_refs.layer > 0 AND symbols.layer > 0 AND \
-                 symbol_instances.layer > 0 AND parent_decls.layer > 0 AND \
+                "NOT (symbol_refs.layer > 0 AND parent_decls.layer > 0 AND \
                  parent_symbols.layer > 0)"
             ),
             "eph branch must render the bind-free sign-form disjointness guard \
-             over all five recorded columns, got: {esql}"
+             over every recorded column, got: {esql}"
         );
 
         let pvis = EphVisibility::root_only(&eph);
         let pq = build_parents_query(vec![1, 2], &pvis).filter(pvis.guard());
         let psql = format!("{:?}", diesel::debug_query::<Pg, _>(&pq));
         assert!(
-            psql.contains("symbols.layer = ANY("),
+            psql.contains("parent_symbols.layer = ANY("),
             "persistent branch pins columns to the root set, got: {psql}"
         );
         assert!(
