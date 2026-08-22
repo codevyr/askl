@@ -32,9 +32,7 @@ use self::ephemeral::{EphemeralInstanceVerb, EphemeralRefVerb, EphemeralSymbolVe
 pub(crate) use self::ephemeral::{EphemeralOps, LabelResolutions};
 pub(super) use self::filters::{IgnoreVerb, PackageFilter, ProjectFilter};
 pub(super) use self::loc::LocSelector;
-pub(super) use self::modifiers::{
-    DeriveModifier, HasModifier, IsolatedScope, RefsModifier, UnnestModifier,
-};
+pub(super) use self::modifiers::{DeriveModifier, HasModifier, RefsModifier, UnnestModifier};
 pub(super) use self::search::SearchSelector;
 pub(super) use self::selectors::{ForcedVerb, TypeSelector};
 
@@ -99,7 +97,6 @@ pub(crate) fn build_generic_verb(
         ProjectFilter::NAME => ProjectFilter::new(verb_span, &positional, &named),
         PackageFilter::NAME => PackageFilter::new(verb_span, &positional, &named),
         ForcedVerb::NAME => ForcedVerb::new(verb_span, &positional, &named),
-        IsolatedScope::NAME => IsolatedScope::new(verb_span, &positional, &named),
         LabelVerb::NAME => LabelVerb::new(verb_span, &positional, &named),
         UserVerb::NAME => UserVerb::new(verb_span, &positional, &named),
         PreambleVerb::NAME => PreambleVerb::new(verb_span, &positional, &named),

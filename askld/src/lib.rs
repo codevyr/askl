@@ -27,9 +27,6 @@ mod compound_test;
 #[cfg(test)]
 mod dependency_test;
 #[cfg(test)]
-#[cfg(any())] // Disable group tests for now
-mod group_test;
-#[cfg(test)]
 mod parser_test;
 #[cfg(test)]
 mod test_util;
