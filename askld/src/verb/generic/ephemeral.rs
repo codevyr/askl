@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::{Arc, Mutex};
 
-use super::super::{AnchorKind, DeriveMethod, Selector, Verb};
+use super::super::{AnchorKind, DeriveMethod, Selector, Verb, VerbClass};
 
 /// Resolved selections for labels referenced by ephemeral verbs.  An
 /// ephemeral verb that takes `symbol="@foo"` looks up the symbol IDs of
@@ -503,8 +503,12 @@ impl Verb for LayerVerb {
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Skip
     }
-    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
-        Ok(self)
+    fn class(&self) -> VerbClass {
+        VerbClass::Predicate
+    }
+
+    fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
+        Some(self)
     }
 
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {

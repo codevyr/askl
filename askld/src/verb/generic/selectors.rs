@@ -9,7 +9,7 @@ use crate::parser_context::{
 };
 use crate::span::Span;
 use crate::statement::Statement;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
     CompositeFilter, CompoundNameMixin, EphContext, ExactNameMixin, Index, LeafNameMixin,
@@ -20,7 +20,9 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::{Arc, OnceLock};
 
-use super::super::{AnchorKind, DeriveMethod, Filter, OwnPredicate, Selector, Verb, VerbTag};
+use super::super::{
+    AnchorKind, DeriveMethod, Filter, OwnPredicate, Selector, Verb, VerbClass, VerbTag,
+};
 use super::name_filter;
 
 #[derive(Debug)]
@@ -53,8 +55,12 @@ impl Verb for NameSelector {
         self.span.as_pest_span()
     }
 
-    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
-        Ok(self)
+    fn class(&self) -> VerbClass {
+        VerbClass::Predicate
+    }
+
+    fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
+        Some(self)
     }
 
     fn anchor_kind(&self) -> Option<AnchorKind> {
@@ -152,12 +158,16 @@ impl Verb for ForcedVerb {
         self.span.as_pest_span()
     }
 
+    fn class(&self) -> VerbClass {
+        VerbClass::Predicate
+    }
+
     fn anchor_kind(&self) -> Option<AnchorKind> {
         Some(AnchorKind::Name)
     }
 
-    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
-        Ok(self)
+    fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
+        Some(self)
     }
 }
 
@@ -296,8 +306,12 @@ impl Verb for UnitVerb {
         self.span.as_pest_span()
     }
 
-    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
-        Ok(self)
+    fn class(&self) -> VerbClass {
+        VerbClass::Predicate
+    }
+
+    fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
+        Some(self)
     }
 
     fn derive_method(&self) -> DeriveMethod {
@@ -545,16 +559,23 @@ impl Verb for TypeSelector {
         }
     }
 
-    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
+    fn class(&self) -> VerbClass {
+        VerbClass::Predicate
+    }
+
+    fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
+        // Instance-conditional role: an inherited bare type selector is a
+        // pure filter (it propagates the type constraint, never anchors or
+        // holds execution state of its own).
         if self.name_pattern.is_none() && self.inherit {
-            Err(anyhow!("Inherited bare TypeSelector is not a selector"))
+            None
         } else {
-            Ok(self)
+            Some(self)
         }
     }
 
-    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
-        Ok(self)
+    fn as_filter<'a>(&'a self) -> Option<&'a dyn Filter> {
+        Some(self)
     }
 
     fn derive_method(&self) -> DeriveMethod {
@@ -750,8 +771,12 @@ impl Verb for GenericSelector {
         self.span.as_pest_span()
     }
 
-    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
-        Ok(self)
+    fn class(&self) -> VerbClass {
+        VerbClass::Predicate
+    }
+
+    fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
+        Some(self)
     }
 
     /// `select` is the bindness verb: it declares the tree binding ("I

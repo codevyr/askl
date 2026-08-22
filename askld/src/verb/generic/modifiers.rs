@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use super::super::{DeriveMethod, Selector, Verb, VerbTag};
+use super::super::{DeriveMethod, Selector, Verb, VerbClass, VerbTag};
 
 #[derive(Debug)]
 pub(in crate::verb) struct IsolatedScope {
@@ -59,12 +59,19 @@ impl Verb for IsolatedScope {
         self.span.as_pest_span()
     }
 
+    // Operationally a (no-op) selector, so it lives in the predicate aspect
+    // to keep its current behaviour.  The `isolated` flag was never wired up;
+    // the filter-expressions design supersedes this verb and removes it.
+    fn class(&self) -> VerbClass {
+        VerbClass::Predicate
+    }
+
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Skip
     }
 
-    fn as_selector<'a>(&'a self) -> Result<&'a dyn Selector> {
-        Ok(self)
+    fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
+        Some(self)
     }
 }
 
@@ -115,6 +122,10 @@ impl Verb for HasModifier {
         self.span.as_pest_span()
     }
 
+    fn class(&self) -> VerbClass {
+        VerbClass::Relationship
+    }
+
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Skip
     }
@@ -158,6 +169,10 @@ impl Verb for RefsModifier {
 
     fn span(&self) -> pest::Span<'_> {
         self.span.as_pest_span()
+    }
+
+    fn class(&self) -> VerbClass {
+        VerbClass::Relationship
     }
 
     fn derive_method(&self) -> DeriveMethod {
@@ -240,6 +255,10 @@ impl Verb for DeriveModifier {
         self.span.as_pest_span()
     }
 
+    fn class(&self) -> VerbClass {
+        VerbClass::Relationship
+    }
+
     fn derive_method(&self) -> DeriveMethod {
         DeriveMethod::Skip
     }
@@ -284,6 +303,10 @@ impl Verb for UnnestModifier {
 
     fn span(&self) -> pest::Span<'_> {
         self.span.as_pest_span()
+    }
+
+    fn class(&self) -> VerbClass {
+        VerbClass::Relationship
     }
 
     fn derive_method(&self) -> DeriveMethod {

@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use super::super::{AnchorKind, DeriveMethod, Filter, Verb, VerbTag};
+use super::super::{AnchorKind, DeriveMethod, Filter, Verb, VerbClass, VerbTag};
 use super::selectors::TypeSelector;
 
 #[derive(Debug)]
@@ -66,8 +66,12 @@ impl Verb for IgnoreVerb {
         self.span.as_pest_span()
     }
 
-    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
-        Ok(self)
+    fn class(&self) -> VerbClass {
+        VerbClass::Predicate
+    }
+
+    fn as_filter<'a>(&'a self) -> Option<&'a dyn Filter> {
+        Some(self)
     }
 
     fn derive_method(&self) -> DeriveMethod {
@@ -144,8 +148,12 @@ impl Verb for ProjectFilter {
         self.span.as_pest_span()
     }
 
-    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
-        Ok(self)
+    fn class(&self) -> VerbClass {
+        VerbClass::Predicate
+    }
+
+    fn as_filter<'a>(&'a self) -> Option<&'a dyn Filter> {
+        Some(self)
     }
 
     fn derive_method(&self) -> DeriveMethod {
@@ -201,8 +209,12 @@ impl Verb for DefaultTypeFilter {
         self.span.as_pest_span()
     }
 
-    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
-        Ok(self)
+    fn class(&self) -> VerbClass {
+        VerbClass::Predicate
+    }
+
+    fn as_filter<'a>(&'a self) -> Option<&'a dyn Filter> {
+        Some(self)
     }
 
     fn derive_method(&self) -> DeriveMethod {
@@ -396,8 +408,12 @@ impl Verb for GenericFilter {
         self.span.as_pest_span()
     }
 
-    fn as_filter<'a>(&'a self) -> Result<&'a dyn Filter> {
-        Ok(self)
+    fn class(&self) -> VerbClass {
+        VerbClass::Predicate
+    }
+
+    fn as_filter<'a>(&'a self) -> Option<&'a dyn Filter> {
+        Some(self)
     }
 
     /// `filter("exact_name"/"compound_name", ...)` anchors by name — it
