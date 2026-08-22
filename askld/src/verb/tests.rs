@@ -124,9 +124,12 @@ fn test_glob_type_selector_construction() {
         )
     };
 
-    build("*.go", StringKind::Glob, SYMBOL_TYPE_FILE).unwrap();
-    build("/src/*", StringKind::Glob, SYMBOL_TYPE_FILE).unwrap();
-    assert!(build("*", StringKind::Glob, SYMBOL_TYPE_FILE).is_err());
+    build("*.go", StringKind::Glob, Some(SYMBOL_TYPE_FILE)).unwrap();
+    build("/src/*", StringKind::Glob, Some(SYMBOL_TYPE_FILE)).unwrap();
+    assert!(build("*", StringKind::Glob, Some(SYMBOL_TYPE_FILE)).is_err());
+    // `any` shares the guard: a glob with no literal is rejected there too.
+    assert!(build("*", StringKind::Glob, None).is_err());
+    build("ibv_*", StringKind::Glob, None).unwrap();
 }
 
 #[test]

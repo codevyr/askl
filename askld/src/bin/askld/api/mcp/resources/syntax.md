@@ -47,10 +47,14 @@ separate statements; a `{` must be on the same line as its verb to attach.
 
 ## Filters — constrain, add nothing
 - A **bare** type verb is a filter that **inherits** to all descendants:
-  `func`, `type`, `data`, `macro`, `field`, `mod`, `file`, `dir`. Use `any` in a
-  child scope to drop an inherited type filter.
+  `func`, `type`, `data`, `macro`, `field`, `mod`, `file`, `dir`, and `any`.
+- **`any` is the type verb that constrains no type.** Bare `any` in a child
+  scope drops an inherited type filter — `func("x") { any }` is everything `x`
+  references, not just the functions. With a name it matches that name at every
+  type: `any("ioctl")` finds the function, the macro and the struct.
 - **Duality:** `func("x")` (with a name) is a *selector* that queries; bare `func`
   is a *filter* that constrains. This is the most common point of confusion.
+  `any` follows the same rule: `any("x")` queries, bare `any` constrains.
 - `project("name")` restrict to one project (list names with the `askl_projects`
   tool). `ignore("pat")` exclude matches.
 - **Scoping to a project is cheaper as an argument than as a verb:** pass
