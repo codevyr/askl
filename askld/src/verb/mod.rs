@@ -302,6 +302,37 @@ pub fn build_verb(
     })?;
 
     if let Some(verb) = verb {
+        // A preamble configures the query: its verbs are redirected to the
+        // global context and ANDed into every statement.  A term that selects
+        // has nothing to select there, so it was silently swallowed —
+        // `preamble project("p") "foo"` ran as though the name had never been
+        // written.
+        //
+        // The test is the conjunction of both halves, and each excludes a
+        // construct a preamble is FOR.  Anchoring alone would reject
+        // `filter("compound_name", "test")`, a name filter that legitimately
+        // scopes every statement in the query.  Being a selector alone would
+        // reject `scope(...)` and `unnest`, modifiers that are selectors but
+        // never originate a row.  A verb that is both — `"foo"`,
+        // `func("foo")`, `search(...)`, `loc(...)`, a layer literal,
+        // `select`, `use(...)` — is a statement's reason to exist, and a
+        // preamble is not a statement.
+        if ctx.redirects_to_global() && verb.as_selector().is_ok() && verb.anchor_kind().is_some() {
+            return Err(Error::new_from_span(
+                CustomError {
+                    message: format!(
+                        "`{}` selects, and a preamble cannot select: its verbs apply to \
+                         every statement, so a selector here has nothing of its own to \
+                         select.  Move it into a statement after the preamble \
+                         (`preamble …; {} …`), or keep only constraints here — \
+                         `project(...)`, `ignore(...)`, `filter(...)`, a bare type.",
+                        verb_span.as_pest_span().as_str().trim(),
+                        verb_span.as_pest_span().as_str().trim(),
+                    ),
+                },
+                verb_span.as_pest_span(),
+            ));
+        }
         ctx.extend_verb(verb)
     };
 
