@@ -233,10 +233,13 @@ impl Command {
             // The slot cascade, in full: writing a dimension replaces the
             // previous holder of that dimension wholesale; dimensionless
             // predicate verbs (anchors, exclusions, layer-backed selectors)
-            // accumulate.  Verbs never inspect each other.
+            // accumulate.  Compound expressions can hold several dimensions;
+            // eviction is by intersection.  Verbs never inspect each other.
             VerbClass::Predicate => {
-                if let Some(dim) = other.dimension() {
-                    self.predicate.retain(|v| v.dimension() != Some(dim));
+                let dims = other.dimensions();
+                if !dims.is_empty() {
+                    self.predicate
+                        .retain(|v| !v.dimensions().iter().any(|d| dims.contains(d)));
                 }
                 self.predicate.push(other);
             }

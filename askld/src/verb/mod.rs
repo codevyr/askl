@@ -200,10 +200,12 @@ use std::ptr;
 use std::rc::Rc;
 use std::sync::Arc;
 
+mod compound;
 mod generic;
 mod labels;
 mod preamble;
 
+pub(crate) use self::compound::build_compound_filter;
 pub(crate) use self::generic::{name_filter, EphemeralOps, LabelResolutions};
 pub use self::generic::{
     DefaultTypeFilter, GenericFilter, GenericSelector, NameSelector, UnitVerb,
@@ -212,10 +214,15 @@ pub use self::generic::{
 use self::generic::{build_generic_verb, ForcedVerb};
 use self::labels::{LabelVerb, UserVerb};
 
-pub fn build_verb(
-    ctx: Rc<ParserContext>,
+/// Construct the verb a `Rule::verb` pair denotes, WITHOUT applying its
+/// parse-context side effects (`update_context`) or adding it to the
+/// command.  Shared by [`build_verb`] (which then applies both) and by
+/// compound-expression atoms, where the suppression rule says only the
+/// predicate contribution of a verb is read.
+pub(super) fn construct_verb(
+    ctx: &Rc<ParserContext>,
     pair: pest::iterators::Pair<Rule>,
-) -> Result<(), Error<Rule>> {
+) -> Result<Arc<dyn Verb>, Error<Rule>> {
     let verb_span = Span::from_pest(pair.as_span(), ctx.source());
     debug!("Build verb {:#?}", pair);
     let verb = if let Some(verb) = pair.into_inner().next() {
@@ -291,6 +298,16 @@ pub fn build_verb(
             )
         })?
     };
+
+    Ok(verb)
+}
+
+pub fn build_verb(
+    ctx: Rc<ParserContext>,
+    pair: pest::iterators::Pair<Rule>,
+) -> Result<(), Error<Rule>> {
+    let verb_span = Span::from_pest(pair.as_span(), ctx.source());
+    let verb = construct_verb(&ctx, pair)?;
 
     let verb = ctx.consume(verb).map_err(|e| {
         Error::new_from_span(
@@ -465,6 +482,48 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
     /// verb (see [`Dimension`]).  `None` = accumulate.
     fn dimension(&self) -> Option<Dimension> {
         None
+    }
+
+    /// Every dimension this verb positively constrains.  Single verbs hold
+    /// at most one slot; compound expressions can mention several (each of
+    /// which they evict on write, and any of which gets them evicted by a
+    /// later write).
+    fn dimensions(&self) -> Vec<Dimension> {
+        self.dimension().into_iter().collect()
+    }
+
+    /// Whether this verb may appear as an atom inside a compound expression
+    /// (`or`/`and`/`not`/parens), and if not, why.  The gate of the
+    /// filter-expressions design: an atom must denote ONE concrete predicate
+    /// — so verbs whose emission is not a single predicate query (`search`,
+    /// `loc`, layer literals, forced selection) and verbs that constrain
+    /// nothing (bare `any`, `select`, units) stay out.  `Ok` is a structural,
+    /// eph-independent guarantee that the atom compiles to `Some` filter;
+    /// [`crate::verb::compound`] relies on it.
+    ///
+    /// The rejection text lives HERE, next to the flag that produces it,
+    /// rather than in a table keyed on display names.  The default rejects
+    /// with a reason derived from the verb's class.
+    fn compound_admission(&self) -> Result<(), String> {
+        Err(match self.class() {
+            VerbClass::Relationship => format!(
+                "`{}` is a relationship verb and cannot appear in a filter \
+                 expression; write it outside the expression",
+                self.name()
+            ),
+            VerbClass::Binding => format!(
+                "`{}` is a label verb and cannot appear in a filter expression",
+                self.name()
+            ),
+            VerbClass::Env => format!(
+                "`{}` configures the query environment and cannot appear in a \
+                 filter expression",
+                self.name()
+            ),
+            VerbClass::Predicate => {
+                format!("`{}` cannot appear in a filter expression", self.name())
+            }
+        })
     }
 
     fn update_context(&self, _ctx: &ParserContext) -> Result<bool> {

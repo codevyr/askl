@@ -23,6 +23,8 @@ pub mod verb;
 #[cfg(test)]
 mod all_tests;
 #[cfg(test)]
+mod compound_test;
+#[cfg(test)]
 mod dependency_test;
 #[cfg(test)]
 #[cfg(any())] // Disable group tests for now

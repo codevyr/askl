@@ -21,7 +21,11 @@ use super::selectors::TypeSelector;
 pub(in crate::verb) struct IgnoreVerb {
     span: Span,
     name: Option<NamePattern>,
-    package: Option<String>,
+    /// The VALIDATED package leaf, not the raw string: whether this verb can
+    /// produce a predicate at all must be answerable without an EphContext,
+    /// because `compound_admission` promises exactly that (a package that
+    /// normalises to no ltree labels yields none).
+    package: Option<PackageDescendantLeaf>,
 }
 
 impl IgnoreVerb {
@@ -45,7 +49,10 @@ impl IgnoreVerb {
         }
 
         if let Some(package) = named.get("package") {
-            verb.package = Some(package.as_plain()?.to_string());
+            // A package that normalises to nothing stays a no-op filter, as
+            // before — `compound_admission` is what keeps it out of
+            // expressions, where a no-op would break the compiler's totality.
+            verb.package = PackageDescendantLeaf::new(package.as_plain()?);
             empty = false;
         }
 
@@ -70,6 +77,17 @@ impl Verb for IgnoreVerb {
         VerbClass::Predicate
     }
 
+    fn compound_admission(&self) -> Result<(), String> {
+        if self.name.is_some() || self.package.is_some() {
+            Ok(())
+        } else {
+            Err("this `ignore` excludes nothing (its package path names no \
+                 package), so it constrains nothing and cannot appear in a \
+                 filter expression"
+                .to_string())
+        }
+    }
+
     fn as_filter<'a>(&'a self) -> Option<&'a dyn Filter> {
         Some(self)
     }
@@ -92,10 +110,8 @@ impl Filter for IgnoreVerb {
             Some(NamePattern::Glob(glob)) => parts.push(glob.filter(true, true)),
             None => {}
         }
-        if let Some(ref package) = self.package {
-            if let Some(leaf) = PackageDescendantLeaf::new(package) {
-                parts.push(CompositeFilter::leaf(leaf));
-            }
+        if let Some(ref leaf) = self.package {
+            parts.push(CompositeFilter::leaf(leaf.clone()));
         }
         if parts.is_empty() {
             return None;
@@ -150,6 +166,10 @@ impl Verb for ProjectFilter {
 
     fn class(&self) -> VerbClass {
         VerbClass::Predicate
+    }
+
+    fn compound_admission(&self) -> Result<(), String> {
+        Ok(())
     }
 
     fn as_filter<'a>(&'a self) -> Option<&'a dyn Filter> {
@@ -404,6 +424,10 @@ impl Verb for GenericFilter {
 
     fn class(&self) -> VerbClass {
         VerbClass::Predicate
+    }
+
+    fn compound_admission(&self) -> Result<(), String> {
+        Ok(())
     }
 
     fn as_filter<'a>(&'a self) -> Option<&'a dyn Filter> {
