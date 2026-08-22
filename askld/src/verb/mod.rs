@@ -10,7 +10,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
     CompositeFilter, DirectOnlyMixin, EphContext, EphScopedFut, EphTransaction, Index,
-    InnermostOnlyMixin, OuterParentFilterMixin, RootLayer, RootShardRef, ScopeContext, Selection,
+    OuterParentFilterMixin, RootLayer, RootShardRef, ScopeContext, Selection,
     SymbolInstanceIdMixin,
 };
 
@@ -925,51 +925,6 @@ pub trait Selector: std::fmt::Debug + Verb {
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to find child instance IDs: {}", e))?;
-
-        let selection = find_symbol_by_instance_id(
-            index,
-            selector_filters,
-            &decl_ids,
-            parent_scope,
-            children_scope,
-            eph,
-        )
-        .await?;
-
-        Ok(Some(selection))
-    }
-
-    async fn derive_from_child(
-        &self,
-        ctx: &mut ExecutionContext,
-        index: &Index,
-        selector_filters: &[&dyn Filter],
-        child: &Statement,
-        notif_ctx: &NotificationContext,
-        parent_scope: ScopeContext,
-        children_scope: ScopeContext,
-    ) -> Result<Option<Selection>> {
-        let child_sel = match child.get_selection(&ctx) {
-            Some(selection) => selection,
-            None => return Ok(None),
-        };
-        let child_ids = child_sel.get_instance_ids();
-        let mut find_parts: Vec<CompositeFilter> = vec![];
-        if !notif_ctx.unnest {
-            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new()));
-        }
-        let find_filter = CompositeFilter::and(find_parts);
-        let eph = &ctx.eph;
-        let decl_ids = index
-            .find_parent_instance_ids(
-                &child_ids,
-                notif_ctx.rel_type.contains(RelationshipType::REFS),
-                notif_ctx.rel_type.contains(RelationshipType::HAS),
-                &find_filter,
-                eph,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
 
         let selection = find_symbol_by_instance_id(
             index,

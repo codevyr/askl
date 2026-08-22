@@ -1,16 +1,13 @@
 use crate::{
     execution_context::{selector_state_with, SelectorRegistry},
-    execution_state::{DependencyKind, DependencyRole, RelationshipType},
+    execution_state::{DependencyKind, DependencyRole},
     parser::{Rule, Value},
     span::Span,
 };
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::{
-    db_diesel::{
-        CompositeFilter, EphContext, Index, InnermostOnlyMixin, ParentReference, ScopeContext,
-        Selection,
-    },
+    db_diesel::{CompositeFilter, EphContext, Index, ParentReference, ScopeContext, Selection},
     models_diesel::SymbolRef,
 };
 use pest::error::ErrorVariant::CustomError;
@@ -279,54 +276,6 @@ impl Selector for UserVerb {
         normal_selection.parents = fake_parent_references;
 
         Ok(Some(normal_selection))
-    }
-
-    async fn derive_from_child(
-        &self,
-        ctx: &mut ExecutionContext,
-        index: &Index,
-        _selector_filters: &[&dyn Filter],
-        child: &Statement,
-        notif_ctx: &NotificationContext,
-        _parent_scope: ScopeContext,
-        _children_scope: ScopeContext,
-    ) -> Result<Option<Selection>> {
-        let child = match child.get_selection(&ctx) {
-            Some(selection) => selection,
-            None => return Ok(None),
-        };
-
-        let mut cached_selection = if let Some(sel) = self.selection.get().cloned() {
-            sel
-        } else {
-            return Ok(Some(Selection::new()));
-        };
-
-        // Use DB query instead of stale child.parents vector
-        let child_ids = child.get_instance_ids();
-        let mut find_parts: Vec<CompositeFilter> = vec![];
-        if !notif_ctx.unnest {
-            find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new()));
-        }
-        let find_filter = CompositeFilter::and(find_parts);
-        let parent_ids = index
-            .find_parent_instance_ids(
-                &child_ids,
-                notif_ctx.rel_type.contains(RelationshipType::REFS),
-                notif_ctx.rel_type.contains(RelationshipType::HAS),
-                &find_filter,
-                &ctx.eph,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to find parent instance IDs: {}", e))?;
-        let parent_id_set: std::collections::HashSet<i64> =
-            parent_ids.into_iter().map(Into::<i64>::into).collect();
-
-        cached_selection
-            .nodes
-            .retain(|s| parent_id_set.contains(&s.symbol_instance.id));
-
-        Ok(Some(cached_selection))
     }
 
     /// Override that forwards through to the default — kept as an
