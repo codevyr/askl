@@ -538,6 +538,21 @@ impl SelectorState {
         role: &DependencyRole,
         rel_type: RelationshipType,
     ) -> bool {
+        // Every arm below RETAINS against `dependency`'s rows, so a dependency
+        // that stopped at a `LIMIT` would silently prune neighbours that do
+        // relate to the rows it never fetched.  `stage_read` prevents it by
+        // clearing the result budget for any composed statement — at a cost
+        // measured in `perf/BUDGET_GATE.md` (a bounded wide leaf answers in
+        // 0.05s; the same leaf composed times out at 120s).  Retiring that
+        // gate means teaching composition to consume a PREDICATE instead of
+        // rows; until then this is the invariant that makes the gate load
+        // bearing, so assert it rather than leave it implied.
+        debug_assert!(
+            !dependency.budget_bounded,
+            "constrain_selection consumed a budget_bounded (truncated) dependency: \
+             composition would treat the rows that fit the LIMIT as the whole answer"
+        );
+
         if self.selection.is_none() {
             return false;
         }
