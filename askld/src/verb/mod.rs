@@ -507,27 +507,19 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
 
 /// Filter trait for verbs that constrain symbol selection.
 ///
-/// Two filtering stages:
-/// - `get_composite_filter(eph)` — returns a `CompositeFilter` tree compiled
-///   into SQL WHERE clauses.  Receives the request's `EphContext` so filters
-///   whose SQL needs the visibility chain (today: only the direct-only mixin)
-///   can bind it; impls that don't need it ignore the parameter.
-/// - `filter_impl()` — optional in-memory post-filter on the returned `Selection`.
-///   Use only when SQL cannot express the constraint (e.g., application-level logic).
-///   When both are implemented, the SQL filter should be at least as broad as the
-///   in-memory filter (it pre-filters, the in-memory path refines).
+/// A filter contributes ONE thing: a `CompositeFilter` tree compiled into a
+/// SQL WHERE clause.  It receives the request's `EphContext` so filters whose
+/// SQL needs the visibility chain (today: only the direct-only mixin) can bind
+/// it; impls that don't need it ignore the parameter.
+///
+/// There is deliberately no in-memory post-filter hook.  The trait used to
+/// carry one for constraints "SQL cannot express"; nothing ever implemented
+/// it, and every call site was a no-op walking the filter list.  All filtering
+/// happens in SQL, and this trait's shape now says so.
 pub trait Filter: std::fmt::Debug + Display + Verb {
     fn get_composite_filter(&self, _eph: &EphContext) -> Option<CompositeFilter> {
         None
     }
-
-    fn filter(&self, selection: &mut Selection) {
-        let filter_name = format!("{}", self);
-        let _filter = tracing::debug_span!("filter", name = %filter_name).entered();
-        self.filter_impl(selection);
-    }
-
-    fn filter_impl(&self, _selection: &mut Selection) {}
 }
 
 #[derive(Debug)]
