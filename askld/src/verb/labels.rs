@@ -18,7 +18,8 @@ use std::{collections::HashMap, sync::OnceLock};
 use crate::{cfg::ControlFlowGraph, execution_context::ExecutionContext, statement::Statement};
 
 use super::{
-    ConstraintAction, DeriveMethod, Labeler, NotificationContext, Selector, SelectorState, Verb,
+    weak_notifier_blocks, ConstraintAction, DeriveMethod, Labeler, NotificationContext, Selector,
+    SelectorState, Verb,
 };
 use crate::verb::Filter;
 
@@ -286,8 +287,17 @@ impl Selector for UserVerb {
         registry: &mut SelectorRegistry,
         dependency: &Selection,
         notif_ctx: &NotificationContext,
-        _notifier: &Statement,
+        notifier: &Statement,
     ) -> Result<ConstraintAction, pest::error::Error<Rule>> {
+        // The weakness rule holds here as well: a weak provider or parent may
+        // seed this selector, but must not narrow one that has already
+        // resolved.  This override used to ignore the notifier entirely and
+        // so escaped the rule the default implementation applies.
+        let has_selection = selector_state_with(registry, self, |state| state.selection.is_some());
+        if weak_notifier_blocks(notifier.get_state().weak, has_selection) {
+            return Ok(ConstraintAction::Skip);
+        }
+
         // For forced parent dependencies, we always derive fake selection.
         if !self.forced || notif_ctx.role != DependencyRole::Child {
             let mut changed = false;

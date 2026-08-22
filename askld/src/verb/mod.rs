@@ -692,6 +692,25 @@ impl SelectorState {
 
 pub type SelectorId = usize;
 
+/// The weakness rule, in one place.
+///
+/// A weak substatement is a display echo, so it must never *narrow* a
+/// neighbour that has already resolved — but it may still *supply* a
+/// selection to one that has none.  That second half is not a loophole: it
+/// is how a chain propagates through weak intermediaries (`{{"a"}}`, or
+/// `data(inherit="true") {{{"channels_a"}}}`), where every middle scope is
+/// weak and the only data comes from the ends.
+///
+/// Both notification edges ask this question and must answer it the same
+/// way: the parent→child edge in [`Selector::try_constrain_notification`],
+/// and the child→parent edge in `Command::notify_from_selection`.  They
+/// disagreed until the child→parent edge got this call, which let an empty
+/// weak child empty its parent while an empty weak parent left its child
+/// alone.
+pub fn weak_notifier_blocks(notifier_weak: bool, receiver_has_selection: bool) -> bool {
+    notifier_weak && receiver_has_selection
+}
+
 /// Result of per-selector constraint logic in `try_constrain_notification`.
 pub enum ConstraintAction {
     /// Selector should be skipped (e.g., weak statement already has selection).
@@ -778,13 +797,11 @@ pub trait Selector: std::fmt::Debug + Verb {
         notif_ctx: &NotificationContext,
         notifier: &Statement,
     ) -> Result<ConstraintAction, pest::error::Error<Rule>> {
-        // Weak statements do not constrain the selection of their dependencies.
-        if notifier.get_state().weak {
-            let state_exists =
-                selector_state_with(registry, self, |state| state.selection.is_some());
-            if state_exists {
-                return Ok(ConstraintAction::Skip);
-            }
+        // A weak notifier may seed an empty selector below, never narrow a
+        // resolved one — see [`weak_notifier_blocks`].
+        let has_selection = selector_state_with(registry, self, |state| state.selection.is_some());
+        if weak_notifier_blocks(notifier.get_state().weak, has_selection) {
+            return Ok(ConstraintAction::Skip);
         }
 
         let span = Span::from_pest(self.span(), notifier.command().span().input());
