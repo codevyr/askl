@@ -53,6 +53,11 @@ separate statements; a `{` must be on the same line as its verb to attach.
   is a *filter* that constrains. This is the most common point of confusion.
 - `project("name")` restrict to one project (list names with the `askl_projects`
   tool). `ignore("pat")` exclude matches.
+- **Scoping to a project is cheaper as an argument than as a verb:** pass
+  `projects: ["linux"]` to `askl_run` and the other projects stop existing for
+  that call, instead of being filtered out of the results afterwards. Use
+  `project("name")` inside the query when a single query must span projects and
+  name one of them.
 
 ## Paths
 - `file()`/`dir()` arguments starting with `/` are **exact** and paths are

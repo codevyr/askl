@@ -3,6 +3,7 @@ use actix_web::{get, post, web, HttpResponse, Responder};
 use askld::execution_context::ExecutionContext;
 use askld::offset_range::range_bounds_to_offsets;
 use askld::parser::parse;
+use index::db_diesel::RootLayer;
 use index::symbols::{FileId, InstanceType, SymbolId, SymbolInstanceId, SymbolType};
 use log::{debug, info, warn};
 use serde::Deserialize;
@@ -61,11 +62,16 @@ fn error_response(
 /// pest error (which renders its own `^---` caret) so the HTTP handler and the
 /// MCP tool present the same message. `Storage` is a plain string for infra
 /// failures that have no source span.
+#[derive(Debug)]
 pub enum QueryError {
     Parse(pest::error::Error<askld::parser::Rule>),
     Exec(pest::error::Error<askld::parser::Rule>),
     Timeout(pest::error::Error<askld::parser::Rule>),
     Storage(String),
+    /// The request itself is malformed — today, a `projects` narrowing that
+    /// names something the index does not have.  Distinct from `Storage`
+    /// because the caller can fix it, so it answers 400 rather than 500.
+    Request(String),
 }
 
 impl QueryError {
@@ -89,6 +95,7 @@ impl QueryError {
                 error_response(want_markdown, StatusCode::GATEWAY_TIMEOUT, &err, None)
             }
             QueryError::Storage(msg) => HttpResponse::InternalServerError().body(msg),
+            QueryError::Request(msg) => HttpResponse::BadRequest().body(msg),
         }
     }
 
@@ -101,7 +108,7 @@ impl QueryError {
                 format!("# Error\n```text\n{}\n```\n\n{}\n", err, SYNTAX_HINT)
             }
             QueryError::Timeout(err) => format!("# Error\n```text\n{}\n```\n", err),
-            QueryError::Storage(msg) => format!("# Error\n{}\n", msg),
+            QueryError::Storage(msg) | QueryError::Request(msg) => format!("# Error\n{}\n", msg),
         }
     }
 }
@@ -137,7 +144,8 @@ pub async fn query(
         },
     };
 
-    let result_graph = match build_result_graph(&data, &req_body, opts.limit).await {
+    let projects = parse_project_list(opts.projects.as_deref());
+    let result_graph = match build_result_graph(&data, &req_body, opts.limit, &projects).await {
         Ok(graph) => graph,
         Err(err) => return err.into_http_response(want_markdown),
     };
@@ -156,14 +164,63 @@ pub async fn query(
     HttpResponse::Ok().body(json_graph)
 }
 
+/// Narrow the visible root set to the named projects.
+///
+/// Visibility is a property of the REQUEST, not of the query text: the roots
+/// decide which projects exist at all for this run, while `project("…")`
+/// inside a query is a predicate over the rows those roots make visible. The
+/// two compose — narrowing to `a` and then writing `project("b")` yields
+/// nothing, because `b` is not visible to begin with.
+///
+/// An empty `names` slice means "no narrowing requested" and keeps every root.
+/// Naming a project the index does not have is a client error rather than an
+/// empty result: silence there is indistinguishable from "that project has no
+/// matches", which is the failure mode this whole entry point exists to avoid.
+///
+/// Cache note: root shards are keyed on ONE root's identity
+/// (`root_shard_hash` folds `root.hash`), so a narrowed run REUSES the shards
+/// a broader run populated — never mints a parallel set.
+/// `per_root_root_shard_reused_under_narrowed_roots` fences that property.
+fn narrow_roots(all: Vec<RootLayer>, names: &[String]) -> Result<Vec<RootLayer>, QueryError> {
+    if names.is_empty() {
+        return Ok(all);
+    }
+
+    let unknown: Vec<&str> = names
+        .iter()
+        .filter(|wanted| !all.iter().any(|root| &root.name == *wanted))
+        .map(|s| s.as_str())
+        .collect();
+    if !unknown.is_empty() {
+        let mut known: Vec<&str> = all.iter().map(|r| r.name.as_str()).collect();
+        known.sort_unstable();
+        return Err(QueryError::Request(format!(
+            "unknown project(s): {}. Indexed projects: {}",
+            unknown.join(", "),
+            if known.is_empty() {
+                "(none)".to_string()
+            } else {
+                known.join(", ")
+            }
+        )));
+    }
+
+    Ok(all
+        .into_iter()
+        .filter(|root| names.iter().any(|wanted| wanted == &root.name))
+        .collect())
+}
+
 /// Parse, execute, and assemble the capped result graph for `query_text`. Shared
 /// by the `/query` HTTP handler and the MCP `askl_run` tool so both produce the
 /// same graph (and thus the same markdown). `limit` overrides the server's
 /// default symbol cap (`None` → `data.max_result_symbols`; `0` → unlimited).
+/// `projects` narrows the visible roots (empty = every indexed project).
 pub async fn build_result_graph(
     data: &AsklData,
     query_text: &str,
     limit: Option<usize>,
+    projects: &[String],
 ) -> Result<Graph, QueryError> {
     debug!("Received query: {}", query_text);
     let ast = parse(query_text).map_err(|err| {
@@ -172,12 +229,14 @@ pub async fn build_result_graph(
     })?;
     debug!("Global scope: {:#?}", ast);
 
-    // Resolve the visible root layers (all projects today; a narrower,
-    // per-tenant set later). RAM-cached via the SQL result cache.
+    // Resolve the visible root layers, then narrow them to the projects this
+    // request asked for. RAM-cached via the SQL result cache, so the narrowing
+    // costs one filter, not one query per root set.
     let roots = data.cfg.index.load_root_layers().await.map_err(|err| {
         warn!("Failed to resolve root layers: {}", err);
         QueryError::Storage("Failed to resolve root layers".to_string())
     })?;
+    let roots = narrow_roots(roots, projects)?;
     let mut ctx = ExecutionContext::new(roots);
     ctx.probe_cap = data.probe_cap;
     // Push the result cap into the leaf SQL (the budget facet of fusion): the
@@ -392,6 +451,22 @@ pub struct QueryOpts {
     /// Max distinct symbols in the result; `0` = unlimited. Defaults to the
     /// server's `max_result_symbols`.
     limit: Option<usize>,
+    /// Comma-separated project names to make visible; absent = every indexed
+    /// project. Names come from `/projects`; an unknown one is a 400.
+    projects: Option<String>,
+}
+
+/// Split a `projects=a,b` query parameter into names, dropping empty entries so
+/// a trailing comma is not an unknown project called "".
+fn parse_project_list(raw: Option<&str>) -> Vec<String> {
+    raw.map(|s| {
+        s.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Choose which symbols survive the E1 cap, deterministically keeping the first
@@ -446,6 +521,68 @@ mod tests {
         assert_eq!(kept.len(), 2);
         assert!(kept.contains(&12) && kept.contains(&11));
         assert!(!kept.contains(&10));
+    }
+
+    fn root(id: i64, name: &str) -> RootLayer {
+        RootLayer {
+            id,
+            project_id: id as i32,
+            name: name.to_string(),
+            hash: vec![id as u8; 32],
+        }
+    }
+
+    fn roots() -> Vec<RootLayer> {
+        vec![root(1, "linux"), root(2, "rdma-core"), root(3, "ucx")]
+    }
+
+    #[test]
+    fn no_narrowing_keeps_every_root() {
+        let kept = narrow_roots(roots(), &[]).unwrap();
+        assert_eq!(kept, roots(), "an absent `projects` must not narrow");
+    }
+
+    #[test]
+    fn narrowing_keeps_the_named_roots_in_load_order() {
+        let kept = narrow_roots(roots(), &["ucx".to_string(), "linux".to_string()]).unwrap();
+        let names: Vec<&str> = kept.iter().map(|r| r.name.as_str()).collect();
+        // Load order, not argument order: roots are sorted by layer id, and
+        // `EphContext::rooted` sorts them again — the request cannot reorder
+        // visibility.
+        assert_eq!(names, vec!["linux", "ucx"]);
+    }
+
+    #[test]
+    fn an_unknown_project_is_an_error_naming_what_exists() {
+        let err = narrow_roots(roots(), &["lnux".to_string()]).unwrap_err();
+        let QueryError::Request(msg) = err else {
+            panic!("an unknown project must be a client error");
+        };
+        assert!(msg.contains("lnux"), "must name the unknown project: {msg}");
+        assert!(
+            msg.contains("linux") && msg.contains("rdma-core") && msg.contains("ucx"),
+            "must list what is indexed: {msg}"
+        );
+    }
+
+    #[test]
+    fn one_bad_name_among_good_ones_still_errors() {
+        // Narrowing to {linux, nope} must not quietly answer over linux
+        // alone: the caller asked a question about a project that is not
+        // there, and an answer would look like "no matches".
+        let err = narrow_roots(roots(), &["linux".to_string(), "nope".to_string()]).unwrap_err();
+        assert!(matches!(err, QueryError::Request(_)));
+    }
+
+    #[test]
+    fn project_list_splits_trims_and_drops_blanks() {
+        assert_eq!(parse_project_list(None), Vec::<String>::new());
+        assert_eq!(parse_project_list(Some("")), Vec::<String>::new());
+        assert_eq!(
+            parse_project_list(Some("linux, rdma-core ,")),
+            vec!["linux".to_string(), "rdma-core".to_string()],
+            "a trailing comma must not become a project named \"\""
+        );
     }
 }
 
