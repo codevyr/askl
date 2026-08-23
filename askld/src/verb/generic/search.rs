@@ -71,7 +71,7 @@ impl SearchSelector {
     pub fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
         // Reject unknown named args so typos surface at parse time rather
         // than silently being ignored.
-        args.allow(&["case", "whole_word", "limit"])?;
+        args.accepts(1, &["case", "whole_word", "limit"])?;
 
         if args.count() != 1 {
             bail!("search requires exactly one positional argument: query");

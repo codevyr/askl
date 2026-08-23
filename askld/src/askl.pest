@@ -28,7 +28,11 @@ string_value = _{ prefixed_string | quoted_string }
 // Typed argument value.  Groundwork for a richer type system: future
 // alternatives (list) slot in here.
 value = _{ string_value | boolean | integer }
-named_argument = ${ident ~ "=" ~ value}
+// NOT compound-atomic: `${...}` suppresses implicit whitespace, which made
+// `limit = 5` a parse error.  Quoted values hid that; bare integers invite
+// spacing around the `=`.  `ident` and `value` are atomic in their own
+// right, so only the gaps BETWEEN the three tokens open up.
+named_argument = {ident ~ "=" ~ value}
 named_arguments = _{named_argument ~ (nl ~ "," ~ nl ~ named_argument)*}
 positional_argument = { value }
 positional_arguments = _{positional_argument ~ (nl ~ "," ~ nl ~ positional_argument)* }

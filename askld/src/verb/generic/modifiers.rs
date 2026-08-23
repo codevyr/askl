@@ -17,7 +17,8 @@ pub(in crate::verb) struct HasModifier {
 impl HasModifier {
     pub(in crate::verb) const NAME: &'static str = "has";
 
-    pub fn new(span: Span, _args: &Args) -> Result<Arc<dyn Verb>> {
+    pub fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        args.accepts(0, &[])?;
         Ok(Arc::new(Self { span }))
     }
 }
@@ -62,7 +63,8 @@ pub(in crate::verb) struct RefsModifier {
 impl RefsModifier {
     pub(in crate::verb) const NAME: &'static str = "refs";
 
-    pub fn new(span: Span, _args: &Args) -> Result<Arc<dyn Verb>> {
+    pub fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        args.accepts(0, &[])?;
         Ok(Arc::new(Self { span }))
     }
 }
@@ -113,7 +115,7 @@ impl DeriveModifier {
     pub(in crate::verb) const NAME: &'static str = "derive";
 
     pub fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
-        args.allow(&["type", "inherit"])?;
+        args.accepts(0, &["type", "inherit"])?;
 
         let type_str = args
             .named_str("type")?
@@ -186,7 +188,8 @@ pub(in crate::verb) struct UnnestModifier {
 impl UnnestModifier {
     pub(in crate::verb) const NAME: &'static str = "unnest";
 
-    pub fn new(span: Span, _args: &Args) -> Result<Arc<dyn Verb>> {
+    pub fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        args.accepts(0, &[])?;
         Ok(Arc::new(Self { span }))
     }
 }

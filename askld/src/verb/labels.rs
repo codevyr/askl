@@ -35,7 +35,7 @@ impl LabelVerb {
     pub(super) const NAME: &'static str = "label";
 
     pub(super) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
-        args.allow(&["inherit"])?;
+        args.accepts(1, &["inherit"])?;
 
         let inherit = args.named_bool("inherit")?.unwrap_or(false);
 
@@ -95,7 +95,7 @@ impl UserVerb {
     pub(super) const NAME: &'static str = "use";
 
     pub(super) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
-        args.allow(&["forced"])?;
+        args.accepts(1, &["forced"])?;
 
         let forced = args.named_bool("forced")?.unwrap_or(false);
 

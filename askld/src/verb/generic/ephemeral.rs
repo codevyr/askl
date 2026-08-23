@@ -136,7 +136,7 @@ impl EphemeralSymbolVerb {
     pub(in crate::verb) const NAME: &'static str = "ephemeral_symbol";
 
     fn create(args: &Args) -> Result<Self> {
-        args.allow(&["name", "project_id", "symbol_type", "scope"])?;
+        args.accepts(0, &["name", "project_id", "symbol_type", "scope"])?;
         let name = args.req_str("name")?.to_string();
         let project_id = args.req_i32("project_id")?;
         let symbol_type = args.req_i32("symbol_type")?;
@@ -283,7 +283,10 @@ impl EphemeralInstanceVerb {
     pub(in crate::verb) const NAME: &'static str = "ephemeral_instance";
 
     fn create(args: &Args) -> Result<Self> {
-        args.allow(&["symbol_id", "object_id", "start", "end", "instance_type"])?;
+        args.accepts(
+            0,
+            &["symbol_id", "object_id", "start", "end", "instance_type"],
+        )?;
         let symbol = SymbolRef::from_value(args.required_named("symbol_id")?, "symbol_id")?;
         let object_id = args.req_i32("object_id")?;
         let start = args.req_i64("start")?;
@@ -372,7 +375,7 @@ impl EphemeralRefVerb {
     pub(in crate::verb) const NAME: &'static str = "ephemeral_ref";
 
     fn create(args: &Args) -> Result<Self> {
-        args.allow(&["to_symbol", "from_object", "start", "end"])?;
+        args.accepts(0, &["to_symbol", "from_object", "start", "end"])?;
         let to_symbol = SymbolRef::from_value(args.required_named("to_symbol")?, "to_symbol")?;
         let from_object = args.req_i32("from_object")?;
         let start = args.req_i64("start")?;
@@ -448,7 +451,8 @@ pub(crate) struct LayerVerb {
 impl LayerVerb {
     pub(in crate::verb) const NAME: &'static str = "layer";
 
-    pub(in crate::verb) fn new(span: Span, _args: &Args) -> Result<Arc<dyn Verb>> {
+    pub(in crate::verb) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        args.accepts(0, &[])?;
         Ok(Arc::new(Self {
             span,
             ops: Arc::new(Mutex::new(Vec::new())),

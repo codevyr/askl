@@ -44,7 +44,7 @@ impl LocSelector {
     pub(in crate::verb) const NAME: &'static str = "loc";
 
     pub fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
-        args.allow(&["project"])?;
+        args.accepts(2, &["project"])?;
 
         if args.count() < 2 {
             bail!("loc requires two positional arguments: file path and line number");

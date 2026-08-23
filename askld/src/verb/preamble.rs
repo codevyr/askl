@@ -14,11 +14,7 @@ impl PreambleVerb {
     pub(super) const NAME: &'static str = "preamble";
 
     pub(super) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
-        if !args.no_positional() {
-            bail!("Unexpected positional arguments");
-        };
-        args.allow(&[])?;
-
+        args.accepts(0, &[])?;
         Ok(Arc::new(Self { span }))
     }
 }
