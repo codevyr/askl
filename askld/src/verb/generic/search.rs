@@ -14,17 +14,18 @@
 //! Patterns that look regex-ish (e.g. `foo.*bar`, `[a-z]+`) are searched
 //! verbatim.  Document prominently in user-facing docs.
 //!
-//! Step 6 (this file) wires up the verb with hard-coded defaults:
-//!   * `case="insensitive"`
-//!   * `whole_word="false"` (substring)
-//!   * `limit=500`
+//! Defaults when an argument is omitted:
+//!   * `case="smart"` — all-lowercase queries match case-insensitively
+//!   * `whole_word=false` — substring
+//!   * `limit=500` per project, with a truncation warning above it
 //!
-//! Subsequent steps add full argument parsing (smart-case, `case=`,
-//! `whole_word=`, `limit=`) and the truncation warning.
+//! `case` is a string because it is tri-state; `whole_word` is a boolean and
+//! `limit` an integer, so `whole_word="true"` and `limit="500"` are type
+//! errors that name the typed spelling.
 
 use crate::cfg::ControlFlowGraph;
-use crate::parser::Value;
 use crate::span::Span;
+use crate::verb::Args;
 use crate::verb::LayerSpec;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
@@ -34,7 +35,6 @@ use index::db_diesel::{
 };
 use index::symbols::{smart_case_sensitive, symbol_path_and_leaf};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -44,6 +44,13 @@ use super::super::{AnchorKind, DeriveMethod, Selector, Verb, VerbClass};
 /// cost; explicit `limit=N` overrides it.  Aligns with how interactive
 /// code-search tools (GitHub, Sourcegraph) pace result sets.
 const DEFAULT_LIMIT: usize = 500;
+
+/// Largest cap the SQL `LIMIT` bind can express (a 32-bit Integer).  A bigger
+/// `limit=` is clamped to it rather than rejected: past this many matches per
+/// project the cap has stopped meaning anything, and clamping HERE — before
+/// the value reaches the layer key — keeps every "effectively unlimited"
+/// spelling on one cache entry instead of one per number written.
+const MAX_LIMIT: usize = i32::MAX as usize;
 
 /// `search(query, ...)` selector — produces one ephemeral content-anchored
 /// symbol per matching project, with N instances per symbol where each
@@ -61,15 +68,15 @@ pub(in crate::verb) struct SearchSelector {
 impl SearchSelector {
     pub(in crate::verb) const NAME: &'static str = "search";
 
-    pub fn new(
-        span: Span,
-        positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
-        if positional.len() != 1 {
+    pub fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        // Reject unknown named args so typos surface at parse time rather
+        // than silently being ignored.
+        args.allow(&["case", "whole_word", "limit"])?;
+
+        if args.count() != 1 {
             bail!("search requires exactly one positional argument: query");
         }
-        let query = positional[0].as_plain()?.to_string();
+        let query = args.str_at(0, "query")?.to_string();
         if query.trim().is_empty() {
             bail!("search: query must be non-empty");
         }
@@ -80,7 +87,7 @@ impl SearchSelector {
         // Smart-case is resolved at parse time so the hash and the SQL
         // variant choice see a concrete bool — different `case=` values
         // that resolve to the same bool share the cache.
-        let case_sensitive = match crate::parser::named_plain(named, "case")? {
+        let case_sensitive = match args.named_str("case")? {
             None | Some("smart") => smart_case_sensitive(&query),
             Some("sensitive") => true,
             Some("insensitive") => false,
@@ -90,37 +97,13 @@ impl SearchSelector {
             ),
         };
 
-        let whole_word = match crate::parser::named_plain(named, "whole_word")? {
-            None | Some("false") => false,
-            Some("true") => true,
-            Some(other) => bail!(
-                "search: whole_word must be \"true\" or \"false\", got: {:?}",
-                other,
-            ),
-        };
+        let whole_word = args.named_bool("whole_word")?.unwrap_or(false);
 
-        let limit = match named.get("limit") {
+        let limit = match args.named_usize("limit")? {
             None => DEFAULT_LIMIT,
-            Some(s) => {
-                let s = s.as_plain()?;
-                let n: usize = s.parse().map_err(|_| {
-                    anyhow::anyhow!("search: limit must be a positive integer, got: {:?}", s,)
-                })?;
-                if n == 0 {
-                    bail!("search: limit must be >= 1");
-                }
-                n
-            }
+            Some(0) => bail!("search: limit must be >= 1"),
+            Some(n) => n.min(MAX_LIMIT),
         };
-
-        // Reject unknown named args so typos surface at parse time rather
-        // than silently being ignored.
-        const ALLOWED: &[&str] = &["case", "whole_word", "limit"];
-        for key in named.keys() {
-            if !ALLOWED.contains(&key.as_str()) {
-                bail!("search: unknown argument {:?}; allowed: {:?}", key, ALLOWED,);
-            }
-        }
 
         Ok(Arc::new(Self {
             span,
@@ -409,7 +392,7 @@ impl Selector for SearchSelector {
             format!(
                 "search({:?}): result truncated at {} matches in at least one \
                  project; narrow the query (more specific text, \
-                 project(\"name\"), whole_word=\"true\")",
+                 project(\"name\"), whole_word=true)",
                 self.query, self.limit,
             ),
         ))

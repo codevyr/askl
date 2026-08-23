@@ -31,7 +31,7 @@ Combining children — `;` is AND, a space is OR
 
 Full-text (raw source bytes — for text that is NOT a symbol name; to find a symbol prefer `g"*foo*"`)
 - Find a literal:             `search("mmap_lock")`
-- Whole word, scoped:         `project("linux") search("EXPORT_SYMBOL", whole_word="true")`
+- Whole word, scoped:         `project("linux") search("EXPORT_SYMBOL", whole_word=true)`
 - Several literals (OR):      `search("foo") search("bar")`  (or as two top-level statements, `search("foo"); search("bar")` — both union; `search()` is literal, `search("a|b")` matches the text `a|b`, not a regex)
 - Children of each hit:       `search("kmalloc") { }`
 

@@ -3715,7 +3715,13 @@ impl Index {
         use crate::schema_diesel::objects;
         use diesel::sql_types::{Array, BigInt, Integer, Text};
 
-        let limit_plus_one = (limit as i32).saturating_add(1);
+        // SATURATING, not `as i32`: the bind is a 32-bit Integer, and a
+        // truncating cast turns a too-large cap into a small or negative one
+        // (`limit=2^32` truncated to 0; `limit=2^31` bound a negative LIMIT).
+        // A cap the bind cannot express means "no effective cap".
+        // `SearchSelector` clamps to `i32::MAX` before the value ever gets
+        // here, so this is the guard for other callers, not the live fix.
+        let limit_plus_one = i32::try_from(limit).unwrap_or(i32::MAX).saturating_add(1);
 
         // Per-root scoping is computed as bind PREPARATION (not row
         // filtering): when the composite filter constrains objects (today:

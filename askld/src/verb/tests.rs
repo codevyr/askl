@@ -8,8 +8,6 @@ use crate::{
     verb::*,
 };
 
-use std::collections::HashMap;
-
 #[tokio::test(flavor = "current_thread")]
 async fn test_select_matching_name() {
     let index = get_shared_index(VERB_TEST).await;
@@ -27,8 +25,8 @@ async fn test_select_matching_name() {
 
     for (name, expected_ids) in test_cases {
         let fake_span = Span::synthetic(name);
-        let named_args = HashMap::from([("name".to_string(), Value::plain(name))]);
-        let selector = NameSelector::new(fake_span, &vec![], &named_args).unwrap();
+        let args = Args::of("_name_select").with_named("name", Value::plain(name));
+        let selector = NameSelector::new(fake_span, &args).unwrap();
 
         let result = selector
             .as_selector()
@@ -69,28 +67,22 @@ fn test_glob_name_selector_construction() {
     use crate::parser::StringKind;
 
     let named = |name: &str, kind| {
-        HashMap::from([(
-            "name".to_string(),
+        Args::of("_name_select").with_named(
+            "name",
             Value::Str {
                 kind,
                 text: name.to_string(),
             },
-        )])
+        )
     };
 
     // Globs are opt-in via g"..."; compound globs are valid too.
     for pattern in ["*ab*", "a.*b", "(*Kubelet).Run", "/src/*"] {
-        NameSelector::new(
-            Span::synthetic(pattern),
-            &vec![],
-            &named(pattern, StringKind::Glob),
-        )
-        .unwrap();
+        NameSelector::new(Span::synthetic(pattern), &named(pattern, StringKind::Glob)).unwrap();
     }
 
     // A glob without any literal would select every symbol.
-    let err = NameSelector::new(Span::synthetic("*"), &vec![], &named("*", StringKind::Glob))
-        .unwrap_err();
+    let err = NameSelector::new(Span::synthetic("*"), &named("*", StringKind::Glob)).unwrap_err();
     assert!(
         err.to_string().contains("literal"),
         "unexpected error: {err}"
@@ -100,7 +92,6 @@ fn test_glob_name_selector_construction() {
     // (stripped by normalization, restoring pre-glob behavior).
     NameSelector::new(
         Span::synthetic("(*Kubelet).Run"),
-        &vec![],
         &named("(*Kubelet).Run", StringKind::Plain),
     )
     .unwrap();
@@ -115,11 +106,10 @@ fn test_glob_type_selector_construction() {
     let build = |name: &str, kind, symbol_type_id| {
         TypeSelector::new(
             Span::synthetic(name),
-            &vec![Value::Str {
+            &Args::of("func").with(Value::Str {
                 kind,
                 text: name.to_string(),
-            }],
-            &HashMap::new(),
+            }),
             symbol_type_id,
         )
     };
@@ -335,33 +325,37 @@ fn verb_classes_are_declared_per_aspect() {
     use crate::parser_context::SYMBOL_TYPE_FUNCTION;
 
     let span = || Span::synthetic("v");
-    let no_named = HashMap::new();
+    let bare = |verb: &str| Args::of(verb);
+    let one = |verb: &str, value: &str| Args::of(verb).with(Value::plain(value));
 
-    let named_name = HashMap::from([("name".to_string(), Value::plain("foo"))]);
-    let name = NameSelector::new(span(), &vec![], &named_name).unwrap();
+    let name = NameSelector::new(
+        span(),
+        &Args::of("_name_select").with_named("name", Value::plain("foo")),
+    )
+    .unwrap();
     assert_eq!(name.class(), VerbClass::Predicate);
 
-    let func = TypeSelector::new(span(), &vec![], &no_named, Some(SYMBOL_TYPE_FUNCTION)).unwrap();
+    let func = TypeSelector::new(span(), &bare("func"), Some(SYMBOL_TYPE_FUNCTION)).unwrap();
     assert_eq!(func.class(), VerbClass::Predicate);
     // A bare inherited type selector is filter-only: the selector role is
     // instance-conditional, the class is not.
     assert!(func.as_filter().is_some());
     assert!(func.as_selector().is_none());
 
-    let project = ProjectFilter::new(span(), &vec![Value::plain("p")], &no_named).unwrap();
+    let project = ProjectFilter::new(span(), &one("project", "p")).unwrap();
     assert_eq!(project.class(), VerbClass::Predicate);
 
-    let unnest = UnnestModifier::new(span(), &vec![], &no_named).unwrap();
+    let unnest = UnnestModifier::new(span(), &bare("unnest")).unwrap();
     assert_eq!(unnest.class(), VerbClass::Relationship);
-    let has = HasModifier::new(span(), &vec![], &no_named).unwrap();
+    let has = HasModifier::new(span(), &bare("has")).unwrap();
     assert_eq!(has.class(), VerbClass::Relationship);
 
-    let label = LabelVerb::new(span(), &vec![Value::plain("l")], &no_named).unwrap();
+    let label = LabelVerb::new(span(), &one("label", "l")).unwrap();
     assert_eq!(label.class(), VerbClass::Binding);
-    let user = UserVerb::new(span(), &vec![Value::plain("l")], &no_named).unwrap();
+    let user = UserVerb::new(span(), &one("use", "l")).unwrap();
     assert_eq!(user.class(), VerbClass::Binding);
 
-    let preamble = PreambleVerb::new(span(), &vec![], &no_named).unwrap();
+    let preamble = PreambleVerb::new(span(), &bare("preamble")).unwrap();
     assert_eq!(preamble.class(), VerbClass::Env);
 }
 
@@ -374,26 +368,26 @@ fn slot_cascade_replaces_within_a_dimension() {
     use crate::parser_context::{SYMBOL_TYPE_DATA, SYMBOL_TYPE_FUNCTION};
 
     let span = || Span::synthetic("v");
-    let no_named = HashMap::new();
+    let one = |verb: &str, value: &str| Args::of(verb).with(Value::plain(value));
 
     // project(a) project(b) -> b holds the project slot alone.
     let mut cmd = Command::new(span());
-    cmd.extend(ProjectFilter::new(span(), &vec![Value::plain("a")], &no_named).unwrap());
-    cmd.extend(ProjectFilter::new(span(), &vec![Value::plain("b")], &no_named).unwrap());
+    cmd.extend(ProjectFilter::new(span(), &one("project", "a")).unwrap());
+    cmd.extend(ProjectFilter::new(span(), &one("project", "b")).unwrap());
     let filters: Vec<String> = cmd.filters().map(|f| format!("{}", f)).collect();
     assert_eq!(filters, vec!["ProjectFilter(project=b)".to_string()]);
 
     // func data -> data holds the type slot alone.
     let mut cmd = Command::new(span());
-    cmd.extend(TypeSelector::new(span(), &vec![], &no_named, Some(SYMBOL_TYPE_FUNCTION)).unwrap());
-    cmd.extend(TypeSelector::new(span(), &vec![], &no_named, Some(SYMBOL_TYPE_DATA)).unwrap());
+    cmd.extend(TypeSelector::new(span(), &Args::of("func"), Some(SYMBOL_TYPE_FUNCTION)).unwrap());
+    cmd.extend(TypeSelector::new(span(), &Args::of("data"), Some(SYMBOL_TYPE_DATA)).unwrap());
     let filters: Vec<String> = cmd.filters().map(|f| format!("{}", f)).collect();
     assert_eq!(filters, vec!["TypeSelector(data)".to_string()]);
 
     // Exclusions have no dimension: ignore(a) ignore(b) both survive.
     let mut cmd = Command::new(span());
-    cmd.extend(IgnoreVerb::new(span(), &vec![Value::plain("a")], &no_named).unwrap());
-    cmd.extend(IgnoreVerb::new(span(), &vec![Value::plain("b")], &no_named).unwrap());
+    cmd.extend(IgnoreVerb::new(span(), &one("ignore", "a")).unwrap());
+    cmd.extend(IgnoreVerb::new(span(), &one("ignore", "b")).unwrap());
     assert_eq!(cmd.filters().count(), 2);
 }
 
@@ -408,17 +402,16 @@ fn slot_cascade_type_dimension_is_symmetric() {
     use crate::parser_context::SYMBOL_TYPE_FUNCTION;
 
     let span = || Span::synthetic("v");
-    let no_named = HashMap::new();
     let type_filter = |v: &str| {
         GenericFilter::new(
             span(),
-            &vec![Value::plain("type"), Value::plain(v)],
-            &no_named,
+            &Args::of("filter")
+                .with(Value::plain("type"))
+                .with(Value::plain(v)),
         )
         .unwrap()
     };
-    let func =
-        || TypeSelector::new(span(), &vec![], &no_named, Some(SYMBOL_TYPE_FUNCTION)).unwrap();
+    let func = || TypeSelector::new(span(), &Args::of("func"), Some(SYMBOL_TYPE_FUNCTION)).unwrap();
 
     let mut cmd = Command::new(span());
     cmd.extend(type_filter("data"));
@@ -444,11 +437,10 @@ fn slot_cascade_type_write_keeps_layer_backed_anchors() {
     use crate::parser_context::SYMBOL_TYPE_FUNCTION;
 
     let span = || Span::synthetic("v");
-    let no_named = HashMap::new();
 
     let mut cmd = Command::new(span());
-    cmd.extend(SearchSelector::new(span(), &vec![Value::plain("xyz")], &no_named).unwrap());
-    cmd.extend(TypeSelector::new(span(), &vec![], &no_named, Some(SYMBOL_TYPE_FUNCTION)).unwrap());
+    cmd.extend(SearchSelector::new(span(), &Args::of("search").with(Value::plain("xyz"))).unwrap());
+    cmd.extend(TypeSelector::new(span(), &Args::of("func"), Some(SYMBOL_TYPE_FUNCTION)).unwrap());
     assert!(
         cmd.has_layer_spec(),
         "the search anchor must survive a type-dimension write"

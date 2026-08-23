@@ -1,9 +1,8 @@
 use crate::execution_state::RelationshipType;
-use crate::parser::Value;
 use crate::parser_context::ParserContext;
 use crate::span::Span;
+use crate::verb::Args;
 use anyhow::{anyhow, bail, Result};
-use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -18,11 +17,7 @@ pub(in crate::verb) struct HasModifier {
 impl HasModifier {
     pub(in crate::verb) const NAME: &'static str = "has";
 
-    pub fn new(
-        span: Span,
-        _positional: &Vec<Value>,
-        _named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
+    pub fn new(span: Span, _args: &Args) -> Result<Arc<dyn Verb>> {
         Ok(Arc::new(Self { span }))
     }
 }
@@ -67,11 +62,7 @@ pub(in crate::verb) struct RefsModifier {
 impl RefsModifier {
     pub(in crate::verb) const NAME: &'static str = "refs";
 
-    pub fn new(
-        span: Span,
-        _positional: &Vec<Value>,
-        _named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
+    pub fn new(span: Span, _args: &Args) -> Result<Arc<dyn Verb>> {
         Ok(Arc::new(Self { span }))
     }
 }
@@ -110,7 +101,7 @@ impl Display for RefsModifier {
 /// derive(type="refs")           — same as refs (inherits by default)
 /// derive(type="has")            — same as has (inherits by default)
 /// derive(type="refs,has")       — union: either relationship (inherits by default)
-/// derive(type="has", inherit="false") — has, NOT propagated to descendants
+/// derive(type="has", inherit=false) — has, NOT propagated to descendants
 #[derive(Debug)]
 pub(in crate::verb) struct DeriveModifier {
     span: Span,
@@ -121,15 +112,12 @@ pub(in crate::verb) struct DeriveModifier {
 impl DeriveModifier {
     pub(in crate::verb) const NAME: &'static str = "derive";
 
-    pub fn new(
-        span: Span,
-        _positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
-        let type_str = named
-            .get("type")
-            .ok_or_else(|| anyhow!("derive requires a 'type' parameter"))?
-            .as_plain()?;
+    pub fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        args.allow(&["type", "inherit"])?;
+
+        let type_str = args
+            .named_str("type")?
+            .ok_or_else(|| anyhow!("derive requires a 'type' parameter"))?;
 
         let mut rel_type = RelationshipType::EMPTY;
         for part in type_str.split(',') {
@@ -147,10 +135,7 @@ impl DeriveModifier {
             bail!("derive type parameter must contain at least one of 'refs', 'has'");
         }
 
-        let inherit = match named.get("inherit") {
-            Some(v) => v.as_plain()?.eq_ignore_ascii_case("true"),
-            None => true,
-        };
+        let inherit = args.named_bool("inherit")?.unwrap_or(true);
 
         Ok(Arc::new(Self {
             span,
@@ -201,11 +186,7 @@ pub(in crate::verb) struct UnnestModifier {
 impl UnnestModifier {
     pub(in crate::verb) const NAME: &'static str = "unnest";
 
-    pub fn new(
-        span: Span,
-        _positional: &Vec<Value>,
-        _named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
+    pub fn new(span: Span, _args: &Args) -> Result<Arc<dyn Verb>> {
         Ok(Arc::new(Self { span }))
     }
 }

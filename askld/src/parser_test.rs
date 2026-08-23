@@ -199,7 +199,7 @@ fn preamble_keeps_constraints_and_directives() {
     for query in [
         "preamble project(\"p\") ignore(\"builtin\")\n\"bar\"",
         "preamble filter(\"type\", \"func\")\n\"bar\"",
-        "preamble filter(\"compound_name\", \"test\", inherit=\"true\")\n\"bar\"",
+        "preamble filter(\"compound_name\", \"test\", inherit=true)\n\"bar\"",
         "preamble filter(\"exact_name\", \"foo\")\n\"bar\"",
         "preamble func\n\"bar\"",
     ] {
@@ -338,7 +338,7 @@ fn anchor_classification_table() {
     assert!(first_statement_anchored("func select"));
     // Anchored: content and location predicates.
     assert!(first_statement_anchored(r#"search("needle")"#));
-    assert!(first_statement_anchored(r#"loc("main.c", "1")"#));
+    assert!(first_statement_anchored(r#"loc("main.c", 1)"#));
     // Pure constraints: type predicates, project, bare select.
     assert!(!first_statement_anchored("func"));
     assert!(!first_statement_anchored(r#"project("linux")"#));
@@ -347,4 +347,62 @@ fn anchor_classification_table() {
     // An anchor anywhere in the verb bag anchors the whole statement.
     assert!(first_statement_anchored(r#"func "foo""#));
     assert!(first_statement_anchored(r#"project("linux") "foo""#));
+}
+
+// === Primitive literals: integers and booleans ===
+
+#[test]
+fn bare_literals_are_not_selectors() {
+    // Literals live in argument position only.  A bare `42` or `true` in
+    // statement position is a mistake, not a name — `"42"` is how you name a
+    // symbol called 42 — so `plain_filter` takes a string, never a `value`.
+    for query in ["42", "-7", "true", "false", "!42", "!true"] {
+        assert!(
+            parse(query).is_err(),
+            "a bare literal must not parse as a selector: {query}"
+        );
+    }
+}
+
+#[test]
+fn boolean_keywords_do_not_split_longer_words() {
+    // `true`/`false` are keywords only where the word ends, mirroring the
+    // !XID_CONTINUE guard on or/and/not.  `truthy` is not `true` followed by
+    // garbage; it is not a value at all.
+    for query in [
+        r#"func("a", inherit=truthy)"#,
+        r#"func("a", inherit=falsey)"#,
+    ] {
+        assert!(parse(query).is_err(), "must not parse: {query}");
+    }
+}
+
+#[test]
+fn integer_literals_must_fit_in_64_bits() {
+    // Both signs go through the same `integer` rule, so both overflow the
+    // same way — and the message says which literal, not "expected ...".
+    for query in [
+        r#"search("abc", limit=99999999999999999999)"#,
+        r#"search("abc", limit=-99999999999999999999)"#,
+    ] {
+        let err = parse(query).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("does not fit in a 64-bit integer"),
+            "expected an out-of-range error for {query}, got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn a_bare_word_in_value_position_names_every_value_type() {
+    // pest lists the rules that could have matched, and a SILENT rule never
+    // appears there.  With `quoted_string` silent, `case=smart` was told it
+    // could write a glob string, an integer or a boolean — everything except
+    // the plain string it meant.
+    let err = parse(r#"search("x", case=smart)"#).unwrap_err();
+    let msg = format!("{err}");
+    for want in ["a quoted string", "an integer", "a boolean"] {
+        assert!(msg.contains(want), "expected {want:?} in: {msg}");
+    }
 }

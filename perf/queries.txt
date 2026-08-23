@@ -28,10 +28,10 @@ mod("amdgpu") { func { "drm_dev_enter" } }
 # --- W5: search scoping A/B (nested is the correct form; sibling does NOT scope) ---
 file("drm_mm.c") { search("color") }
 search("color") file("drm_mm.c")
-search("color", limit="50")
+search("color", limit=50)
 
 # --- full-text search (the slow ones; search("color") is the eval timeout culprit) ---
 search("mmap_lock")
-project("linux") search("EXPORT_SYMBOL", whole_word="true")
+project("linux") search("EXPORT_SYMBOL", whole_word=true)
 search("color_adjust")
 search("color")

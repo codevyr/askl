@@ -5,12 +5,12 @@ use crate::parser_context::{
     SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MACRO, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
 };
 use crate::span::Span;
+use crate::verb::Args;
 use anyhow::{anyhow, bail, Result};
 use index::db_diesel::{
     CompositeFilter, CompoundNameMixin, DefaultSymbolTypeMixin, ExactNameMixin,
     PackageDescendantLeaf, ProjectFilterMixin, SymbolTypeMixin,
 };
-use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -31,11 +31,7 @@ pub(in crate::verb) struct IgnoreVerb {
 impl IgnoreVerb {
     pub(in crate::verb) const NAME: &'static str = "ignore";
 
-    pub fn new(
-        span: Span,
-        positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
+    pub(in crate::verb) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
         let mut verb = Self {
             span,
             name: None,
@@ -43,16 +39,16 @@ impl IgnoreVerb {
         };
         let mut empty = true;
 
-        if let Some(name) = positional.iter().next() {
+        if let Some(name) = args.value_at(0) {
             verb.name = Some(NamePattern::from_value(name)?);
             empty = false;
         }
 
-        if let Some(package) = named.get("package") {
+        if let Some(package) = args.named_str("package")? {
             // A package that normalises to nothing stays a no-op filter, as
             // before — `compound_admission` is what keeps it out of
             // expressions, where a no-op would break the compiler's totality.
-            verb.package = PackageDescendantLeaf::new(package.as_plain()?);
+            verb.package = PackageDescendantLeaf::new(package);
             empty = false;
         }
 
@@ -139,19 +135,14 @@ pub(in crate::verb) struct ProjectFilter {
 impl ProjectFilter {
     pub(in crate::verb) const NAME: &'static str = "project";
 
-    pub fn new(
-        span: Span,
-        positional: &Vec<Value>,
-        _named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
-        if let Some(project) = positional.iter().next() {
-            Ok(Arc::new(Self {
-                span,
-                project: project.as_plain()?.to_string(),
-            }))
-        } else {
+    pub(in crate::verb) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        if args.no_positional() {
             bail!("Expected a positional argument");
         }
+        Ok(Arc::new(Self {
+            span,
+            project: args.str_at(0, "project name")?.to_string(),
+        }))
     }
 }
 
@@ -218,18 +209,12 @@ pub(in crate::verb) struct PackageFilter {
 impl PackageFilter {
     pub(in crate::verb) const NAME: &'static str = "package";
 
-    pub fn new(
-        span: Span,
-        positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
-        if !named.is_empty() {
-            bail!("Unexpected named arguments");
-        }
-        if positional.len() != 1 {
+    pub(in crate::verb) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        args.allow(&[])?;
+        if args.count() != 1 {
             bail!("package requires exactly one positional argument: the package path");
         }
-        let package = positional[0].as_plain()?.to_string();
+        let package = args.str_at(0, "package path")?.to_string();
         let Some(leaf) = PackageDescendantLeaf::new(&package) else {
             bail!("'{}' does not name a package path", package);
         };
@@ -468,26 +453,19 @@ pub struct GenericFilter {
 impl GenericFilter {
     pub const NAME: &'static str = "filter";
 
-    pub fn new(
-        span: Span,
-        positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
-        let kind_str = positional
-            .first()
-            .ok_or_else(|| anyhow!("filter requires a kind as first argument"))?
-            .as_plain()?;
+    pub(in crate::verb) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        if args.no_positional() {
+            bail!("filter requires a kind as first argument");
+        }
+        let kind_str = args.str_at(0, "filter kind")?;
 
-        let value = positional
-            .get(1)
+        let value = args
+            .value_at(1)
             .ok_or_else(|| anyhow!("filter requires a value as second argument"))?;
 
         let kind = FilterKind::parse(kind_str, value)?;
 
-        let inherit = match named.get("inherit") {
-            Some(v) => v.as_plain()?.eq_ignore_ascii_case("true"),
-            None => false,
-        };
+        let inherit = args.named_bool("inherit")?.unwrap_or(false);
 
         Ok(Arc::new(Self {
             span,

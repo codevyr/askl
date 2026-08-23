@@ -80,6 +80,13 @@ impl NamePattern {
                 kind: StringKind::Glob,
                 text,
             } => Ok(NamePattern::Glob(GlobPattern::parse(text)?)),
+            // A name is text.  An integer or boolean literal in name position
+            // is a type error, not a name that happens to look numeric —
+            // `func(42)` is a mistake, `func("42")` is the way to say it.
+            other => anyhow::bail!(
+                "a name pattern expects a string, found {}",
+                other.describe()
+            ),
         }
     }
 }

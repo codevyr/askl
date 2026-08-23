@@ -2,6 +2,7 @@ use crate::cfg::ControlFlowGraph;
 use crate::parser::Value;
 use crate::parser_context::ParserContext;
 use crate::span::Span;
+use crate::verb::Args;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
@@ -119,21 +120,10 @@ fn merge_batch(dst: &mut LayerBatch, src: LayerBatch) {
 /// The lock is here for the trait bound, not for mutual exclusion.
 pub(crate) type EphemeralOps = Arc<Mutex<Vec<Arc<dyn EphemeralOp>>>>;
 
-macro_rules! parse_required {
-    ($named:expr, $key:expr, $t:ty) => {
-        $named
-            .get($key)
-            .ok_or_else(|| anyhow::anyhow!("requires '{}' parameter", $key))?
-            .as_plain()?
-            .parse::<$t>()
-            .map_err(|_| anyhow::anyhow!("'{}' must be a valid {}", $key, stringify!($t)))?
-    };
-}
-
 /// EphemeralSymbolVerb - creates an ephemeral symbol row in the DB.
 ///
 /// Only available inside `layer { }` blocks.
-/// Usage: ephemeral_symbol(name="sym", project_id="1", symbol_type="1")
+/// Usage: ephemeral_symbol(name="sym", project_id=1, symbol_type=1)
 #[derive(Debug)]
 pub(in crate::verb) struct EphemeralSymbolVerb {
     name: String,
@@ -145,10 +135,11 @@ pub(in crate::verb) struct EphemeralSymbolVerb {
 impl EphemeralSymbolVerb {
     pub(in crate::verb) const NAME: &'static str = "ephemeral_symbol";
 
-    fn create(_positional: &Vec<Value>, named: &HashMap<String, Value>) -> Result<Self> {
-        let name: String = parse_required!(named, "name", String);
-        let project_id: i32 = parse_required!(named, "project_id", i32);
-        let symbol_type: i32 = parse_required!(named, "symbol_type", i32);
+    fn create(args: &Args) -> Result<Self> {
+        args.allow(&["name", "project_id", "symbol_type", "scope"])?;
+        let name = args.req_str("name")?.to_string();
+        let project_id = args.req_i32("project_id")?;
+        let symbol_type = args.req_i32("symbol_type")?;
         if !(SYMBOL_TYPE_FUNCTION..=SYMBOL_TYPE_FIELD).contains(&symbol_type) {
             bail!(
                 "symbol_type must be between {} and {} (got {})",
@@ -157,13 +148,7 @@ impl EphemeralSymbolVerb {
                 symbol_type
             );
         }
-        let scope: Option<i32> = named
-            .get("scope")
-            .map(|s| s.as_plain())
-            .transpose()?
-            .map(|s| s.parse())
-            .transpose()
-            .map_err(|_| anyhow::anyhow!("'scope' must be a valid i32"))?;
+        let scope = args.named_i32("scope")?;
 
         Ok(Self {
             name,
@@ -173,12 +158,8 @@ impl EphemeralSymbolVerb {
         })
     }
 
-    pub(crate) fn new_op(
-        _span: Span,
-        positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn EphemeralOp>> {
-        Ok(Arc::new(Self::create(positional, named)?))
+    pub(crate) fn new_op(_span: Span, args: &Args) -> Result<Arc<dyn EphemeralOp>> {
+        Ok(Arc::new(Self::create(args)?))
     }
 }
 
@@ -219,7 +200,7 @@ impl EphemeralOp for EphemeralSymbolVerb {
 ///
 /// **Multi-row semantics by default.**  An ephemeral verb takes a
 /// `SymbolRef` and emits N rows, where N is the resolved set's size:
-///   - `symbol_id="1"` → `Literal(1)` → resolves to one symbol → one row.
+///   - `symbol_id=1` → `Literal(1)` → resolves to one symbol → one row.
 ///   - `symbol_id="@foo"` → `Label("foo")` → resolves to whatever the
 ///     `@foo` statement selected → N rows.
 ///   - If a label resolves to zero symbols (statement matched nothing),
@@ -235,22 +216,31 @@ enum SymbolRef {
 }
 
 impl SymbolRef {
-    /// Parse `"123"` → `Literal(123)` or `"@foo"` → `Label("foo".into())`.
-    fn parse(raw: &str, key: &str) -> Result<Self> {
-        if let Some(label) = raw.strip_prefix('@') {
-            if label.is_empty() {
-                bail!("'{}' label reference must not be empty", key);
-            }
-            Ok(SymbolRef::Label(label.to_string()))
-        } else {
-            let id: i64 = raw.parse().map_err(|_| {
-                anyhow::anyhow!(
-                    "'{}' must be a valid i64 or a label reference \
-                     (labels start with '@', e.g. '@foo')",
+    /// `123` → `Literal(123)`, `"@foo"` → `Label("foo")`.  The argument's
+    /// TYPE does the discriminating: an integer is an id, a string is a label
+    /// reference.  Before arguments were typed both arrived as strings and
+    /// the leading `@` had to be sniffed off.
+    fn from_value(value: &Value, key: &str) -> Result<Self> {
+        match value {
+            Value::Int(id) => Ok(SymbolRef::Literal(*id)),
+            Value::Str { text, .. } => match text.strip_prefix('@') {
+                Some("") => bail!("'{}' label reference must not be empty", key),
+                Some(label) => Ok(SymbolRef::Label(label.to_string())),
+                None => bail!(
+                    "'{}' expects a symbol id or a label reference, found the \
+                     string {:?} — write an id unquoted ({}={}), or reference a \
+                     label as \"@name\"",
                     key,
-                )
-            })?;
-            Ok(SymbolRef::Literal(id))
+                    text,
+                    key,
+                    text,
+                ),
+            },
+            other => bail!(
+                "'{}' expects a symbol id or a label reference, found {}",
+                key,
+                other.describe()
+            ),
         }
     }
 
@@ -276,8 +266,8 @@ impl SymbolRef {
 /// Only available inside `layer { }` blocks.  Emits one row per
 /// resolved symbol — see [`SymbolRef`] for the multi-row semantic.
 ///
-/// Usage: `ephemeral_instance(symbol_id="<id>", object_id="1",
-///        start="0", end="10", instance_type="1")` for a literal
+/// Usage: `ephemeral_instance(symbol_id=<id>, object_id=1,
+///        start=0, end=10, instance_type=1)` for a literal
 ///        (single-row) input, or `symbol_id="@label"` for a
 ///        label-resolved (`N`-row) input.
 #[derive(Debug)]
@@ -292,16 +282,13 @@ pub(in crate::verb) struct EphemeralInstanceVerb {
 impl EphemeralInstanceVerb {
     pub(in crate::verb) const NAME: &'static str = "ephemeral_instance";
 
-    fn create(_positional: &Vec<Value>, named: &HashMap<String, Value>) -> Result<Self> {
-        let symbol_raw = named
-            .get("symbol_id")
-            .ok_or_else(|| anyhow::anyhow!("requires 'symbol_id' parameter"))?
-            .as_plain()?;
-        let symbol = SymbolRef::parse(symbol_raw, "symbol_id")?;
-        let object_id: i32 = parse_required!(named, "object_id", i32);
-        let start: i64 = parse_required!(named, "start", i64);
-        let end: i64 = parse_required!(named, "end", i64);
-        let instance_type: i32 = parse_required!(named, "instance_type", i32);
+    fn create(args: &Args) -> Result<Self> {
+        args.allow(&["symbol_id", "object_id", "start", "end", "instance_type"])?;
+        let symbol = SymbolRef::from_value(args.required_named("symbol_id")?, "symbol_id")?;
+        let object_id = args.req_i32("object_id")?;
+        let start = args.req_i64("start")?;
+        let end = args.req_i64("end")?;
+        let instance_type = args.req_i32("instance_type")?;
         if !(INSTANCE_TYPE_DEFINITION..=INSTANCE_TYPE_DOCUMENTATION).contains(&instance_type) {
             bail!(
                 "instance_type must be between {} and {} (got {})",
@@ -320,12 +307,8 @@ impl EphemeralInstanceVerb {
         })
     }
 
-    pub(crate) fn new_op(
-        _span: Span,
-        positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn EphemeralOp>> {
-        Ok(Arc::new(Self::create(positional, named)?))
+    pub(crate) fn new_op(_span: Span, args: &Args) -> Result<Arc<dyn EphemeralOp>> {
+        Ok(Arc::new(Self::create(args)?))
     }
 }
 
@@ -334,7 +317,7 @@ impl EphemeralOp for EphemeralInstanceVerb {
         h.update(b"ephemeral_instance");
         // Hash the *resolved* symbol IDs (not the label string), so the
         // cache key reflects the actual rows we'll emit.  A literal
-        // `symbol_id="42"` hashes the same as before; `symbol="@x"` where
+        // `symbol_id=42` hashes the same as before; `symbol="@x"` where
         // @x resolves to [42] hashes identically (cache shared if the
         // resolved set matches).
         let ids = self.symbol.resolve_vec(resolved);
@@ -373,8 +356,8 @@ impl EphemeralOp for EphemeralInstanceVerb {
 /// Only available inside `layer { }` blocks.  Emits one row per
 /// resolved to-symbol — see [`SymbolRef`] for the multi-row semantic.
 ///
-/// Usage: `ephemeral_ref(to_symbol="<id>", from_object="1",
-///        start="0", end="10")` for a literal (single-row) input,
+/// Usage: `ephemeral_ref(to_symbol=<id>, from_object=1,
+///        start=0, end=10)` for a literal (single-row) input,
 ///        or `to_symbol="@label"` for a label-resolved (`N`-row)
 ///        input.
 #[derive(Debug)]
@@ -388,15 +371,12 @@ pub(in crate::verb) struct EphemeralRefVerb {
 impl EphemeralRefVerb {
     pub(in crate::verb) const NAME: &'static str = "ephemeral_ref";
 
-    fn create(_positional: &Vec<Value>, named: &HashMap<String, Value>) -> Result<Self> {
-        let to_symbol_raw = named
-            .get("to_symbol")
-            .ok_or_else(|| anyhow::anyhow!("requires 'to_symbol' parameter"))?
-            .as_plain()?;
-        let to_symbol = SymbolRef::parse(to_symbol_raw, "to_symbol")?;
-        let from_object: i32 = parse_required!(named, "from_object", i32);
-        let start: i64 = parse_required!(named, "start", i64);
-        let end: i64 = parse_required!(named, "end", i64);
+    fn create(args: &Args) -> Result<Self> {
+        args.allow(&["to_symbol", "from_object", "start", "end"])?;
+        let to_symbol = SymbolRef::from_value(args.required_named("to_symbol")?, "to_symbol")?;
+        let from_object = args.req_i32("from_object")?;
+        let start = args.req_i64("start")?;
+        let end = args.req_i64("end")?;
 
         Ok(Self {
             to_symbol,
@@ -406,12 +386,8 @@ impl EphemeralRefVerb {
         })
     }
 
-    pub(crate) fn new_op(
-        _span: Span,
-        positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn EphemeralOp>> {
-        Ok(Arc::new(Self::create(positional, named)?))
+    pub(crate) fn new_op(_span: Span, args: &Args) -> Result<Arc<dyn EphemeralOp>> {
+        Ok(Arc::new(Self::create(args)?))
     }
 }
 
@@ -458,9 +434,9 @@ impl EphemeralOp for EphemeralRefVerb {
 /// Usage:
 /// ```askl
 /// layer {
-///     ephemeral_symbol(name="foo", project_id="1", symbol_type="1");
-///     ephemeral_instance(symbol_id="1", object_id="1",
-///         start="100", end="200", instance_type="1");
+///     ephemeral_symbol(name="foo", project_id=1, symbol_type=1);
+///     ephemeral_instance(symbol_id=1, object_id=1,
+///         start=100, end=200, instance_type=1);
 /// }
 /// ```
 #[derive(Debug)]
@@ -472,11 +448,7 @@ pub(crate) struct LayerVerb {
 impl LayerVerb {
     pub(in crate::verb) const NAME: &'static str = "layer";
 
-    pub(in crate::verb) fn new(
-        span: Span,
-        _positional: &Vec<Value>,
-        _named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
+    pub(in crate::verb) fn new(span: Span, _args: &Args) -> Result<Arc<dyn Verb>> {
         Ok(Arc::new(Self {
             span,
             ops: Arc::new(Mutex::new(Vec::new())),

@@ -194,17 +194,18 @@ use index::symbols::SymbolInstanceId;
 use log::debug;
 use pest::error::Error;
 use pest::error::ErrorVariant::CustomError;
-use std::collections::HashMap;
 use std::fmt::Display;
 use std::ptr;
 use std::rc::Rc;
 use std::sync::Arc;
 
+mod args;
 mod compound;
 mod generic;
 mod labels;
 mod preamble;
 
+pub(crate) use self::args::Args;
 pub(crate) use self::compound::build_compound_filter;
 pub(crate) use self::generic::{name_filter, EphemeralOps, LabelResolutions};
 pub use self::generic::{
@@ -250,34 +251,30 @@ pub(super) fn construct_verb(
         match verb.as_rule() {
             Rule::label_shortcut => {
                 let label_ident = verb.into_inner().next().unwrap();
-                let positional = vec![Value::plain(label_ident.as_str())];
-                LabelVerb::new(verb_span.clone(), &positional, &HashMap::new())
+                let args = Args::of(LabelVerb::NAME).with(Value::plain(label_ident.as_str()));
+                LabelVerb::new(verb_span.clone(), &args)
             }
             Rule::inherit_label_shortcut => {
                 let label_ident = verb.into_inner().next().unwrap();
-                let positional = vec![Value::plain(label_ident.as_str())];
-                let mut named = HashMap::new();
-                named.insert("inherit".to_string(), Value::plain("true"));
-                LabelVerb::new(verb_span.clone(), &positional, &named)
+                let args = Args::of(LabelVerb::NAME)
+                    .with(Value::plain(label_ident.as_str()))
+                    .with_named("inherit", Value::Bool(true));
+                LabelVerb::new(verb_span.clone(), &args)
             }
             Rule::use_shortcut => {
                 let label_ident = verb.into_inner().next().unwrap();
-                let positional = vec![Value::plain(label_ident.as_str())];
-                UserVerb::new(verb_span.clone(), &positional, &HashMap::new())
+                let args = Args::of(UserVerb::NAME).with(Value::plain(label_ident.as_str()));
+                UserVerb::new(verb_span.clone(), &args)
             }
             Rule::plain_filter => {
                 let value = Value::build(verb.into_inner().next().unwrap())?;
-                let positional = vec![];
-                let mut named = HashMap::new();
-                named.insert("name".to_string(), value);
-                NameSelector::new(verb_span.clone(), &positional, &named)
+                let args = Args::of(NameSelector::NAME).with_named("name", value);
+                NameSelector::new(verb_span.clone(), &args)
             }
             Rule::forced_verb => {
                 let value = Value::build(verb.into_inner().next().unwrap())?;
-                let positional = vec![];
-                let mut named = HashMap::new();
-                named.insert("name".to_string(), value);
-                ForcedVerb::new(verb_span.clone(), &positional, &named)
+                let args = Args::of(ForcedVerb::NAME).with_named("name", value);
+                ForcedVerb::new(verb_span.clone(), &args)
             }
             _ => {
                 return Err(Error::new_from_span(
@@ -835,7 +832,7 @@ pub type SelectorId = usize;
 /// neighbour that has already resolved — but it may still *supply* a
 /// selection to one that has none.  That second half is not a loophole: it
 /// is how a chain propagates through weak intermediaries (`{{"a"}}`, or
-/// `data(inherit="true") {{{"channels_a"}}}`), where every middle scope is
+/// `data(inherit=true) {{{"channels_a"}}}`), where every middle scope is
 /// weak and the only data comes from the ends.
 ///
 /// Both notification edges ask this question and must answer it the same
