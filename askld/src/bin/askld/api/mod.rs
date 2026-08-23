@@ -36,6 +36,34 @@ async fn clear_cache(store: web::Data<IndexStore>) -> impl Responder {
     }
 }
 
+/// `POST /admin/local/analyze` — refresh Postgres planner statistics without
+/// a restart or psql access.  Loopback-only via the scope guard.
+///
+/// The perf harness calls this beside `/clear-cache`: measuring a corpus
+/// against cold statistics is how a 95 s baseline got recorded for work that
+/// actually takes 22 s.
+#[post("/analyze")]
+async fn analyze(store: web::Data<IndexStore>) -> impl Responder {
+    match store.refresh_planner_stats().await {
+        Ok(report) => HttpResponse::Ok().json(serde_json::json!({
+            "analyzed": report
+                .analyzed
+                .iter()
+                .map(|(t, d)| serde_json::json!({ "table": t, "ms": d.as_millis() as u64 }))
+                .collect::<Vec<_>>(),
+            "failed": report
+                .failed
+                .iter()
+                .map(|(t, e)| serde_json::json!({ "table": t, "error": e }))
+                .collect::<Vec<_>>(),
+            "elapsed_ms": report.elapsed.as_millis() as u64,
+        })),
+        Err(err) => {
+            HttpResponse::InternalServerError().body(format!("analyze failed: {:?}\n", err))
+        }
+    }
+}
+
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(version)
         // Local-admin surface: everything under /admin/local is loopback-only
@@ -45,6 +73,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             web::scope("/admin/local")
                 .guard(guard::fn_guard(loopback_only))
                 .service(clear_cache)
+                .service(analyze)
                 .service(auth::create_api_key)
                 .service(auth::revoke_api_key)
                 .service(auth::list_api_keys),

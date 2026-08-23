@@ -1,4 +1,4 @@
-use clap::{Args as ClapArgs, Parser, Subcommand};
+use clap::{ArgEnum, Args as ClapArgs, Parser, Subcommand};
 
 /// Indexer for askl
 #[derive(Parser, Debug)]
@@ -49,6 +49,47 @@ pub struct ServeArgs {
     /// many instance ids are resolved exactly and read by id
     #[clap(long, default_value = "1000", env = "ASKL_PROBE_CAP")]
     pub probe_cap: usize,
+
+    /// Boot-time planner-statistics refresh.
+    ///
+    /// `force` (the default) always runs ANALYZE — a couple of seconds, and
+    /// the only setting that covers statistics which are the right size and
+    /// the wrong distribution, the failure that motivated this.  `auto` only
+    /// refreshes tables whose catalog entries look implausible; `off`
+    /// disables the pass.  Never fatal in any mode.
+    #[clap(long, arg_enum, default_value = "force", env = "ASKL_BOOT_ANALYZE")]
+    pub boot_analyze: BootAnalyzeArg,
+
+    /// Wall-clock budget for the boot-time refresh, in seconds (0 = no bound).
+    /// On expiry the server logs and starts anyway: a maintenance pass must
+    /// never turn into a health-check restart loop.
+    ///
+    /// ANALYZE samples a fixed 30k rows per table, so this is not a function
+    /// of corpus size -- but on a cold cache those samples are 30k random
+    /// reads per table, which is tens of seconds for a large deployment.  The
+    /// budget is generous because expiring it means the boot pass silently
+    /// stops happening on exactly the deployments that need it most.
+    #[clap(long, default_value = "300", env = "ASKL_BOOT_ANALYZE_TIMEOUT")]
+    pub boot_analyze_timeout: u64,
+}
+
+/// CLI mirror of [`index::db_diesel::BootAnalyze`].  Kept here so the `index`
+/// crate does not grow a clap dependency for one enum.
+#[derive(ArgEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootAnalyzeArg {
+    Off,
+    Auto,
+    Force,
+}
+
+impl From<BootAnalyzeArg> for index::db_diesel::BootAnalyze {
+    fn from(arg: BootAnalyzeArg) -> Self {
+        match arg {
+            BootAnalyzeArg::Off => index::db_diesel::BootAnalyze::Off,
+            BootAnalyzeArg::Auto => index::db_diesel::BootAnalyze::Auto,
+            BootAnalyzeArg::Force => index::db_diesel::BootAnalyze::Force,
+        }
+    }
 }
 
 #[derive(ClapArgs, Debug)]

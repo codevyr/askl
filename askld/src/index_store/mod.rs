@@ -20,6 +20,8 @@ use index::symbols::FileId;
 mod query;
 mod upload;
 
+pub use upload::FinalizeOutcome;
+
 #[cfg(test)]
 mod tests;
 

@@ -160,7 +160,12 @@ impl IndexStore {
         .await
     }
 
-    pub async fn finalize_project(&self, project_id: i32) -> Result<bool, UploadError> {
+    /// Mark an upload complete.
+    ///
+    /// Returns [`FinalizeOutcome`] rather than a bool so the post-commit
+    /// statistics refresh below can fire on the *transition* only: a repeated
+    /// finalize is idempotent and must not re-ANALYZE.
+    pub async fn finalize_project(&self, project_id: i32) -> Result<FinalizeOutcome, UploadError> {
         let mut conn = self.get_upload_conn().await?;
         // Cancellation-safe invalidation: the RAM cache mirrors the DB-side
         // eph purge inside the transaction; the guard clears it on normal
@@ -184,8 +189,8 @@ impl IndexStore {
                         .optional()?;
 
                 match row {
-                    None => Ok(false),
-                    Some((UploadStatus::Complete, _, _)) => Ok(true), // idempotent
+                    None => Ok(FinalizeOutcome::NotFound),
+                    Some((UploadStatus::Complete, _, _)) => Ok(FinalizeOutcome::AlreadyComplete),
                     Some((UploadStatus::Uploading, sym_total, obj_total)) => {
                         // Null-safe: only validate if totals were recorded (new protocol).
                         if let Some(total) = sym_total {
@@ -243,14 +248,41 @@ impl IndexStore {
                             purged_layers = purged,
                             "purged ephemeral layer cache after project finalize"
                         );
-                        Ok(true)
+                        Ok(FinalizeOutcome::Finalized)
                     }
                     Some((_, _, _)) => Err(UploadError::Conflict),
                 }
             })
             .await?;
 
+        // Post-commit, and only on the transition: an import has just changed
+        // the persistent distribution — most sharply by introducing a new
+        // `layer` value, which is exactly the statistic whose staleness made a
+        // 0.4 ms query take 120 s.  Inline rather than spawned so that
+        // `askl index upload` returning means the index is queryable *fast*;
+        // otherwise the CLI's first query races the refresh.
+        //
+        // Failure is logged, never propagated: the upload is already
+        // committed, and turning it into a 500 would make the client retry a
+        // multi-gigabyte upload because a maintenance statement hit a lock.
+        if finalized == FinalizeOutcome::Finalized {
+            self.refresh_stats_after_mutation("finalize_project").await;
+        }
+
         Ok(finalized)
+    }
+
+    /// Refresh planner statistics after a committed persistent mutation.
+    /// Infallible by design — see the call sites.
+    pub(crate) async fn refresh_stats_after_mutation(&self, context: &str) {
+        match self.refresh_planner_stats().await {
+            Ok(report) => index::db_diesel::log_report(&report, context),
+            Err(e) => tracing::warn!(
+                context,
+                error = ?e,
+                "planner statistics: refresh failed after mutation",
+            ),
+        }
     }
 
     pub async fn upload_contents(&self, batch: ContentBatch) -> Result<usize, UploadError> {
@@ -1176,4 +1208,19 @@ mod tests {
         let obj_map = HashMap::from([(1i64, 1i32)]);
         assert!(build_symbol_refs(1, 1000001, &[object], &obj_map).is_err());
     }
+}
+
+/// What [`IndexStore::finalize_project`] actually did.
+///
+/// `Finalized` and `AlreadyComplete` are both success for the caller — the
+/// HTTP layer maps both to 200 — but only the former changed the database,
+/// which is what the statistics refresh keys on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalizeOutcome {
+    /// Uploading -> Complete: rows are now visible, statistics are stale.
+    Finalized,
+    /// Already Complete; nothing changed.
+    AlreadyComplete,
+    /// No such project.
+    NotFound,
 }

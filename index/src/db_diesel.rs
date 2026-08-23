@@ -8,6 +8,7 @@ mod index_impl;
 pub(crate) mod mixins;
 mod selection;
 mod sql_cache;
+pub mod stats;
 
 pub use index_impl::{
     eph_pool_manager_config, layer_shard_hash, purge_eph_cache, selection_shard_hash,
@@ -35,6 +36,10 @@ pub use selection::{
 };
 pub use sql_cache::{
     vec_weight, CacheKey, CacheStats, CacheWeight, ClearOnDrop, RowKey, SqlResultCache,
+};
+pub use stats::{
+    analyze_index_schema, ensure_planner_stats, index_table_names, index_table_stats_health,
+    log_report, AnalyzeReport, BootAnalyze, StatsStaleness, TableStatsHealth,
 };
 
 pub type Connection = AsyncPgConnection;
