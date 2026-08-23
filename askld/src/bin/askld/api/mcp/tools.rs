@@ -303,6 +303,47 @@ struct ToolDefinition {
     description: &'static str,
     #[serde(rename = "inputSchema")]
     input_schema: Value,
+    annotations: ToolAnnotations,
+    #[serde(rename = "_meta")]
+    meta: ToolMeta,
+}
+
+/// MCP tool annotations (protocol revision 2025-03-26+). Claude Code maps
+/// `readOnlyHint` onto its own `isReadOnly()`, which is what lets a tool run in
+/// plan mode without asking the user for permission.
+#[derive(Debug, Serialize)]
+struct ToolAnnotations {
+    #[serde(rename = "readOnlyHint")]
+    read_only_hint: bool,
+    #[serde(rename = "destructiveHint")]
+    destructive_hint: bool,
+    #[serde(rename = "openWorldHint")]
+    open_world_hint: bool,
+}
+
+impl ToolAnnotations {
+    /// Every askld tool only queries the index, so none of them is destructive.
+    /// The world is open, though: which projects a given server has indexed is
+    /// neither fixed nor enumerable in advance by the caller.
+    ///
+    /// `destructiveHint` and `openWorldHint` both default to `true` in the spec,
+    /// so they are stated rather than left out.
+    fn read_only() -> Self {
+        Self {
+            read_only_hint: true,
+            destructive_hint: false,
+            open_world_hint: true,
+        }
+    }
+}
+
+/// Anthropic's `_meta` extensions. `searchHint` is what a client with deferred
+/// tool loading matches against when it decides whether to pull the tool's full
+/// schema into the conversation.
+#[derive(Debug, Serialize)]
+struct ToolMeta {
+    #[serde(rename = "anthropic/searchHint")]
+    search_hint: &'static str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -366,6 +407,11 @@ accumulated context.",
                 },
                 "required": ["query"]
             }),
+            annotations: ToolAnnotations::read_only(),
+            meta: ToolMeta {
+                search_hint: "query indexed code structure (callers, callees, \
+definitions, full-text search)",
+            },
         },
         ToolDefinition {
             name: "askl_projects",
@@ -373,6 +419,10 @@ accumulated context.",
 status, and file/symbol counts. Call this first to learn which project names exist — the name is \
 what `project(\"…\")` takes to scope a query, and the counts show how large a scope is.",
             input_schema: json!({ "type": "object", "properties": {} }),
+            annotations: ToolAnnotations::read_only(),
+            meta: ToolMeta {
+                search_hint: "list indexed code projects available to query",
+            },
         },
         ToolDefinition {
             name: "askl_read",
@@ -405,6 +455,45 @@ files still match it reads the best one and lists the rest.",
                 },
                 "required": ["file"]
             }),
+            annotations: ToolAnnotations::read_only(),
+            meta: ToolMeta {
+                search_hint: "read a line range from an indexed source file",
+            },
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The plan-mode gate in an MCP client is driven entirely by `readOnlyHint`,
+    /// and a deferred tool is only discoverable through its search hint, so a
+    /// tool that ships without either is silently degraded rather than broken.
+    #[test]
+    fn every_tool_is_annotated_read_only_and_searchable() {
+        let value = list().expect("tools/list");
+        let tools = value["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 3);
+        for tool in tools {
+            let name = &tool["name"];
+            assert_eq!(
+                tool["annotations"],
+                json!({
+                    "readOnlyHint": true,
+                    "destructiveHint": false,
+                    "openWorldHint": true
+                }),
+                "tool {} has unexpected annotations",
+                name
+            );
+            assert!(
+                tool["_meta"]["anthropic/searchHint"]
+                    .as_str()
+                    .is_some_and(|hint| !hint.is_empty()),
+                "tool {} is missing a search hint",
+                name
+            );
+        }
+    }
 }
