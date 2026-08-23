@@ -34,13 +34,10 @@ impl NameSelector {
     pub(in crate::verb) const NAME: &'static str = "_name_select";
 
     pub(in crate::verb) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
-        if let Some(name) = args.named_value("name") {
-            Ok(Arc::new(Self {
-                span,
-                pattern: NamePattern::from_value(name)?,
-            }))
-        } else {
-            bail!("Must contain name field");
+        args.accepts(0, &["name"])?;
+        match args.named_name("name")? {
+            Some(pattern) => Ok(Arc::new(Self { span, pattern })),
+            None => bail!("Must contain name field"),
         }
     }
 }
@@ -132,14 +129,14 @@ impl ForcedVerb {
     pub(in crate::verb) const NAME: &'static str = "forced";
 
     pub(in crate::verb) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
-        if let Some(name) = args.named_value("name") {
-            Ok(Arc::new(Self {
+        args.accepts(0, &["name"])?;
+        match args.named_name("name")? {
+            Some(pattern) => Ok(Arc::new(Self {
                 span,
-                pattern: NamePattern::from_value(name)?,
+                pattern,
                 selection: Arc::new(OnceLock::new()),
-            }))
-        } else {
-            bail!("Must contain name field");
+            })),
+            None => bail!("Must contain name field"),
         }
     }
 }
@@ -412,7 +409,7 @@ impl TypeSelector {
     pub(in crate::verb) const NAME_ANY: &'static str = "any";
 
     pub fn new(span: Span, args: &Args, symbol_type_id: Option<i32>) -> Result<Arc<dyn Verb>> {
-        let name_pattern = args.value_at(0).map(NamePattern::from_value).transpose()?;
+        let name_pattern = args.name_at(0, "name")?;
 
         // `filter=` was a manual query-plan toggle; statements are
         // cost-planned now, so it is gone rather than silently ignored
@@ -425,6 +422,8 @@ impl TypeSelector {
                  filter(\"compound_name\", ...) (was mod(\"x\", filter=\"true\") name)"
             );
         }
+
+        args.accepts(1, &["inherit", "match"])?;
 
         // Bare type selectors (no name) inherit by default so they propagate
         // the type filter into child scopes. Named type selectors don't inherit.
@@ -764,7 +763,8 @@ pub struct GenericSelector {
 impl GenericSelector {
     pub const NAME: &'static str = "select";
 
-    pub(in crate::verb) fn new(span: Span, _args: &Args) -> Result<Arc<dyn Verb>> {
+    pub(in crate::verb) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        args.accepts(0, &[])?;
         Ok(Arc::new(Self { span }))
     }
 }

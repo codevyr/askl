@@ -24,6 +24,7 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 
+use crate::name_pattern::NamePattern;
 use crate::parser::{Value, ValueType};
 
 /// Which argument of a verb is being read.  Selects both how the slot is
@@ -107,20 +108,6 @@ impl Args {
         self.named.contains_key(key)
     }
 
-    // === Raw access ===
-    //
-    // For arguments whose type is richer than one primitive — a name pattern
-    // is a plain string OR a `g"..."` glob, a symbol reference is an integer
-    // id OR an `"@label"` — the verb reads the `Value` and discriminates.
-
-    pub(crate) fn value_at(&self, index: usize) -> Option<&Value> {
-        self.positional.get(index)
-    }
-
-    pub(crate) fn named_value(&self, key: &str) -> Option<&Value> {
-        self.named.get(key)
-    }
-
     // === Positional ===
 
     pub(crate) fn str_at(&self, index: usize, what: &str) -> Result<&str> {
@@ -194,23 +181,79 @@ impl Args {
 
     // === Whole-list checks ===
 
-    /// Reject named arguments the verb does not understand, so a typo
-    /// surfaces at parse time instead of being silently ignored.
-    pub(crate) fn allow(&self, keys: &[&str]) -> Result<()> {
+    /// Declare the verb's whole signature: how many positional arguments it
+    /// reads, and which names it understands.  Anything beyond that is
+    /// rejected instead of silently dropped — `func("x", bogus=1)` and
+    /// `project("a", "b")` both used to run as though the surplus had never
+    /// been written, which turns a typo into a query that quietly answers a
+    /// different question.
+    ///
+    /// `positional` is the MAXIMUM; a verb with a required minimum keeps its
+    /// own check, because "too few" wants a message naming what is missing.
+    pub(crate) fn accepts(&self, positional: usize, named: &[&str]) -> Result<()> {
+        if self.positional.len() > positional {
+            if positional == 0 {
+                bail!(
+                    "{}: takes no positional arguments, found {}",
+                    self.verb,
+                    self.positional.len()
+                );
+            }
+            bail!(
+                "{}: takes at most {} positional arguments, found {}",
+                self.verb,
+                positional,
+                self.positional.len()
+            );
+        }
         for key in self.named.keys() {
-            if !keys.contains(&key.as_str()) {
-                if keys.is_empty() {
+            if !named.contains(&key.as_str()) {
+                if named.is_empty() {
                     bail!("{}: takes no named arguments, found '{}'", self.verb, key);
                 }
                 bail!(
                     "{}: unknown argument '{}' (allowed: {})",
                     self.verb,
                     key,
-                    keys.join(", ")
+                    named.join(", ")
                 );
             }
         }
         Ok(())
+    }
+
+    // === Name patterns ===
+    //
+    // A name argument is a plain string OR a `g"..."` glob, so it cannot go
+    // through `as_str`.  It still goes through `Args`, so that a type error
+    // names the verb and the slot like every other one does — `func(42)` used
+    // to answer with a bare "a name pattern expects a string".
+
+    pub(crate) fn name_at(&self, index: usize, what: &str) -> Result<Option<NamePattern>> {
+        match self.positional.get(index) {
+            Some(value) => self
+                .as_name(Slot::Positional { index, what }, value)
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn named_name(&self, key: &str) -> Result<Option<NamePattern>> {
+        match self.named.get(key) {
+            Some(value) => self.as_name(Slot::Named(key), value).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn as_name(&self, slot: Slot<'_>, value: &Value) -> Result<NamePattern> {
+        match value {
+            // A glob that fails validation has its own message worth keeping
+            // ("must contain at least one literal character ..."); prefix it
+            // rather than replacing it.
+            Value::Str { .. } => NamePattern::from_value(value)
+                .map_err(|e| anyhow::anyhow!("{}: {}: {}", self.verb, slot.describe(), e)),
+            other => Err(self.type_error(slot, ValueType::Str, other)),
+        }
     }
 
     // === Conversions ===
@@ -359,7 +402,7 @@ mod tests {
     fn unknown_named_arguments_are_rejected() {
         let args = Args::of("search").with_named("limt", Value::Int(5));
         let msg = args
-            .allow(&["case", "whole_word", "limit"])
+            .accepts(1, &["case", "whole_word", "limit"])
             .unwrap_err()
             .to_string();
         assert_eq!(

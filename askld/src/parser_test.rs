@@ -211,7 +211,10 @@ fn preamble_keeps_constraints_and_directives() {
 
 #[test]
 fn multiline_positional_args() {
-    let ast = parse("func(\n\"a\",\n\"b\"\n)").unwrap();
+    // `filter`, not `func`: this is about the argument LIST spanning lines,
+    // and `func` reads exactly one name — a second positional is now a verb
+    // error, which would test the wrong thing.
+    let ast = parse("filter(\n\"exact_name\",\n\"a\"\n)").unwrap();
     assert_eq!(ast.scope().statements().count(), 1);
 }
 
@@ -405,4 +408,66 @@ fn a_bare_word_in_value_position_names_every_value_type() {
     for want in ["a quoted string", "an integer", "a boolean"] {
         assert!(msg.contains(want), "expected {want:?} in: {msg}");
     }
+}
+
+#[test]
+fn whitespace_may_surround_a_named_argument_equals() {
+    // `named_argument` was compound-atomic, so `limit = 5` was a parse error.
+    // Quoted values hid that; a bare integer invites the spacing.
+    for query in [
+        r#"search("abc", limit = 5)"#,
+        r#"search("abc", limit =5)"#,
+        r#"search("abc", limit= 5)"#,
+        r#"func("a", inherit = true)"#,
+        r#"ignore("a", package = "p")"#,
+    ] {
+        assert!(parse(query).is_ok(), "must parse: {query}");
+    }
+}
+
+#[test]
+fn unknown_arguments_are_rejected_not_swallowed() {
+    // Every verb declares its signature.  A typo used to run as though it had
+    // never been written, so the query quietly answered a different question.
+    for (query, needle) in [
+        (r#"func("a", bogus=1)"#, "unknown argument 'bogus'"),
+        (r#"project("p", bogus=1)"#, "takes no named arguments"),
+        (r#"ignore("a", bogus=1)"#, "unknown argument 'bogus'"),
+        (
+            r#"filter("exact_name", "a", bogus=1)"#,
+            "unknown argument 'bogus'",
+        ),
+        (r#"search("abc", limt=1)"#, "unknown argument 'limt'"),
+        (r#"unnest(bogus=1)"#, "takes no named arguments"),
+        // Surplus positionals are swallowed the same way and are rejected too.
+        (r#"func("a", "b")"#, "takes at most 1 positional"),
+        (r#"project("a", "b")"#, "takes at most 1 positional"),
+        (r#"select("a")"#, "takes no positional arguments"),
+    ] {
+        let err = parse(query).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(needle),
+            "expected {needle:?} for {query}: {msg}"
+        );
+    }
+}
+
+#[test]
+fn a_name_argument_type_error_names_the_verb() {
+    // Name arguments are a plain string OR a `g"..."` glob, so they bypass
+    // the string accessor — but they still go through `Args`, so the error
+    // identifies the verb and slot like every other one.
+    let err = parse(r#"func(42)"#).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("func: argument 1 (name) expects a string, found the integer 42"),
+        "got: {msg}"
+    );
+
+    // A glob that fails validation keeps its own explanation, prefixed.
+    let err = parse(r#"file(g"*")"#).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("file: argument 1 (name):"), "got: {msg}");
+    assert!(msg.contains("literal"), "got: {msg}");
 }

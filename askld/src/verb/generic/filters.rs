@@ -1,5 +1,4 @@
 use crate::name_pattern::NamePattern;
-use crate::parser::Value;
 use crate::parser_context::{
     ParserContext, SYMBOL_TYPE_DATA, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FIELD, SYMBOL_TYPE_FILE,
     SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MACRO, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
@@ -32,6 +31,8 @@ impl IgnoreVerb {
     pub(in crate::verb) const NAME: &'static str = "ignore";
 
     pub(in crate::verb) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        args.accepts(1, &["package"])?;
+
         let mut verb = Self {
             span,
             name: None,
@@ -39,8 +40,8 @@ impl IgnoreVerb {
         };
         let mut empty = true;
 
-        if let Some(name) = args.value_at(0) {
-            verb.name = Some(NamePattern::from_value(name)?);
+        if let Some(name) = args.name_at(0, "name")? {
+            verb.name = Some(name);
             empty = false;
         }
 
@@ -136,6 +137,7 @@ impl ProjectFilter {
     pub(in crate::verb) const NAME: &'static str = "project";
 
     pub(in crate::verb) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        args.accepts(1, &[])?;
         if args.no_positional() {
             bail!("Expected a positional argument");
         }
@@ -210,7 +212,7 @@ impl PackageFilter {
     pub(in crate::verb) const NAME: &'static str = "package";
 
     pub(in crate::verb) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
-        args.allow(&[])?;
+        args.accepts(1, &[])?;
         if args.count() != 1 {
             bail!("package requires exactly one positional argument: the package path");
         }
@@ -362,17 +364,19 @@ pub(in crate::verb) enum FilterKind {
 }
 
 impl FilterKind {
-    fn parse(kind: &str, value: &Value) -> Result<Self> {
+    /// Reads the filter's VALUE (positional 1) through `args`, so a wrong
+    /// type there is reported like any other argument.
+    fn parse(kind: &str, args: &Args) -> Result<Self> {
+        let name = || -> Result<NamePattern> {
+            args.name_at(1, "filter value")?
+                .ok_or_else(|| anyhow!("filter requires a value as second argument"))
+        };
         match kind {
             "type" => Ok(FilterKind::Type {
-                symbol_type_ids: parse_symbol_types(value.as_plain()?)?,
+                symbol_type_ids: parse_symbol_types(args.str_at(1, "filter value")?)?,
             }),
-            "exact_name" => Ok(FilterKind::ExactName {
-                pattern: NamePattern::from_value(value)?,
-            }),
-            "compound_name" => Ok(FilterKind::CompoundName {
-                pattern: NamePattern::from_value(value)?,
-            }),
+            "exact_name" => Ok(FilterKind::ExactName { pattern: name()? }),
+            "compound_name" => Ok(FilterKind::CompoundName { pattern: name()? }),
             other => bail!(
                 "Unknown filter kind: '{}'. Expected 'type', 'exact_name', or 'compound_name'",
                 other
@@ -454,16 +458,14 @@ impl GenericFilter {
     pub const NAME: &'static str = "filter";
 
     pub(in crate::verb) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        args.accepts(2, &["inherit"])?;
         if args.no_positional() {
             bail!("filter requires a kind as first argument");
         }
-        let kind_str = args.str_at(0, "filter kind")?;
-
-        let value = args
-            .value_at(1)
-            .ok_or_else(|| anyhow!("filter requires a value as second argument"))?;
-
-        let kind = FilterKind::parse(kind_str, value)?;
+        if args.count() < 2 {
+            bail!("filter requires a value as second argument");
+        }
+        let kind = FilterKind::parse(args.str_at(0, "filter kind")?, args)?;
 
         let inherit = args.named_bool("inherit")?.unwrap_or(false);
 
