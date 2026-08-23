@@ -160,6 +160,25 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
         .validate_canary()
         .await
         .expect("ephemeral leak-detection canary missing — re-apply migrations");
+    // Planner-statistics refresh, after the canary (a correctness gate) and
+    // before we listen: serving with statistics describing a two-project
+    // database is how a 0.4 ms query became a 120 s timeout.
+    //
+    // Unlike the canary this is NEVER fatal — stale statistics cost speed,
+    // not correctness, and a deployment whose role cannot ANALYZE must still
+    // boot.  `ensure_planner_stats` returns `()` so that is a type-level
+    // guarantee rather than a promise made here.
+    //
+    // Its own connection, not a pooled one: a tokio timeout does not cancel a
+    // server-side ANALYZE, so a pooled connection would return to bb8 with a
+    // query still in flight.  Dropping a standalone connection takes the
+    // query with it.
+    //
+    // This call site is verified by inspection — `run` binds a port and is
+    // not unit-testable, which is why the logic lives in a free function over
+    // a connection (index::db_diesel::stats, tested there and in all_tests).
+    run_boot_analyze(&serve_args).await;
+
     let askl_data = web::Data::new(AsklData {
         cfg: ControlFlowGraph::from_symbols(index_query),
         query_timeout: std::time::Duration::from_secs(query_timeout_secs),
@@ -239,4 +258,40 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
     .bind((serve_args.host, serve_args.port))?
     .run()
     .await
+}
+
+/// Boot-time planner-statistics pass: connect, refresh, disconnect.
+///
+/// Bounded by `--boot-analyze-timeout` so a slow refresh cannot stall
+/// startup past a container health check — a restart loop would mean more
+/// crash recovery, which is what wiped the autovacuum counters in the first
+/// place.
+async fn run_boot_analyze(serve_args: &ServeArgs) {
+    use diesel_async::{AsyncConnection, AsyncPgConnection};
+
+    let mode: index::db_diesel::BootAnalyze = serve_args.boot_analyze.into();
+    if mode == index::db_diesel::BootAnalyze::Off {
+        return;
+    }
+
+    let mut conn = match AsyncPgConnection::establish(&serve_args.database_url).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            warn!("planner statistics: could not connect for the boot refresh: {e}");
+            return;
+        }
+    };
+
+    let pass = index::db_diesel::ensure_planner_stats(&mut conn, mode);
+    if serve_args.boot_analyze_timeout == 0 {
+        pass.await;
+        return;
+    }
+    let budget = std::time::Duration::from_secs(serve_args.boot_analyze_timeout);
+    if tokio::time::timeout(budget, pass).await.is_err() {
+        tracing::error!(
+            timeout_secs = serve_args.boot_analyze_timeout,
+            "planner statistics: boot refresh exceeded its budget, starting anyway",
+        );
+    }
 }

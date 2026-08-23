@@ -1,7 +1,7 @@
 use actix_web::{delete, get, http::header, web, HttpRequest, HttpResponse, Responder};
 use askld::auth::AuthIdentity;
 use askld::index_store::{
-    normalize_full_path, IndexStore, MultiTreeResult, StoreError, UploadError,
+    normalize_full_path, FinalizeOutcome, IndexStore, MultiTreeResult, StoreError, UploadError,
 };
 use askld::proto::askl::index::{ContentBatch, Project};
 use log::{error, warn};
@@ -174,8 +174,12 @@ pub async fn finalize_project(
     project_id: web::Path<i32>,
 ) -> impl Responder {
     match store.finalize_project(*project_id).await {
-        Ok(true) => HttpResponse::Ok().finish(),
-        Ok(false) => HttpResponse::NotFound().body("Project not found"),
+        // Wire-compatible with the previous bool: a real finalize and an
+        // idempotent repeat are both 200.
+        Ok(FinalizeOutcome::Finalized | FinalizeOutcome::AlreadyComplete) => {
+            HttpResponse::Ok().finish()
+        }
+        Ok(FinalizeOutcome::NotFound) => HttpResponse::NotFound().body("Project not found"),
         Err(UploadError::Conflict) => {
             HttpResponse::Conflict().body("Project is not in uploading state")
         }

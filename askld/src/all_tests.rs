@@ -7885,7 +7885,10 @@ fn finalize_project_clears_ram_cache() {
         .await
         .unwrap();
 
-        assert!(store.finalize_project(1).await.unwrap());
+        assert_eq!(
+            store.finalize_project(1).await.unwrap(),
+            crate::index_store::FinalizeOutcome::Finalized
+        );
         assert!(
             index.sql_cache().epoch() > epoch_before,
             "finalize must clear (epoch-bump) the shared RAM cache"
@@ -8425,4 +8428,332 @@ fn func_scope_conjoins_siblings_but_disjoins_selectors() {
         nodes.sort_unstable();
         assert_eq!(nodes, vec![91, 92, 94, 95, 942], "cap {cap}: disjunction");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Planner-statistics maintenance
+//
+// These run on isolated fixtures: ANALYZE and pg_class writes are
+// destructive-global by the convention documented above.  They assert on
+// pg_class, never on pg_stat_user_tables — the latter is flushed
+// asynchronously and would make the assertions flaky, which is also exactly
+// why production staleness detection reads pg_class.
+// ---------------------------------------------------------------------------
+
+/// Fabricate stale statistics: claim the table is tiny while it is not.
+/// The fixture container runs as superuser, so a catalog UPDATE is the
+/// deterministic way to reach the state a crash-plus-import produces.
+#[cfg(test)]
+async fn poison_stats(conn: &mut diesel_async::AsyncPgConnection, table: &str, reltuples: f32) {
+    use diesel_async::RunQueryDsl;
+    diesel::sql_query(format!(
+        "UPDATE pg_class SET reltuples = {reltuples}, relpages = 4 \
+         WHERE oid = 'index.{table}'::regclass"
+    ))
+    .execute(conn)
+    .await
+    .unwrap();
+}
+
+#[cfg(test)]
+#[derive(diesel::QueryableByName)]
+struct RelStatsRow {
+    #[diesel(sql_type = diesel::sql_types::Float)]
+    reltuples: f32,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    relpages: i32,
+}
+
+#[cfg(test)]
+async fn read_rel_stats(conn: &mut diesel_async::AsyncPgConnection, table: &str) -> (f32, i32) {
+    use diesel_async::RunQueryDsl;
+    let row: RelStatsRow = diesel::sql_query(format!(
+        "SELECT reltuples, relpages FROM pg_class WHERE oid = 'index.{table}'::regclass"
+    ))
+    .get_result(conn)
+    .await
+    .unwrap();
+    (row.reltuples, row.relpages)
+}
+
+#[test]
+fn analyze_index_schema_repairs_poisoned_catalog() {
+    // The whole point, end to end: poisoned catalog in, plausible catalog
+    // out, and the table list comes from the catalog so content_store is
+    // covered without anyone having remembered to name it.
+    use crate::test_util::create_isolated_fixture;
+    use diesel_async::AsyncConnection;
+    let fx = create_isolated_fixture(VERB_TEST);
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let mut conn = diesel_async::AsyncPgConnection::establish(fx.url())
+            .await
+            .unwrap();
+        poison_stats(&mut conn, "symbol_instances", 278.0).await;
+        poison_stats(&mut conn, "content_store", 3.0).await;
+
+        let report = index::db_diesel::analyze_index_schema(&mut conn)
+            .await
+            .unwrap();
+        assert!(
+            report.failed.is_empty(),
+            "unexpected failures: {:?}",
+            report.failed
+        );
+        assert!(
+            report
+                .analyzed
+                .iter()
+                .any(|(t, _)| t.contains("content_store")),
+            "the catalog-derived list must include content_store: {:?}",
+            report.analyzed
+        );
+
+        let (tuples, _) = read_rel_stats(&mut conn, "symbol_instances").await;
+        assert_ne!(tuples, 278.0, "reltuples must be recomputed");
+    });
+}
+
+#[test]
+fn ensure_planner_stats_force_analyzes_and_auto_leaves_healthy_alone() {
+    // `force` is the shipped default precisely because `auto`'s size
+    // heuristic cannot see distribution staleness; this pins both halves of
+    // that trade-off.
+    use crate::test_util::create_isolated_fixture;
+    use diesel_async::AsyncConnection;
+    let fx = create_isolated_fixture(VERB_TEST);
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let mut conn = diesel_async::AsyncPgConnection::establish(fx.url())
+            .await
+            .unwrap();
+
+        // Force always refreshes, and leaves the catalog healthy...
+        index::db_diesel::ensure_planner_stats(&mut conn, index::db_diesel::BootAnalyze::Force)
+            .await;
+        let health = index::db_diesel::index_table_stats_health(&mut conn)
+            .await
+            .unwrap();
+        assert!(
+            health.iter().all(|t| t.staleness().is_none()),
+            "no table may look stale right after a full ANALYZE: {:?}",
+            health
+                .iter()
+                .filter(|t| t.staleness().is_some())
+                .map(|t| (&t.relname, t.staleness()))
+                .collect::<Vec<_>>()
+        );
+
+        // ...so `auto` has nothing to do, while `off` is inert even when poisoned.
+        poison_stats(&mut conn, "symbol_instances", 278.0).await;
+        index::db_diesel::ensure_planner_stats(&mut conn, index::db_diesel::BootAnalyze::Off).await;
+        let (tuples, _) = read_rel_stats(&mut conn, "symbol_instances").await;
+        assert_eq!(tuples, 278.0, "`off` must not touch the catalog");
+    });
+}
+
+#[test]
+fn analyze_survives_lock_contention() {
+    // Non-fatality, per-table transaction isolation, and that SET LOCAL
+    // lock_timeout is actually applied: one table held under ACCESS
+    // EXCLUSIVE must cost exactly that table, not the run.
+    use crate::test_util::create_isolated_fixture;
+    use diesel_async::{AsyncConnection, RunQueryDsl};
+    let fx = create_isolated_fixture(VERB_TEST);
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let mut blocker = diesel_async::AsyncPgConnection::establish(fx.url())
+            .await
+            .unwrap();
+        diesel::sql_query("BEGIN")
+            .execute(&mut blocker)
+            .await
+            .unwrap();
+        diesel::sql_query("LOCK TABLE index.symbol_instances IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut blocker)
+            .await
+            .unwrap();
+
+        let mut conn = diesel_async::AsyncPgConnection::establish(fx.url())
+            .await
+            .unwrap();
+        let report = index::db_diesel::analyze_index_schema(&mut conn)
+            .await
+            .expect("a locked table must not abort the run");
+
+        assert!(
+            report
+                .failed
+                .iter()
+                .any(|(t, _)| t.contains("symbol_instances")),
+            "the locked table must be reported as failed: {:?}",
+            report.failed
+        );
+        assert!(
+            report.analyzed.iter().any(|(t, _)| t.contains("symbols")),
+            "every other table must still be analyzed: {:?}",
+            report.analyzed
+        );
+
+        diesel::sql_query("ROLLBACK")
+            .execute(&mut blocker)
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn finalize_project_refreshes_planner_stats() {
+    // The load-bearing hook: an import that has just introduced a new `layer`
+    // value must leave the statistics describing it.
+    use crate::test_util::{create_isolated_fixture, store_and_index_with_shared_cache};
+    use diesel_async::{AsyncConnection, RunQueryDsl};
+    let fx = create_isolated_fixture(VERB_TEST);
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let (store, _index) = store_and_index_with_shared_cache(fx.url()).await;
+        let mut conn = diesel_async::AsyncPgConnection::establish(fx.url())
+            .await
+            .unwrap();
+
+        diesel::sql_query(
+            "UPDATE index.projects SET upload_status = 'uploading', \
+             symbol_chunks_total = 0, object_chunks_total = 0 WHERE id = 1",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+
+        // Poison two tables, one of which a hand-written list would miss.
+        poison_stats(&mut conn, "symbol_instances", 278.0).await;
+        poison_stats(&mut conn, "content_store", 3.0).await;
+
+        assert_eq!(
+            store.finalize_project(1).await.unwrap(),
+            crate::index_store::FinalizeOutcome::Finalized
+        );
+
+        let (instances, _) = read_rel_stats(&mut conn, "symbol_instances").await;
+        let (contents, _) = read_rel_stats(&mut conn, "content_store").await;
+        assert_ne!(instances, 278.0, "finalize must refresh symbol_instances");
+        assert_ne!(contents, 3.0, "finalize must refresh content_store too");
+    });
+}
+
+#[test]
+fn idempotent_finalize_does_not_reanalyze() {
+    // The hook fires on the transition, not on the call — which is the whole
+    // reason finalize_project returns an outcome rather than a bool.
+    use crate::test_util::{create_isolated_fixture, store_and_index_with_shared_cache};
+    use diesel_async::{AsyncConnection, RunQueryDsl};
+    let fx = create_isolated_fixture(VERB_TEST);
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let (store, _index) = store_and_index_with_shared_cache(fx.url()).await;
+        let mut conn = diesel_async::AsyncPgConnection::establish(fx.url())
+            .await
+            .unwrap();
+
+        diesel::sql_query(
+            "UPDATE index.projects SET upload_status = 'uploading', \
+             symbol_chunks_total = 0, object_chunks_total = 0 WHERE id = 1",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        assert_eq!(
+            store.finalize_project(1).await.unwrap(),
+            crate::index_store::FinalizeOutcome::Finalized
+        );
+
+        poison_stats(&mut conn, "symbol_instances", 278.0).await;
+        assert_eq!(
+            store.finalize_project(1).await.unwrap(),
+            crate::index_store::FinalizeOutcome::AlreadyComplete
+        );
+        let (tuples, _) = read_rel_stats(&mut conn, "symbol_instances").await;
+        assert_eq!(tuples, 278.0, "an idempotent finalize must not re-ANALYZE");
+    });
+}
+
+#[test]
+fn delete_project_refreshes_planner_stats() {
+    // Also proves ANALYZE over freshly-emptied tables does not error.
+    use crate::test_util::{create_isolated_fixture, store_and_index_with_shared_cache};
+    use diesel_async::AsyncConnection;
+    let fx = create_isolated_fixture(VERB_TEST);
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let (store, _index) = store_and_index_with_shared_cache(fx.url()).await;
+        let mut conn = diesel_async::AsyncPgConnection::establish(fx.url())
+            .await
+            .unwrap();
+        poison_stats(&mut conn, "symbol_instances", 278.0).await;
+
+        assert!(store.delete_project(1).await.unwrap());
+
+        let (tuples, _) = read_rel_stats(&mut conn, "symbol_instances").await;
+        assert_ne!(tuples, 278.0, "delete_project must refresh statistics");
+    });
+}
+
+#[test]
+fn autovacuum_reloptions_applied() {
+    // Guards the migration, and the "only tables above ~1M rows" rule: a
+    // future big table should be added deliberately, not by accident.
+    use crate::test_util::{get_shared_db_url, get_shared_index};
+    use diesel_async::{AsyncConnection, RunQueryDsl};
+
+    #[derive(diesel::QueryableByName)]
+    struct OptRow {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        relname: String,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        opts: String,
+    }
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        // Touch the fixture first so the container exists before we connect.
+        let _ = get_shared_index(VERB_TEST).await;
+        let mut conn = diesel_async::AsyncPgConnection::establish(get_shared_db_url(VERB_TEST))
+            .await
+            .unwrap();
+
+        let rows: Vec<OptRow> = diesel::sql_query(
+            "SELECT c.relname::text AS relname, \
+                    coalesce(array_to_string(c.reloptions, ','), '') AS opts \
+               FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+              WHERE n.nspname = 'index' AND c.relkind = 'r'",
+        )
+        .load(&mut conn)
+        .await
+        .unwrap();
+
+        const TUNED: [&str; 4] = ["symbols", "symbol_instances", "symbol_refs", "objects"];
+        for row in &rows {
+            let tuned = TUNED.contains(&row.relname.as_str());
+            assert_eq!(
+                row.opts.contains("autovacuum_analyze_threshold=25000"),
+                tuned,
+                "{} reloptions = {:?} (tuned tables are exactly {:?})",
+                row.relname,
+                row.opts,
+                TUNED
+            );
+        }
+    });
 }

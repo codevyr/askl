@@ -21,6 +21,18 @@ impl IndexStore {
     /// `layers` rows, so `search()`/`loc()` re-materialise). For the perf harness
     /// via the loopback `/admin/clear-cache` endpoint — no restart needed.
     /// Returns the number of ephemeral layer rows purged.
+    /// Refresh Postgres planner statistics for the whole `index` schema.
+    ///
+    /// Used by the loopback admin endpoint and by the post-commit hooks on
+    /// the mutation paths.  Per-table failures are reported, not raised: see
+    /// [`index::db_diesel::analyze_index_schema`].
+    pub async fn refresh_planner_stats(
+        &self,
+    ) -> Result<index::db_diesel::AnalyzeReport, StoreError> {
+        let mut conn = self.get_conn().await?;
+        Ok(index::db_diesel::analyze_index_schema(&mut conn).await?)
+    }
+
     pub async fn clear_caches(&self) -> Result<usize, StoreError> {
         self.sql_cache.clear();
         let mut conn = self.get_conn().await?;
@@ -268,6 +280,11 @@ impl IndexStore {
             Ok(())
         })
         .await?;
+
+        // Post-commit: a mass delete leaves `reltuples` far too high and the
+        // `layer` statistics pointing at a project that no longer exists.
+        // Non-fatal, like the finalize hook — the delete has committed.
+        self.refresh_stats_after_mutation("delete_project").await;
 
         Ok(true)
     }

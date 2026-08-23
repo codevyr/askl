@@ -50,6 +50,23 @@ def clear_cache(base, clear_cmd):
         post(base, "/admin/local/clear-cache", timeout=60)
 
 
+def refresh_stats(base):
+    """Refresh planner statistics once, before the corpus runs.
+
+    Cold CACHES are the point of this harness; cold STATISTICS are not.  A
+    corpus measured against a planner that thinks a 15M-row table holds a few
+    hundred rows records latencies for plans no healthy deployment would ever
+    choose — this harness once published a 95.3 s baseline for work that takes
+    21.6 s.  Loopback-only, so it is skipped (with a note) when the endpoint is
+    unreachable, e.g. when driving the compose stack from the host."""
+    try:
+        post(base, "/admin/local/analyze", timeout=600)
+        print("planner statistics refreshed")
+    except Exception as e:  # noqa: BLE001 - diagnostic only
+        print(f"WARNING: could not refresh planner statistics ({e});"
+              " latencies may reflect stale plans")
+
+
 def run_query(base, q):
     t0 = time.perf_counter()
     body = post(base, "/query?format=markdown&projection=names", q.encode())
@@ -140,6 +157,10 @@ def main():
 
     queries = [l.strip() for l in (HERE / "queries.txt").read_text().splitlines()
                if l.strip() and not l.startswith("#")]
+
+    # Once, before the corpus: caches must be cold, statistics must not be.
+    refresh_stats(args.base)
+
     rows = []
     for q in queries:
         best, err, stats = float("inf"), False, ""
