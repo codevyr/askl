@@ -15,7 +15,7 @@ use std::vec;
 
 use super::labels::{LabelVerb, UserVerb};
 use super::preamble::PreambleVerb;
-use super::Verb;
+use super::{Args, Verb};
 
 mod ephemeral;
 mod filters;
@@ -68,6 +68,7 @@ pub(crate) fn build_generic_verb(
 
     let span = ident.as_span();
     let ident_name = Identifier::build(ident)?.0;
+    let args = Args::new(ident_name.clone(), positional, named);
 
     // Reject non-ephemeral verbs inside layer blocks.
     if ctx.get_eph_ops().is_some() {
@@ -91,47 +92,37 @@ pub(crate) fn build_generic_verb(
     }
 
     let res = match ident_name.as_str() {
-        GenericSelector::NAME => GenericSelector::new(verb_span, &positional, &named),
-        GenericFilter::NAME => GenericFilter::new(verb_span, &positional, &named),
-        IgnoreVerb::NAME => IgnoreVerb::new(verb_span, &positional, &named),
-        ProjectFilter::NAME => ProjectFilter::new(verb_span, &positional, &named),
-        PackageFilter::NAME => PackageFilter::new(verb_span, &positional, &named),
-        ForcedVerb::NAME => ForcedVerb::new(verb_span, &positional, &named),
-        LabelVerb::NAME => LabelVerb::new(verb_span, &positional, &named),
-        UserVerb::NAME => UserVerb::new(verb_span, &positional, &named),
-        PreambleVerb::NAME => PreambleVerb::new(verb_span, &positional, &named),
-        HasModifier::NAME => HasModifier::new(verb_span, &positional, &named),
-        RefsModifier::NAME => RefsModifier::new(verb_span, &positional, &named),
-        DeriveModifier::NAME => DeriveModifier::new(verb_span, &positional, &named),
-        UnnestModifier::NAME => UnnestModifier::new(verb_span, &positional, &named),
-        TypeSelector::NAME_ANY => TypeSelector::new(verb_span, &positional, &named, None),
+        GenericSelector::NAME => GenericSelector::new(verb_span, &args),
+        GenericFilter::NAME => GenericFilter::new(verb_span, &args),
+        IgnoreVerb::NAME => IgnoreVerb::new(verb_span, &args),
+        ProjectFilter::NAME => ProjectFilter::new(verb_span, &args),
+        PackageFilter::NAME => PackageFilter::new(verb_span, &args),
+        ForcedVerb::NAME => ForcedVerb::new(verb_span, &args),
+        LabelVerb::NAME => LabelVerb::new(verb_span, &args),
+        UserVerb::NAME => UserVerb::new(verb_span, &args),
+        PreambleVerb::NAME => PreambleVerb::new(verb_span, &args),
+        HasModifier::NAME => HasModifier::new(verb_span, &args),
+        RefsModifier::NAME => RefsModifier::new(verb_span, &args),
+        DeriveModifier::NAME => DeriveModifier::new(verb_span, &args),
+        UnnestModifier::NAME => UnnestModifier::new(verb_span, &args),
+        TypeSelector::NAME_ANY => TypeSelector::new(verb_span, &args, None),
         TypeSelector::NAME_FUNCTION => {
-            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_FUNCTION))
+            TypeSelector::new(verb_span, &args, Some(SYMBOL_TYPE_FUNCTION))
         }
-        TypeSelector::NAME_FILE => {
-            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_FILE))
-        }
-        TypeSelector::NAME_MODULE => {
-            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_MODULE))
-        }
+        TypeSelector::NAME_FILE => TypeSelector::new(verb_span, &args, Some(SYMBOL_TYPE_FILE)),
+        TypeSelector::NAME_MODULE => TypeSelector::new(verb_span, &args, Some(SYMBOL_TYPE_MODULE)),
         TypeSelector::NAME_DIRECTORY => {
-            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_DIRECTORY))
+            TypeSelector::new(verb_span, &args, Some(SYMBOL_TYPE_DIRECTORY))
         }
-        TypeSelector::NAME_TYPE => {
-            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_TYPE))
-        }
-        TypeSelector::NAME_DATA => {
-            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_DATA))
-        }
-        TypeSelector::NAME_MACRO => {
-            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_MACRO))
-        }
+        TypeSelector::NAME_TYPE => TypeSelector::new(verb_span, &args, Some(SYMBOL_TYPE_TYPE)),
+        TypeSelector::NAME_DATA => TypeSelector::new(verb_span, &args, Some(SYMBOL_TYPE_DATA)),
+        TypeSelector::NAME_MACRO => TypeSelector::new(verb_span, &args, Some(SYMBOL_TYPE_MACRO)),
         TypeSelector::NAME_FIELD | TypeSelector::NAME_METHOD => {
-            TypeSelector::new(verb_span, &positional, &named, Some(SYMBOL_TYPE_FIELD))
+            TypeSelector::new(verb_span, &args, Some(SYMBOL_TYPE_FIELD))
         }
-        LocSelector::NAME => LocSelector::new(verb_span, &positional, &named),
-        SearchSelector::NAME => SearchSelector::new(verb_span, &positional, &named),
-        LayerVerb::NAME => LayerVerb::new(verb_span, &positional, &named),
+        LocSelector::NAME => LocSelector::new(verb_span, &args),
+        SearchSelector::NAME => SearchSelector::new(verb_span, &args),
+        LayerVerb::NAME => LayerVerb::new(verb_span, &args),
         EphemeralSymbolVerb::NAME | EphemeralInstanceVerb::NAME | EphemeralRefVerb::NAME => ctx
             .get_eph_ops()
             .ok_or_else(|| {
@@ -143,14 +134,12 @@ pub(crate) fn build_generic_verb(
             .and_then(|eph_ops| {
                 let op = match ident_name.as_str() {
                     EphemeralSymbolVerb::NAME => {
-                        EphemeralSymbolVerb::new_op(verb_span.clone(), &positional, &named)?
+                        EphemeralSymbolVerb::new_op(verb_span.clone(), &args)?
                     }
                     EphemeralInstanceVerb::NAME => {
-                        EphemeralInstanceVerb::new_op(verb_span.clone(), &positional, &named)?
+                        EphemeralInstanceVerb::new_op(verb_span.clone(), &args)?
                     }
-                    EphemeralRefVerb::NAME => {
-                        EphemeralRefVerb::new_op(verb_span.clone(), &positional, &named)?
-                    }
+                    EphemeralRefVerb::NAME => EphemeralRefVerb::new_op(verb_span.clone(), &args)?,
                     _ => unreachable!(),
                 };
                 eph_ops.lock().unwrap().push(op);

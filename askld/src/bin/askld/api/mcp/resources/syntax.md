@@ -20,7 +20,7 @@ separate statements; a `{` must be on the same line as its verb to attach.
   match. **Literal only — no regex** (`search("a|b")` matches the text `a|b`; to OR
   literals, `search("a") search("b")` or `search("a"); search("b")` — both union). To find a
   **symbol by name, prefer a glob `g"*name*"`** (indexed, cheaper) — use `search()`
-  only for non-symbol text. `>=3` chars, smart-case, options `whole_word="true"`,
+  only for non-symbol text. `>=3` chars, smart-case, options `whole_word=true`,
   `case="sensitive"|"insensitive"`, `limit=500`.
 - Several selectors in one statement are **ORed** (union): `"a" "b"` (or
   `func("a") func("b")`) selects symbols matching *either*; `"a" or "b"` is
@@ -116,7 +116,7 @@ separate statements; a `{` must be on the same line as its verb to attach.
   children are the functions assigned to it in initializers, so this one query
   lists every `.reg_mr = xxx_reg_mr` implementation; don't grep for `.field =`.
 - Transitive callees:            `"vfs_read" unnest { func }`
-- Full-text (non-symbol text):   `project("linux") search("EXPORT_SYMBOL", whole_word="true")`
+- Full-text (non-symbol text):   `project("linux") search("EXPORT_SYMBOL", whole_word=true)`
 
 To read a listed symbol's **body**, re-run the query with `projection="body"`
 on `askl_run` — exact definition, no line-range guessing.  Use `askl_read`

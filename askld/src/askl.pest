@@ -3,15 +3,31 @@ WHITESPACE = _{(" " | "\t")+}
 nl = _{ NEWLINE* }
 ident = @{ ("_" | XID_START) ~ XID_CONTINUE* }
 string = @{(!"\"" ~ ANY)*}
-quoted_string = _{ "\"" ~ string  ~ "\""}
+// NOT silent: a silent rule never appears in pest's "expected ..." set,
+// so a bare word in value position used to be told it could be a glob
+// string, an integer or a boolean — everything except the plain string
+// it almost certainly meant.
+quoted_string = { "\"" ~ string  ~ "\""}
 // Typed strings: a prefix glued to the opening quote selects the string
 // type (g"..." = glob; re"..." reserved for regex).  Unknown prefixes are
 // rejected in the parser with a span error, so new types are non-breaking.
 string_prefix = @{ ASCII_ALPHA+ }
 prefixed_string = ${ string_prefix ~ "\"" ~ string ~ "\"" }
+// Primitive literals.  `integer` is 64-bit; the optional sign is accepted by
+// the grammar so a nonsensical `limit=-1` fails with the verb's own range
+// error rather than an "expected ..." parse dump.  `boolean` is guarded with
+// !XID_CONTINUE like or_kw/and_kw/not_kw below, so `inherit=truthy` is a parse
+// error instead of `true` followed by garbage; the keywords cannot collide
+// with verb idents because they are reachable only from `value`.
+integer = @{ "-"? ~ ASCII_DIGIT+ }
+boolean = @{ ("true" | "false") ~ !XID_CONTINUE }
+// String-only value.  Statement-position uses of a value (a bare selector,
+// a forced verb) take THIS, not `value`: a bare `42` or `true` is not a name,
+// and "unknown verb" beats a NameSelector over a boolean.
+string_value = _{ prefixed_string | quoted_string }
 // Typed argument value.  Groundwork for a richer type system: future
-// alternatives (bool, number, list) slot in here.
-value = _{ prefixed_string | quoted_string }
+// alternatives (list) slot in here.
+value = _{ string_value | boolean | integer }
 named_argument = ${ident ~ "=" ~ value}
 named_arguments = _{named_argument ~ (nl ~ "," ~ nl ~ named_argument)*}
 positional_argument = { value }
@@ -21,8 +37,8 @@ generic_verb = { ident ~ ("(" ~ verb_arguments ~ ")")?}
 inherit_label_shortcut = ${ "@@" ~ ident }
 label_shortcut = ${ "@" ~ ident }
 use_shortcut = ${ "#" ~ ident }
-plain_filter = { value }
-forced_verb = { "!" ~ value }
+plain_filter = { string_value }
+forced_verb = { "!" ~ string_value }
 special_verb = _{ plain_filter | forced_verb }
 // special_verb must precede generic_verb so a prefixed string like g"foo"
 // parses as a filter rather than as verb ident `g` followed by a string.

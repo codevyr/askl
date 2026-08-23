@@ -117,7 +117,7 @@ fn multiple_label_use() {
 
 #[test]
 fn label_use_forced() {
-    const QUERY: &str = r#""main" label("foo") {}; "b" {use("foo", forced="true")}"#;
+    const QUERY: &str = r#""main" label("foo") {}; "b" {use("foo", forced=true)}"#;
     let res = run_query(TEST_INPUT_A, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -205,8 +205,8 @@ fn label_use_reports_error_instead_of_panic() {
 #[test]
 fn forced_label_use_loop_returns_empty() {
     const QUERY: &str = r#"
-        "a" label("foo") use("bar", forced="true");
-        "b" label("bar") use("foo", forced="true")
+        "a" label("foo") use("bar", forced=true);
+        "b" label("bar") use("foo", forced=true)
     "#;
     let res = run_query(TEST_INPUT_A, QUERY);
 

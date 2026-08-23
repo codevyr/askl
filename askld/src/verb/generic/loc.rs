@@ -1,7 +1,7 @@
 use crate::cfg::ControlFlowGraph;
 use crate::line_index::{line_to_offset, next_line_offset};
-use crate::parser::Value;
 use crate::span::Span;
+use crate::verb::Args;
 use crate::verb::LayerSpec;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
@@ -11,7 +11,7 @@ use index::db_diesel::{
 };
 use index::symbols::symbol_path_and_leaf;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -24,9 +24,9 @@ use super::super::{AnchorKind, DeriveMethod, Selector, Verb, VerbClass};
 
 /// LocSelector - creates an ephemeral symbol at a specific file location.
 ///
-/// Usage: loc("path/to/file.c", "42")
-///   positional[0] = file path (suffix match)
-///   positional[1] = line number (1-based)
+/// Usage: loc("path/to/file.c", 42)
+///   positional[0] = file path (suffix match), a string
+///   positional[1] = line number (1-based), an integer
 ///   named: project="name" (optional)
 ///
 /// Content-addressed via SHA-256 hash for caching.  The layer is materialized
@@ -43,26 +43,18 @@ pub(in crate::verb) struct LocSelector {
 impl LocSelector {
     pub(in crate::verb) const NAME: &'static str = "loc";
 
-    pub fn new(
-        span: Span,
-        positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
-        if positional.len() < 2 {
+    pub fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        args.allow(&["project"])?;
+
+        if args.count() < 2 {
             bail!("loc requires two positional arguments: file path and line number");
         }
-        let file_path = positional[0].as_plain()?.to_string();
-        let line: usize = positional[1]
-            .as_plain()?
-            .parse()
-            .map_err(|_| anyhow::anyhow!("loc line number must be an integer"))?;
+        let file_path = args.str_at(0, "file path")?.to_string();
+        let line = args.usize_at(1, "line number")?;
         if line == 0 {
             bail!("loc line number must be >= 1");
         }
-        let project = named
-            .get("project")
-            .map(|v| v.as_plain().map(str::to_string))
-            .transpose()?;
+        let project = args.named_str("project")?.map(str::to_string);
 
         Ok(Arc::new(Self {
             span,

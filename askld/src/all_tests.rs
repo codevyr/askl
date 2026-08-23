@@ -708,13 +708,13 @@ fn two_statements() {
 #[test]
 fn project_double_parent_query() {
     // Tests mod filter with double parent query pattern.
-    // filter("compound_name", "test", inherit="true") acts as a namespace filter
-    // that propagates into child scopes via inherit="true".
+    // filter("compound_name", "test", inherit=true) acts as a namespace filter
+    // that propagates into child scopes via inherit=true.
     // The outer command is strong twice over — `select` is a real selector,
     // and the name filter is a constraint in its own right — so the bare
     // middle scope is sandwiched between a strong parent and a strong child
     // and stays strong too.
-    const QUERY: &str = r#"select filter("compound_name", "test", inherit="true") {{"b"}}"#;
+    const QUERY: &str = r#"select filter("compound_name", "test", inherit=true) {{"b"}}"#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -735,7 +735,7 @@ fn project_double_parent_query() {
     // still not weak and the same three-level composition applies.  (While
     // it was weak, the echo also kept test.c (93) — a caller of test.b that
     // nothing in the namespace calls.)
-    const UNSELECTED_QUERY: &str = r#"filter("compound_name", "test", inherit="true") {{"b"}}"#;
+    const UNSELECTED_QUERY: &str = r#"filter("compound_name", "test", inherit=true) {{"b"}}"#;
     let res = run_query(TEST_INPUT_MODULES, UNSELECTED_QUERY);
     assert_eq!(
         res.nodes.as_vec(),
@@ -785,7 +785,7 @@ fn module_filter_excludes_other_modules() {
     );
 
     const PREAMBLE_FILTERED_QUERY: &str =
-        r#"preamble filter("compound_name", "test", inherit="true"); "a""#;
+        r#"preamble filter("compound_name", "test", inherit=true); "a""#;
     let preamble_filtered = run_query(TEST_INPUT_MODULES, PREAMBLE_FILTERED_QUERY);
     let preamble_filtered_nodes = preamble_filtered.nodes.as_vec();
 
@@ -1964,7 +1964,7 @@ fn generic_filter_type_func_only() {
 
 #[test]
 fn generic_filter_compound_name_inherit() {
-    // filter("compound_name", "test", inherit="true") {{"b"}}
+    // filter("compound_name", "test", inherit=true) {{"b"}}
     // Namespace filter inherited through double parent.
     // The "test" compound name filter is inherited into child scopes,
     // constraining grandchildren to also match "test" in their name search.
@@ -1978,7 +1978,7 @@ fn generic_filter_compound_name_inherit() {
     // a caller of its own inside the namespace (test.main) — so test.c drops
     // out at the middle level, exactly as it does when the same query is
     // written with an explicit `select` (see `project_double_parent_query`).
-    const QUERY: &str = r#"filter("compound_name", "test", inherit="true") {{"b"}}"#;
+    const QUERY: &str = r#"filter("compound_name", "test", inherit=true) {{"b"}}"#;
     let res = run_query(TEST_INPUT_MODULES, QUERY);
 
     let nodes = res.nodes.as_vec();
@@ -2072,13 +2072,13 @@ fn generic_filter_with_select_constrains_parent() {
 
 #[test]
 fn weak_child_does_not_eliminate_parent() {
-    // `data(inherit="false")` is a bare type selector that does NOT inherit,
+    // `data(inherit=false)` is a bare type selector that does NOT inherit,
     // so unlike plain `data` it IS a selector — non-unit and
     // non-constraining, i.e. weak and yet a participant in the parent
     // conjunction.  The fixture has no data symbols, so the child resolves
     // empty.  A weak child is a display echo: its emptiness must not take
     // the parent with it.
-    const QUERY: &str = r#""foo" { data(inherit="false") }"#;
+    const QUERY: &str = r#""foo" { data(inherit=false) }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     let nodes = res.nodes.as_vec();
@@ -2095,7 +2095,7 @@ fn weak_parent_does_not_eliminate_child() {
     // it is a bug rather than a preference: written on the other side of the
     // braces, the same weak statement asserting the same absent evidence has
     // always left its neighbour alone.  Both spellings must agree.
-    const QUERY: &str = r#"data(inherit="false") { "foo" }"#;
+    const QUERY: &str = r#"data(inherit=false) { "foo" }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     let nodes = res.nodes.as_vec();
@@ -2108,13 +2108,13 @@ fn weak_parent_does_not_eliminate_child() {
 
 #[test]
 fn bare_and_explicit_type_children_agree() {
-    // `data` and `data(inherit="false")` differ only in whether the type
+    // `data` and `data(inherit=false)` differ only in whether the type
     // constraint is inherited into child scopes — neither constrains a
     // parent.  Bare `data` reaches the parent merge as unit+filter and is
     // skipped outright; the explicit form arrives as a weak selector.  Two
     // routes, one answer.
     let bare = run_query(TEST_INPUT_CONTAINMENT, r#""foo" { data }"#);
-    let explicit = run_query(TEST_INPUT_CONTAINMENT, r#""foo" { data(inherit="false") }"#);
+    let explicit = run_query(TEST_INPUT_CONTAINMENT, r#""foo" { data(inherit=false) }"#);
 
     assert_eq!(
         bare.nodes.as_vec(),
@@ -2251,14 +2251,14 @@ fn derive_type_refs_has_union() {
 
 #[test]
 fn derive_inherit_true_propagates() {
-    // derive(type="has", inherit="true") propagates to grandchildren
-    // file derive(type="has", inherit="true") { { "foo" } }
+    // derive(type="has", inherit=true) propagates to grandchildren
+    // file derive(type="has", inherit=true) { { "foo" } }
     // Without inherit, the grandchild {} would reset to refs, but with inherit
     // the grandchild also uses has semantics
     // file has→ ??? has→ foo
     // Since file contains foo directly, the intermediate {} derives contained functions,
     // then the inner "foo" also uses has to constrain
-    const QUERY: &str = r#"file("/main.go") derive(type="has", inherit="true") { func { "foo" } }"#;
+    const QUERY: &str = r#"file("/main.go") derive(type="has", inherit=true) { func { "foo" } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("derive inherit=true result: {:#?}", res.nodes);
@@ -2287,11 +2287,10 @@ fn derive_inherits_by_default() {
 
 #[test]
 fn derive_explicit_no_inherit_resets_to_refs() {
-    // With explicit inherit="false", grandchild resets to refs
-    // file derive(type="has", inherit="false") { "foo" { "bar" } }
+    // With explicit inherit=false, grandchild resets to refs
+    // file derive(type="has", inherit=false) { "foo" { "bar" } }
     // file has→ foo refs→ bar (grandchild resets to refs)
-    const QUERY: &str =
-        r#"file("/main.go") derive(type="has", inherit="false") { "foo" { "bar" } }"#;
+    const QUERY: &str = r#"file("/main.go") derive(type="has", inherit=false) { "foo" { "bar" } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     println!("derive explicit no inherit result: {:#?}", res.nodes);
@@ -2692,10 +2691,10 @@ fn non_constraining_containment_still_works() {
 
 #[test]
 fn data_inherit_with_name_prunes_to_target_path() {
-    // data(inherit="true") "driver" {{{{"channels_a"}}}}
+    // data(inherit=true) "driver" {{{{"channels_a"}}}}
     // Should return ONLY the path: driver → id_table → info_a → config_a → channels_a
     // NOT info_b, config_b, channels_b
-    const QUERY: &str = r#"data(inherit="true") "driver" {{{{"channels_a"}}}}"#;
+    const QUERY: &str = r#"data(inherit=true) "driver" {{{{"channels_a"}}}}"#;
     let res = run_query(VERB_TEST, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -2724,8 +2723,8 @@ fn data_inherit_with_name_prunes_to_target_path() {
 #[test]
 fn data_inherit_without_name_prunes_to_target_path() {
     // Same query without the top-level name selector — should also prune correctly.
-    // data(inherit="true") {{{{"channels_a"}}}}
-    const QUERY: &str = r#"data(inherit="true") {{{{"channels_a"}}}}"#;
+    // data(inherit=true) {{{{"channels_a"}}}}
+    const QUERY: &str = r#"data(inherit=true) {{{{"channels_a"}}}}"#;
     let res = run_query(VERB_TEST, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -2753,9 +2752,9 @@ fn data_inherit_without_name_prunes_to_target_path() {
 fn data_inherit_weak_parent_derives_full_chain() {
     // Regression: weak UnitVerb children were skipped even when the parent was also weak,
     // preventing the full chain from being derived.
-    // data(inherit="true") {{{"channels_a"}}} — 3-level deep, all intermediate statements are weak.
+    // data(inherit=true) {{{"channels_a"}}} — 3-level deep, all intermediate statements are weak.
     // Expected chain: id_table → info_a → config_a → channels_a
-    const QUERY: &str = r#"data(inherit="true") {{{"channels_a"}}}"#;
+    const QUERY: &str = r#"data(inherit=true) {{{"channels_a"}}}"#;
     let res = run_query(VERB_TEST, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -3284,10 +3283,10 @@ fn label_scoped_nested_has_chain() {
 #[test]
 fn label_forced_with_scoped_derivation() {
     // Forced label use with scoped derivation:
-    // "e" label("parent") { "M" {} }; "g" { use("parent", forced="true") }
+    // "e" label("parent") { "M" {} }; "g" { use("parent", forced=true) }
     // The forced use should inject e's children into g's scope, constraining
     // to only M-children visible from e.
-    const QUERY: &str = r#""e" label("parent") { "M" {} }; "g" { use("parent", forced="true") }"#;
+    const QUERY: &str = r#""e" label("parent") { "M" {} }; "g" { use("parent", forced=true) }"#;
     let res = run_query(TEST_INPUT_B, QUERY);
 
     let nodes = res.nodes.as_vec();
@@ -3351,8 +3350,8 @@ fn ephemeral_verb_outside_layer_block_fails() {
     // Ephemeral verbs are only allowed inside layer { } blocks.
     // Using them standalone should produce a parse error.
     const QUERY: &str = concat!(
-        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="50000", end="50100", instance_type="1"); "#,
+        r#"ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=50000, end=50100, instance_type=1); "#,
         r#""foo""#,
     );
     let res = run_query_err(VERB_TEST, QUERY);
@@ -3367,8 +3366,8 @@ fn ephemeral_instance_is_queryable() {
     // Existing instance 91 is at [910,919). Add a second at [50000,50100).
     const QUERY: &str = concat!(
         r#"layer { "#,
-        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="50000", end="50100", instance_type="1") "#,
+        r#"ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=50000, end=50100, instance_type=1) "#,
         r#"}; "#,
         r#""foo""#,
     );
@@ -3395,8 +3394,8 @@ fn ephemeral_ref_creates_edge() {
     // reference tar (only foo.bar and foobar via existing refs).
     const QUERY: &str = concat!(
         r#"layer { "#,
-        r#"ephemeral_ref(to_symbol="4", from_object="1", "#,
-        r#"start="915", end="916") "#,
+        r#"ephemeral_ref(to_symbol=4, from_object=1, "#,
+        r#"start=915, end=916) "#,
         r#"}; "#,
         r#""foo" { "tar" }"#,
     );
@@ -3419,8 +3418,8 @@ fn ephemeral_layers_are_isolated_between_queries() {
     // must not leak into the other.
     const QUERY1: &str = concat!(
         r#"layer { "#,
-        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="51000", end="51100", instance_type="1") "#,
+        r#"ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=51000, end=51100, instance_type=1) "#,
         r#"}; "#,
         r#""foo""#,
     );
@@ -3462,10 +3461,10 @@ fn multiple_ephemeral_instances_same_symbol() {
     // Create two ephemeral instances for the same symbol. Both should appear.
     const QUERY: &str = concat!(
         r#"layer { "#,
-        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="52000", end="52100", instance_type="1"); "#,
-        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="52200", end="52300", instance_type="1") "#,
+        r#"ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=52000, end=52100, instance_type=1); "#,
+        r#"ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=52200, end=52300, instance_type=1) "#,
         r#"}; "#,
         r#""foo""#,
     );
@@ -3496,8 +3495,8 @@ fn eph_ref_parent_traversal() {
     // should make "foo" { "sort.IsSorted" } find sort.IsSorted as a child.
     const QUERY: &str = concat!(
         r#"layer { "#,
-        r#"ephemeral_ref(to_symbol="5", from_object="1", "#,
-        r#"start="913", end="914") "#,
+        r#"ephemeral_ref(to_symbol=5, from_object=1, "#,
+        r#"start=913, end=914) "#,
         r#"}; "#,
         r#""foo" { "sort.IsSorted" }"#,
     );
@@ -3522,8 +3521,8 @@ fn eph_instance_in_containment() {
     // should appear as a containment child of foo.
     const QUERY: &str = concat!(
         r#"layer { "#,
-        r#"ephemeral_instance(symbol_id="4", object_id="1", "#,
-        r#"start="911", end="912", instance_type="1") "#,
+        r#"ephemeral_instance(symbol_id=4, object_id=1, "#,
+        r#"start=911, end=912, instance_type=1) "#,
         r#"}; "#,
         r#""foo" has { "tar" }"#,
     );
@@ -3555,8 +3554,8 @@ fn eph_ref_produces_edge() {
     // Uses different offset from A1 [913,914) to produce a different layer hash.
     const QUERY: &str = concat!(
         r#"layer { "#,
-        r#"ephemeral_ref(to_symbol="5", from_object="1", "#,
-        r#"start="914", end="915") "#,
+        r#"ephemeral_ref(to_symbol=5, from_object=1, "#,
+        r#"start=914, end=915) "#,
         r#"}; "#,
         r#""foo" { "sort.IsSorted" }"#,
     );
@@ -3576,8 +3575,8 @@ fn eph_instance_produces_edge() {
     // and ephemeral instances appear as children of foo.
     const QUERY: &str = concat!(
         r#"layer { "#,
-        r#"ephemeral_instance(symbol_id="2", object_id="1", "#,
-        r#"start="53100", end="53200", instance_type="1") "#,
+        r#"ephemeral_instance(symbol_id=2, object_id=1, "#,
+        r#"start=53100, end=53200, instance_type=1) "#,
         r#"}; "#,
         r#""foo" { "foo.bar" }"#,
     );
@@ -3611,9 +3610,9 @@ fn layer_block_symbol_then_instance() {
     const QUERY: &str = concat!(
         r#"layer { "#,
         r#"ephemeral_symbol(name="eph_chain", "#,
-        r#"project_id="1", symbol_type="1"); "#,
-        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="53300", end="53400", instance_type="1") "#,
+        r#"project_id=1, symbol_type=1); "#,
+        r#"ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=53300, end=53400, instance_type=1) "#,
         r#"}; "#,
         r#""foo""#,
     );
@@ -3639,10 +3638,10 @@ fn layer_block_instance_and_ref_enables_traversal() {
     // and find both the persistent instance (95) and the ephemeral one.
     const QUERY: &str = concat!(
         r#"layer { "#,
-        r#"ephemeral_instance(symbol_id="5", object_id="1", "#,
-        r#"start="53500", end="53600", instance_type="1"); "#,
-        r#"ephemeral_ref(to_symbol="5", from_object="1", "#,
-        r#"start="916", end="917") "#,
+        r#"ephemeral_instance(symbol_id=5, object_id=1, "#,
+        r#"start=53500, end=53600, instance_type=1); "#,
+        r#"ephemeral_ref(to_symbol=5, from_object=1, "#,
+        r#"start=916, end=917) "#,
         r#"}; "#,
         r#""foo" { "sort.IsSorted" }"#,
     );
@@ -3673,8 +3672,8 @@ fn eph_instance_same_params_is_idempotent() {
     // layer) and reuses the existing data without re-inserting.
     const QUERY: &str = concat!(
         r#"layer { "#,
-        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="53700", end="53800", instance_type="1") "#,
+        r#"ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=53700, end=53800, instance_type=1) "#,
         r#"}; "#,
         r#""foo""#,
     );
@@ -3740,8 +3739,8 @@ fn eph_instance_at_persistent_offset_coexists() {
     // duplicates are allowed.
     const QUERY: &str = concat!(
         r#"layer { "#,
-        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="910", end="919", instance_type="1") "#,
+        r#"ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=910, end=919, instance_type=1) "#,
         r#"}; "#,
         r#""foo""#,
     );
@@ -3774,8 +3773,8 @@ fn eph_gc_purges_old_layers() {
     // (global TTL=0) to avoid interfering with concurrently running tests.
     const QUERY: &str = concat!(
         r#"layer { "#,
-        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="54000", end="54100", instance_type="1") "#,
+        r#"ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=54000, end=54100, instance_type=1) "#,
         r#"}; "#,
         r#""foo""#,
     );
@@ -3853,9 +3852,9 @@ fn layer_block_groups_ops_into_single_layer() {
     // should be queryable.
     const QUERY: &str = concat!(
         r#"layer { "#,
-        r#"ephemeral_symbol(name="layer_test_sym", project_id="1", symbol_type="1"); "#,
-        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="55000", end="55100", instance_type="1") "#,
+        r#"ephemeral_symbol(name="layer_test_sym", project_id=1, symbol_type=1); "#,
+        r#"ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=55000, end=55100, instance_type=1) "#,
         r#"}; "#,
         r#""foo""#,
     );
@@ -3883,8 +3882,8 @@ fn layer_block_cache_hit() {
     // even with other tests sharing the fixture DB.)
     const QUERY: &str = concat!(
         r#"layer { "#,
-        r#"ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="55100", end="55200", instance_type="1") "#,
+        r#"ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=55100, end=55200, instance_type=1) "#,
         r#"}; "#,
         r#""foo""#,
     );
@@ -3948,12 +3947,12 @@ fn layer_block_includes_parent_context_in_hash() {
     // Verify both layers are created and the query works.
     const QUERY: &str = concat!(
         r#"layer { "#,
-        r#"ephemeral_ref(to_symbol="5", from_object="1", "#,
-        r#"start="55300", end="55310") "#,
+        r#"ephemeral_ref(to_symbol=5, from_object=1, "#,
+        r#"start=55300, end=55310) "#,
         r#"}; "#,
         r#"layer { "#,
-        r#"ephemeral_instance(symbol_id="4", object_id="1", "#,
-        r#"start="55200", end="55300", instance_type="1") "#,
+        r#"ephemeral_instance(symbol_id=4, object_id=1, "#,
+        r#"start=55200, end=55300, instance_type=1) "#,
         r#"}; "#,
         r#""tar""#,
     );
@@ -3980,9 +3979,9 @@ fn loc_matches_multiple_files() {
     // verb_test.sql has two files named main.c in different projects:
     //   object 1: /main.c      (project 1)
     //   object 3: /src/main.c  (project 2)
-    // Both match the suffix "main.c". loc("main.c", "1") should create
+    // Both match the suffix "main.c". loc("main.c", 1) should create
     // an ephemeral symbol+instance for each matching file.
-    const QUERY: &str = r#"loc("main.c", "1")"#;
+    const QUERY: &str = r#"loc("main.c", 1)"#;
     let res = run_query(VERB_TEST, QUERY);
 
     let nodes = res.nodes.as_vec();
@@ -4006,7 +4005,7 @@ fn loc_matches_multiple_files() {
 fn loc_single_file_with_project_filter() {
     // When a project filter is specified, only the matching project's file
     // should be returned.
-    const QUERY: &str = r#"loc("main.c", "1", project="test_project_2")"#;
+    const QUERY: &str = r#"loc("main.c", 1, project="test_project_2")"#;
     let res = run_query(VERB_TEST, QUERY);
 
     let nodes = res.nodes.as_vec();
@@ -4351,7 +4350,7 @@ fn canary_leak_in_each_relationship_field_detected() {
 
 #[test]
 fn loc_bad_file_path_errors() {
-    let res = run_query_err(VERB_TEST, r#"loc("nonexistent_file.c", "1")"#);
+    let res = run_query_err(VERB_TEST, r#"loc("nonexistent_file.c", 1)"#);
     let msg = res.err().expect("should be an error").to_string();
     assert!(
         msg.contains("no file matching"),
@@ -4362,7 +4361,7 @@ fn loc_bad_file_path_errors() {
 
 #[test]
 fn loc_bad_line_number_errors() {
-    let res = run_query_err(VERB_TEST, r#"loc("main.c", "999")"#);
+    let res = run_query_err(VERB_TEST, r#"loc("main.c", 999)"#);
     let msg = res.err().expect("should be an error").to_string();
     assert!(
         msg.contains("out of range"),
@@ -4379,7 +4378,7 @@ fn layer_block_unknown_object_id_errors() {
     // silently-empty result.  The validation must reject it loudly instead.
     let res = run_query_err(
         VERB_TEST,
-        r#"layer { ephemeral_instance(symbol_id="1", object_id="99999", start="0", end="10", instance_type="1") }"#,
+        r#"layer { ephemeral_instance(symbol_id=1, object_id=99999, start=0, end=10, instance_type=1) }"#,
     );
     let msg = res.err().expect("should be an error").to_string();
     assert!(
@@ -4393,7 +4392,7 @@ fn layer_block_unknown_object_id_errors() {
 fn ephemeral_symbol_unknown_project_errors() {
     let res = run_query_err(
         VERB_TEST,
-        r#"layer { ephemeral_symbol(name="ghost", project_id="424242", symbol_type="1") }"#,
+        r#"layer { ephemeral_symbol(name="ghost", project_id=424242, symbol_type=1) }"#,
     );
     let msg = res.err().expect("should be an error").to_string();
     assert!(
@@ -4489,13 +4488,13 @@ fn layer_sign_check_rejects_mismatched_rows() {
 #[test]
 fn wrap_loc_yields_single_instance_and_parent_has_edge() {
     // Regression for the {loc(...)} wrapper pattern.  The user's
-    // failing query had an inner `loc("qaic_drv.c", "100")` inside
+    // failing query had an inner `loc("qaic_drv.c", 100)` inside
     // `{...}`; a leftover persistent loc-row caused two nodes plus a
     // missing has-edge from the containing function.  On a clean DB
     // the wrapper must yield exactly one ephemeral loc node and a
     // has-edge from the containing function (fixture: wrap_loc_target,
     // body covers line 1 of /main.c).
-    const QUERY: &str = r#"{loc("main.c", "1", project="test_project")}"#;
+    const QUERY: &str = r#"{loc("main.c", 1, project="test_project")}"#;
     let res = run_query(VERB_TEST, QUERY);
 
     let loc_nodes: Vec<_> = res
@@ -4545,9 +4544,9 @@ fn ephemeral_instance_with_label_input_resolves_to_labelled_selection() {
     //
     // Query:
     //   @target "foo";
-    //   layer { ephemeral_instance(symbol_id="@target", object_id="1",
-    //                              start="50000", end="50100",
-    //                              instance_type="1") }
+    //   layer { ephemeral_instance(symbol_id="@target", object_id=1,
+    //                              start=50000, end=50100,
+    //                              instance_type=1) }
     //
     // Expected:
     //   - The labelled statement's selection includes "foo" instance 91.
@@ -4560,8 +4559,8 @@ fn ephemeral_instance_with_label_input_resolves_to_labelled_selection() {
     //     emits one EphInstanceRow with symbol_id=1.
     const QUERY: &str = concat!(
         r#"@target "foo"; "#,
-        r#"layer { ephemeral_instance(symbol_id="@target", object_id="1", "#,
-        r#"start="50000", end="50100", instance_type="1") }"#,
+        r#"layer { ephemeral_instance(symbol_id="@target", object_id=1, "#,
+        r#"start=50000, end=50100, instance_type=1) }"#,
     );
     let res = run_query(VERB_TEST, QUERY);
 
@@ -4582,11 +4581,36 @@ fn ephemeral_instance_with_label_input_resolves_to_labelled_selection() {
     );
 }
 
+/// `symbol_id` is a union type, and the argument's TYPE picks the arm: an
+/// integer is a symbol id, a string is a label reference.  The pre-typed
+/// spelling `symbol_id="1"` is now neither, and says so.
+#[test]
+fn ephemeral_symbol_ref_discriminates_by_type() {
+    const QUOTED_ID: &str = concat!(
+        r#"layer { ephemeral_instance(symbol_id="1", object_id=1, "#,
+        r#"start=60700, end=60800, instance_type=1) }"#,
+    );
+    let Err(err) = run_query_err(VERB_TEST, QUOTED_ID) else {
+        panic!("a quoted symbol id must not parse");
+    };
+    assert!(
+        err.to_string().contains("symbol_id=1"),
+        "expected the unquoted spelling in the hint, got: {err}"
+    );
+
+    // An empty label reference is still caught.
+    const EMPTY_LABEL: &str = concat!(
+        r#"layer { ephemeral_instance(symbol_id="@", object_id=1, "#,
+        r#"start=60700, end=60800, instance_type=1) }"#,
+    );
+    assert!(run_query_err(VERB_TEST, EMPTY_LABEL).is_err());
+}
+
 #[test]
 fn ephemeral_instance_label_hash_matches_equivalent_literal() {
     // Validates the cache-key semantic: an ephemeral_instance with
     // symbol_id="@target" where @target resolves to symbol id 1 must
-    // produce the same layer hash as symbol_id="1" — same resolved
+    // produce the same layer hash as symbol_id=1 — same resolved
     // symbol IDs in the hash inputs means the same cache entry.
     //
     // Hashes are private, but cache sharing has a direct
@@ -4603,13 +4627,13 @@ fn ephemeral_instance_label_hash_matches_equivalent_literal() {
     // *negative IDs we produced* across the two runs, not absolute
     // table counts.
     const LITERAL_FIRST: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="60500", end="60600", instance_type="1") }"#,
+        r#"layer { ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=60500, end=60600, instance_type=1) }"#,
     );
     const LABEL_VARIANT: &str = concat!(
         r#"@target "foo"; "#,
-        r#"layer { ephemeral_instance(symbol_id="@target", object_id="1", "#,
-        r#"start="60500", end="60600", instance_type="1") }"#,
+        r#"layer { ephemeral_instance(symbol_id="@target", object_id=1, "#,
+        r#"start=60500, end=60600, instance_type=1) }"#,
     );
 
     let res_literal = run_query(VERB_TEST, LITERAL_FIRST);
@@ -4657,7 +4681,7 @@ fn ephemeral_instance_same_tree_label_rejected() {
     // split-with-`;` hint.
     const QUERY: &str = concat!(
         r#"@target "foo" { layer { ephemeral_instance(symbol_id="@target", "#,
-        r#"object_id="1", start="50000", end="50100", instance_type="1") } }"#,
+        r#"object_id=1, start=50000, end=50100, instance_type=1) } }"#,
     );
     let res = run_query_err(VERB_TEST, QUERY);
     let err = match res {
@@ -4678,8 +4702,8 @@ fn ephemeral_instance_forward_label_rejected() {
     // defines the label.  Must be a structured error, not an empty
     // resolution.
     const QUERY: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="@target", object_id="1", "#,
-        r#"start="50000", end="50100", instance_type="1") }; "#,
+        r#"layer { ephemeral_instance(symbol_id="@target", object_id=1, "#,
+        r#"start=50000, end=50100, instance_type=1) }; "#,
         r#"@target "foo""#,
     );
     let res = run_query_err(VERB_TEST, QUERY);
@@ -4985,18 +5009,18 @@ fn search_skeleton_missing_argument_rejects() {
 #[test]
 fn search_whole_word_excludes_foobar() {
     // Fixture object 3 has "foobar foo foo_bar foo.bar".  With
-    // whole_word="true", `search("foo")` must NOT match the leading
+    // whole_word=true, `search("foo")` must NOT match the leading
     // "foobar" or "foo_bar" but MUST match the freestanding "foo" and
     // "foo.bar" instances.  The substring default (whole_word=false)
     // would match all four occurrences.
     let substring = run_query(TEST_INPUT_SEARCH, r#"search("foo")"#);
-    let whole_word = run_query(TEST_INPUT_SEARCH, r#"search("foo", whole_word="true")"#);
+    let whole_word = run_query(TEST_INPUT_SEARCH, r#"search("foo", whole_word=true)"#);
 
     let n_substr = substring.nodes.as_vec().len();
     let n_whole = whole_word.nodes.as_vec().len();
     assert!(
         n_substr > n_whole,
-        "whole_word=\"true\" must match strictly fewer ranges than substring; \
+        "whole_word=true must match strictly fewer ranges than substring; \
          got substring={}, whole_word={}",
         n_substr,
         n_whole,
@@ -5008,7 +5032,7 @@ fn search_case_smart_default_lowercase_is_insensitive() {
     // Fixture object 4 has "Foo FOO foo".  An all-lowercase query under
     // the default smart-case resolves to insensitive, so all three
     // tokens match across the fixture (plus matches in other files).
-    let res = run_query(TEST_INPUT_SEARCH, r#"search("foo", whole_word="true")"#);
+    let res = run_query(TEST_INPUT_SEARCH, r#"search("foo", whole_word=true)"#);
     let n_smart_lower = res.nodes.as_vec().len();
     assert!(
         n_smart_lower >= 3,
@@ -5023,7 +5047,7 @@ fn search_case_smart_default_uppercase_is_sensitive() {
     // "Foo" under smart-case has uppercase → sensitive.  Object 4's
     // "Foo FOO foo" has exactly one literal "Foo" (the others are FOO
     // and foo).
-    let res = run_query(TEST_INPUT_SEARCH, r#"search("Foo", whole_word="true")"#);
+    let res = run_query(TEST_INPUT_SEARCH, r#"search("Foo", whole_word=true)"#);
     let n = res.nodes.as_vec().len();
     // Whole-word + case-sensitive across the fixture: object 4 contributes one
     // match (the literal "Foo"); other objects contain "foo" but not "Foo".
@@ -5041,7 +5065,7 @@ fn search_case_explicit_insensitive_overrides_smart() {
     // "Foo FOO foo" in object 4 even though the query has uppercase.
     let res = run_query(
         TEST_INPUT_SEARCH,
-        r#"search("Foo", case="insensitive", whole_word="true")"#,
+        r#"search("Foo", case="insensitive", whole_word=true)"#,
     );
     let n = res.nodes.as_vec().len();
     assert!(
@@ -5059,19 +5083,107 @@ fn search_bad_case_value_rejects() {
 
 #[test]
 fn search_bad_whole_word_value_rejects() {
-    let res = run_query_err(TEST_INPUT_SEARCH, r#"search("foo", whole_word="yes")"#);
-    assert!(res.is_err(), "search with whole_word=yes should error");
+    // A bare word is not a value at all, and a quoted one is a string where a
+    // boolean is wanted.  `"yes"` spells no boolean, so no requoting hint.
+    for query in [
+        r#"search("foo", whole_word=yes)"#,
+        r#"search("foo", whole_word="yes")"#,
+    ] {
+        let res = run_query_err(TEST_INPUT_SEARCH, query);
+        assert!(res.is_err(), "must error: {query}");
+    }
 }
 
 #[test]
 fn search_bad_limit_value_rejects() {
     let res = run_query_err(TEST_INPUT_SEARCH, r#"search("foo", limit="not_a_number")"#);
-    assert!(res.is_err(), "search with non-integer limit should error");
+    assert!(res.is_err(), "search with a non-integer limit should error");
+}
+
+/// The pre-typed-arguments spelling is an error, and the error says what to
+/// write instead.  Arguments were all strings once; a query written then
+/// fails here rather than silently meaning something else.
+#[test]
+fn search_quoted_argument_spellings_teach_the_typed_form() {
+    for (query, hint) in [
+        (r#"search("foo", limit="3")"#, "write limit=3"),
+        (
+            r#"search("foo", whole_word="true")"#,
+            "write whole_word=true",
+        ),
+    ] {
+        let Err(err) = run_query_err(TEST_INPUT_SEARCH, query) else {
+            panic!("must not parse: {query}");
+        };
+        assert!(
+            err.to_string().contains(hint),
+            "expected the hint {hint:?} for {query}, got: {err}"
+        );
+    }
+}
+
+/// The layer cache is keyed on the PARSED inputs, not on which arguments
+/// were written.  Spelling the defaults explicitly must therefore land on the
+/// same layer as omitting them — which is also why typing `limit` and
+/// `whole_word` left every previously-cached search layer valid: `limit="500"`
+/// and `limit=500` both reach the hasher as the integer 500.
+///
+/// Observable, since hashes are private: a shared layer means a shared row in
+/// `symbol_instances`, so the two runs share negative instance ids.
+#[test]
+fn search_explicit_defaults_share_the_layer_with_omitted_ones() {
+    let neg_ids = |res: &crate::statement::ExecutionResult| -> std::collections::HashSet<i64> {
+        res.nodes
+            .as_vec()
+            .iter()
+            .map(|id| <SymbolInstanceId as Into<i64>>::into(*id))
+            .filter(|id| *id < 0)
+            .collect()
+    };
+
+    let omitted = neg_ids(&run_query(TEST_INPUT_SEARCH, r#"search("foo")"#));
+    let explicit = neg_ids(&run_query(
+        TEST_INPUT_SEARCH,
+        r#"search("foo", whole_word=false, limit=500)"#,
+    ));
+
+    assert!(
+        !omitted.is_empty(),
+        "the fixture must produce at least one search match"
+    );
+    assert_eq!(
+        omitted, explicit,
+        "writing the defaults must not change the layer key"
+    );
+}
+
+/// A `limit` past what the SQL bind can express means "no effective cap", not
+/// a truncated one.  The bind is a 32-bit Integer and the cast used to be
+/// `limit as i32`, so `limit=2^32` truncated to 0 and returned ONE row per
+/// project, `limit=2^63-1` truncated to -1 and returned NONE, and `limit=2^31`
+/// bound a negative LIMIT and failed in Postgres.
+#[test]
+fn search_oversized_limit_is_clamped_not_truncated() {
+    let count = |query: &str| run_query(TEST_INPUT_SEARCH, query).nodes.as_vec().len();
+
+    // The fixture has fewer than 500 matches, so the default cap binds nothing
+    // and is the "no cap" reference.
+    let uncapped = count(r#"search("foo")"#);
+    assert!(uncapped > 1, "fixture must have several matches to compare");
+
+    for limit in ["2147483648", "4294967296", "9223372036854775807"] {
+        let query = format!(r#"search("foo", limit={limit})"#);
+        assert_eq!(
+            count(&query),
+            uncapped,
+            "limit={limit} must behave as no cap, not as a truncated one"
+        );
+    }
 }
 
 #[test]
 fn search_zero_limit_rejects() {
-    let res = run_query_err(TEST_INPUT_SEARCH, r#"search("foo", limit="0")"#);
+    let res = run_query_err(TEST_INPUT_SEARCH, r#"search("foo", limit=0)"#);
     assert!(res.is_err(), "search with limit=0 should error");
 }
 
@@ -5092,7 +5204,7 @@ fn search_truncation_warning_surfaces_on_cache_miss() {
     // part of the layer hash), which guarantees the run is a genuine cache
     // MISS even though all tests share one fixture DB -- asserted via the
     // activation trace, not assumed.
-    const QUERY: &str = r#"search("foo", whole_word="true", limit="3")"#;
+    const QUERY: &str = r#"search("foo", whole_word=true, limit=3)"#;
     let (res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
 
     // One layer-bearing statement, one root shard per visible root (no upstream
@@ -5144,7 +5256,7 @@ fn search_truncation_warning_surfaces_on_cache_hit() {
     // cache hit was an early footgun the design pins down.  limit=2 is
     // unique to this test so the miss->hit sequence is guaranteed and
     // asserted, not assumed.
-    const QUERY: &str = r#"search("foo", whole_word="true", limit="2")"#;
+    const QUERY: &str = r#"search("foo", whole_word=true, limit=2)"#;
     let (_first, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
     let (second, acts2) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
 
@@ -5185,7 +5297,7 @@ fn search_truncation_warning_surfaces_on_cache_hit() {
 fn search_no_truncation_warning_when_under_cap() {
     // Plenty of headroom: explicit large limit so no truncation occurs.
     // The result set should not contain a truncation warning.
-    const QUERY: &str = r#"search("foo", limit="500")"#;
+    const QUERY: &str = r#"search("foo", limit=500)"#;
     let res = run_query(TEST_INPUT_SEARCH, QUERY);
 
     let truncation_warns: Vec<_> = res
@@ -5206,14 +5318,14 @@ fn search_no_truncation_warning_when_under_cap() {
 
 #[test]
 fn search_whole_word_underscore_negative() {
-    // `_` is in is_word_char's ASCII range so `search("foo", whole_word="true")`
+    // `_` is in is_word_char's ASCII range so `search("foo", whole_word=true)`
     // must NOT match "foo_bar".  Object 3's "foobar foo foo_bar foo.bar" lets
     // us cross-check: the whole-word search picks up "foo" (freestanding) and
     // "foo" inside "foo.bar" (`.` separates), but neither "foobar" (no left
     // boundary) nor "foo_bar" (underscore is a word char).
     let res = run_query(
         TEST_INPUT_SEARCH,
-        r#"project("search_proj_1") search("foo", whole_word="true", case="sensitive")"#,
+        r#"project("search_proj_1") search("foo", whole_word=true, case="sensitive")"#,
     );
     // Object 3 in proj 1: "foobar foo foo_bar foo.bar" -- whole-word "foo"
     // matches the freestanding "foo" and the leading "foo" of "foo.bar".  We
@@ -5238,7 +5350,7 @@ fn search_substring_includes_foobar() {
     );
     let whole = run_query(
         TEST_INPUT_SEARCH,
-        r#"project("search_proj_1") search("foo", whole_word="true")"#,
+        r#"project("search_proj_1") search("foo", whole_word=true)"#,
     );
     assert!(
         substring.nodes.as_vec().len() > whole.nodes.as_vec().len(),
@@ -5371,7 +5483,7 @@ fn search_cache_hit_on_repeat_same_filter() {
     // id without repopulating.  limit=399 is unique to this test (limit is
     // part of the layer hash) so the miss->hit sequence is guaranteed even
     // with other tests sharing the fixture DB.
-    const QUERY: &str = r#"project("search_proj_1") search("foo", limit="399")"#;
+    const QUERY: &str = r#"project("search_proj_1") search("foo", limit=399)"#;
     let (first, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
     let (second, acts2) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
 
@@ -5409,11 +5521,11 @@ fn search_different_filter_different_cache() {
     // identical nodes for both).
     let (p1, acts1) = run_query_traced(
         TEST_INPUT_SEARCH,
-        r#"project("search_proj_1") search("foo", limit="400")"#,
+        r#"project("search_proj_1") search("foo", limit=400)"#,
     );
     let (p2, acts2) = run_query_traced(
         TEST_INPUT_SEARCH,
-        r#"project("search_proj_2") search("foo", limit="400")"#,
+        r#"project("search_proj_2") search("foo", limit=400)"#,
     );
 
     assert!(
@@ -5451,7 +5563,7 @@ fn search_different_filter_different_cache() {
 // Isolation convention: all tests share one fixture DB per fixture file and
 // run in parallel, so cache entries leak across tests.  `limit` is part of
 // the search layer hash; every cache-sensitive test therefore uses a limit
-// value unique across this file (grep for `limit="` before picking a new
+// value unique across this file (grep for `limit=` before picking a new
 // one) to guarantee its first run is a genuine cache miss.
 
 /// Read one eph layer's metadata row and its (symbols, instances) row counts.
@@ -5474,7 +5586,7 @@ fn search_first_call_reports_created_and_populated() {
     // instance rows hold exactly that project's matches — summing to the
     // returned nodes 1:1.
     use crate::command::ShardRole;
-    const QUERY: &str = r#"search("foo", limit="397")"#;
+    const QUERY: &str = r#"search("foo", limit=397)"#;
     let (res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
 
     assert_root_roles(&acts, &[(R1, ShardRole::Root), (R2, ShardRole::Root)]);
@@ -5547,7 +5659,7 @@ fn search_repeat_call_hits_cache_without_repopulating() {
     // Second identical call must reuse the SAME layer row (created=false)
     // and must not insert any new rows into it -- the per-layer symbol and
     // instance counts are identical before and after the repeat call.
-    const QUERY: &str = r#"search("foo", limit="398")"#;
+    const QUERY: &str = r#"search("foo", limit=398)"#;
 
     let (first, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
     assert!(
@@ -5594,7 +5706,7 @@ fn search_truncated_flag_persists_on_layer_row() {
     // truncated=true in the same transaction as the populate; the repeat
     // call reads it back on the cache-hit path and still surfaces the
     // warning.
-    const QUERY: &str = r#"search("foo", whole_word="true", limit="1")"#;
+    const QUERY: &str = r#"search("foo", whole_word=true, limit=1)"#;
 
     let (_, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
     assert!(
@@ -5685,14 +5797,14 @@ fn search_root_shard_reused_across_eph_prefix_change() {
     // run B's search layer was a full cache miss.
     use crate::command::ShardRole;
     const Q_A: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="60000", end="60100", instance_type="1") }; "#,
-        r#"search("foo", limit="21")"#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=60000, end=60100, instance_type=1) }; "#,
+        r#"search("foo", limit=21)"#,
     );
     const Q_B: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="61000", end="61100", instance_type="1") }; "#,
-        r#"search("foo", limit="21")"#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=61000, end=61100, instance_type=1) }; "#,
+        r#"search("foo", limit=21)"#,
     );
 
     // Trace shape, per visible root (ascending): the layer{} block (itself
@@ -5774,7 +5886,7 @@ fn search_without_upstream_creates_only_root_shard() {
     // selection shard — a bare search materialises exactly one activation per
     // visible root, the root-parented root shard, and repeat runs hit both.
     use crate::command::ShardRole;
-    const QUERY: &str = r#"search("foo", limit="22")"#;
+    const QUERY: &str = r#"search("foo", limit=22)"#;
 
     let (_res, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
     assert_root_roles(&acts1, &[(R1, ShardRole::Root), (R2, ShardRole::Root)]);
@@ -5817,9 +5929,9 @@ fn search_selection_shard_empty_but_materialized() {
     // The row's existence is what keeps downstream chaining deterministic.
     use crate::command::ShardRole;
     const QUERY: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="62000", end="62100", instance_type="1") }; "#,
-        r#"search("foo", limit="23")"#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=62000, end=62100, instance_type=1) }; "#,
+        r#"search("foo", limit=23)"#,
     );
 
     let (_res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
@@ -5911,14 +6023,14 @@ fn search_truncation_on_root_shard_survives_eph_change() {
     // survives BOTH cache dimensions (hit, and changed prefix).
     use crate::command::ShardRole;
     const Q_A: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="63000", end="63100", instance_type="1") }; "#,
-        r#"search("foo", whole_word="true", limit="4")"#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=63000, end=63100, instance_type=1) }; "#,
+        r#"search("foo", whole_word=true, limit=4)"#,
     );
     const Q_B: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="64000", end="64100", instance_type="1") }; "#,
-        r#"search("foo", whole_word="true", limit="4")"#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=64000, end=64100, instance_type=1) }; "#,
+        r#"search("foo", whole_word=true, limit=4)"#,
     );
 
     let shape: &[(i64, ShardRole)] = &[
@@ -6001,11 +6113,11 @@ fn downstream_chaining_keys_deterministic() {
     // chain tail) and the selection shard-id stability downstream keys depend
     // on.
     const QUERY: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="65000", end="65100", instance_type="1") }; "#,
-        r#"search("foo", limit="24"); "#,
-        r#"layer { ephemeral_instance(symbol_id="11", object_id="2", "#,
-        r#"start="66000", end="66100", instance_type="1") }"#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=65000, end=65100, instance_type=1) }; "#,
+        r#"search("foo", limit=24); "#,
+        r#"layer { ephemeral_instance(symbol_id=11, object_id=2, "#,
+        r#"start=66000, end=66100, instance_type=1) }"#,
     );
 
     // 10 activations — each statement materialises per root: the leading
@@ -6117,14 +6229,14 @@ fn multi_selection_shard_tree_sibling_parents_and_deterministic_tip() {
     //    hit with identical layer ids on every root.
     use crate::command::ShardRole;
     const QUERY: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="86000", end="86100", instance_type="1") }; "#,
-        r#"{ layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="86200", end="86300", instance_type="1") } ; "#,
-        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="86400", end="86500", instance_type="1") } }; "#,
-        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="86600", end="86700", instance_type="1") }"#,
+        r#"layer { ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=86000, end=86100, instance_type=1) }; "#,
+        r#"{ layer { ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=86200, end=86300, instance_type=1) } ; "#,
+        r#"layer { ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=86400, end=86500, instance_type=1) } }; "#,
+        r#"layer { ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=86600, end=86700, instance_type=1) }"#,
     );
     let shape: &[(i64, ShardRole)] = &[
         // tree 0 (seed): empty pre-tree chain → root shards only.
@@ -6219,12 +6331,12 @@ fn first_materialisation_multi_block_tree_tip_is_last_root_shard() {
     // in pre-order), which the next tree's selection shards parent on.
     use crate::command::ShardRole;
     const QUERY: &str = concat!(
-        r#"{ layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="87000", end="87100", instance_type="1") } ; "#,
-        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="87200", end="87300", instance_type="1") } }; "#,
-        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="87400", end="87500", instance_type="1") }"#,
+        r#"{ layer { ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=87000, end=87100, instance_type=1) } ; "#,
+        r#"layer { ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=87200, end=87300, instance_type=1) } }; "#,
+        r#"layer { ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=87400, end=87500, instance_type=1) }"#,
     );
 
     let (_res, acts) = run_query_traced(VERB_TEST, QUERY);
@@ -6270,9 +6382,9 @@ fn identical_tree_mates_converge_on_same_layers() {
     // a cache hit on the SAME layer id — never a duplicate row, never a
     // half-built layer.
     use crate::command::ShardRole;
-    // `limit="44"` is unique to this test, so the first run is cold: the
+    // `limit=44` is unique to this test, so the first run is cold: the
     // race is a genuine create-vs-create, not two cache hits.
-    const QUERY: &str = r#"{ search("foo", limit="44") ; search("foo", limit="44") }"#;
+    const QUERY: &str = r#"{ search("foo", limit=44) ; search("foo", limit=44) }"#;
 
     let shape: &[(i64, ShardRole)] = &[
         // ONE tree, empty pre-tree chain → first-materialisation elision: root shards
@@ -6342,10 +6454,10 @@ fn three_content_verb_tree_deterministic_across_runs() {
     // hits.
     use crate::command::ShardRole;
     const QUERY: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="88000", end="88100", instance_type="1") }; "#,
-        r#"{ search("foo", limit="41") ; search("hello", limit="41") ; "#,
-        r#"search("foo", limit="42") }"#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=88000, end=88100, instance_type=1) }; "#,
+        r#"{ search("foo", limit=41) ; search("hello", limit=41) ; "#,
+        r#"search("foo", limit=42) }"#,
     );
 
     let shape: &[(i64, ShardRole)] = &[
@@ -6429,14 +6541,14 @@ fn loc_root_shard_reused_across_eph_prefix_change() {
     // must be reused when the upstream ephemeral prefix changes.
     use crate::command::ShardRole;
     const Q_A: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="70000", end="70100", instance_type="1") }; "#,
-        r#"loc("main.c", "2")"#,
+        r#"layer { ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=70000, end=70100, instance_type=1) }; "#,
+        r#"loc("main.c", 2)"#,
     );
     const Q_B: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="70500", end="70600", instance_type="1") }; "#,
-        r#"loc("main.c", "2")"#,
+        r#"layer { ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=70500, end=70600, instance_type=1) }; "#,
+        r#"loc("main.c", 2)"#,
     );
 
     let shape: &[(i64, ShardRole)] = &[
@@ -6495,16 +6607,16 @@ fn layer_block_root_shard_reused_across_eph_prefix_change() {
     // the chain, so changing the upstream prefix reuses it.
     use crate::command::ShardRole;
     const Q_A: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="71000", end="71100", instance_type="1") }; "#,
-        r#"layer { ephemeral_instance(symbol_id="2", object_id="1", "#,
-        r#"start="72000", end="72100", instance_type="1") }"#,
+        r#"layer { ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=71000, end=71100, instance_type=1) }; "#,
+        r#"layer { ephemeral_instance(symbol_id=2, object_id=1, "#,
+        r#"start=72000, end=72100, instance_type=1) }"#,
     );
     const Q_B: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
-        r#"start="71500", end="71600", instance_type="1") }; "#,
-        r#"layer { ephemeral_instance(symbol_id="2", object_id="1", "#,
-        r#"start="72000", end="72100", instance_type="1") }"#,
+        r#"layer { ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=71500, end=71600, instance_type=1) }; "#,
+        r#"layer { ephemeral_instance(symbol_id=2, object_id=1, "#,
+        r#"start=72000, end=72100, instance_type=1) }"#,
     );
 
     let shape: &[(i64, ShardRole)] = &[
@@ -6580,11 +6692,11 @@ fn layer_block_eph_ops_split_into_selection_shard() {
     // op's rows in the selection shard.
     use crate::command::ShardRole;
     const QUERY: &str = concat!(
-        r#"@e search("foo", limit="26"); "#,
+        r#"@e search("foo", limit=26); "#,
         r#"layer { "#,
-        r#"ephemeral_symbol(name="splitsym2", project_id="1", symbol_type="1"); "#,
-        r#"ephemeral_instance(symbol_id="@e", object_id="1", "#,
-        r#"start="73000", end="73100", instance_type="1") "#,
+        r#"ephemeral_symbol(name="splitsym2", project_id=1, symbol_type=1); "#,
+        r#"ephemeral_instance(symbol_id="@e", object_id=1, "#,
+        r#"start=73000, end=73100, instance_type=1) "#,
         r#"}"#,
     );
 
@@ -6664,14 +6776,14 @@ fn selection_shard_collision_guard_extra_disambiguates() {
     // the differing op content flows into the selection shard key.
     use crate::command::ShardRole;
     const Q_1: &str = concat!(
-        r#"@c search("foo", limit="27"); "#,
-        r#"layer { ephemeral_ref(to_symbol="@c", from_object="1", "#,
-        r#"start="74000", end="74001") }"#,
+        r#"@c search("foo", limit=27); "#,
+        r#"layer { ephemeral_ref(to_symbol="@c", from_object=1, "#,
+        r#"start=74000, end=74001) }"#,
     );
     const Q_2: &str = concat!(
-        r#"@c search("foo", limit="27"); "#,
-        r#"layer { ephemeral_ref(to_symbol="@c", from_object="1", "#,
-        r#"start="75000", end="75001") }"#,
+        r#"@c search("foo", limit=27); "#,
+        r#"layer { ephemeral_ref(to_symbol="@c", from_object=1, "#,
+        r#"start=75000, end=75001) }"#,
     );
 
     let shape: &[(i64, ShardRole)] = &[
@@ -6742,8 +6854,8 @@ fn layer_block_negative_literal_without_chain_errors() {
     // chain the executor creates no selection shard — the rows would be
     // silently dropped.  The layer verb must error instead.
     const QUERY: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="-5", object_id="1", "#,
-        r#"start="76000", end="76100", instance_type="1") }"#,
+        r#"layer { ephemeral_instance(symbol_id=-5, object_id=1, "#,
+        r#"start=76000, end=76100, instance_type=1) }"#,
     );
     let res = run_query_err(VERB_TEST, QUERY);
     let err = match res {
@@ -6788,9 +6900,9 @@ fn root_shard_delete_cascades_selection_shard() {
     // different incarnation.
     use crate::command::ShardRole;
     const QUERY: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="80000", end="80100", instance_type="1") }; "#,
-        r#"search("foo", limit="28")"#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=80000, end=80100, instance_type=1) }; "#,
+        r#"search("foo", limit=28)"#,
     );
     let (_res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
     assert_root_roles(
@@ -6852,11 +6964,11 @@ fn delete_eph_layer_removes_reference_dependents() {
     // dependents.
     use crate::command::ShardRole;
     const QUERY: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="82000", end="82100", instance_type="1") }; "#,
-        r#"@e search("foo", limit="29"); "#,
-        r#"layer { ephemeral_instance(symbol_id="@e", object_id="1", "#,
-        r#"start="82500", end="82600", instance_type="1") }"#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=82000, end=82100, instance_type=1) }; "#,
+        r#"@e search("foo", limit=29); "#,
+        r#"layer { ephemeral_instance(symbol_id="@e", object_id=1, "#,
+        r#"start=82500, end=82600, instance_type=1) }"#,
     );
     let (_res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
     assert_root_roles(
@@ -6961,11 +7073,11 @@ fn ttl_purge_takes_dependent_closure() {
     use crate::command::ShardRole;
     use diesel_async::AsyncConnection;
     const QUERY: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="84000", end="84100", instance_type="1") }; "#,
-        r#"@e search("foo", limit="31"); "#,
-        r#"layer { ephemeral_instance(symbol_id="@e", object_id="1", "#,
-        r#"start="84500", end="84600", instance_type="1") }"#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=84000, end=84100, instance_type=1) }; "#,
+        r#"@e search("foo", limit=31); "#,
+        r#"layer { ephemeral_instance(symbol_id="@e", object_id=1, "#,
+        r#"start=84500, end=84600, instance_type=1) }"#,
     );
     let (_res, acts) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
     assert_root_roles(
@@ -7119,14 +7231,14 @@ fn search_root_shard_reused_with_filters_across_eph_change() {
     // key stays while content diverges; this test pins the key side.
     use crate::command::ShardRole;
     const Q_A: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="85000", end="85100", instance_type="1") }; "#,
-        r#"project("search_proj_1") search("foo", limit="30")"#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=85000, end=85100, instance_type=1) }; "#,
+        r#"project("search_proj_1") search("foo", limit=30)"#,
     );
     const Q_B: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="85500", end="85600", instance_type="1") }; "#,
-        r#"project("search_proj_1") search("foo", limit="30")"#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=85500, end=85600, instance_type=1) }; "#,
+        r#"project("search_proj_1") search("foo", limit=30)"#,
     );
 
     let shape: &[(i64, ShardRole)] = &[
@@ -7166,11 +7278,11 @@ fn label_resolution_keys_stable_across_duplicate_instances() {
     // instance symbol ids; canonical_ids collapses them, so the block's
     // cache key is stable and a repeat run is a full hit on every layer.
     const QUERY: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="83000", end="83100", instance_type="1") }; "#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=83000, end=83100, instance_type=1) }; "#,
         r#"@t "fn_basic"; "#,
-        r#"layer { ephemeral_instance(symbol_id="@t", object_id="2", "#,
-        r#"start="83500", end="83600", instance_type="1") }"#,
+        r#"layer { ephemeral_instance(symbol_id="@t", object_id=2, "#,
+        r#"start=83500, end=83600, instance_type=1) }"#,
     );
 
     let (_res1, acts1) = run_query_traced(TEST_INPUT_SEARCH, QUERY);
@@ -7212,7 +7324,7 @@ fn delete_project_purges_eph_cache() {
         // incidentally — the review caught exactly that).
         let (store, index) = store_and_index_with_shared_cache(fx.url()).await;
 
-        const QUERY: &str = r#"loc("main.c", "2", project="test_project")"#;
+        const QUERY: &str = r#"loc("main.c", 2, project="test_project")"#;
         let (_res, acts) = run_query_traced_on(index.clone(), QUERY).await.unwrap();
         assert!(acts[0].created, "cold loc root shard, got {:?}", acts);
         assert!(index.eph_layer_count().await.unwrap() >= 1);
@@ -7245,7 +7357,7 @@ fn per_root_root_shard_reused_under_narrowed_roots() {
     // resolver hands to `ExecutionContext::new`.
     use crate::command::ShardRole;
     use crate::test_util::run_query_traced_with_roots;
-    const QUERY: &str = r#"search("foo", limit="97")"#; // unique limit → own cache rows
+    const QUERY: &str = r#"search("foo", limit=97)"#; // unique limit → own cache rows
 
     let mut rt = tokio::runtime::Runtime::new().unwrap();
     let local = tokio::task::LocalSet::new();
@@ -7307,9 +7419,9 @@ fn root_deletion_cascades_only_that_projects_chains() {
         // Two statements → per root: prefix root shard, then search root shard +
         // selection shard (chains on both roots).
         const QUERY: &str = concat!(
-            r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-            r#"start="90000", end="90100", instance_type="1") }; "#,
-            r#"search("foo", limit="93")"#,
+            r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+            r#"start=90000, end=90100, instance_type=1) }; "#,
+            r#"search("foo", limit=93)"#,
         );
         let (_res, acts) = run_query_traced_on(index.clone(), QUERY).await.unwrap();
         let r1_layers: Vec<i64> = acts
@@ -7483,13 +7595,13 @@ fn sql_cache_persistent_branch_shared_across_chains() {
     use crate::test_util::run_query_traced_on;
     const BARE: &str = r#""fn_basic""#;
     const Q_A: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="90000", end="90100", instance_type="1") }; "#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=90000, end=90100, instance_type=1) }; "#,
         r#""fn_basic""#,
     );
     const Q_B: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="91000", end="91100", instance_type="1") }; "#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=91000, end=91100, instance_type=1) }; "#,
         r#""fn_basic""#,
     );
 
@@ -7529,8 +7641,8 @@ fn sql_cache_eph_rows_visible_cold_and_warm() {
     // nodes on a cold cache and on a warm one.
     use crate::test_util::run_query_traced_on;
     const QUERY: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="10", object_id="1", "#,
-        r#"start="92000", end="92100", instance_type="1") }; "#,
+        r#"layer { ephemeral_instance(symbol_id=10, object_id=1, "#,
+        r#"start=92000, end=92100, instance_type=1) }; "#,
         r#""fn_basic""#,
     );
 
@@ -7574,13 +7686,13 @@ fn sql_cache_containment_correct_under_prefixes() {
     // differing prefixes and cache temperatures.
     use crate::test_util::run_query_traced_on;
     const Q_A: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="201", object_id="1", "#,
-        r#"start="93000", end="93100", instance_type="1") }; "#,
+        r#"layer { ephemeral_instance(symbol_id=201, object_id=1, "#,
+        r#"start=93000, end=93100, instance_type=1) }; "#,
         r#"dir("/") has { file }"#,
     );
     const Q_B: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="201", object_id="1", "#,
-        r#"start="93500", end="93600", instance_type="1") }; "#,
+        r#"layer { ephemeral_instance(symbol_id=201, object_id=1, "#,
+        r#"start=93500, end=93600, instance_type=1) }; "#,
         r#"dir("/") has { file }"#,
     );
 
@@ -7697,8 +7809,8 @@ fn edges_pick_min_instance_across_branches() {
     // observe this function's rows directly.
     use crate::test_util::run_query_traced_on;
     const SETUP: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="2", object_id="1", "#,
-        r#"start="95000", end="95100", instance_type="1") }"#,
+        r#"layer { ephemeral_instance(symbol_id=2, object_id=1, "#,
+        r#"start=95000, end=95100, instance_type=1) }"#,
     );
 
     let mut rt = tokio::runtime::Runtime::new().unwrap();
@@ -7755,8 +7867,8 @@ fn sql_cache_warm_arrow_query_hits_traversal_families() {
     // families.
     use crate::test_util::run_query_traced_on;
     const QUERY: &str = concat!(
-        r#"layer { ephemeral_instance(symbol_id="2", object_id="1", "#,
-        r#"start="96000", end="96100", instance_type="1") }; "#,
+        r#"layer { ephemeral_instance(symbol_id=2, object_id=1, "#,
+        r#"start=96000, end=96100, instance_type=1) }; "#,
         r#""foo" { "foo.bar" }"#,
     );
 
@@ -7803,8 +7915,8 @@ fn zombie_project_reupload_purges_caches() {
 
         // Warm both caches: a query result in RAM, an eph layer in the DB.
         const QUERY: &str = concat!(
-            r#"layer { ephemeral_instance(symbol_id="1", object_id="1", "#,
-            r#"start="97000", end="97100", instance_type="1") }; "#,
+            r#"layer { ephemeral_instance(symbol_id=1, object_id=1, "#,
+            r#"start=97000, end=97100, instance_type=1) }; "#,
             r#""foo""#,
         );
         let (before, _) = run_query_traced_on(index.clone(), QUERY).await.unwrap();
@@ -7911,8 +8023,8 @@ fn combined_fallback_consults_eph_rows() {
         // Mid covers [50,250): strictly inside the module instance
         // [0,1000), strictly containing foo [100,200); bar [200,300) and
         // baz [300,400) are not contained.
-        r#"layer { ephemeral_instance(symbol_id="2", object_id="1", "#,
-        r#"start="50", end="250", instance_type="1") }; "#,
+        r#"layer { ephemeral_instance(symbol_id=2, object_id=1, "#,
+        r#"start=50, end=250, instance_type=1) }; "#,
         r#"mod("testmodule") has { func }"#,
     );
 

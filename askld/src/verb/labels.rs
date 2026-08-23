@@ -1,7 +1,8 @@
+use crate::verb::Args;
 use crate::{
     execution_context::{selector_state_with, SelectorRegistry},
     execution_state::{DependencyKind, DependencyRole},
-    parser::{Rule, Value},
+    parser::Rule,
     span::Span,
 };
 use anyhow::{bail, Result};
@@ -13,7 +14,7 @@ use index::{
 use pest::error::ErrorVariant::CustomError;
 use std::fmt::Display;
 use std::sync::Arc;
-use std::{collections::HashMap, sync::OnceLock};
+use std::sync::OnceLock;
 
 use crate::{cfg::ControlFlowGraph, execution_context::ExecutionContext, statement::Statement};
 
@@ -33,36 +34,19 @@ pub(super) struct LabelVerb {
 impl LabelVerb {
     pub(super) const NAME: &'static str = "label";
 
-    pub(super) fn new(
-        span: Span,
-        positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
-        let inherit = if let Some(val) = named.get("inherit") {
-            match val.as_plain()? {
-                "true" => true,
-                "false" => false,
-                other => bail!("Unexpected value for inherit parameter: {}", other),
-            }
-        } else {
-            false
-        };
+    pub(super) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        args.allow(&["inherit"])?;
 
-        for key in named.keys() {
-            if key != "inherit" {
-                bail!("Unexpected named argument: {}", key);
-            }
-        }
+        let inherit = args.named_bool("inherit")?.unwrap_or(false);
 
-        if let Some(label) = positional.iter().next() {
-            Ok(Arc::new(Self {
-                span,
-                label: label.as_plain()?.to_string(),
-                inherit,
-            }))
-        } else {
+        if args.no_positional() {
             bail!("Expected a positional argument");
         }
+        Ok(Arc::new(Self {
+            span,
+            label: args.str_at(0, "label name")?.to_string(),
+            inherit,
+        }))
     }
 }
 
@@ -110,34 +94,20 @@ pub(super) struct UserVerb {
 impl UserVerb {
     pub(super) const NAME: &'static str = "use";
 
-    pub(super) fn new(
-        span: Span,
-        positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
-        let forced = if let Some(forced) = named.get("forced") {
-            let forced = forced.as_plain()?;
-            if forced == "true" {
-                true
-            } else if forced == "false" {
-                false
-            } else {
-                bail!("Unexpected value for forced parameter")
-            }
-        } else {
-            false
-        };
+    pub(super) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        args.allow(&["forced"])?;
 
-        if let Some(label) = positional.iter().next() {
-            Ok(Arc::new(Self {
-                span,
-                label: label.as_plain()?.to_string(),
-                forced,
-                selection: Arc::new(OnceLock::new()),
-            }))
-        } else {
+        let forced = args.named_bool("forced")?.unwrap_or(false);
+
+        if args.no_positional() {
             bail!("Expected a positional argument");
         }
+        Ok(Arc::new(Self {
+            span,
+            label: args.str_at(0, "label name")?.to_string(),
+            forced,
+            selection: Arc::new(OnceLock::new()),
+        }))
     }
 }
 

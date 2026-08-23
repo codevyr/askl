@@ -2,13 +2,13 @@ use crate::cfg::ControlFlowGraph;
 use crate::execution_context::ExecutionContext;
 use crate::execution_state::{DependencyKind, DependencyRole};
 use crate::name_pattern::NamePattern;
-use crate::parser::Value;
 use crate::parser_context::{
     ParserContext, SYMBOL_TYPE_DATA, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FIELD, SYMBOL_TYPE_FILE,
     SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MACRO, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
 };
 use crate::span::Span;
 use crate::statement::Statement;
+use crate::verb::Args;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use index::db_diesel::{
@@ -16,7 +16,6 @@ use index::db_diesel::{
     ParentReference, ScopeContext, Selection, SymbolTypeMixin,
 };
 use index::models_diesel::SymbolRef;
-use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::{Arc, OnceLock};
 
@@ -34,12 +33,8 @@ pub struct NameSelector {
 impl NameSelector {
     pub(in crate::verb) const NAME: &'static str = "_name_select";
 
-    pub fn new(
-        span: Span,
-        _positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
-        if let Some(name) = named.get("name") {
+    pub(in crate::verb) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        if let Some(name) = args.named_value("name") {
             Ok(Arc::new(Self {
                 span,
                 pattern: NamePattern::from_value(name)?,
@@ -136,12 +131,8 @@ pub(in crate::verb) struct ForcedVerb {
 impl ForcedVerb {
     pub(in crate::verb) const NAME: &'static str = "forced";
 
-    pub fn new(
-        span: Span,
-        _positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
-        if let Some(name) = named.get("name") {
+    pub(in crate::verb) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        if let Some(name) = args.named_value("name") {
             Ok(Arc::new(Self {
                 span,
                 pattern: NamePattern::from_value(name)?,
@@ -399,10 +390,9 @@ pub(in crate::verb) struct TypeSelector {
     /// only in contributing no type predicate.
     symbol_type_id: Option<i32>,
     name_pattern: Option<NamePattern>,
-    /// If true, don't select from all - only act as a filter when deriving from parent.
-    /// This is much more efficient for queries like `file has { func }`.
-    /// If true, this filter is inherited (cloned) into derived child scopes.
-    /// Used for namespace filters like `mod("test", filter="true", inherit="true")`.
+    /// If true, this filter is inherited (cloned) into derived child scopes,
+    /// so it constrains every descendant: `mod("test", inherit=true) { ... }`.
+    /// Bare type verbs inherit by default; named ones do not.
     inherit: bool,
     /// If true, the last query token is anchored to the last path component.
     /// Default for dir and file; can be overridden with `match="contains"`.
@@ -421,21 +411,13 @@ impl TypeSelector {
     pub(in crate::verb) const NAME_METHOD: &'static str = "method";
     pub(in crate::verb) const NAME_ANY: &'static str = "any";
 
-    pub fn new(
-        span: Span,
-        positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-        symbol_type_id: Option<i32>,
-    ) -> Result<Arc<dyn Verb>> {
-        let name_pattern = positional
-            .first()
-            .map(NamePattern::from_value)
-            .transpose()?;
+    pub fn new(span: Span, args: &Args, symbol_type_id: Option<i32>) -> Result<Arc<dyn Verb>> {
+        let name_pattern = args.value_at(0).map(NamePattern::from_value).transpose()?;
 
         // `filter=` was a manual query-plan toggle; statements are
         // cost-planned now, so it is gone rather than silently ignored
         // (its namespace mode changed a query's MEANING, not just its plan).
-        if named.contains_key("filter") {
+        if args.has_named("filter") {
             bail!(
                 "`filter=` was removed: statements are cost-planned. Use `select` to \
                  make a statement binding (was filter=\"false\"); for namespace \
@@ -446,12 +428,13 @@ impl TypeSelector {
 
         // Bare type selectors (no name) inherit by default so they propagate
         // the type filter into child scopes. Named type selectors don't inherit.
-        let inherit = match named.get("inherit") {
-            Some(v) => v.as_plain()?.eq_ignore_ascii_case("true"),
-            None => name_pattern.is_none(),
-        };
+        // Bare type selectors (no name) inherit by default so they propagate
+        // the type filter into child scopes. Named type selectors don't inherit.
+        let inherit = args
+            .named_bool("inherit")?
+            .unwrap_or_else(|| name_pattern.is_none());
 
-        let leaf_anchored = match crate::parser::named_plain(named, "match")? {
+        let leaf_anchored = match args.named_str("match")? {
             Some("contains") => false,
             // Files and directories anchor to the leaf by default; code
             // symbols (where '.' separates labels) do not.  `any` follows the
@@ -781,11 +764,7 @@ pub struct GenericSelector {
 impl GenericSelector {
     pub const NAME: &'static str = "select";
 
-    pub fn new(
-        span: Span,
-        _positional: &Vec<Value>,
-        _named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
+    pub(in crate::verb) fn new(span: Span, _args: &Args) -> Result<Arc<dyn Verb>> {
         Ok(Arc::new(Self { span }))
     }
 }

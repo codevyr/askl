@@ -1,6 +1,6 @@
-use crate::{parser::Value, parser_context::ParserContext, span::Span};
+use crate::verb::Args;
+use crate::{parser_context::ParserContext, span::Span};
 use anyhow::{bail, Result};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::{DeriveMethod, Verb, VerbClass};
@@ -13,18 +13,11 @@ pub(super) struct PreambleVerb {
 impl PreambleVerb {
     pub(super) const NAME: &'static str = "preamble";
 
-    pub(super) fn new(
-        span: Span,
-        positional: &Vec<Value>,
-        named: &HashMap<String, Value>,
-    ) -> Result<Arc<dyn Verb>> {
-        if !positional.is_empty() {
+    pub(super) fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        if !args.no_positional() {
             bail!("Unexpected positional arguments");
         };
-
-        if !named.is_empty() {
-            bail!("Unexpected named arguments");
-        };
+        args.allow(&[])?;
 
         Ok(Arc::new(Self { span }))
     }
