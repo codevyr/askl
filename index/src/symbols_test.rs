@@ -471,3 +471,100 @@ async fn multi_instance_edges_do_not_fan_out() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// The token containment `CompoundNameMixin` emits beside its lquery is a
+/// *pre-filter*: it must narrow the candidate set without ever removing a
+/// match.  Soundness rests on one implication -- an ordered-subset match on
+/// labels `a..b` means both are labels of the path, so
+/// `{a,b} subset labels(path)` -- and that in turn rests on the query's
+/// tokens appearing literally in `symbol_path`.
+///
+/// This test is the guard for exactly that.  It compares the engine's answer
+/// against the bare lquery run directly, so it fails if
+/// `index.symbol_name_to_ltree`'s normalization ever diverges from
+/// `normalize_symbol_tokens` -- which is what would silently start dropping
+/// matches.  `(*k8s.io/kubernetes/pkg/kubelet.Kubelet).Run` in the fixture is
+/// the case that matters: its labels are *not* substrings of its `name`, so a
+/// `name`-based pre-filter would fail here.
+#[tokio::test(flavor = "current_thread")]
+async fn test_compound_name_prefilter_never_drops_a_match() -> anyhow::Result<()> {
+    use crate::db_diesel::Index;
+    use crate::symbols::build_lquery;
+    use diesel::RunQueryDsl;
+
+    #[derive(diesel::QueryableByName)]
+    struct NameRow {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        name: String,
+    }
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_SYMBOL_TOKENS)
+        .await?;
+
+    let conn = &mut <PgConnection as Connection>::establish(&url)
+        .map_err(|e| anyhow::anyhow!("connect: {e}"))?;
+
+    // Deep paths, shared prefixes, near-misses, and a name whose labels are
+    // not substrings of it.  Single tokens included: CompoundNameMixin is
+    // constructed with them too, and containment on one label is still sound.
+    let patterns = [
+        "kubelet.run",
+        "kubelet",
+        "run",
+        "kubernetes.run",
+        "kubelet.Kubelet.Run",
+        "k8s.kubelet.Run",
+        "pkg.run",
+        "kubelet.aaaaaaaaaaa.run",
+        "kubeleter.run",
+        "nosuchtoken.run",
+    ];
+
+    for pattern in patterns {
+        let filter = CompositeFilter::leaf(CompoundNameMixin::new(pattern));
+        let mut engine: Vec<String> = index
+            .find_symbol(
+                &filter,
+                ScopeContext::Skip,
+                ScopeContext::Skip,
+                &EphContext::rooted(index.load_root_layers().await?),
+            )
+            .await?
+            .into_inner()
+            .nodes
+            .iter()
+            .map(|n| n.symbol.name.clone())
+            .collect();
+        engine.sort();
+        engine.dedup();
+
+        // Reference: the lquery alone, no pre-filter, joined to instances the
+        // way the engine's current-query is.
+        let lquery = build_lquery(pattern, false, true)
+            .unwrap_or_else(|| panic!("{pattern:?} produced no lquery"));
+        let mut reference: Vec<String> = diesel::sql_query(format!(
+            "SELECT DISTINCT s.name FROM index.symbols s \
+             JOIN index.symbol_instances si ON si.symbol = s.id \
+             WHERE s.symbol_path ~ '{lquery}'::lquery"
+        ))
+        .load::<NameRow>(conn)
+        .map_err(|e| anyhow::anyhow!("reference query for {pattern:?}: {e}"))?
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+        reference.sort();
+        reference.dedup();
+
+        assert_eq!(
+            engine, reference,
+            "pre-filtered result set diverged from the bare lquery for {pattern:?}"
+        );
+    }
+
+    Ok(())
+}

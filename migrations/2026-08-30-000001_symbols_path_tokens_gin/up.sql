@@ -1,0 +1,71 @@
+-- A GIN index over the labels of symbol_path, so compound-name lookups have a
+-- prunable access path.
+--
+-- THE INCIDENT
+--
+-- `func {field "qaic_bo.dbc"}` took 19.6 s cold.  All of it was one SQL --
+-- `probe completed elapsed_ms=19636 rows=1` -- while every other statement in
+-- that query ran in 1-9 ms.
+--
+-- A compound name (one containing '.', '/' or ':') is matched by ordered
+-- subset: "cli.Run" matches any symbol whose path holds the labels `cli` and
+-- `Run`, in that order, at any depth.  CompoundNameMixin expresses that as
+-- `symbol_path ~ '*.cli.*.Run.*'::lquery`, and for the non-leaf-anchored form
+-- that lquery is the ONLY predicate it contributes -- the leaf_name btree
+-- equality that makes single-token names fast comes from the leaf-anchored
+-- constructor alone.
+--
+-- A leading-'*' lquery gives GiST nothing to descend on, so the scan
+-- degenerated into a full walk of the 1.5 GB symbols_project_path_gist_idx:
+-- 79,456 pages / ~620 MB read to return one row.  With shared_buffers at
+-- 128 MB against a 24 GB database that walk is served from the OS page cache
+-- at best -- hence 0.39 s warm and 19.6 s cold, for the same plan.
+--
+-- WHAT THIS INDEX GIVES THE PLANNER
+--
+-- An ordered-subset match on labels a..b implies the set containment
+-- {a,b} <= labels(path), so
+--
+--   string_to_array(symbol_path::text, '.') @> ARRAY['cli','Run']
+--
+-- is a sound superset pre-filter, and this index answers it.  The lquery still
+-- decides -- it alone enforces order and repetition; the containment only
+-- narrows the candidates.  Measured on the reference deployment: 79,456 pages
+-- -> 19 pages, 0.39 s -> 0.4 ms.
+--
+-- The pre-filter is deliberately over symbol_path and NOT over `name`: the
+-- labels are not substrings of `name`.  index.symbol_name_to_ltree strips
+-- `* [ ] { } , @ - ( )` and space, then drops anything outside [A-Za-z0-9_]
+-- per label, so `foo-bar.baz` is stored as `foobar.baz`.  270,090 of 5.9M
+-- names (4.6%) contain such characters, and a `name LIKE '%a%b%'` pre-filter
+-- would silently drop every one of them.  symbol_path::text IS the normalized
+-- dot-joined form, so its labels are literally present, in order.
+--
+-- AN EXPRESSION INDEX, NOT A GENERATED COLUMN
+--
+-- string_to_array, the ltree->text cast and text are all IMMUTABLE, so this
+-- needs no stored column: no table rewrite, and the ingest path is untouched.
+--
+-- Built non-CONCURRENTLY, like symbols_leafname_trgm_idx in
+-- 2026-07-29-000001_leafname_trgm: diesel runs migrations inside a
+-- transaction, where CONCURRENTLY is not allowed.  The build takes a ShareLock
+-- on index.symbols, briefly blocking indexer writes at deploy -- ~58 s and
+-- 480 MB at 5.9M symbols.
+--
+-- NOTE FOR WHOEVER TOUCHES THE QUERY SIDE
+--
+-- This index is worthless on its own.  GiST-ltree has no selectivity
+-- estimator -- it reports a constant `rows=591` for every lquery -- so against
+-- that fixed estimate a second bitmap always looks cheap and the planner
+-- BitmapAnds the 116k-page GiST walk straight back in.  CompoundNameMixin
+-- therefore emits the lquery against `(symbol_path::text)::ltree`, which stops
+-- it matching the indexed column and demotes it to a recheck.  Removing that
+-- cast silently restores the full walk.
+--
+-- The dependency runs the other way too: with the cast in place but this index
+-- missing, the predicate has no access path at all and degrades to a parallel
+-- seq scan -- 227,400 pages, worse than the walk it replaced.  Migrations run
+-- at boot before askld serves, so the two ship together; do not separate
+-- them.
+CREATE INDEX symbols_path_tokens_gin
+  ON index.symbols USING gin (string_to_array(symbol_path::text, '.'));
