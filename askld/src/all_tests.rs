@@ -4881,6 +4881,90 @@ fn budget_truncation_surfaces_warning() {
 }
 
 #[test]
+fn an_echo_child_does_not_cost_the_budget() {
+    // The budget law: *truncated rows may only travel where they cannot
+    // narrow an independent selection.*  A bare `{}` is an echo — it derives
+    // from the parent and, being weak, never narrows it — so the parent keeps
+    // its bound and still warns.
+    //
+    // Before this rule ANY dependent cleared the budget, which is what made a
+    // wide leaf with an empty scope time out where the same leaf alone
+    // answered instantly (`perf/BUDGET_GATE.md`).
+    let res = run_query_with_budget(TEST_INPUT_SEARCH, r#"search("foo") { }"#, 1);
+    assert!(
+        res.warnings
+            .iter()
+            .any(|w| w.message.contains("result budget")),
+        "an echo child must not clear the budget, got {:?}",
+        res.warnings
+            .iter()
+            .map(|w| w.message.clone())
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn a_data_originating_child_costs_the_budget() {
+    // The other half of the law, from the user's side: when a child computes
+    // its own selection, the parent's rows feed `constrain_*` and the
+    // truncation warning must not appear.
+    //
+    // In THIS shape `find_symbol`'s scope rule is what enforces it — the
+    // child is conditioned and uncomputed, so `build_children_scope` hands
+    // the parent a `Scope` and the leaf limit drops there.  The case only
+    // Gate 1 covers is
+    // `a_composed_child_keeps_its_rows_complete_under_a_budget`.
+    let res = run_query_with_budget(TEST_INPUT_SEARCH, r#"search("foo") { "fn_basic" }"#, 1);
+    assert!(
+        !res.warnings
+            .iter()
+            .any(|w| w.message.contains("result budget")),
+        "a data-originating child must clear the budget, got {:?}",
+        res.warnings
+            .iter()
+            .map(|w| w.message.clone())
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn a_composed_child_keeps_its_rows_complete_under_a_budget() {
+    // Gate 1's own case — the one `find_symbol`'s scope rule does NOT cover.
+    //
+    // The wrapper `{ … }` is a unit with no name of its own, so
+    // `build_parent_scope` finds no parent filter to scope by; the child IS
+    // conditioned and the wrapper originates data (it has a non-weak
+    // descendant), so the parent side DEFERS — `Skip`.  The child has no
+    // children, so that side is `Skip` too.  Neither is a `Scope`, so nothing
+    // inside `find_symbol` objects to bounding the child — yet the wrapper
+    // then takes those rows through `constrain_by_child`.
+    //
+    // `g"test.*"` matches 8 symbols over 9 instances (`test.f` has two), and
+    // cap=1 means a LIMIT of 8.  The bound would bite by exactly one row.
+    const QUERY: &str = r#"{ g"test.*" }"#;
+    let unlimited = run_query_with_budget(TEST_INPUT_MODULES, QUERY, 0);
+    let capped = run_query_with_budget(TEST_INPUT_MODULES, QUERY, 1);
+
+    let sorted = |r: &crate::statement::ExecutionResult| {
+        let mut v = r.nodes.as_vec();
+        v.sort();
+        v
+    };
+    assert!(
+        sorted(&unlimited).len() > 8,
+        "fixture must exceed cap=1's LIMIT of 8 or the comparison proves \
+         nothing; got {}",
+        sorted(&unlimited).len()
+    );
+    assert_eq!(
+        sorted(&capped),
+        sorted(&unlimited),
+        "a result budget must not change a composed answer: the child's rows \
+         feed the wrapper's constrain_by_child"
+    );
+}
+
+#[test]
 fn multi_instance_target_keeps_its_reference_edges() {
     // `test.f` has TWO definition instances — 86 in /bar.c, 96 in /main.c —
     // and is referenced twice, from `test.d` (94) and `test.e` (95).

@@ -661,18 +661,14 @@ impl SelectorState {
     ) -> bool {
         // Every arm below RETAINS against `dependency`'s rows, so a dependency
         // that stopped at a `LIMIT` would silently prune neighbours that do
-        // relate to the rows it never fetched.  `stage_read` prevents it by
-        // clearing the result budget for any composed statement — at a cost
-        // measured in `perf/BUDGET_GATE.md` (a bounded wide leaf answers in
-        // 0.05s; the same leaf composed times out at 120s).  Retiring that
-        // gate means teaching composition to consume a PREDICATE instead of
-        // rows; until then this is the invariant that makes the gate load
-        // bearing, so assert it rather than leave it implied.
-        debug_assert!(
-            !dependency.budget_bounded,
-            "constrain_selection consumed a budget_bounded (truncated) dependency: \
-             composition would treat the rows that fit the LIMIT as the whole answer"
-        );
+        // relate to the rows it never fetched.  What keeps that unreachable is
+        // the budget law — *truncated rows may only travel where they cannot
+        // narrow an independent selection* — established by
+        // `edge_consumes_rows` and fenced in `Statement::notify`, the one
+        // place that can see whether the receiving statement is an echo.  A
+        // bare `Selection` cannot answer that, which is why the assert is not
+        // here.
+        // Cost of the gate: `perf/BUDGET_GATE.md`.
 
         if self.selection.is_none() {
             return false;
@@ -1102,7 +1098,7 @@ pub trait Selector: std::fmt::Debug + Verb {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to find child instance IDs: {}", e))?;
 
-        let selection = find_symbol_by_instance_id(
+        let mut selection = find_symbol_by_instance_id(
             index,
             selector_filters,
             &decl_ids,
@@ -1111,6 +1107,13 @@ pub trait Selector: std::fmt::Debug + Verb {
             eph,
         )
         .await?;
+
+        // An echo of a truncated parent is itself truncated: `decl_ids` was
+        // derived from the parent ids that survived its LIMIT, so rows the
+        // parent never fetched have no children here either.  The id-scoped
+        // query above cannot notice that, so carry the flag across — otherwise
+        // the echo renders short with nothing saying why.
+        selection.budget_bounded |= parent_sel.budget_bounded;
 
         Ok(Some(selection))
     }
