@@ -16,8 +16,8 @@ use crate::ltree::Ltree;
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::schema_diesel as index_schema;
 use crate::symbols::{
-    build_lquery, normalize_leaf_fragment, normalize_symbol_tokens, smart_case_sensitive,
-    symbol_name_to_path, SymbolInstanceId,
+    build_lquery_and_tokens, is_leaf_char, normalize_leaf_fragment, normalize_symbol_tokens,
+    smart_case_sensitive, symbol_name_to_path, SymbolInstanceId,
 };
 
 diesel::alias! {
@@ -295,8 +295,55 @@ type HasChildrenJoinSource = InnerJoinQuerySource<
 pub type HasChildrenQuery<'a> =
     BoxedSelectStatement<'a, HasChildrenSelectionTuple, FromClause<HasChildrenJoinSource>, Pg>;
 
+/// An lquery predicate against `column`.
+///
+/// The column is wrapped in `::text::ltree` **on purpose**, to keep this
+/// predicate away from `symbols_project_path_gist_idx`.  This is not
+/// cosmetic and it is not redundant.
+///
+/// Every lquery this module builds begins with `*`, which GiST-ltree cannot
+/// prune: matching one costs a full walk of the 1.5 GB index -- 79,456 pages
+/// to return a single row, 0.39 s warm and 19.6 s cold for the same plan.
+/// Worse, GiST-ltree has no selectivity estimator; it reports a constant
+/// `rows=591` whatever the pattern, so against that fixed estimate a second
+/// bitmap always looks cheap and the planner `BitmapAnd`s the walk back in
+/// even when a far better access path exists.  Measured: adding the token
+/// pre-filter beside this predicate changed nothing at all until the cast
+/// went in.
+///
+/// A predicate the planner cannot cost must not be offered as an access path.
+/// The cast stops the expression matching the indexed column, leaving the
+/// lquery as the recheck it should be over candidates from
+/// `symbols_path_tokens_gin` (see [`path_tokens_contains_sql`]).  Deleting it
+/// silently restores the full walk.
 fn ltree_filter_sql(column: &str, lquery: &str) -> String {
-    format!("{} ~ '{}'::lquery", column, lquery)
+    format!("({column}::text)::ltree ~ '{lquery}'::lquery")
+}
+
+/// Token-set pre-filter for a compound name: the labels the lquery requires,
+/// as a containment test `symbols_path_tokens_gin` can answer.
+///
+/// Sound because an ordered-subset match on labels `a..b` implies the set
+/// containment `{a,b} subset labels(path)`.  It is only ever a pre-filter --
+/// the lquery beside it still decides, since containment knows nothing about
+/// order or repetition.
+///
+/// The pre-filter is over `symbol_path` and deliberately not over `name`: the
+/// labels are not substrings of `name`.  `index.symbol_name_to_ltree` strips
+/// `* [ ] { } , @ - ( )` and space, then drops anything outside `[A-Za-z0-9_]`
+/// per label, so `foo-bar.baz` is stored as `foobar.baz` -- 4.6% of names on
+/// the reference deployment contain such characters, and a `name`-based
+/// pre-filter would silently drop every one of them.
+///
+/// Tokens are interpolated rather than bound; the `[A-Za-z0-9_]+` invariant
+/// asserted in [`CompoundNameMixin::with_options`] is what makes that safe.
+fn path_tokens_contains_sql(column: &str, tokens: &[String]) -> String {
+    let list = tokens
+        .iter()
+        .map(|t| format!("'{t}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("string_to_array({column}::text, '.') @> ARRAY[{list}]::text[]")
 }
 
 // ============================================================================
@@ -979,6 +1026,11 @@ fn extract_leaf_token(name: &str, dot_is_separator: bool) -> String {
 pub struct CompoundNameMixin {
     lquery: Option<String>,
     leaf_token: Option<String>,
+    /// The labels `lquery` requires, taken from the same tokenisation that
+    /// built it.  Emitted as a containment pre-filter so the query has an
+    /// access path the planner can actually cost; empty exactly when
+    /// `lquery` is `None`.
+    tokens: Vec<String>,
 }
 
 impl CompoundNameMixin {
@@ -996,9 +1048,26 @@ impl CompoundNameMixin {
         } else {
             None
         };
+        let (lquery, tokens) =
+            match build_lquery_and_tokens(compound_name, leaf_anchored, dot_is_separator) {
+                Some((lquery, tokens)) => (Some(lquery), tokens),
+                None => (None, Vec::new()),
+            };
+        // Constructor-enforced invariant: these tokens get interpolated into
+        // SQL by `path_tokens_contains_sql`, and they originate in user query
+        // text.  What makes that safe is `normalize_symbol_tokens` filtering
+        // through `is_leaf_char`.  Assert it here so widening `is_leaf_char`
+        // fails loudly instead of opening an injection hole.
+        assert!(
+            tokens
+                .iter()
+                .all(|t| !t.is_empty() && t.chars().all(is_leaf_char)),
+            "symbol path tokens must be [A-Za-z0-9_]+ before interpolation, got {tokens:?}",
+        );
         Self {
-            lquery: build_lquery(compound_name, leaf_anchored, dot_is_separator),
+            lquery,
             leaf_token,
+            tokens,
         }
     }
 }
@@ -1010,6 +1079,16 @@ impl FilterLeaf for CompoundNameMixin {
             parts.push(Box::new(
                 index_schema::symbols::dsl::leaf_name.eq(leaf.clone()),
             ));
+        }
+        // The token containment is the access path and the lquery is the
+        // recheck; they are emitted together, never one without the other.
+        // Alone, the containment would over-match (it ignores order) and the
+        // lquery would cost a full GiST walk -- see `ltree_filter_sql`.
+        if !self.tokens.is_empty() {
+            parts.push(Box::new(OwnedSql::<Bool>::new(path_tokens_contains_sql(
+                "symbols.symbol_path",
+                &self.tokens,
+            ))));
         }
         if let Some(ref lquery) = self.lquery {
             parts.push(Box::new(OwnedSql::<Bool>::new(ltree_filter_sql(
@@ -1037,6 +1116,15 @@ impl FilterLeaf for CompoundNameMixin {
                 h.update(s.as_bytes());
             }
             None => h.update([0u8]),
+        }
+        // Tokens are derived from the same tokenisation as `lquery` and so add
+        // nothing today, but they are part of the emitted SQL: the hash has to
+        // cover everything the predicate depends on, or a future change to how
+        // tokens are derived would reuse another filter's cached rows.
+        h.update((self.tokens.len() as u32).to_le_bytes());
+        for t in &self.tokens {
+            h.update((t.len() as u32).to_le_bytes());
+            h.update(t.as_bytes());
         }
     }
 }
@@ -1755,5 +1843,97 @@ mod tests {
         GlobNameMixin::new(&[lit("foo")], true, true).hash_into(&mut leaf_hash);
 
         assert_ne!(full_hash.finalize(), leaf_hash.finalize());
+    }
+
+    // ---- CompoundNameMixin: token pre-filter + demoted lquery -------------
+
+    #[test]
+    fn compound_name_carries_the_lquerys_own_tokens() {
+        // Tokens and lquery must describe the same labels; taking them from
+        // one tokenisation is what guarantees the pre-filter stays a superset
+        // of the pattern.
+        let mixin = CompoundNameMixin::new("qaic_bo.dbc");
+        assert_eq!(mixin.tokens, vec!["qaic_bo", "dbc"]);
+        assert_eq!(mixin.lquery.as_deref(), Some("*.qaic_bo.*.dbc.*"));
+
+        // dot_is_separator = false folds '.' into '_' BEFORE splitting, so a
+        // caller that re-tokenised the raw name here would disagree.
+        let file = CompoundNameMixin::with_options("src/main.go", false, false);
+        assert_eq!(file.tokens, vec!["src", "main_go"]);
+        assert_eq!(file.lquery.as_deref(), Some("*.src.*.main_go.*"));
+    }
+
+    #[test]
+    fn compound_name_emits_containment_and_demoted_lquery() {
+        let mixin = CompoundNameMixin::new("qaic_bo.dbc");
+
+        // The access path: a containment the symbols_path_tokens_gin
+        // expression index can answer.  Must match the indexed expression
+        // `string_to_array(symbol_path::text, '.')` exactly.
+        assert_eq!(
+            path_tokens_contains_sql("symbols.symbol_path", &mixin.tokens),
+            "string_to_array(symbols.symbol_path::text, '.') \
+             @> ARRAY['qaic_bo','dbc']::text[]",
+        );
+
+        // The recheck: cast away from the GiST-indexed column on purpose.
+        // A bare `symbols.symbol_path ~ ...` here means the planner can
+        // BitmapAnd the 1.5 GB index walk back in.
+        let sql = ltree_filter_sql("symbols.symbol_path", mixin.lquery.as_ref().unwrap());
+        assert_eq!(
+            sql,
+            "(symbols.symbol_path::text)::ltree ~ '*.qaic_bo.*.dbc.*'::lquery"
+        );
+        assert!(!sql.starts_with("symbols.symbol_path ~"));
+    }
+
+    #[test]
+    fn compound_name_single_token_still_pre_filters() {
+        // CompoundNameMixin is constructed with single-token names too (see
+        // symbols_test.rs); containment on one label is still sound and still
+        // beats a full index walk.
+        let mixin = CompoundNameMixin::new("kubelet");
+        assert_eq!(mixin.tokens, vec!["kubelet"]);
+        assert_eq!(
+            path_tokens_contains_sql("symbols.symbol_path", &mixin.tokens),
+            "string_to_array(symbols.symbol_path::text, '.') @> ARRAY['kubelet']::text[]"
+        );
+    }
+
+    #[test]
+    fn compound_name_tokens_are_sql_safe() {
+        // Every character that could escape the interpolated literal is
+        // stripped or split on by normalize_symbol_tokens.  If this ever
+        // fails, path_tokens_contains_sql is an injection point.
+        let mixin = CompoundNameMixin::new("foo-bar.b'az;--.qu(ux)");
+        assert!(!mixin.tokens.is_empty());
+        for t in &mixin.tokens {
+            assert!(
+                t.chars().all(is_leaf_char),
+                "token {t:?} would not be safe to interpolate"
+            );
+        }
+    }
+
+    #[test]
+    fn compound_name_hash_tracks_tokens() {
+        let mut a = Sha256::new();
+        CompoundNameMixin::new("cli.Run").hash_into(&mut a);
+
+        let mut b = Sha256::new();
+        CompoundNameMixin::new("Run.cli").hash_into(&mut b);
+
+        // Same token set, different order: different SQL, so different hash.
+        assert_ne!(a.finalize(), b.finalize());
+    }
+
+    #[test]
+    fn compound_name_empty_pattern_emits_nothing() {
+        // A name whose every character is stripped yields no tokens and no
+        // lquery -- the two must stay in lockstep, or current_expr would emit
+        // a containment with no recheck.
+        let mixin = CompoundNameMixin::new("-*-");
+        assert!(mixin.tokens.is_empty());
+        assert!(mixin.lquery.is_none());
     }
 }

@@ -716,6 +716,28 @@ pub(crate) fn build_lquery(
     anchor_leaf: bool,
     dot_is_separator: bool,
 ) -> Option<String> {
+    build_lquery_and_tokens(input, anchor_leaf, dot_is_separator).map(|(lquery, _)| lquery)
+}
+
+/// [`build_lquery`], also returning the normalized tokens the pattern was
+/// built from.
+///
+/// Callers that pair the lquery with a token-set pre-filter (see
+/// `CompoundNameMixin`, which sends the tokens to the
+/// `symbols_path_tokens_gin` index) MUST take both from here rather than
+/// re-tokenising: the two have to describe the same labels or the pre-filter
+/// stops being a superset of the pattern and starts dropping matches.  The
+/// `dot_is_separator = false` case is where a re-tokenising caller would go
+/// wrong, since the dots are folded into `_` *before* the split.
+///
+/// Every returned token satisfies [`is_leaf_char`], i.e. `[A-Za-z0-9_]+`.
+/// `CompoundNameMixin` interpolates them straight into SQL and re-asserts
+/// this; do not relax it without looking there first.
+pub(crate) fn build_lquery_and_tokens(
+    input: &str,
+    anchor_leaf: bool,
+    dot_is_separator: bool,
+) -> Option<(String, Vec<String>)> {
     let input: std::borrow::Cow<str> = if dot_is_separator {
         std::borrow::Cow::Borrowed(input)
     } else {
@@ -734,7 +756,7 @@ pub(crate) fn build_lquery(
             parts.push("*".to_string());
         }
     }
-    Some(parts.join("."))
+    Some((parts.join("."), tokens))
 }
 
 /// Checks if `subset` is an ordered subset of `superset`.

@@ -146,6 +146,66 @@ fn test_ignore_package_filter() {
 }
 
 #[test]
+fn test_ignore_compound_name_filter() {
+    // `ignore` is the one place the compound-name predicate is negated:
+    // CompoundNameMixin now contributes a token containment beside its
+    // lquery, so the exclusion is NOT(containment AND lquery).  That is only
+    // equivalent to the old NOT(lquery) because an ordered-subset match
+    // implies the containment -- exercise it directly.
+    let query = r#"preamble {
+    ignore("foo.bar")
+}
+"foo"
+"foo.bar"
+"foobar"
+"tar"
+"#;
+
+    let res = run_query("verb_test.sql", query);
+
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(93),
+            SymbolInstanceId::new(94),
+        ]
+    );
+}
+
+#[test]
+fn test_ignore_compound_name_respects_token_order() {
+    // Compound names match by ORDERED subset, so "bar.foo" excludes nothing:
+    // `foo.bar` has both labels, in the wrong order.
+    //
+    // This is the negated counterpart of the "run.kubelet" guard in
+    // index/src/symbols_test.rs.  The token containment alone cannot tell
+    // these apart -- {bar,foo} is a subset of {foo,bar} -- so if the lquery
+    // recheck is ever dropped as redundant, this test starts wrongly
+    // excluding foo.bar.
+    let query = r#"preamble {
+    ignore("bar.foo")
+}
+"foo"
+"foo.bar"
+"foobar"
+"tar"
+"#;
+
+    let res = run_query("verb_test.sql", query);
+
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(92),
+            SymbolInstanceId::new(93),
+            SymbolInstanceId::new(94),
+        ]
+    );
+}
+
+#[test]
 fn test_glob_smart_case_insensitive() {
     // All-lowercase glob matches case-insensitively: g"is*" finds sort.IsSorted.
     let res = run_query("verb_test.sql", r#"g"is*""#);

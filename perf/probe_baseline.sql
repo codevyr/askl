@@ -262,3 +262,60 @@ SELECT si.id
  WHERE s.layer = ANY(:'roots') AND si.layer = ANY(:'roots')
    AND s.leaf_name = 'amdgpu' AND s.symbol_type = 3
  LIMIT :cap + 1;
+
+\echo '=== S10: compound-name probe — field "qaic_bo.dbc" (the 17 s report) ==='
+-- Verbatim shape the engine emits for a name containing '.', '/' or ':':
+-- CompoundNameMixin with leaf_anchored=false contributes ONLY the lquery
+-- (index/src/db_diesel/mixins.rs, CompoundNameMixin::current_expr), so the
+-- probe's sole indexable predicate is a leading-`*` lquery.  GiST ltree
+-- cannot prune on a leading `*`, so this walks the 1.5 GB
+-- symbols_project_path_gist_idx end to end to return one row.
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT si.id
+  FROM index.symbols s
+  JOIN index.symbol_instances si ON s.id = si.symbol
+  JOIN index.projects p ON s.project_id = p.id
+  JOIN index.objects o ON o.id = si.object_id
+ WHERE s.layer = ANY(:'roots') AND si.layer = ANY(:'roots')
+   AND s.symbol_type = 8
+   AND s.symbol_path ~ '*.qaic_bo.*.dbc.*'::lquery
+ LIMIT :cap + 1;
+
+\echo '=== S11: same name, ANCHORED lquery — what pruning is worth ==='
+-- Not the engine's semantics (it must match qaic_bo..dbc at any depth), only
+-- the control that isolates the leading-`*` as the cause: identical index,
+-- identical row, two orders of magnitude fewer pages.
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT s.id FROM index.symbols s
+ WHERE s.symbol_path ~ 'qaic_bo.dbc'::lquery AND s.symbol_type = 8
+ LIMIT :cap + 1;
+
+\echo '=== S12: trigram-seeded candidate + lquery recheck — the fix shape ==='
+-- Preserves the ordered-subset semantics exactly (the lquery still decides;
+-- the LIKE is only a superset pre-filter, since an ordered-subset match of
+-- tokens a..b implies name LIKE '%a%b%').  Seeds from
+-- symbols_name_trgm_idx instead of the GiST walk.
+EXPLAIN (ANALYZE, BUFFERS)
+WITH cand AS MATERIALIZED (
+  SELECT s.id, s.symbol_path FROM index.symbols s
+   WHERE s.name LIKE '%qaic_bo%dbc%' AND s.symbol_type = 8
+     AND s.layer = ANY(:'roots'))
+SELECT id FROM cand WHERE symbol_path ~ '*.qaic_bo.*.dbc.*'::lquery
+ LIMIT :cap + 1;
+
+\echo '=== S13: compound-name probe AFTER the fix (needs symbols_path_tokens_gin) ==='
+-- The predicate CompoundNameMixin emits once 2026-08-30-000001 is applied:
+-- a token containment as the access path, with the lquery cast off the
+-- GiST-indexed column so it can only be a recheck.  This is S10's query with
+-- S10's semantics; only the access path differs.  Expect ~19 pages, sub-ms.
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT si.id
+  FROM index.symbols s
+  JOIN index.symbol_instances si ON s.id = si.symbol
+  JOIN index.projects p ON s.project_id = p.id
+  JOIN index.objects o ON o.id = si.object_id
+ WHERE s.layer = ANY(:'roots') AND si.layer = ANY(:'roots')
+   AND s.symbol_type = 8
+   AND string_to_array(s.symbol_path::text, '.') @> ARRAY['qaic_bo','dbc']::text[]
+   AND (s.symbol_path::text)::ltree ~ '*.qaic_bo.*.dbc.*'::lquery
+ LIMIT :cap + 1;

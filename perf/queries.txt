@@ -35,3 +35,17 @@ search("mmap_lock")
 project("linux") search("EXPORT_SYMBOL", whole_word=true)
 search("color_adjust")
 search("color")
+
+# --- compound (dotted/slashed) names: unanchored-lquery GiST full walk ---
+# A name containing '.', '/' or ':' takes the CompoundNameMixin path, which
+# emits ONLY `symbol_path ~ '*.a.*.b.*'::lquery` -- no leaf_name equality to
+# seed a btree.  A leading-`*` lquery cannot prune a GiST ltree index, so the
+# probe walks ~620 MB of the 1.5 GB symbols_project_path_gist_idx to return one
+# row: 17.3 s cold / ~0.5 s warm.  Non-compound names take LeafNameMixin
+# (btree leaf_name equality) and stay in the tens of ms -- keep both here so a
+# regression shows up as the GAP between them, not just an absolute number.
+field "qaic_bo.dbc"
+"qaic_bo.dbc"
+func "qaic_data.c"
+# controls: same shape, no dot -> btree path, must stay fast
+type "drm_gem_object"
