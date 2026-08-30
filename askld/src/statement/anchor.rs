@@ -117,7 +117,7 @@ pub(super) fn check_anchor_completeness(root: &Statement) -> Result<(), Error<Ru
             if !has_anchor[r] {
                 return Err(Error::new_from_span(
                     ErrorVariant::CustomError {
-                        message: "this query group selects nothing: no statement in it has a \
+                        message: "this component selects nothing: no statement in it has a \
                                   selecting predicate.  Add an anchor — a name (\"foo\", g\"pat*\", \
                                   func(\"foo\")), a name filter, search(...), loc(...) — or use \
                                   `select` for an explicit budget-bounded enumeration"
