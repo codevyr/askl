@@ -3,7 +3,9 @@
 .direnv
 .vscode
 test.db
-ast.json# Devenv
+ast.json
+
+# Devenv
 .devenv*
 devenv.local.nix
 result
@@ -23,3 +25,6 @@ perf/REPORT.md
 
 # SDD (subagent-driven-development) scratch workspace
 .superpowers/
+
+# Python bytecode from the perf/ and eval/ harnesses
+__pycache__/
