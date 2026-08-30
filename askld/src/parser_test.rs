@@ -277,7 +277,7 @@ fn preamble_may_repeat_at_any_top_level_position() {
         // Two directives, then a statement.
         "preamble project(\"p\")\npreamble ignore(package=\"q\")\n\"bar\"",
         // A directive between statements — the shape that used to be
-        // rejected outright as "this query group selects nothing".
+        // rejected outright as "this component selects nothing".
         "\"bar\"\npreamble project(\"p\")\n\"baz\"",
         // A trailing directive, configuring nothing.
         "\"bar\"\npreamble project(\"p\")",
