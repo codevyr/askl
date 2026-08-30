@@ -10,7 +10,7 @@ use crate::name_pattern::NamePattern;
 use crate::offset_range::range_bounds_to_offsets;
 use crate::parser::Rule;
 use crate::scope::{Scope, StatementIter};
-use crate::verb::{name_filter, LabelResolutions, NotificationContext};
+use crate::verb::{name_filter, weak_notifier_blocks, LabelResolutions, NotificationContext};
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::{CompositeFilter, EphContext, ScopeContext, Selection};
@@ -28,7 +28,7 @@ mod scope_helpers;
 
 pub use self::parse::{build_dependency_graph, build_empty_statement, build_statement};
 
-use self::scope_helpers::{build_children_scope, build_parent_scope, should_skip_in_parent_merge};
+use self::scope_helpers::{build_children_scope, build_parent_scope, is_echo};
 
 pub struct ExecutionResult {
     pub nodes: NodeList,
@@ -119,16 +119,42 @@ async fn enrich_no_match_suggestions(
     }
 }
 
+/// Whether an edge to `neighbour` means someone will read this statement's
+/// ROWS as if they were the whole answer.
+///
+/// One law decides it, and [`Statement::notify`] fences the same sentence:
+/// **truncated rows may only travel where they cannot narrow an independent
+/// selection.**  An [`is_echo`] neighbour has none — it derives from us
+/// (`derive_from_parent`) or re-displays what we found, so a bound on our rows
+/// simply bounds the echo too, and our own truncation warning already says so.
+/// Any other neighbour computes a selection of its own, which `constrain_*`
+/// then retains against our rows, silently pruning neighbours of the rows we
+/// never fetched.
+///
+/// `PreSeedSibling` carries no data at all.  `PreSeedLabel` always counts,
+/// echo or not: `compute_roots` reads the selection for `@label` resolution,
+/// and a truncated, order-arbitrary id set would both seed the layer wrongly
+/// and destabilise its input hash.
+fn edge_consumes_rows(role: &DependencyRole, neighbour: &Rc<Statement>) -> bool {
+    match role {
+        DependencyRole::PreSeedSibling => false,
+        DependencyRole::PreSeedLabel(_) => true,
+        DependencyRole::Parent | DependencyRole::Child | DependencyRole::User => {
+            !is_echo(neighbour)
+        }
+    }
+}
+
 /// Budget gate + scope construction for a statement's READ phase (Phase R).
 ///
-/// Budget-pushdown safety gate: only a statement whose selection no one else
-/// consumes may bound its neighbourhood leaves.  Any Parent/Child/User
-/// dependency or dependent means another statement's `constrain_*` reads this
-/// selection's nodes/parents/children, and a PreSeedLabel DEPENDENT means
-/// `compute_roots` reads the selection for `@label` resolution (a truncated,
-/// order-arbitrary id set would silently seed the layer AND destabilise its
-/// input hash) — so both clear the budget.  Only PreSeedSibling is pure
-/// ordering with no data flow.
+/// Budget-pushdown safety gate: only a statement whose rows nobody consumes
+/// may bound its leaves.  [`edge_consumes_rows`] answers that per edge; if any
+/// edge says yes, the budget goes.
+///
+/// This gate is the coarse one.  `find_symbol` applies a second, finer rule
+/// (a `Scope` on either side also drops the bound) — it catches the case where
+/// this statement's own neighbourhood rows feed a Rust-side intersection,
+/// which is invisible from here.  Both must hold; neither subsumes the other.
 fn stage_read(
     ctx: &ExecutionContext,
     statement: &Rc<Statement>,
@@ -139,11 +165,11 @@ fn stage_read(
         let composed = st
             .dependencies
             .iter()
-            .any(|d| !d.dependency_role.is_pre_seed())
+            .any(|d| edge_consumes_rows(&d.dependency_role, &d.dependency))
             || st
                 .dependents
                 .iter()
-                .any(|d| !matches!(d.dependency_role, DependencyRole::PreSeedSibling));
+                .any(|d| edge_consumes_rows(&d.dependency_role, &d.statement));
         if composed {
             eph.set_result_budget(index::db_diesel::ResultBudget::UNLIMITED);
         }
@@ -352,6 +378,21 @@ impl Statement {
 
     pub fn has_selection(&self, ctx: &ExecutionContext) -> bool {
         self.selection_node_count(ctx).is_some()
+    }
+
+    /// Whether any selector's selection stopped at the result budget's LIMIT,
+    /// without cloning (`get_selection` builds a merged copy).  `Selection::
+    /// extend` ORs the flag, so asking per selector matches what the merged
+    /// selection would say.  Read by the budget fence in [`Statement::notify`].
+    fn selection_is_budget_bounded(&self, ctx: &ExecutionContext) -> bool {
+        let mut bounded = false;
+        ctx.registry
+            .for_each_selector(self.command().selectors(), |selector, state| {
+                if let Some(sel) = selector.get_selection(state) {
+                    bounded |= sel.budget_bounded;
+                }
+            });
+        bounded
     }
 
     pub fn propagation_priority(&self, ctx: &ExecutionContext) -> usize {
@@ -1474,6 +1515,36 @@ impl Statement {
             return Ok(PropagationResult { changed: false });
         }
 
+        // The budget law, fenced where both ends of the edge are visible:
+        // **truncated rows may only travel where they cannot narrow an
+        // independent selection.**  [`edge_consumes_rows`] establishes it by
+        // clearing the result budget for every edge that carries rows; this
+        // assert catches a change that lets one slip through.
+        //
+        // Two ways an edge is safe.  The receiver is an echo — it has no
+        // selection of its own to lose, it derives from us.  Or the weakness
+        // rule already blocks this notification, which is how a truncated
+        // flag travels BACK from an echo we just fed: the echo is weak by
+        // construction, so it may seed a receiver that has nothing but may
+        // never narrow one that has resolved.  That second arm asks
+        // [`weak_notifier_blocks`] rather than restating it — a fence that
+        // disagreed with the rule it guards would be worse than none.
+        //
+        // It cannot live in `constrain_selection`, where the rows are actually
+        // retained against: that sees a bare `Selection` and has no way to
+        // tell an echo from a statement with an independent selection to lose.
+        debug_assert!(
+            !self.selection_is_budget_bounded(ctx)
+                || is_echo(&dependent.statement)
+                || weak_notifier_blocks(
+                    self.get_state().weak,
+                    dependent.statement.has_selection(ctx)
+                ),
+            "a budget_bounded (truncated) selection reached a data-originating \
+             dependent: composition would treat the rows that fit the LIMIT as \
+             the whole answer"
+        );
+
         if dependent.dependency_role == DependencyRole::Parent {
             // A child takes part iff it has selectors and is not a
             // display-only weak unit — the membership test is unchanged;
@@ -1486,9 +1557,7 @@ impl Statement {
             let selections: Vec<(bool, Selection)> = dependent
                 .statement
                 .children()
-                .filter(|child| {
-                    child.command().has_selectors() && !should_skip_in_parent_merge(child)
-                })
+                .filter(|child| child.command().has_selectors() && !is_echo(child))
                 .filter_map(|child| {
                     let weak = child.get_state().weak;
                     child.get_selection(ctx).map(|sel| (weak, sel))

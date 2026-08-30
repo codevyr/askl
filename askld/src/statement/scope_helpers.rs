@@ -4,7 +4,10 @@ use index::db_diesel::{CompositeFilter, EphContext, ScopeContext};
 
 use super::Statement;
 
-/// Whether a child should be excluded from the bottom-up parent merge.
+/// An **echo**: a substatement that can never originate selection data of its
+/// own, only display what a neighbour already found.  Structurally that is a
+/// weak unit verb (`{}`, `{{…}}`) whose whole subtree is weak, so no
+/// descendant could have originated data either.
 ///
 /// A bare `{}` (weak UnitVerb) can acquire a selection in two ways:
 ///
@@ -16,28 +19,32 @@ use super::Statement;
 ///    originated data that propagated upward through weak intermediaries.
 ///    This is real constraining data that the parent needs.
 ///
-/// We distinguish the two structurally: if every descendant of the child is
-/// weak, no node below could have originated data, so any selection is
-/// necessarily a top-down echo (case 1) — skip it.  If a non-weak descendant
-/// exists, real data could have flowed up (case 2) — include it.
+/// We distinguish the two structurally: if every descendant is weak, no node
+/// below could have originated data, so any selection is necessarily a
+/// top-down echo (case 1).  If a non-weak descendant exists, real data could
+/// have flowed up (case 2) — not an echo.
 ///
 /// A direct-children check (`child.children().all(weak)`) is insufficient
 /// because `mark_weak_statements` propagates weakness downward via the
 /// `parent_weak` rule: a statement can be weak (from its parent) while having
 /// a non-weak child of its own.  So a weak grandchild may still carry data
 /// from a non-weak great-grandchild.  We therefore recurse the full subtree.
-pub(super) fn should_skip_in_parent_merge(child: &Statement) -> bool {
-    child.get_state().weak && child.command().is_unit() && all_descendants_weak(child)
+///
+/// Three rules turn on this one predicate and must agree: exclusion from the
+/// bottom-up parent merge, whether a scope builder may defer its eager
+/// neighbourhood query, and — see `stage_read` — whether a neighbour may be
+/// handed budget-truncated rows.
+pub(super) fn is_echo(stmt: &Statement) -> bool {
+    stmt.get_state().weak && stmt.command().is_unit() && all_descendants_weak(stmt)
 }
 
 /// A statement that will originate selection data of its own — a non-unit
-/// selector, or a subtree containing one.  The complement of the display-only
-/// weak-unit case (`should_skip_in_parent_merge`).  Both scope builders defer
-/// an eager neighbourhood query only when the other side originates data (it
-/// will carry the relationship edges itself); a display-only side needs the
-/// eager query to materialise what it shows.
+/// selector, or a subtree containing one.  The complement of [`is_echo`].
+/// Both scope builders defer an eager neighbourhood query only when the other
+/// side originates data (it will carry the relationship edges itself); an echo
+/// needs the eager query to materialise what it shows.
 pub(super) fn originates_data(stmt: &Statement) -> bool {
-    !should_skip_in_parent_merge(stmt)
+    !is_echo(stmt)
 }
 
 fn all_descendants_weak(stmt: &Statement) -> bool {
