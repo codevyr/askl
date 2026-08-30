@@ -1109,15 +1109,20 @@ fn preamble_second_command() {
 
 #[test]
 fn preamble_inner_command() {
+    // A preamble nested in a scope is a placement error.  The message used to
+    // say "first verb statement", which described neither the check (which is
+    // about nesting depth, not position) nor the language (a query may open
+    // several preambles, anywhere at the top level).
     const QUERY: &str = r#""a"{;;;;;preamble}"#;
     let res = run_query_err(TEST_INPUT_A, QUERY);
 
     assert_eq!(res.is_err(), true);
     if let Err(e) = res {
         println!("{:#?}", e);
-        assert!(e
-            .to_string()
-            .contains("Preamble verb can only be used as the first verb"));
+        assert!(
+            e.to_string().contains("must be a top-level statement"),
+            "unexpected error: {e}"
+        );
     }
 }
 
@@ -8083,6 +8088,168 @@ fn anchor_error_is_per_component() {
     assert!(
         err.to_string().contains("selects nothing"),
         "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn preamble_after_a_preamble_is_not_an_anchoring_error() {
+    // A preamble is a directive, not a statement: it must never be held to
+    // the anchor rule.  A second preamble used to inherit the first one's
+    // globally-installed filters through the parse-time derive, so its
+    // otherwise-unit command looked like a constraint-only statement and
+    // the whole query was rejected.
+    let res = run_query_err(
+        TEST_INPUT_MODULES,
+        r#"preamble project("test_project"); preamble project("other_project"); "a""#,
+    );
+    if let Err(err) = res {
+        panic!("a preamble must not demand an anchor: {err}");
+    }
+}
+
+#[test]
+fn later_preamble_rescopes_the_statements_after_it() {
+    // Each preamble applies to the statements that follow it: a statement
+    // inherits the global command as it stood when the statement was parsed,
+    // and a repeated `project` replaces its predecessor.  So the two halves
+    // of the query resolve in different projects.
+    const QUERY: &str =
+        r#"preamble project("test_project"); "a"; preamble project("other_project"); "a""#;
+    let res = run_query(TEST_INPUT_MODULES, QUERY);
+
+    println!("{:#?}", res.nodes);
+
+    // 91 + 201 from test_project (first half), 301 from other_project (second).
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(201),
+            SymbolInstanceId::new(301)
+        ]
+    );
+}
+
+#[test]
+fn preamble_directives_accumulate_across_preambles() {
+    // Separate preambles write separate dimensions of the same global
+    // command, so they compose rather than replace: project scopes to
+    // test_project (dropping project_only.a) and ignore drops the test
+    // package, leaving other.a.  The scope spelling must agree exactly.
+    const INLINE: &str = r#"preamble project("test_project")
+preamble ignore(package="test")
+"a""#;
+    let res = run_query(TEST_INPUT_MODULES, INLINE);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(201)]);
+
+    const SCOPED: &str = r#"preamble { project("test_project") }
+preamble { ignore(package="test") }
+"a""#;
+    let res = run_query(TEST_INPUT_MODULES, SCOPED);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(201)]);
+}
+
+#[test]
+fn preamble_repeating_a_dimension_replaces_it() {
+    // Accumulation is per dimension, not per preamble: writing the same slot
+    // twice follows the ordinary replacement rule, so the later `project`
+    // wins wholesale rather than intersecting to nothing.
+    const LATER_WINS: &str = r#"preamble project("other_project")
+preamble project("test_project")
+"a""#;
+    let res = run_query(TEST_INPUT_MODULES, LATER_WINS);
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(201)]
+    );
+
+    // Reversed, the other project wins — it is order, not precedence.
+    const REVERSED: &str = r#"preamble project("test_project")
+preamble project("other_project")
+"a""#;
+    let res = run_query(TEST_INPUT_MODULES, REVERSED);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(301)]);
+
+    // The scope spelling replaces identically.
+    const SCOPED: &str = r#"preamble { project("other_project") }
+preamble { project("test_project") }
+"a""#;
+    let res = run_query(TEST_INPUT_MODULES, SCOPED);
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(201)]
+    );
+
+    // `ignore` holds no slot, so repeats accumulate instead: both packages
+    // are excluded and only the third project's symbol survives.
+    const ACCUMULATES: &str = r#"preamble ignore(package="test")
+preamble ignore(package="other")
+"a""#;
+    let res = run_query(TEST_INPUT_MODULES, ACCUMULATES);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(301)]);
+}
+
+#[test]
+fn preamble_reaches_into_nested_scopes() {
+    // "Every statement" means every statement, not every top-level one: the
+    // children inherit the directive through the same parse-time derive.
+    const QUERY: &str = r#"preamble project("test_project")
+"a" { }"#;
+    let res = run_query(TEST_INPUT_MODULES, QUERY);
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(92),
+            SymbolInstanceId::new(201),
+            SymbolInstanceId::new(202)
+        ]
+    );
+
+    // Without the directive, project_only.a joins the roots.
+    let res = run_query(TEST_INPUT_MODULES, r#""a" { }"#);
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(92),
+            SymbolInstanceId::new(201),
+            SymbolInstanceId::new(202),
+            SymbolInstanceId::new(301)
+        ]
+    );
+}
+
+#[test]
+fn preamble_composes_with_labels() {
+    // A preamble cannot carry label plumbing, but it does constrain the
+    // statements that do: both the definition and the reader see the
+    // directive, so the label round-trip stays inside test_project.
+    const QUERY: &str = r#"preamble project("test_project")
+"a" @l
+#l"#;
+    let res = run_query(TEST_INPUT_MODULES, QUERY);
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(201)]
+    );
+}
+
+#[test]
+fn trailing_preamble_configures_nothing() {
+    // A directive applies forward only.  With no statement after it there is
+    // nothing to configure — and, since a directive is not a statement, also
+    // nothing for the anchor check to reject.
+    const QUERY: &str = r#""a"
+preamble project("other_project")"#;
+    let res = run_query(TEST_INPUT_MODULES, QUERY);
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![
+            SymbolInstanceId::new(91),
+            SymbolInstanceId::new(201),
+            SymbolInstanceId::new(301)
+        ]
     );
 }
 
