@@ -154,8 +154,24 @@ impl ParserContext {
         self.prev.clone()
     }
 
+    /// Finalize this context into the command of the statement being built.
+    ///
+    /// A context that redirects to global belongs to a preamble directive
+    /// (or to a statement inside a `preamble { … }` scope).  Its verbs were
+    /// installed on the global context and apply to every statement, so the
+    /// directive keeps no command of its own — including the inheritance
+    /// [`Self::derive`] seeded it with, which carries the verbs of *earlier*
+    /// preambles.  Dropping it is what makes "directives are unit-only by
+    /// construction" true rather than merely intended: a directive is not a
+    /// statement and must never be held to the anchor rule
+    /// (see [`Command::demands_anchoring`]).
     pub fn command(&self, span: Span) -> Command {
-        let mut command = self.command.take();
+        let inherited = self.command.take();
+        let mut command = if self.redirects_to_global() {
+            Command::new(span.clone())
+        } else {
+            inherited
+        };
         if command.selectors().count() == 0 {
             command.extend(UnitVerb::new(span.clone()));
         }

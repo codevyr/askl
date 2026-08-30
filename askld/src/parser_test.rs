@@ -202,8 +202,129 @@ fn preamble_keeps_constraints_and_directives() {
         "preamble filter(\"compound_name\", \"test\", inherit=true)\n\"bar\"",
         "preamble filter(\"exact_name\", \"foo\")\n\"bar\"",
         "preamble func\n\"bar\"",
+        "preamble unnest\n\"bar\"",
     ] {
         assert!(parse(query).is_ok(), "must still parse: {query}");
+    }
+}
+
+#[test]
+fn preamble_rejects_every_selecting_form() {
+    // The rule is one rule, not a list of special cases: a verb that both
+    // selects and anchors is a statement's reason to exist, and a preamble is
+    // not a statement.  Every spelling of "originates rows" is refused.
+    for query in [
+        "preamble select\n\"bar\"",
+        "preamble g\"foo*\"\n\"bar\"",
+        "preamble func(\"foo\")\n\"bar\"",
+        "preamble !\"foo\"\n\"bar\"",
+        "preamble loc(\"/main.c\", 1)\n\"bar\"",
+        "preamble layer { }\n\"bar\"",
+    ] {
+        let msg = format!("{}", parse(query).unwrap_err());
+        assert!(
+            msg.contains("preamble cannot select"),
+            "expected a preamble-selector error for {query}, got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn preamble_rejects_a_selecting_expression() {
+    // The compound-expression builder carries the same guard, keyed on the
+    // expression's own anchor rather than on any single atom.
+    let msg = format!(
+        "{}",
+        parse("preamble (\"a\" or \"b\")\n\"bar\"").unwrap_err()
+    );
+    assert!(
+        msg.contains("this expression selects, and a preamble cannot select"),
+        "expected an expression-selector error, got: {msg}"
+    );
+}
+
+#[test]
+fn preamble_rejects_label_plumbing() {
+    // A label names ONE statement's result set, and "every statement" is not
+    // one result set — so neither half of the plumbing has a reading here.
+    // `use` is a selector but not an anchor and `label` is neither, so the
+    // selector test above misses both; what rules them out is their class.
+    // Until that check existed they were swallowed exactly as the selectors
+    // once were: `preamble #x` ran as though it had never been written,
+    // undefined label and all.
+    for query in [
+        "preamble @x\n\"bar\"",
+        "preamble @@x\n\"bar\"",
+        "preamble #x\n\"bar\"",
+        "preamble label(\"x\")\n\"bar\"",
+        "preamble use(\"x\")\n\"bar\"",
+        "preamble { @x }\n\"bar\"",
+    ] {
+        let msg = format!("{}", parse(query).unwrap_err());
+        assert!(
+            msg.contains("label plumbing"),
+            "expected a binding error for {query}, got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn preamble_may_repeat_at_any_top_level_position() {
+    // A preamble is a directive, not a header: nothing caps how many a query
+    // opens or where they sit among the top-level statements.  Each one
+    // configures the statements that follow it.
+    for query in [
+        // Two directives, then a statement.
+        "preamble project(\"p\")\npreamble ignore(package=\"q\")\n\"bar\"",
+        // A directive between statements — the shape that used to be
+        // rejected outright as "this query group selects nothing".
+        "\"bar\"\npreamble project(\"p\")\n\"baz\"",
+        // A trailing directive, configuring nothing.
+        "\"bar\"\npreamble project(\"p\")",
+        // Both spellings, repeated and mixed.
+        "preamble { ignore(package=\"f\") }\npreamble { ignore(package=\"g\") }\n\"bar\"",
+        "preamble project(\"p\")\npreamble { ignore(package=\"g\") }\n\"bar\"",
+        // The same dimension written twice — the later write replaces.
+        "preamble filter(\"type\", \"func\")\npreamble filter(\"compound_name\", \"x\")\n\"bar\"",
+    ] {
+        assert!(parse(query).is_ok(), "must parse: {query}");
+    }
+}
+
+#[test]
+fn preamble_must_be_a_top_level_statement() {
+    // Inside a scope, "applies to every statement" has no reading — so the
+    // directive is refused rather than silently narrowed to the block.
+    for query in [
+        "\"a\" { preamble project(\"p\") }",
+        "\"a\" { \"b\" { preamble } }",
+        "{ preamble }",
+    ] {
+        let msg = format!("{}", parse(query).unwrap_err());
+        assert!(
+            msg.contains("must be a top-level statement"),
+            "expected a placement error for {query}, got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn preamble_cannot_nest_inside_a_preamble() {
+    // Once a preamble is in effect its verbs are redirected to the global
+    // context, so a second `preamble` is handed that context and finds no
+    // predecessor.  That case used to `panic!("Expected to have global
+    // context")` — parsing untrusted input must never abort the process.
+    for query in [
+        "preamble preamble",
+        "preamble { preamble }",
+        "preamble ignore(package=\"f\") preamble",
+        "preamble { ignore(package=\"f\")\npreamble }",
+    ] {
+        let msg = format!("{}", parse(query).unwrap_err());
+        assert!(
+            msg.contains("cannot appear inside another"),
+            "expected a nesting error for {query}, got: {msg}"
+        );
     }
 }
 

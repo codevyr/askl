@@ -327,10 +327,11 @@ pub fn build_verb(
         // `filter("compound_name", "test")`, a name filter that legitimately
         // scopes every statement in the query.  Being a selector alone would
         // reject `scope(...)` and `unnest`, modifiers that are selectors but
-        // never originate a row.  A verb that is both — `"foo"`,
-        // `func("foo")`, `search(...)`, `loc(...)`, a layer literal,
-        // `select`, `use(...)` — is a statement's reason to exist, and a
-        // preamble is not a statement.
+        // never originate a row.  A verb that is both — `"foo"`, `func("foo")`,
+        // `search(...)`, `loc(...)`, a layer literal, `select` — is a
+        // statement's reason to exist, and a preamble is not a statement.
+        // (`use(...)` belongs to that list by intent but is not an anchor; the
+        // binding check below is what actually catches it.)
         if ctx.redirects_to_global() && verb.as_selector().is_some() && verb.anchor_kind().is_some()
         {
             return Err(Error::new_from_span(
@@ -348,6 +349,30 @@ pub fn build_verb(
                 verb_span.as_pest_span(),
             ));
         }
+
+        // The same law on the binding aspect.  `use` is a selector but not an
+        // anchor, so the test above misses it; `label` is neither.  What rules
+        // both out is the class: a label names ONE statement's result set, and
+        // "every statement" is not one result set.  Left unchecked these were
+        // swallowed exactly as the selectors above once were — `preamble #x`
+        // ran as though it had never been written, undefined label and all.
+        if ctx.redirects_to_global() && verb.class() == VerbClass::Binding {
+            return Err(Error::new_from_span(
+                CustomError {
+                    message: format!(
+                        "`{}` is label plumbing, and a preamble is not a statement: a \
+                         label names one statement's result set, so there is nothing \
+                         here to name or to read.  Move it into a statement after the \
+                         preamble (`preamble …; {} …`), or keep only constraints here — \
+                         `project(...)`, `ignore(...)`, `filter(...)`, a bare type.",
+                        verb_span.as_pest_span().as_str().trim(),
+                        verb_span.as_pest_span().as_str().trim(),
+                    ),
+                },
+                verb_span.as_pest_span(),
+            ));
+        }
+
         ctx.extend_verb(verb)
     };
 
