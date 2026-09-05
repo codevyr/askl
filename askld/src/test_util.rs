@@ -18,6 +18,7 @@ pub const TEST_INPUT_A: &'static str = index::db_diesel::Index::TEST_INPUT_A;
 pub const TEST_INPUT_B: &'static str = index::db_diesel::Index::TEST_INPUT_B;
 pub const TEST_INPUT_MODULES: &'static str = index::db_diesel::Index::TEST_INPUT_MODULES;
 pub const TEST_INPUT_CONTAINMENT: &'static str = index::db_diesel::Index::TEST_INPUT_CONTAINMENT;
+pub const TEST_INPUT_ESCALATION: &'static str = index::db_diesel::Index::TEST_INPUT_ESCALATION;
 pub const TEST_INPUT_TREE_BROWSER: &'static str = index::db_diesel::Index::TEST_INPUT_TREE_BROWSER;
 pub const TEST_INPUT_NESTED_FUNC: &'static str = index::db_diesel::Index::TEST_INPUT_NESTED_FUNC;
 pub const TEST_INPUT_TYPE_FILTER: &'static str = index::db_diesel::Index::TEST_INPUT_TYPE_FILTER;
@@ -85,6 +86,7 @@ const ALL_FIXTURES: &[&str] = &[
     TEST_INPUT_B,
     TEST_INPUT_MODULES,
     TEST_INPUT_CONTAINMENT,
+    TEST_INPUT_ESCALATION,
     TEST_INPUT_TREE_BROWSER,
     TEST_INPUT_NESTED_FUNC,
     TEST_INPUT_TYPE_FILTER,
@@ -288,6 +290,48 @@ pub fn run_query_with_budget(askl_input: &str, askl_query: &str, cap: usize) -> 
         let mut ctx = ExecutionContext::new(roots);
         ctx.eph
             .set_result_budget(index::db_diesel::ResultBudget::symbols(cap));
+        ast.execute(&mut ctx, &cfg).await.unwrap()
+    })
+}
+
+/// Run with an explicit read (safety) cap, so a small cap can force the capped
+/// state on a tiny fixture without a huge corpus.
+pub fn run_query_with_read_cap(
+    askl_input: &str,
+    askl_query: &str,
+    read_cap: usize,
+) -> ExecutionResult {
+    let mut rt = Runtime::new().unwrap();
+    let local = task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(askl_input).await;
+        let roots = index.load_root_layers().await.unwrap();
+        let cfg = ControlFlowGraph::from_symbols(index);
+        let ast = parse(askl_query).unwrap();
+        let mut ctx = ExecutionContext::new(roots);
+        ctx.probe_cap = read_cap;
+        ctx.eph.set_read_cap(read_cap);
+        ast.execute(&mut ctx, &cfg).await.unwrap()
+    })
+}
+
+/// Run with an explicit per-node out-edge cap (E1 assembly capping).  Read
+/// cap stays at the default so discovery is unaffected — the pair under test
+/// is (edges bounded) x (nodes and warnings untouched).
+pub fn run_query_with_edge_cap(
+    askl_input: &str,
+    askl_query: &str,
+    edge_cap: usize,
+) -> ExecutionResult {
+    let mut rt = Runtime::new().unwrap();
+    let local = task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index = get_shared_index(askl_input).await;
+        let roots = index.load_root_layers().await.unwrap();
+        let cfg = ControlFlowGraph::from_symbols(index);
+        let ast = parse(askl_query).unwrap();
+        let mut ctx = ExecutionContext::new(roots);
+        ctx.eph.set_edge_cap(edge_cap);
         ast.execute(&mut ctx, &cfg).await.unwrap()
     })
 }

@@ -1,3 +1,4 @@
+use crate::db_diesel::FamilyDemands;
 use crate::db_diesel::{CompositeFilter, CompoundNameMixin, EphContext, ScopeContext};
 use crate::symbols::{package_match, partial_name_match, Symbol, SymbolId};
 use diesel::pg::PgConnection;
@@ -96,8 +97,9 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
     let empty_selection = index
         .find_symbol(
             &empty_filter,
-            ScopeContext::Skip,
-            ScopeContext::Skip,
+            ScopeContext::Absent,
+            ScopeContext::Absent,
+            FamilyDemands::default(),
             &EphContext::rooted(index.load_root_layers().await?),
         )
         .await?
@@ -114,8 +116,9 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
     let selection = index
         .find_symbol(
             &a_filter,
-            ScopeContext::Skip,
-            ScopeContext::Skip,
+            ScopeContext::Absent,
+            ScopeContext::Absent,
+            FamilyDemands::default(),
             &EphContext::rooted(index.load_root_layers().await?),
         )
         .await?
@@ -130,8 +133,9 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
     let selection = index
         .find_symbol(
             &main_filter,
-            ScopeContext::Skip,
-            ScopeContext::Skip,
+            ScopeContext::Absent,
+            ScopeContext::Absent,
+            FamilyDemands::default(),
             &EphContext::rooted(index.load_root_layers().await?),
         )
         .await?
@@ -156,8 +160,9 @@ async fn test_find_symbol_by_name() -> anyhow::Result<()> {
     let compound_selection = index
         .find_symbol(
             &compound_filter,
-            ScopeContext::Skip,
-            ScopeContext::Skip,
+            ScopeContext::Absent,
+            ScopeContext::Absent,
+            FamilyDemands::default(),
             &EphContext::rooted(index.load_root_layers().await?),
         )
         .await?
@@ -188,8 +193,9 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
     let selection = index
         .find_symbol(
             &filter1,
-            ScopeContext::Skip,
-            ScopeContext::Skip,
+            ScopeContext::Absent,
+            ScopeContext::Absent,
+            FamilyDemands::default(),
             &EphContext::rooted(index.load_root_layers().await?),
         )
         .await?
@@ -212,8 +218,9 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
     let selection = index
         .find_symbol(
             &filter2,
-            ScopeContext::Skip,
-            ScopeContext::Skip,
+            ScopeContext::Absent,
+            ScopeContext::Absent,
+            FamilyDemands::default(),
             &EphContext::rooted(index.load_root_layers().await?),
         )
         .await?
@@ -235,8 +242,9 @@ async fn test_find_symbol_by_name_token_ordering() -> anyhow::Result<()> {
     let reverse_selection = index
         .find_symbol(
             &filter3,
-            ScopeContext::Skip,
-            ScopeContext::Skip,
+            ScopeContext::Absent,
+            ScopeContext::Absent,
+            FamilyDemands::default(),
             &EphContext::rooted(index.load_root_layers().await?),
         )
         .await?
@@ -406,6 +414,377 @@ async fn test_probe_instance_ids() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `find_edges_between` prunes the target side to two rows per symbol; this
+/// is the case that proves two is the floor, not one.
+///
+/// The fixture's `rec` is defined in both objects (instance 10 in /b.c, 20 in
+/// /a.c) and calls itself from inside instance 10.  Instance 10 is therefore
+/// BOTH the reference's enclosing declaration and the lowest-id instance of
+/// the symbol referred to, so `from_inst.id != to_inst.id` eliminates exactly
+/// the row `ORDER BY ..., to_inst.id` would have picked.  The edge must fall
+/// through to instance 20 rather than disappear.
+#[tokio::test(flavor = "current_thread")]
+async fn recursive_edge_survives_when_the_lowest_target_is_the_caller() -> anyhow::Result<()> {
+    use crate::db_diesel::Index;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_RECURSIVE_MULTI_INSTANCE)
+        .await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+
+    let edges = index.find_edges_between(&[10, 20], &eph).await?.0;
+
+    assert_eq!(
+        edges.len(),
+        1,
+        "the self-call must produce exactly one edge, got {:?}",
+        edges
+            .iter()
+            .map(|e| (e.from_instance_id, e.to_instance_id))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(edges[0].from_instance_id, 10, "caller is instance 10");
+    assert_eq!(
+        edges[0].to_instance_id, 20,
+        "instance 10 is excluded as its own target, so the edge resolves to 20"
+    );
+    Ok(())
+}
+
+/// A family the relationship cannot read is not fetched either.
+///
+/// `constrain_by_*` consults the REFS families only when the relationship
+/// carries REFS and the containment families only when it carries HAS, so
+/// `mod("x") { has func }` never looks at a REFS family.  On the real index
+/// that family was 10.9 s and 70,202 rows for
+/// `mod("amdgpu") { derive(type="has") func }`, every row discarded.
+///
+/// Both directions are asserted so neither half can pass vacuously: the
+/// fixture's module both refers to things and contains them.
+#[tokio::test(flavor = "current_thread")]
+async fn a_family_the_relationship_cannot_read_is_not_fetched() -> anyhow::Result<()> {
+    use crate::db_diesel::{FamilyDemand, Index};
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_CONTAINMENT).await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+    let module = CompositeFilter::leaf(CompoundNameMixin::new("testmodule"));
+
+    let demands = |refs: bool, has: bool| FamilyDemands {
+        parent: FamilyDemand { refs, has },
+        children: FamilyDemand { refs, has },
+    };
+
+    let both = index
+        .find_symbol(
+            &module,
+            ScopeContext::Unscoped,
+            ScopeContext::Unscoped,
+            demands(true, true),
+            &eph,
+        )
+        .await?
+        .into_inner();
+    assert!(
+        !both.children.is_empty() && !both.has_children.is_empty(),
+        "premise: the module both refers to things and contains them"
+    );
+
+    let has_only = index
+        .find_symbol(
+            &module,
+            ScopeContext::Unscoped,
+            ScopeContext::Unscoped,
+            demands(false, true),
+            &eph,
+        )
+        .await?
+        .into_inner();
+    assert!(
+        has_only.children.is_empty(),
+        "a HAS-only relationship cannot read a REFS family; got {} rows",
+        has_only.children.len()
+    );
+    assert!(
+        !has_only.has_children.is_empty(),
+        "...but the containment family it CAN read must still be fetched"
+    );
+
+    let refs_only = index
+        .find_symbol(
+            &module,
+            ScopeContext::Unscoped,
+            ScopeContext::Unscoped,
+            demands(true, false),
+            &eph,
+        )
+        .await?
+        .into_inner();
+    assert!(
+        refs_only.has_children.is_empty(),
+        "a REFS-only relationship cannot read a containment family; got {} rows",
+        refs_only.has_children.len()
+    );
+    assert!(
+        !refs_only.children.is_empty(),
+        "...but the REFS family it CAN read must still be fetched"
+    );
+
+    assert_eq!(
+        both.nodes.len(),
+        has_only.nodes.len(),
+        "gating a family must not change which symbols are selected"
+    );
+    Ok(())
+}
+
+/// Deriving a statement and constraining it must compute the SAME relation.
+///
+/// Once a capped statement can RE-derive as its neighbours settle, the order
+/// notifications arrive in stops being cosmetic: if `derive(N)` and the edge
+/// evidence `constrain` narrows by disagreed, the fixpoint a query reaches
+/// would depend on which neighbour spoke first. That is an intermittent wrong
+/// answer, and the cheapest defence is that both go through one query builder
+/// rather than two implementations that happen to match.
+///
+/// They do today — `find_child_instance_ids` and the `children`/`has_children`
+/// families both call `build_children_query` and `build_has_children_query`.
+/// This pins it, because nothing else would notice a fork.
+#[tokio::test(flavor = "current_thread")]
+async fn deriving_and_constraining_agree_on_the_same_relation() -> anyhow::Result<()> {
+    use crate::db_diesel::Index;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_CONTAINMENT).await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+    let identity = CompositeFilter::and(vec![]);
+
+    // The module: it both refers to things and contains them, so neither half
+    // of the relation is vacuous here.
+    let module = index
+        .find_symbol(
+            &CompositeFilter::leaf(CompoundNameMixin::new("testmodule")),
+            ScopeContext::Unscoped,
+            ScopeContext::Unscoped,
+            FamilyDemands::default(),
+            &eph,
+        )
+        .await?
+        .into_inner();
+    let source_ids: Vec<i64> = module.nodes.iter().map(|n| n.symbol_instance.id).collect();
+    assert!(!source_ids.is_empty(), "premise: the module was selected");
+
+    // What CONSTRAIN would narrow by: the child instances named in the families.
+    let mut from_families: Vec<i64> = module
+        .children
+        .iter()
+        .map(|c| c.symbol_instance.id)
+        .chain(module.has_children.iter().map(|h| h.child_instance.id))
+        .collect();
+    from_families.sort_unstable();
+    from_families.dedup();
+    assert!(
+        !from_families.is_empty(),
+        "premise: the families are non-empty, or this compares two empty sets"
+    );
+
+    // What DERIVE would produce from the same sources.
+    let (derived_ids, _capped) = index
+        .find_child_instance_ids(&source_ids, true, true, &identity, &eph)
+        .await?;
+    let mut from_derive: Vec<i64> = derived_ids.into_iter().map(Into::into).collect();
+    from_derive.sort_unstable();
+    from_derive.dedup();
+
+    assert_eq!(
+        from_derive, from_families,
+        "derive and constrain must see the same children, or the fixpoint \
+         depends on notification order"
+    );
+    Ok(())
+}
+
+/// The safety cap bounds a family read to `read_cap + 1`, always.
+///
+/// P1: no SQL read returns too much data, at any level. The escalation fixture
+/// gives `lock` ten callers; with `read_cap = 3` the derive read of "parents of
+/// lock" must come back with at most four rows — the cap plus the one sentinel
+/// row that tells the caller it was truncated. Without the cap it returns all
+/// ten. On the real index the same missing bound was a 1,100,906-row read.
+#[tokio::test(flavor = "current_thread")]
+async fn a_family_read_is_bounded_by_the_safety_cap() -> anyhow::Result<()> {
+    use crate::db_diesel::Index;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_ESCALATION).await?;
+    let mut eph = EphContext::rooted(index.load_root_layers().await?);
+    let identity = CompositeFilter::and(vec![]);
+
+    // `lock` (symbol 2) is defined at instance 3000 and has ten callers.
+    let (uncapped, uncapped_flag) = index
+        .find_parent_instance_ids(&[3000], true, false, &identity, &eph)
+        .await?;
+    assert!(
+        uncapped.len() >= 10,
+        "premise: lock has >= 10 callers uncapped, got {}",
+        uncapped.len()
+    );
+    assert!(
+        !uncapped_flag,
+        "an unbounded read (read_cap defaults to 1000 here) saw every caller,          so it must not report truncation"
+    );
+
+    eph.set_read_cap(3);
+    let (capped, capped_flag) = index
+        .find_parent_instance_ids(&[3000], true, false, &identity, &eph)
+        .await?;
+    assert!(
+        capped.len() <= 4,
+        "read_cap = 3 must bound the read to cap + 1 = 4 rows, got {}",
+        capped.len()
+    );
+    assert!(
+        capped_flag,
+        "the read hit the cap (ten callers, limit four), so it must report          truncation — this is the signal the derive path carries so a filtered          re-read cannot launder the incompleteness"
+    );
+    Ok(())
+}
+
+/// A containment family with no neighbour statement to consume it is not
+/// fetched at all.
+///
+/// `Absent` says there is no statement on that side, so nothing can read the
+/// family: `constrain_by_*` needs a neighbour to constrain against, and the
+/// graph's containment now comes from `find_has_edges_between` over the
+/// answer's own nodes.  On the real index this was 2.5 s and 178,807 rows for
+/// bare `mod("amdgpu")`, all of it discarded.
+///
+/// The same query under `Unscoped` still returns the rows, so this pins the
+/// gate rather than the absence of containment in the fixture.
+#[tokio::test(flavor = "current_thread")]
+async fn containment_family_is_not_fetched_without_a_neighbour() -> anyhow::Result<()> {
+    use crate::db_diesel::Index;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_CONTAINMENT).await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+    let module = CompositeFilter::leaf(CompoundNameMixin::new("testmodule"));
+
+    let unscoped = index
+        .find_symbol(
+            &module,
+            ScopeContext::Unscoped,
+            ScopeContext::Unscoped,
+            FamilyDemands::default(),
+            &eph,
+        )
+        .await?
+        .into_inner();
+    assert!(
+        !unscoped.has_children.is_empty(),
+        "premise: the module does contain things, so `Unscoped` must fetch them"
+    );
+
+    let absent = index
+        .find_symbol(
+            &module,
+            ScopeContext::Absent,
+            ScopeContext::Absent,
+            FamilyDemands::default(),
+            &eph,
+        )
+        .await?
+        .into_inner();
+    assert_eq!(
+        absent.nodes.len(),
+        unscoped.nodes.len(),
+        "gating a family must not change which symbols are selected"
+    );
+    assert!(
+        absent.has_children.is_empty(),
+        "no neighbour statement on the children side, so the family has no \
+         reader and must not be fetched; got {} rows",
+        absent.has_children.len()
+    );
+    assert!(
+        absent.has_parents.is_empty(),
+        "likewise on the parents side; got {} rows",
+        absent.has_parents.len()
+    );
+    Ok(())
+}
+
+/// The target-side pruning must keep the LOWEST ids, because that is the
+/// winner `ORDER BY ..., to_inst.id` picks.
+///
+/// `rec` has three instances (10, 20, 30) and `caller` — which is not a `rec`
+/// — refers to it, so nothing is removed by the self-exclusion and the edge
+/// must resolve to instance 10.  Pruning that kept the two HIGHEST instead
+/// would answer 20 and still look plausible; with only two instances of the
+/// target symbol the order is unobservable, which is why the fixture has
+/// three.  This is the second leg of the `rn <= 2` argument (the first,
+/// self-exclusion, is `recursive_edge_survives_when_the_lowest_target_is_the_caller`).
+#[tokio::test(flavor = "current_thread")]
+async fn target_pruning_keeps_the_lowest_instances() -> anyhow::Result<()> {
+    use crate::db_diesel::Index;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_RECURSIVE_MULTI_INSTANCE)
+        .await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+
+    let edges = index.find_edges_between(&[10, 20, 30, 40], &eph).await?.0;
+
+    let from_caller: Vec<i64> = edges
+        .iter()
+        .filter(|e| e.from_instance_id == 40)
+        .map(|e| e.to_instance_id)
+        .collect();
+    assert_eq!(
+        from_caller,
+        vec![10],
+        "caller is not a `rec`, so nothing is excluded and the edge takes the          lowest instance; got {:?}",
+        edges
+            .iter()
+            .map(|e| (e.from_instance_id, e.to_instance_id))
+            .collect::<Vec<_>>()
+    );
+
+    // The self-call still resolves past its own instance, now with a third
+    // candidate present.
+    let from_rec: Vec<i64> = edges
+        .iter()
+        .filter(|e| e.from_instance_id == 10)
+        .map(|e| e.to_instance_id)
+        .collect();
+    assert_eq!(
+        from_rec,
+        vec![20],
+        "instance 10 is excluded as its own target, so the next lowest wins"
+    );
+    Ok(())
+}
+
 /// The parents family carries one row per *(reference site, enclosing
 /// declaration)* — never one per instance of the referenced symbol.
 ///
@@ -430,7 +809,8 @@ async fn multi_instance_edges_do_not_fan_out() -> anyhow::Result<()> {
         .find_symbol(
             &CompositeFilter::leaf(CompoundNameMixin::new("test.f")),
             ScopeContext::Unscoped,
-            ScopeContext::Skip,
+            ScopeContext::Absent,
+            FamilyDemands::default(),
             &eph,
         )
         .await?
@@ -530,8 +910,9 @@ async fn test_compound_name_prefilter_never_drops_a_match() -> anyhow::Result<()
         let mut engine: Vec<String> = index
             .find_symbol(
                 &filter,
-                ScopeContext::Skip,
-                ScopeContext::Skip,
+                ScopeContext::Absent,
+                ScopeContext::Absent,
+                FamilyDemands::default(),
                 &EphContext::rooted(index.load_root_layers().await?),
             )
             .await?
@@ -566,5 +947,62 @@ async fn test_compound_name_prefilter_never_drops_a_match() -> anyhow::Result<()
         );
     }
 
+    Ok(())
+}
+
+/// E1: the per-node out-edge cap bounds each source node's edge list to
+/// `edge_cap`, records the truncated node, and is deterministic — assembly
+/// capping, so it never touches soundness.  `hub` (4001) references four
+/// targets, `spoke` (4002) one.
+#[tokio::test(flavor = "current_thread")]
+async fn a_per_node_edge_cap_bounds_out_edges_and_records_truncation() -> anyhow::Result<()> {
+    use crate::db_diesel::ImplicitEdge;
+    use crate::db_diesel::Index;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_ESCALATION).await?;
+    let mut eph = EphContext::rooted(index.load_root_layers().await?);
+
+    let candidates = [4001i64, 4002, 4101, 4102, 4103, 4104];
+    let out_edges = |edges: &[ImplicitEdge], from: i64| -> usize {
+        edges.iter().filter(|e| e.from_instance_id == from).count()
+    };
+
+    // Disabled (the default): hub keeps all four out-edges, spoke its one,
+    // nothing truncated.
+    let (full, trunc_off) = index.find_edges_between(&candidates, &eph).await?;
+    assert_eq!(out_edges(&full, 4001), 4, "hub has four out-edges uncapped");
+    assert_eq!(out_edges(&full, 4002), 1, "spoke has one");
+    assert!(trunc_off.is_empty(), "cap disabled => nothing truncated");
+
+    // Cap at two: hub keeps exactly two and is recorded truncated; spoke is
+    // under the cap and is not.
+    eph.set_edge_cap(2);
+    let (capped, mut trunc) = index.find_edges_between(&candidates, &eph).await?;
+    assert_eq!(out_edges(&capped, 4001), 2, "hub bounded to edge_cap = 2");
+    assert_eq!(out_edges(&capped, 4002), 1, "spoke kept (under the cap)");
+    trunc.sort_unstable();
+    assert_eq!(trunc, vec![4001], "only hub hit the cap");
+
+    // Deterministic: the same two edges survive on a second run (ORDER BY
+    // ref_id under the window), so pagination is stable.
+    let (capped2, _) = index.find_edges_between(&candidates, &eph).await?;
+    let kept = |edges: &[ImplicitEdge], from: i64| -> Vec<i64> {
+        let mut v: Vec<i64> = edges
+            .iter()
+            .filter(|e| e.from_instance_id == from)
+            .map(|e| e.ref_id)
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(
+        kept(&capped, 4001),
+        kept(&capped2, 4001),
+        "the surviving edge set is deterministic across runs"
+    );
     Ok(())
 }

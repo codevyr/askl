@@ -204,7 +204,7 @@ impl Selector for SearchSelector {
         let _ = cfg; // index handle not needed at spec time anymore
         let fusion_scope = match parent_scope {
             ScopeContext::Scope { .. } => Some(parent_scope.clone()),
-            ScopeContext::Skip | ScopeContext::Unscoped => None,
+            ScopeContext::Absent | ScopeContext::Deferred | ScopeContext::Unscoped => None,
         };
         let rooted_eph = EphContext::rooted(eph.roots().to_vec());
 
@@ -224,7 +224,9 @@ impl Selector for SearchSelector {
         // searches cache per-scope (chain-independent: conditions are pure
         // "ifs"; the ids arm covers an already-computed parent).
         match parent_scope {
-            ScopeContext::Skip | ScopeContext::Unscoped => hasher.update(b"scope:none"),
+            ScopeContext::Absent | ScopeContext::Deferred | ScopeContext::Unscoped => {
+                hasher.update(b"scope:none")
+            }
             ScopeContext::Scope { ids, filter } => {
                 hasher.update(b"scope-cond:");
                 match filter {

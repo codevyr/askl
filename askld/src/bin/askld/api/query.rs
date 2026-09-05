@@ -239,6 +239,9 @@ pub async fn build_result_graph(
     let roots = narrow_roots(roots, projects)?;
     let mut ctx = ExecutionContext::new(roots);
     ctx.probe_cap = data.probe_cap;
+    // Read and probe share one cap, so "Resolved" (probe ≤ cap) and "not
+    // truncated" (read ≤ cap) name the same threshold.
+    ctx.eph.set_read_cap(data.probe_cap);
     // Push the result cap into the leaf SQL (the budget facet of fusion): the
     // renderer below still applies the exact per-symbol cap, but bounding the
     // leaves stops bare selectors from materialising far more rows than the cap

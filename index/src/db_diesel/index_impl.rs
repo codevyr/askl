@@ -50,8 +50,15 @@ pub enum ScopeContext {
         ids: Vec<i64>,
         filter: Option<CompositeFilter>,
     },
-    /// No parent/child statement — skip the query entirely.
-    Skip,
+    /// No neighbour statement on this side at all, so nothing can consume
+    /// this neighbourhood: not the display path, and not `constrain_by_*`,
+    /// which needs a neighbour to constrain against.
+    Absent,
+    /// A neighbour statement exists but will compute the relationship from
+    /// ITS side, so this side defers.  `constrain_by_*` accepts evidence
+    /// from either end, and the deferral is provably one-sided: a conditioned
+    /// child puts its parent's children-scope in `Scope`, never here.
+    Deferred,
     /// Run the query without any scope constraint.
     Unscoped,
 }
@@ -63,6 +70,48 @@ impl ScopeContext {
     pub fn is_scope(&self) -> bool {
         matches!(self, ScopeContext::Scope { .. })
     }
+}
+
+/// Which neighbourhood families one side of a statement can actually feed.
+///
+/// A neighbourhood is read by `constrain_by_parent`/`constrain_by_child`, and
+/// those consult the REFS families only when the relationship carries REFS and
+/// the containment families only when it carries HAS.  So `mod("x") { has func
+/// }` never looks at a REFS family, and fetching one is work whose every row
+/// is discarded -- 10.9 s of it on the real index.
+///
+/// Display does not change the answer: an edge between two nodes that are both
+/// in the result is rediscovered by `find_edges_between` and
+/// `find_has_edges_between`, which ask about the answer rather than about a
+/// statement's neighbourhood.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FamilyDemand {
+    pub refs: bool,
+    pub has: bool,
+}
+
+impl FamilyDemand {
+    /// Everything — the conservative default for callers with no statement
+    /// context (tests, direct index use).
+    pub fn both() -> Self {
+        Self {
+            refs: true,
+            has: true,
+        }
+    }
+}
+
+impl Default for FamilyDemand {
+    fn default() -> Self {
+        Self::both()
+    }
+}
+
+/// What each side of a statement can consume; see [`FamilyDemand`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FamilyDemands {
+    pub parent: FamilyDemand,
+    pub children: FamilyDemand,
 }
 
 /// Constrains scope resolution to instances reachable via references.
@@ -260,6 +309,10 @@ impl Index {
             _ => {}
         }
 
+        let query = query.limit(match eph.read_cap() {
+            0 => i64::MAX,
+            c => c as i64 + 1,
+        });
         let results: std::sync::Arc<Vec<(Symbol, SymbolInstance, Object, Project)>> = self
             .cached_load(query)
             .await
@@ -429,7 +482,9 @@ impl Index {
         use crate::schema_diesel::*;
         let (ids, filter) = match scope {
             ScopeContext::Scope { ids, filter } => (ids.as_slice(), filter.as_ref()),
-            ScopeContext::Skip | ScopeContext::Unscoped => return Ok(None),
+            ScopeContext::Absent | ScopeContext::Deferred | ScopeContext::Unscoped => {
+                return Ok(None)
+            }
         };
         let vis = EphVisibility::combined(eph);
         // Same join shape as `build_current_query` (compose_current predicates
@@ -786,6 +841,10 @@ pub struct Index {
 /// silently-enabled private cache in embedder/tooling code would serve
 /// stale results after any out-of-band mutation.
 pub const DEFAULT_SQL_CACHE_BYTES: usize = 256 * 1024 * 1024;
+
+/// Default per-read safety cap (rows).  Matches `DEFAULT_PROBE_CAP` in askld so
+/// probe and read agree on what "too big" means; see `EphContext::read_cap`.
+pub const DEFAULT_READ_CAP: usize = 1000;
 
 // ============================================================================
 // Ephemeral layer batch types
@@ -1608,6 +1667,9 @@ impl Index {
     pub const TEST_INPUT_TREE_BROWSER: &'static str = "test_input_tree_browser.sql";
     pub const TEST_INPUT_NESTED_FUNC: &'static str = "test_input_nested_func.sql";
     pub const TEST_INPUT_TYPE_FILTER: &'static str = "test_input_type_filter.sql";
+    pub const TEST_INPUT_ESCALATION: &'static str = "test_input_escalation.sql";
+    pub const TEST_INPUT_RECURSIVE_MULTI_INSTANCE: &'static str =
+        "test_input_recursive_multi_instance.sql";
     pub const VERB_TEST: &'static str = "verb_test.sql";
     pub const TEST_INPUT_SEARCH: &'static str = "test_input_search.sql";
 
@@ -1643,6 +1705,14 @@ impl Index {
         (
             "test_input_nested_func.sql",
             include_str!("../../../sql/test_input_nested_func.sql"),
+        ),
+        (
+            "test_input_escalation.sql",
+            include_str!("../../../sql/test_input_escalation.sql"),
+        ),
+        (
+            "test_input_recursive_multi_instance.sql",
+            include_str!("../../../sql/test_input_recursive_multi_instance.sql"),
         ),
         (
             "test_input_type_filter.sql",
@@ -1851,6 +1921,7 @@ impl Index {
         filter: &CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        demands: FamilyDemands,
         eph: &EphContext,
     ) -> Result<super::selection::Checked<Selection>> {
         let visible_ids = eph.visible_ids();
@@ -1863,17 +1934,35 @@ impl Index {
         // sharing loss, simple plumbing).
         let chain_dependent = filter.is_chain_dependent();
 
-        // Budget pushdown — the "how many" facet of fusion.  A *bare* selector's
-        // neighbourhood queries are display-only, so bound how many rows they
-        // produce.  A *composed* selector (parent/children scope is a `Scope`)
-        // must NOT be bounded here: its unscoped rows feed the Rust-side
-        // intersection, and truncating them would drop valid results — that is a
-        // job for scope-fusion, not budget.
+        // Two independent bounds, combined into one effective limit:
+        //
+        //  * `leaf_limit` — the RESULT BUDGET (cap × 8 rows, from the request
+        //    limit).  Shapes the answer and drives the "result budget"
+        //    truncation warning via `budget_bounded`.  Suppressed for a composed
+        //    statement (a `Scope` on either side): its rows feed a Rust-side
+        //    intersection, and truncating BELOW the resolved set would drop
+        //    valid results.  Unchanged from before this work.
+        //
+        //  * `safety_limit` = `read_cap + 1` — the SAFETY cap (P1: no read
+        //    returns too much data, at any level).  ALWAYS applied, composed
+        //    reads included, because a resolved set is ≤ `read_cap` by
+        //    construction, so the safety cap never truncates a legitimate
+        //    constraint — only a read the intersection could not have used
+        //    soundly anyway.  `read_cap == 0` disables it (matches probe cap 0
+        //    and ResultBudget 0 = unlimited).
+        //
+        // The effective limit is the tighter of the two: `leaf_limit` for a bare
+        // statement, the safety cap for a composed one.
         let leaf_limit: Option<i64> = if parent_scope.is_scope() || children_scope.is_scope() {
             None
         } else {
             eph.result_budget().leaf_limit()
         };
+        let safety_limit: i64 = match eph.read_cap() {
+            0 => i64::MAX,
+            c => c as i64 + 1,
+        };
+        let read_limit: i64 = leaf_limit.map_or(safety_limit, |b| b.min(safety_limit));
 
         let current = {
             let _select_current: tracing::span::EnteredSpan =
@@ -1886,11 +1975,7 @@ impl Index {
                     if let Some(expr) = filter.compose_current(vis) {
                         q = q.filter(expr);
                     }
-                    let mut q = q.filter(vis.guard());
-                    if let Some(l) = leaf_limit {
-                        q = q.limit(l);
-                    }
-                    q
+                    q.filter(vis.guard()).limit(read_limit)
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to load symbols: {}", e))?;
@@ -1913,7 +1998,8 @@ impl Index {
         current_instance_ids.dedup();
 
         let parents = match parent_scope {
-            ScopeContext::Skip => vec![],
+            _ if !demands.parent.refs => vec![],
+            ScopeContext::Absent | ScopeContext::Deferred => vec![],
             ScopeContext::Unscoped => {
                 let _parents_span: tracing::span::EnteredSpan = tracing::info_span!(
                     "select_parents",
@@ -1929,11 +2015,7 @@ impl Index {
                         if let Some(expr) = filter.compose_parents(vis) {
                             q = q.filter(expr);
                         }
-                        let mut q = q.filter(vis.guard());
-                        if let Some(l) = leaf_limit {
-                            q = q.limit(l);
-                        }
-                        q
+                        q.filter(vis.guard()).limit(read_limit)
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
@@ -1978,7 +2060,7 @@ impl Index {
                                 .field(symbol_instances::dsl::id)
                                 .eq_any(scope_ids.clone()),
                         );
-                        q.filter(vis.guard())
+                        q.filter(vis.guard()).limit(read_limit)
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
@@ -1993,7 +2075,8 @@ impl Index {
         };
 
         let children = match children_scope {
-            ScopeContext::Skip => vec![],
+            _ if !demands.children.refs => vec![],
+            ScopeContext::Absent | ScopeContext::Deferred => vec![],
             ScopeContext::Unscoped => {
                 let _select_children: tracing::span::EnteredSpan = tracing::info_span!(
                     "select_children",
@@ -2016,11 +2099,7 @@ impl Index {
                         if let Some(expr) = filter.compose_children(vis) {
                             q = q.filter(expr);
                         }
-                        let mut q = q.filter(vis.guard());
-                        if let Some(l) = leaf_limit {
-                            q = q.limit(l);
-                        }
-                        q
+                        q.filter(vis.guard()).limit(read_limit)
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
@@ -2065,7 +2144,7 @@ impl Index {
                         }
                         // Always apply scope filter.
                         q = q.filter(symbol_instances::dsl::id.eq_any(scope_ids.clone()));
-                        q.filter(vis.guard())
+                        q.filter(vis.guard()).limit(read_limit)
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
@@ -2084,8 +2163,10 @@ impl Index {
         // a broad container's has-family from materialising its entire
         // containment neighbourhood (measured 214k rows / 142MB) when the
         // neighbour is already known to a small id set.  Predicate scopes
-        // and Skip/Unscoped keep the unconstrained display behaviour:
-        // Skip's refs-deferral contract does not extend to containment.
+        // and `Deferred`/`Unscoped` keep the unconstrained behaviour: the
+        // refs-deferral contract does not extend to containment, because the
+        // deferring side cannot know the neighbour will produce the same
+        // containment rows.
         let has_parent_scope_ids: Option<Vec<i64>> = match &parent_scope {
             ScopeContext::Scope { ids, filter: None } => Some(ids.clone()),
             _ => None,
@@ -2095,7 +2176,23 @@ impl Index {
             _ => None,
         };
 
-        let has_parents = {
+        // A containment family is read by exactly two things: `constrain_by_*`,
+        // which needs a neighbour statement to constrain against, and -- until
+        // `find_has_edges_between` -- the display path.  Now that the graph's
+        // containment comes from asking about the answer's own nodes, a side
+        // with NO neighbour statement has no reader at all, so the query is
+        // not worth issuing: bare `mod("amdgpu")` spent 2.5 s fetching 178,807
+        // rows for a family nobody looked at.
+        //
+        // `Deferred` is deliberately NOT included.  It means a neighbour
+        // exists and will compute the relationship from its side, which is
+        // sound for references because `constrain_by_*` accepts either end's
+        // evidence -- but the deferring side cannot know the neighbour
+        // produces the same CONTAINMENT rows, so containment still
+        // materialises there.
+        let has_parents = if !demands.parent.has || matches!(parent_scope, ScopeContext::Absent) {
+            vec![]
+        } else {
             let _has_parents_span: tracing::span::EnteredSpan = tracing::info_span!(
                 "select_has_parents",
                 source_count = current_instance_ids.len(),
@@ -2118,7 +2215,7 @@ impl Index {
                                 .eq_any(scope_ids.clone()),
                         );
                     }
-                    q.filter(vis.guard())
+                    q.filter(vis.guard()).limit(read_limit)
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to load containment parents: {}", e))?;
@@ -2131,7 +2228,11 @@ impl Index {
             rows
         };
 
-        let has_children = {
+        let has_children = if !demands.children.has
+            || matches!(children_scope, ScopeContext::Absent)
+        {
+            vec![]
+        } else {
             let source_count = current_instance_ids.len();
             let _has_children_span: tracing::span::EnteredSpan = tracing::info_span!(
                 "select_has_children",
@@ -2160,7 +2261,7 @@ impl Index {
                         if let Some(expr) = filter.compose_has_children(vis) {
                             q = q.filter(expr);
                         }
-                        contained_scope(q).filter(vis.guard())
+                        contained_scope(q).filter(vis.guard()).limit(read_limit)
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?
@@ -2169,7 +2270,8 @@ impl Index {
                     self.cached_load_partitioned(eph, chain_dependent, |vis| CteHasChildren {
                         cte_body: build_has_children_cte_body(current_instance_ids.clone(), vis),
                         outer: contained_scope(build_has_children_query_against_cte(vis))
-                            .filter(vis.guard()),
+                            .filter(vis.guard())
+                            .limit(read_limit),
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?
@@ -2199,6 +2301,23 @@ impl Index {
         // runs to 2540 rows — which is how a truncation warning gets trained
         // out of a user's attention.
         let budget_bounded = leaf_limit.is_some_and(|l| current.len() >= l as usize);
+
+        // `capped` is the soundness flag, distinct from `budget_bounded` (the
+        // result-budget WARNING).  A selection is capped when ANY read that
+        // produced it hit the safety cap — `current` or any neighbourhood
+        // family — because a truncated read makes this selection unusable as a
+        // constraint in EITHER direction (you cannot `retain` soundly against
+        // a partial set, nor be retained by one).  The constrain path reads
+        // this to refuse participation; see `SelectorState::constrain_selection`.
+        //
+        // Uses `read_limit`, the effective bound actually applied, so it fires
+        // for both the safety cap (composed reads) and the budget (bare reads).
+        let hit = |n: usize| n as i64 >= read_limit;
+        let capped = hit(current.len())
+            || hit(parents.len())
+            || hit(children.len())
+            || hit(has_parents.len())
+            || hit(has_children.len());
 
         let selection: Result<Selection> = {
             let _collect_span: tracing::span::EnteredSpan =
@@ -2323,6 +2442,7 @@ impl Index {
                 has_parents,
                 has_children,
                 budget_bounded,
+                capped,
             })
         };
 
@@ -2338,7 +2458,7 @@ impl Index {
         include_has: bool,
         filter: &CompositeFilter,
         eph: &EphContext,
-    ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
+    ) -> Result<(Vec<crate::symbols::SymbolInstanceId>, bool)> {
         // Canonical binds: callers pass selection-order ids; the SQL cache
         // keys on rendered binds, so sort+dedup for run-stable keys.
         let mut canonical: Vec<i64> = parent_ids.to_vec();
@@ -2355,7 +2475,20 @@ impl Index {
         source_ids.sort_unstable();
         source_ids.dedup();
 
+        // `read_cap == 0` disables the safety cap (matches probe cap 0 and
+        // ResultBudget 0 = unlimited); `i64::MAX` keeps every `.limit()` call
+        // uniform while never truncating.
+        let read_limit: i64 = match eph.read_cap() {
+            0 => i64::MAX,
+            c => c as i64 + 1,
+        };
         let mut all_ids: Vec<i64> = Vec::new();
+        // Discovery-capping signal: if any branch's read hit the safety
+        // limit, the id set is truncated.  A downstream filter (applied by
+        // `find_symbol_by_instance_id`, which re-reads these ids) can shrink
+        // the survivors below the cap, so the by-id re-read alone cannot
+        // re-detect the truncation — carry it out explicitly.
+        let mut derive_capped = false;
 
         if include_has {
             let _span = tracing::info_span!(
@@ -2365,7 +2498,8 @@ impl Index {
             )
             .entered();
             let t0 = std::time::Instant::now();
-            let has_children_filtered = filter.constrains_has_children();
+            let has_children_filtered =
+                filter.constrains_has_children() || filter.constrains_derive_has_children();
             let results: Vec<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)> =
                 if has_children_filtered {
                     self.cached_load_partitioned(eph, chain_dependent, |vis| {
@@ -2373,7 +2507,12 @@ impl Index {
                         if let Some(expr) = filter.compose_has_children(vis) {
                             q = q.filter(expr);
                         }
-                        q.filter(vis.guard())
+                        // M4: restrict the derived children to the receiver's
+                        // own predicate (separate channel; see FilterLeaf).
+                        if let Some(expr) = filter.compose_derive_has_children(vis) {
+                            q = q.filter(expr);
+                        }
+                        q.filter(vis.guard()).limit(read_limit)
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to find has-child instance IDs: {}", e))?
@@ -2381,7 +2520,9 @@ impl Index {
                     // Fast path: CTE-materialised source set (planner-hint fix).
                     self.cached_load_partitioned(eph, chain_dependent, |vis| CteHasChildren {
                         cte_body: build_has_children_cte_body(source_ids.clone(), vis),
-                        outer: build_has_children_query_against_cte(vis).filter(vis.guard()),
+                        outer: build_has_children_query_against_cte(vis)
+                            .filter(vis.guard())
+                            .limit(read_limit),
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to find has-child instance IDs: {}", e))?
@@ -2402,6 +2543,7 @@ impl Index {
                     anyhow::bail!("internal error: ephemeral layer isolation violation");
                 }
             }
+            derive_capped |= results.len() as i64 >= read_limit;
             all_ids.extend(results.iter().map(|(_, _, _, child_inst, _)| child_inst.id));
         }
 
@@ -2426,7 +2568,12 @@ impl Index {
                     if let Some(expr) = filter.compose_children(vis) {
                         q = q.filter(expr);
                     }
-                    q.filter(vis.guard())
+                    // M4: restrict the derived (ref) children to the receiver's
+                    // own predicate (canonical `symbols` is the child here).
+                    if let Some(expr) = filter.compose_derive_child(vis) {
+                        q = q.filter(expr);
+                    }
+                    q.filter(vis.guard()).limit(read_limit)
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to find ref-child instance IDs: {}", e))?;
@@ -2447,6 +2594,7 @@ impl Index {
                     anyhow::bail!("internal error: ephemeral layer isolation violation");
                 }
             }
+            derive_capped |= results.len() as i64 >= read_limit;
             all_ids.extend(
                 results
                     .iter()
@@ -2456,10 +2604,13 @@ impl Index {
 
         all_ids.sort_unstable();
         all_ids.dedup();
-        Ok(all_ids
-            .into_iter()
-            .map(crate::symbols::SymbolInstanceId::new)
-            .collect())
+        Ok((
+            all_ids
+                .into_iter()
+                .map(crate::symbols::SymbolInstanceId::new)
+                .collect(),
+            derive_capped,
+        ))
     }
 
     /// Query parent instance IDs directly from DB given child instance IDs.
@@ -2470,7 +2621,7 @@ impl Index {
         include_has: bool,
         filter: &CompositeFilter,
         eph: &EphContext,
-    ) -> Result<Vec<crate::symbols::SymbolInstanceId>> {
+    ) -> Result<(Vec<crate::symbols::SymbolInstanceId>, bool)> {
         // Canonical binds: callers pass selection-order ids; the SQL cache
         // keys on rendered binds, so sort+dedup for run-stable keys.
         let mut canonical: Vec<i64> = child_ids.to_vec();
@@ -2487,7 +2638,17 @@ impl Index {
         source_ids.sort_unstable();
         source_ids.dedup();
 
+        // `read_cap == 0` disables the safety cap (matches probe cap 0 and
+        // ResultBudget 0 = unlimited); `i64::MAX` keeps every `.limit()` call
+        // uniform while never truncating.
+        let read_limit: i64 = match eph.read_cap() {
+            0 => i64::MAX,
+            c => c as i64 + 1,
+        };
         let mut all_ids: Vec<i64> = Vec::new();
+        // See `find_child_instance_ids`: carry the truncation signal out because
+        // a downstream filter can hide it from the by-id re-read.
+        let mut derive_capped = false;
 
         if include_refs {
             let _span = tracing::info_span!(
@@ -2503,7 +2664,12 @@ impl Index {
                     if let Some(expr) = filter.compose_parents(vis) {
                         q = q.filter(expr);
                     }
-                    q.filter(vis.guard())
+                    // M4: restrict the derived (ref) parents to the receiver's
+                    // own predicate (`parent_symbols` alias).
+                    if let Some(expr) = filter.compose_derive_parent(vis) {
+                        q = q.filter(expr);
+                    }
+                    q.filter(vis.guard()).limit(read_limit)
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to find ref-parent instance IDs: {}", e))?;
@@ -2522,6 +2688,7 @@ impl Index {
                     anyhow::bail!("internal error: ephemeral layer isolation violation");
                 }
             }
+            derive_capped |= results.len() as i64 >= read_limit;
             all_ids.extend(results.iter().map(|(_, parent_inst)| parent_inst.id));
         }
 
@@ -2539,7 +2706,12 @@ impl Index {
                     if let Some(expr) = filter.compose_has_parents(vis) {
                         q = q.filter(expr);
                     }
-                    q.filter(vis.guard())
+                    // M4: restrict the derived containers to the receiver's own
+                    // predicate (`container_symbols` alias).
+                    if let Some(expr) = filter.compose_derive_has_parents(vis) {
+                        q = q.filter(expr);
+                    }
+                    q.filter(vis.guard()).limit(read_limit)
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to find has-parent instance IDs: {}", e))?;
@@ -2559,6 +2731,7 @@ impl Index {
                     anyhow::bail!("internal error: ephemeral layer isolation violation");
                 }
             }
+            derive_capped |= results.len() as i64 >= read_limit;
             all_ids.extend(
                 results
                     .iter()
@@ -2568,23 +2741,35 @@ impl Index {
 
         all_ids.sort_unstable();
         all_ids.dedup();
-        Ok(all_ids
-            .into_iter()
-            .map(crate::symbols::SymbolInstanceId::new)
-            .collect())
+        Ok((
+            all_ids
+                .into_iter()
+                .map(crate::symbols::SymbolInstanceId::new)
+                .collect(),
+            derive_capped,
+        ))
     }
 
     /// Discover all reference edges between a set of selected instances.
+    /// Returns the ref edges among `instance_ids` and, second, the source
+    /// instance ids whose out-edge list was truncated by the E1 per-node cap
+    /// (empty unless `eph.edge_cap() > 0`).  Truncation is assembly capping:
+    /// the node set is already settled, so a truncated node is paginable, never
+    /// a reason to flag a selection or warn.
     pub async fn find_edges_between(
         &self,
         instance_ids: &[i64],
         eph: &EphContext,
-    ) -> Result<Vec<ImplicitEdge>> {
+    ) -> Result<(Vec<ImplicitEdge>, Vec<i64>)> {
         let visible_ids = eph.visible_ids();
         let eph_ids: &[i64] = &visible_ids;
         if instance_ids.is_empty() {
-            return Ok(vec![]);
+            return Ok((vec![], vec![]));
         }
+        // E1 assembly cap: `Some(cap + 1)` bounds the fetch per source node;
+        // `None` leaves the query untouched (the default, cap disabled).
+        let edge_cap = eph.edge_cap();
+        let edge_limit: Option<i64> = (edge_cap > 0).then(|| edge_cap as i64 + 1);
         // Canonicalize the candidate ids: eq_any membership is
         // order-insensitive, but the rendered binds are part of the cache
         // key — a caller iterating a HashSet would otherwise re-key this
@@ -2626,6 +2811,7 @@ impl Index {
             .cached_load_partitioned(eph, false, |vis| CteFindEdgesBetween {
                 cte_body: build_find_edges_cte_body(instance_ids.to_vec(), vis),
                 vis: vis.snapshot(),
+                edge_limit,
             })
             .await
             .map_err(|e| anyhow::anyhow!("Failed to find edges between instances: {}", e))?;
@@ -2656,6 +2842,144 @@ impl Index {
                 || is_eph_leak(edge.to_layer, eph_ids)
             {
                 tracing::error!(?eph_ids, "layer leak in find_edges_between");
+                anyhow::bail!("internal error: ephemeral layer isolation violation");
+            }
+        }
+
+        // E1: enforce the per-node cap on the merged, deduped edge set (the SQL
+        // `edge_cap + 1` above only bounds the fetch per branch) and record
+        // which source nodes were truncated.  `results` is sorted by
+        // (from_instance_id, ref_id, to_instance_id), so each node's edges are
+        // a contiguous run; keep the first `edge_cap` by ref_id, drop the rest,
+        // and note the node as paginable.  No selection flag, no warning.
+        let mut truncated: Vec<i64> = Vec::new();
+        if edge_cap > 0 {
+            let mut kept: Vec<ImplicitEdge> = Vec::with_capacity(results.len());
+            let mut i = 0;
+            while i < results.len() {
+                let from = results[i].from_instance_id;
+                let mut j = i;
+                while j < results.len() && results[j].from_instance_id == from {
+                    j += 1;
+                }
+                if j - i > edge_cap {
+                    truncated.push(from);
+                    kept.extend_from_slice(&results[i..i + edge_cap]);
+                } else {
+                    kept.extend_from_slice(&results[i..j]);
+                }
+                i = j;
+            }
+            results = kept;
+        }
+
+        Ok((results, truncated))
+    }
+
+    /// Containment edges among a bounded set of instances — the has-side
+    /// counterpart of [`Index::find_edges_between`].
+    ///
+    /// `collect_has_edges` only ever emits a containment whose BOTH endpoints
+    /// are in the answer, but it used to find them by reading every
+    /// statement's `has_parents`/`has_children` family, which made the cost of
+    /// the ANSWER proportional to the cost of the NEIGHBOURHOOD: bare
+    /// `mod("amdgpu")` fetched 178,807 rows / 118 MB to emit **zero**
+    /// has-edges.  Asking the question directly bounds the work by the answer,
+    /// exactly as `find_edges_between` already does for reference edges.
+    ///
+    /// The JOIN mirrors `build_has_children_inner` — the same `level` rule,
+    /// the same layer visibility, the same self-exclusion — because both go
+    /// through the same builders rather than a hand-written equivalent.
+    ///
+    /// What it deliberately does NOT carry is the owning statement's
+    /// `compose_has_children`/scope-ids.  Those narrowed a statement's
+    /// neighbourhood FAMILY; a containment between two nodes that are both in
+    /// the answer is a fact about the data, not about which statement happened
+    /// to select them.  This is a behaviour change: a pair the old traversal
+    /// missed — because neither endpoint's statement family recorded it — now
+    /// gets its edge.
+    pub async fn find_has_edges_between(
+        &self,
+        instance_ids: &[i64],
+        eph: &EphContext,
+    ) -> Result<Vec<ContainmentEdge>> {
+        let visible_ids = eph.visible_ids();
+        let eph_ids: &[i64] = &visible_ids;
+        if instance_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        // Canonicalize: membership is order-insensitive but the rendered binds
+        // are part of the SQL-cache key (same reason as `find_edges_between`).
+        // Callers already pass `canonical_ids` output; re-doing it here keeps
+        // the cache key correct for any caller that does not.
+        let mut instance_ids = instance_ids.to_vec();
+        if !instance_ids.is_sorted() {
+            instance_ids.sort_unstable();
+        }
+        instance_ids.dedup();
+
+        let _span = tracing::info_span!(
+            "find_has_edges_between",
+            count = instance_ids.len(),
+            eph_count = eph_ids.len(),
+        )
+        .entered();
+        let t0 = std::time::Instant::now();
+
+        let ids = instance_ids;
+        let rows: Vec<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)> = self
+            .cached_load_partitioned(eph, false, |vis| {
+                use crate::schema_diesel::symbol_instances;
+                let contained_instance = super::mixins::CONTAINED_INSTANCE_ALIAS;
+                CteHasChildren {
+                    cte_body: build_has_children_cte_body(ids.clone(), vis),
+                    // Both ENDS bound: the container side by the CTE, the
+                    // contained side here.  That is the whole point — an
+                    // unbounded contained side is the 178,807-row fetch.
+                    outer: build_has_children_query_against_cte(vis)
+                        .filter(
+                            contained_instance
+                                .field(symbol_instances::dsl::id)
+                                .eq_any(ids.clone()),
+                        )
+                        .filter(vis.guard()),
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to find containment between instances: {}", e))?;
+
+        let results: Vec<ContainmentEdge> = rows
+            .into_iter()
+            .map(
+                |(parent_symbol, parent_instance, child_symbol, child_instance, _object)| {
+                    ContainmentEdge {
+                        parent_symbol: parent_symbol.id,
+                        parent_instance: parent_instance.id,
+                        parent_offset_range: parent_instance.offset_range,
+                        child_symbol: child_symbol.id,
+                        child_instance: child_instance.id,
+                        parent_symbol_layer: parent_symbol.layer,
+                        parent_instance_layer: parent_instance.layer,
+                        child_symbol_layer: child_symbol.layer,
+                        child_instance_layer: child_instance.layer,
+                    }
+                },
+            )
+            .collect();
+
+        tracing::info!(
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            result_rows = results.len(),
+            "find_has_edges_between completed",
+        );
+
+        for edge in &results {
+            if is_eph_leak(edge.parent_symbol_layer, eph_ids)
+                || is_eph_leak(edge.parent_instance_layer, eph_ids)
+                || is_eph_leak(edge.child_symbol_layer, eph_ids)
+                || is_eph_leak(edge.child_instance_layer, eph_ids)
+            {
+                tracing::error!(?eph_ids, "layer leak in find_has_edges_between");
                 anyhow::bail!("internal error: ephemeral layer isolation violation");
             }
         }
@@ -3788,6 +4112,25 @@ impl Index {
         let matches: Vec<SearchMatchRow> = rows.into_iter().take(limit).collect();
         Ok((matches, truncated))
     }
+}
+
+/// One containment pair returned by [`Index::find_has_edges_between`].
+///
+/// Carries the parent's offset range because the consumer keeps the TIGHTEST
+/// container per child, and all four joined layers because every row leaving
+/// the index is leak-checked on every layer it was joined through — the same
+/// breadth as `select_has_parents`/`find_child_instance_ids`.
+#[derive(Debug, Clone)]
+pub struct ContainmentEdge {
+    pub parent_symbol: i64,
+    pub parent_instance: i64,
+    pub parent_offset_range: (std::ops::Bound<i32>, std::ops::Bound<i32>),
+    pub child_symbol: i64,
+    pub child_instance: i64,
+    pub parent_symbol_layer: i64,
+    pub parent_instance_layer: i64,
+    pub child_symbol_layer: i64,
+    pub child_instance_layer: i64,
 }
 
 /// Edge discovered between two selected instances via DB query.

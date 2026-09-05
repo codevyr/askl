@@ -740,6 +740,35 @@ pub trait FilterLeaf: std::fmt::Debug + FilterLeafClone + Send + Sync {
         None
     }
 
+    // Directional DERIVE predicates (M4).  These express "the RECEIVER symbol
+    // matches this leaf" against the neighbour symbol a derive read fetches —
+    // the child (canonical `symbols`), the ref parent (`parent_symbols`), the
+    // contained child (`contained_symbols`), or the container parent
+    // (`container_symbols`).  They are a SEPARATE channel from the
+    // `*_expr`/`compose_*` family methods above: those relate a node to its
+    // displayed neighbourhood in `find_symbol` (where the current node's type
+    // must NOT restrict its neighbours), whereas these restrict the derived
+    // set to the receiver's own predicate.  Called ONLY by
+    // `find_child_instance_ids` / `find_parent_instance_ids`.
+    fn derive_child_expr(&self, _vis: &EphVisibility) -> Option<ChildrenBoolExpr> {
+        None
+    }
+    fn derive_parent_expr(&self, _vis: &EphVisibility) -> Option<ParentsBoolExpr> {
+        None
+    }
+    fn derive_has_child_expr(&self, _vis: &EphVisibility) -> Option<HasChildrenBoolExpr> {
+        None
+    }
+    fn derive_has_parent_expr(&self, _vis: &EphVisibility) -> Option<HasParentsBoolExpr> {
+        None
+    }
+    /// Whether `derive_has_child_expr` returns Some — the shape probe for the
+    /// has-children fast path in the derive read (mirrors
+    /// `constrains_has_children`).  MUST stay consistent with the expr method.
+    fn constrains_derive_has_children(&self) -> bool {
+        false
+    }
+
     /// Whether `has_children_expr` returns Some for this leaf.  MUST stay
     /// consistent with the expr method and MUST NOT depend on the
     /// visibility token (see `CompositeFilter::constrains_has_children`).
@@ -900,6 +929,38 @@ impl CompositeFilter {
     compose_method_vis!(compose_children, children_expr, ChildrenBoolExpr);
     compose_method_vis!(compose_has_parents, has_parents_expr, HasParentsBoolExpr);
     compose_method_vis!(compose_has_children, has_children_expr, HasChildrenBoolExpr);
+
+    // M4 derive-read channel (see `FilterLeaf::derive_*_expr`).
+    compose_method_vis!(compose_derive_child, derive_child_expr, ChildrenBoolExpr);
+    compose_method_vis!(compose_derive_parent, derive_parent_expr, ParentsBoolExpr);
+    compose_method_vis!(
+        compose_derive_has_children,
+        derive_has_child_expr,
+        HasChildrenBoolExpr
+    );
+    compose_method_vis!(
+        compose_derive_has_parents,
+        derive_has_parent_expr,
+        HasParentsBoolExpr
+    );
+
+    /// Shape probe mirroring [`constrains_has_children`] for the M4 derive
+    /// channel: whether `compose_derive_has_children` would return Some.
+    pub fn constrains_derive_has_children(&self) -> bool {
+        match self {
+            CompositeFilter::Leaf(leaf) => leaf.constrains_derive_has_children(),
+            CompositeFilter::And(children) => children
+                .iter()
+                .any(CompositeFilter::constrains_derive_has_children),
+            CompositeFilter::Or(children) => {
+                !children.is_empty()
+                    && children
+                        .iter()
+                        .all(CompositeFilter::constrains_derive_has_children)
+            }
+            CompositeFilter::Not(inner) => inner.constrains_derive_has_children(),
+        }
+    }
 
     /// Object-level composition for `search()`; tokenless on purpose — the
     /// `objects_expr` contract requires chain-independence.
@@ -1072,6 +1133,31 @@ impl CompoundNameMixin {
     }
 }
 
+impl CompoundNameMixin {
+    /// Path predicates (token containment + lquery recheck) qualified to
+    /// `col` (e.g. `"parent_symbols.symbol_path"`).  Raw, type-erased SQL, so
+    /// they box into any query source — the M4 derive variants reuse them
+    /// against the receiver's alias.  Emitted together or not at all.
+    fn derive_path_parts<QS: 'static>(
+        &self,
+        col: &str,
+    ) -> Vec<Box<dyn BoxableExpression<QS, Pg, SqlType = Bool>>> {
+        let mut parts: Vec<Box<dyn BoxableExpression<QS, Pg, SqlType = Bool>>> = vec![];
+        if !self.tokens.is_empty() {
+            parts.push(Box::new(OwnedSql::<Bool>::new(path_tokens_contains_sql(
+                col,
+                &self.tokens,
+            ))));
+        }
+        if let Some(ref lquery) = self.lquery {
+            parts.push(Box::new(OwnedSql::<Bool>::new(ltree_filter_sql(
+                col, lquery,
+            ))));
+        }
+        parts
+    }
+}
+
 impl FilterLeaf for CompoundNameMixin {
     fn current_expr(&self, _vis: &EphVisibility) -> Option<CurrentBoolExpr> {
         let mut parts: Vec<CurrentBoolExpr> = vec![];
@@ -1097,6 +1183,56 @@ impl FilterLeaf for CompoundNameMixin {
             ))));
         }
         fold_and(parts)
+    }
+
+    fn derive_child_expr(&self, _vis: &EphVisibility) -> Option<ChildrenBoolExpr> {
+        let mut parts: Vec<ChildrenBoolExpr> = vec![];
+        if let Some(ref leaf) = self.leaf_token {
+            parts.push(Box::new(
+                index_schema::symbols::dsl::leaf_name.eq(leaf.clone()),
+            ));
+        }
+        parts.extend(self.derive_path_parts::<ChildrenQS>("symbols.symbol_path"));
+        fold_and(parts)
+    }
+    fn derive_parent_expr(&self, _vis: &EphVisibility) -> Option<ParentsBoolExpr> {
+        let mut parts: Vec<ParentsBoolExpr> = vec![];
+        if let Some(ref leaf) = self.leaf_token {
+            parts.push(Box::new(
+                PARENT_SYMBOLS_ALIAS
+                    .field(index_schema::symbols::dsl::leaf_name)
+                    .eq(leaf.clone()),
+            ));
+        }
+        parts.extend(self.derive_path_parts::<ParentsQS>("parent_symbols.symbol_path"));
+        fold_and(parts)
+    }
+    fn derive_has_child_expr(&self, _vis: &EphVisibility) -> Option<HasChildrenBoolExpr> {
+        let mut parts: Vec<HasChildrenBoolExpr> = vec![];
+        if let Some(ref leaf) = self.leaf_token {
+            parts.push(Box::new(
+                CONTAINED_SYMBOL_ALIAS
+                    .field(index_schema::symbols::dsl::leaf_name)
+                    .eq(leaf.clone()),
+            ));
+        }
+        parts.extend(self.derive_path_parts::<HasChildrenQS>("contained_symbols.symbol_path"));
+        fold_and(parts)
+    }
+    fn derive_has_parent_expr(&self, _vis: &EphVisibility) -> Option<HasParentsBoolExpr> {
+        let mut parts: Vec<HasParentsBoolExpr> = vec![];
+        if let Some(ref leaf) = self.leaf_token {
+            parts.push(Box::new(
+                CONTAINER_SYMBOL_ALIAS
+                    .field(index_schema::symbols::dsl::leaf_name)
+                    .eq(leaf.clone()),
+            ));
+        }
+        parts.extend(self.derive_path_parts::<HasParentsQS>("container_symbols.symbol_path"));
+        fold_and(parts)
+    }
+    fn constrains_derive_has_children(&self) -> bool {
+        true
     }
 
     fn hash_into(&self, h: &mut Sha256) {
@@ -1338,6 +1474,36 @@ impl FilterLeaf for ExactNameMixin {
         ))
     }
 
+    fn derive_child_expr(&self, _vis: &EphVisibility) -> Option<ChildrenBoolExpr> {
+        Some(Box::new(
+            index_schema::symbols::dsl::name.eq(self.name.clone()),
+        ))
+    }
+    fn derive_parent_expr(&self, _vis: &EphVisibility) -> Option<ParentsBoolExpr> {
+        Some(Box::new(
+            PARENT_SYMBOLS_ALIAS
+                .field(index_schema::symbols::dsl::name)
+                .eq(self.name.clone()),
+        ))
+    }
+    fn derive_has_child_expr(&self, _vis: &EphVisibility) -> Option<HasChildrenBoolExpr> {
+        Some(Box::new(
+            CONTAINED_SYMBOL_ALIAS
+                .field(index_schema::symbols::dsl::name)
+                .eq(self.name.clone()),
+        ))
+    }
+    fn derive_has_parent_expr(&self, _vis: &EphVisibility) -> Option<HasParentsBoolExpr> {
+        Some(Box::new(
+            CONTAINER_SYMBOL_ALIAS
+                .field(index_schema::symbols::dsl::name)
+                .eq(self.name.clone()),
+        ))
+    }
+    fn constrains_derive_has_children(&self) -> bool {
+        true
+    }
+
     fn hash_into(&self, h: &mut Sha256) {
         h.update(b"ExactName");
         h.update((self.name.len() as u32).to_le_bytes());
@@ -1468,6 +1634,21 @@ impl FilterLeaf for DirectOnlyMixin {
     }
 
     fn children_expr(&self, vis: &EphVisibility) -> Option<ChildrenBoolExpr> {
+        // The `symbols.id = symbol_refs.to_symbol` conjunct near the end is a
+        // PLANNER FENCE, not a semantic condition: it restates the outer
+        // query's own join condition, so it is TRUE for every row that can
+        // reach this filter.  What it changes is the subplan's correlation
+        // set — referencing the child `symbols` pins the NOT EXISTS after
+        // that join, so a receiver predicate (M4's `compose_derive_child`,
+        // e.g. `symbol_type = 1`) always filters BEFORE the expensive
+        // subplan.  The planner cannot cost range `@>` joins (rows=1
+        // estimates), so nothing else guarantees that order: an ad-hoc plan
+        // over a symbol-driven source ran the subplan early — measured
+        // 11.6 s vs 2.7 s over amdgpu's 931 instances.  The deployed
+        // prepared-statement shape (id-array binds) happens to place the
+        // subplan late already, so there this line is measured-neutral
+        // (~5.1 s either way, the per-ref subplan floor); it is kept as a
+        // structural guarantee, not a production win.
         Some(Box::new(
             EphSqlFragment::<Bool>::builder()
                 .sql("NOT EXISTS (\
@@ -1481,6 +1662,7 @@ impl FilterLeaf for DirectOnlyMixin {
                           AND container.offset_range != parent_decls.offset_range \
                           AND container.id != parent_decls.id \
                           AND cont_type.level <= parent_type.level \
+                          AND symbols.id = symbol_refs.to_symbol \
                           AND ")
                 .eph_visibility("container.layer", vis)
                 .sql(" AND ")
@@ -1636,6 +1818,36 @@ impl FilterLeaf for SymbolTypeMixin {
         ))
     }
 
+    fn derive_child_expr(&self, _vis: &EphVisibility) -> Option<ChildrenBoolExpr> {
+        Some(Box::new(
+            index_schema::symbols::dsl::symbol_type.eq(self.symbol_type_id),
+        ))
+    }
+    fn derive_parent_expr(&self, _vis: &EphVisibility) -> Option<ParentsBoolExpr> {
+        Some(Box::new(
+            PARENT_SYMBOLS_ALIAS
+                .field(index_schema::symbols::dsl::symbol_type)
+                .eq(self.symbol_type_id),
+        ))
+    }
+    fn derive_has_child_expr(&self, _vis: &EphVisibility) -> Option<HasChildrenBoolExpr> {
+        Some(Box::new(
+            CONTAINED_SYMBOL_ALIAS
+                .field(index_schema::symbols::dsl::symbol_type)
+                .eq(self.symbol_type_id),
+        ))
+    }
+    fn derive_has_parent_expr(&self, _vis: &EphVisibility) -> Option<HasParentsBoolExpr> {
+        Some(Box::new(
+            CONTAINER_SYMBOL_ALIAS
+                .field(index_schema::symbols::dsl::symbol_type)
+                .eq(self.symbol_type_id),
+        ))
+    }
+    fn constrains_derive_has_children(&self) -> bool {
+        true
+    }
+
     fn hash_into(&self, h: &mut Sha256) {
         h.update(b"SymbolType");
         h.update(self.symbol_type_id.to_le_bytes());
@@ -1659,6 +1871,36 @@ impl FilterLeaf for DefaultSymbolTypeMixin {
         Some(Box::new(
             index_schema::symbols::dsl::symbol_type.eq_any(self.symbol_type_ids.clone()),
         ))
+    }
+
+    fn derive_child_expr(&self, _vis: &EphVisibility) -> Option<ChildrenBoolExpr> {
+        Some(Box::new(
+            index_schema::symbols::dsl::symbol_type.eq_any(self.symbol_type_ids.clone()),
+        ))
+    }
+    fn derive_parent_expr(&self, _vis: &EphVisibility) -> Option<ParentsBoolExpr> {
+        Some(Box::new(
+            PARENT_SYMBOLS_ALIAS
+                .field(index_schema::symbols::dsl::symbol_type)
+                .eq_any(self.symbol_type_ids.clone()),
+        ))
+    }
+    fn derive_has_child_expr(&self, _vis: &EphVisibility) -> Option<HasChildrenBoolExpr> {
+        Some(Box::new(
+            CONTAINED_SYMBOL_ALIAS
+                .field(index_schema::symbols::dsl::symbol_type)
+                .eq_any(self.symbol_type_ids.clone()),
+        ))
+    }
+    fn derive_has_parent_expr(&self, _vis: &EphVisibility) -> Option<HasParentsBoolExpr> {
+        Some(Box::new(
+            CONTAINER_SYMBOL_ALIAS
+                .field(index_schema::symbols::dsl::symbol_type)
+                .eq_any(self.symbol_type_ids.clone()),
+        ))
+    }
+    fn constrains_derive_has_children(&self) -> bool {
+        true
     }
 
     fn hash_into(&self, h: &mut Sha256) {

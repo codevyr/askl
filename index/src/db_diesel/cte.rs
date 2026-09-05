@@ -267,6 +267,12 @@ pub(super) struct CteFindEdgesBetween<CteBody> {
     /// controls the outer `sr.layer` visibility and, for the eph
     /// branch, the disjointness guard over (sr, from_inst, to_inst).
     pub vis: super::mixins::VisibilitySpec,
+    /// E1 assembly cap: `Some(edge_cap + 1)` bounds out-edges per source node
+    /// (the `+1` is the sentinel that lets the caller tell "exactly cap" from
+    /// "more than cap"); `None` disables it entirely — the query is then
+    /// byte-for-byte what it was before E1.  Assembly capping, not soundness:
+    /// hitting it never flags a selection, only records the node as paginable.
+    pub edge_limit: Option<i64>,
 }
 
 impl<CteBody> QueryId for CteFindEdgesBetween<CteBody> {
@@ -287,8 +293,47 @@ where
         use diesel::sql_types::Array;
         out.push_sql("WITH candidates AS MATERIALIZED (");
         self.cte_body.walk_ast(out.reborrow())?;
+        // `to_inst` contributes only its id (as the edge's target instance)
+        // and its layer; `DISTINCT ON (from_inst.id, sr.id)` then throws away
+        // every row but the one with the smallest `to_inst.id`.  Joining ALL
+        // co-instances of the target symbol to discard all but one is
+        // quadratic in exactly the shape this codebase produces: a module
+        // symbol with 931 instances made this an 865,830-row self-join and
+        // 3.4M buffer hits to return 191 edges.
+        //
+        // Two rows per symbol are provably enough to pick that winner:
+        //   * `from_inst.id != to_inst.id` can eliminate at most ONE row
+        //     (`from_inst` is a single row), so the winner is the smallest id
+        //     or the second smallest;
+        //   * the eph branch's disjointness guard eliminates only ROOT
+        //     to_insts, and root ids are positive while eph ids are negative
+        //     -- so roots sort last, and if the two smallest are roots then
+        //     every later row is a root as well and is eliminated with them.
+        // Either way the surviving minimum is within `rn <= 2`.
         out.push_sql(
-            ") SELECT DISTINCT ON (from_inst.id, sr.id) \
+            "), targets AS MATERIALIZED ( \
+                 SELECT symbol, id, layer FROM ( \
+                     SELECT symbol, id, layer, \
+                            row_number() OVER (PARTITION BY symbol ORDER BY id) AS rn \
+                     FROM candidates \
+                 ) ranked WHERE rn <= 2 \
+             ) ",
+        );
+        // E1: when a per-node edge cap is active, bracket the DISTINCT ON below
+        // in an outer row_number() partition so each source node keeps at most
+        // `edge_cap + 1` edges.  When disabled the query is unchanged.
+        if self.edge_limit.is_some() {
+            out.push_sql(
+                "SELECT ref_id, to_symbol, from_object, from_offset_range, \
+                        to_instance_id, from_instance_id, sr_layer, from_layer, to_layer \
+                 FROM ( SELECT de.*, \
+                          row_number() OVER (PARTITION BY de.from_instance_id \
+                                             ORDER BY de.ref_id) AS edge_rn \
+                        FROM ( ",
+            );
+        }
+        out.push_sql(
+            "SELECT DISTINCT ON (from_inst.id, sr.id) \
                   sr.id AS ref_id, sr.to_symbol, sr.from_object, sr.from_offset_range, \
                   to_inst.id AS to_instance_id, \
                   from_inst.id AS from_instance_id, \
@@ -299,7 +344,7 @@ where
               JOIN index.symbol_refs sr \
                   ON sr.from_object = from_inst.object_id \
                   AND from_inst.offset_range @> sr.from_offset_range \
-              JOIN candidates to_inst \
+              JOIN targets to_inst \
                   ON to_inst.symbol = sr.to_symbol \
               WHERE from_inst.id != to_inst.id \
                 AND ",
@@ -330,6 +375,12 @@ where
             }
         }
         out.push_sql(" ORDER BY from_inst.id, sr.id, to_inst.id");
+        // Close and filter the E1 wrapper opened above.
+        if let Some(ref limit) = self.edge_limit {
+            out.push_sql(") de ) ranked WHERE ranked.edge_rn <= ");
+            out.push_bind_param::<diesel::sql_types::BigInt, _>(limit)?;
+            out.push_sql(" ORDER BY ranked.from_instance_id, ranked.ref_id");
+        }
         Ok(())
     }
 }
