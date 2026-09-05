@@ -7,12 +7,14 @@ use crate::{
 };
 use anyhow::{bail, Result};
 use async_trait::async_trait;
+use index::db_diesel::FamilyDemands;
 use index::{
     db_diesel::{CompositeFilter, EphContext, Index, ParentReference, ScopeContext, Selection},
     models_diesel::SymbolRef,
 };
 use pest::error::ErrorVariant::CustomError;
 use std::fmt::Display;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -145,21 +147,21 @@ impl Selector for UserVerb {
     fn update_state(&self, state: &mut SelectorState) {
         if self.forced {
             if state.selection.is_none() && self.selection.get().is_some() {
-                state.selection = self.selection.get().cloned();
+                state.selection = self.selection.get().cloned().map(Rc::new);
             }
         }
     }
 
     fn get_selection_mut<'a>(&'a self, state: &'a mut SelectorState) -> Option<&'a mut Selection> {
         if !self.forced {
-            return state.selection.as_mut();
+            return state.selection.as_mut().map(Rc::make_mut);
         }
 
         if state.selection.is_none() {
             return None;
         }
 
-        state.selection.as_mut()
+        state.selection.as_mut().map(Rc::make_mut)
     }
 
     async fn select_from_all_impl(
@@ -168,6 +170,7 @@ impl Selector for UserVerb {
         _filter: CompositeFilter,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
+        _demands: FamilyDemands,
         _eph: &EphContext,
     ) -> Result<Option<Selection>> {
         Ok(None)
@@ -187,11 +190,11 @@ impl Selector for UserVerb {
 
         // If not forced, just return the provider's selection as is.
         if !self.forced {
-            return Ok(Some(provider));
+            return Ok(Some((*provider).clone()));
         }
 
         // Otherwise, need to store the selector state until notification from the parent.
-        let _ = self.selection.set(provider.clone());
+        let _ = self.selection.set((*provider).clone());
 
         return Ok(None);
     }
@@ -205,6 +208,7 @@ impl Selector for UserVerb {
         _notif_ctx: &NotificationContext,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
+        _demands: FamilyDemands,
     ) -> Result<Option<Selection>> {
         if !self.forced {
             bail!("Cannot derive from parent when not forced");

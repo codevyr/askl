@@ -1,9 +1,11 @@
 use crate::test_util::{
     format_edges, get_shared_db_url, get_shared_index, run_query, run_query_err,
-    run_query_probe_traced, run_query_traced, run_query_with_budget, TEST_INPUT_A, TEST_INPUT_B,
-    TEST_INPUT_CONTAINMENT, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC, TEST_INPUT_SEARCH,
+    run_query_probe_traced, run_query_traced, run_query_with_budget, run_query_with_edge_cap,
+    run_query_with_read_cap, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT,
+    TEST_INPUT_ESCALATION, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC, TEST_INPUT_SEARCH,
     TEST_INPUT_TREE_BROWSER, VERB_TEST,
 };
+use index::db_diesel::FamilyDemands;
 use index::symbols::{SymbolId, SymbolInstanceId};
 use sha2::Digest;
 
@@ -1242,6 +1244,452 @@ fn non_existent_child_warning() {
 // - Function `testmodule.bar` [200,300) - symbol id 3, instance id 30
 // - Function `testmodule.baz` [300,400) - symbol id 4, instance id 40
 // - Refs: foo→bar, bar→baz
+
+#[test]
+fn a_node_selected_twice_keeps_both_statements_provenance() {
+    // `collect_results` folds the per-statement selections into one node map,
+    // and a node reached by two statements must carry BOTH of their spans —
+    // that provenance is what the UI uses to say which part of the query
+    // produced a node.
+    //
+    // The merge path is the one that clones nothing (only the vacant path
+    // copies the node), so it is easy to write a version that drops the
+    // second statement's span and still passes every other test.
+    const QUERY: &str = r#""testmodule.foo" ; func("testmodule.foo")"#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    let foo: Vec<_> = res
+        .nodes
+        .0
+        .iter()
+        .filter(|n| n.symbol_instance.id == 20)
+        .collect();
+    assert_eq!(
+        foo.len(),
+        1,
+        "both statements select foo, and it must fold to ONE node"
+    );
+
+    let mut spans: Vec<&str> = foo[0]
+        .query_statements
+        .iter()
+        .map(|q| q.text.as_str())
+        .collect();
+    spans.sort();
+    spans.dedup();
+    assert_eq!(
+        spans.len(),
+        2,
+        "foo was selected by two statements, so it must carry both spans, got {:?}",
+        foo[0]
+            .query_statements
+            .iter()
+            .map(|q| &q.text)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn root_statements_still_get_their_reference_edges() {
+    // A statement with no parent no longer fetches its `parents` family: no
+    // `constrain_by_*` can read it (that needs a neighbour), and the display
+    // path rediscovers any edge between two answer nodes through
+    // `find_edges_between`.  On the real index that family cost 577-870 ms to
+    // return ZERO rows for `mod("amdgpu")`.
+    //
+    // So for two root statements the edge between them now comes from exactly
+    // one place.  If that rediscovery ever stops covering the case, this is
+    // where it shows up.
+    const QUERY: &str = r#""testmodule.foo" ; "testmodule.bar""#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    let mut nodes: Vec<i64> = res.nodes.0.iter().map(|n| n.symbol_instance.id).collect();
+    nodes.sort();
+    assert_eq!(nodes, vec![20, 30], "premise: both roots are in the answer");
+
+    assert_eq!(
+        format_edges(res.edges),
+        vec!["20-30"],
+        "foo calls bar and both are roots, so the edge must survive without \
+         either statement's parents family"
+    );
+}
+
+#[test]
+fn a_capped_attempt_escalates_to_a_composition_that_bounds_it() {
+    // "Find all spinlocks in kernel module x", in miniature.  The fixture's
+    // `modx` contains ten functions; `lock` has ten callers; exactly one
+    // function is both.  At cap 5 neither neighbour bounds the middle
+    // statement on its own, and the composition of the two does.
+    //
+    // Derivation is ONE method retried with a strictly more restrictive
+    // composition, so the sequence is the whole point:
+    //   r0  its own predicate            -> capped (22 instances)
+    //   r1  the tightest neighbour alone -> capped (lock has 11)
+    //   r2  that neighbour AND the other -> 1, resolved
+    //
+    // Composing at r1 would have been wasted work on every query where one
+    // neighbour is enough; not composing at r2 leaves this one unbounded.
+    const QUERY: &str = r#"mod("modx") { select { "lock" } }"#;
+    let (res, acts) = run_query_probe_traced(TEST_INPUT_ESCALATION, QUERY, 5);
+
+    let middle: Vec<_> = acts
+        .iter()
+        .filter(|a| a.query_statement.trim() == r#"select { "lock" }"#)
+        .collect();
+    assert!(
+        middle.iter().any(|a| a.round == 1 && a.resolved.is_none()),
+        "premise: one neighbour alone must NOT bound it, or this proves \
+         nothing about composing: {acts:?}"
+    );
+    assert_eq!(
+        middle.last().map(|a| a.resolved),
+        Some(Some(1)),
+        "composing both neighbours bounds it to the single function that is \
+         inside modx AND calls lock: {acts:?}"
+    );
+
+    let mut nodes: Vec<i64> = res.nodes.as_vec().iter().map(|i| (*i).into()).collect();
+    nodes.sort();
+    assert_eq!(
+        nodes,
+        vec![10, 1001, 3000],
+        "the module, the one function inside it that calls lock, and lock"
+    );
+}
+
+#[test]
+fn a_capped_derive_is_flagged_and_said() {
+    // The derive path used to LAUNDER a capped read: `find_parent_instance_ids`
+    // applies the safety LIMIT but returned bare ids, so a derivation built
+    // from a truncated id-fetch produced a selection that was neither flagged
+    // (M3 would let it constrain) nor warned (the Phase-R warning sites ran
+    // before it existed).  `{ "lock" }`: the wrapper derives lock's callers —
+    // ten of them — via `notify_from_selection`.
+    //
+    // At read_cap = 3 the derive read caps at four of ten, so the answer shows
+    // lock plus four callers; the flag must be carried and the warning said.
+    let capped = run_query_with_read_cap(TEST_INPUT_ESCALATION, r#"{ "lock" }"#, 3);
+    assert_eq!(
+        capped.nodes.as_vec().len(),
+        5,
+        "lock + 4-of-10 derived callers"
+    );
+    assert!(
+        capped
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("this part of the graph is incomplete")),
+        "a capped derive must be said, or a short answer renders as a complete \
+         one; got {:?}",
+        capped
+            .warnings
+            .iter()
+            .map(|w| w.message.clone())
+            .collect::<Vec<_>>(),
+    );
+
+    // Uncapped: all ten callers, and no warning to cry wolf with.
+    let full = run_query_with_read_cap(TEST_INPUT_ESCALATION, r#"{ "lock" }"#, 1000);
+    assert_eq!(
+        full.nodes.as_vec().len(),
+        12,
+        "lock + its instance + ten callers"
+    );
+    assert!(
+        !full
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("incomplete")),
+        "an uncapped derive must not warn"
+    );
+
+    // Control: a derive whose true set fits the cap resolves silently.
+    let small = run_query_with_read_cap(TEST_INPUT_ESCALATION, r#"{ "in_1" }"#, 3);
+    assert!(
+        !small
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("incomplete")),
+        "a derive under the cap must not warn"
+    );
+
+    // A TYPED derive that still caps.  With M4 the derive read of `func`'s
+    // callers is itself typed, but all ten of lock's callers ARE functions, so
+    // the typed read still exceeds read_cap = 3 and caps at four — and the
+    // warning must fire.  (`a_typed_derive_reads_only_matching_rows` is the
+    // complementary case, where the typed read fits the cap and correctly does
+    // NOT warn.)
+    let typed_capped = run_query_with_read_cap(TEST_INPUT_ESCALATION, r#"func { "lock" }"#, 3);
+    assert!(
+        typed_capped
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("this part of the graph is incomplete")),
+        "a typed derive that still exceeds the cap must be said; got {:?}",
+        typed_capped
+            .warnings
+            .iter()
+            .map(|w| w.message.clone())
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn a_typed_derive_reads_only_matching_rows() {
+    // M4: a statement that cannot self-resolve derives from its neighbour, and
+    // the derive read carries the statement's OWN predicate so it fetches only
+    // matching rows — not an untyped superset it would cap and then filter.
+    // `hot` has six callers (two functions, four data); each of these selective
+    // derives fetches only its matches (<= 2), well under read_cap = 3, so it
+    // resolves COMPLETE with no warning.
+    //
+    // The predicate reaches the read through the dedicated `compose_derive_*`
+    // channel, NOT the shared `compose_children`/`compose_has_children` that
+    // `find_symbol` uses for a node's displayed family (those must stay
+    // type-agnostic — see `full_hierarchy_query`).
+    //
+    // Mutation guard (broken-and-watched): make any receiver mixin's
+    // `derive_parent_expr` return `None` and the read reverts to the untyped
+    // superset, which caps at four and — via M8's carry — warns.  So a passing
+    // "no warning" assertion here means the predicate really reached the read.
+    for (q, want) in [
+        (r#"func { "hot" }"#, 3usize),                      // type selector
+        (r#"filter("exact_name", "f_1") { "hot" }"#, 2),    // exact name via filter()
+        (r#"filter("compound_name", "f_1") { "hot" }"#, 2), // compound name via filter()
+    ] {
+        let r = run_query_with_read_cap(TEST_INPUT_ESCALATION, q, 3);
+        assert_eq!(
+            r.nodes.as_vec().len(),
+            want,
+            "{q}: typed derive must resolve to the complete matching set"
+        );
+        assert!(
+            !r.warnings.iter().any(|w| w.message.contains("incomplete")),
+            "{q}: a derive whose typed read fits the cap must not warn; got {:?}",
+            r.warnings
+                .iter()
+                .map(|w| w.message.clone())
+                .collect::<Vec<_>>(),
+        );
+    }
+}
+
+#[test]
+fn a_typed_has_derive_targets_the_contained_symbol() {
+    // M4 has-direction: `mod("modx") has { func }` derives modx's CONTAINED
+    // children and must filter them by the receiver's type on the CONTAINED
+    // symbol (`contained_symbols`), not on modx itself.  modx contains ten
+    // functions, so the answer is modx + 10.  If the predicate landed on the
+    // source (modx) instead it would ask "modx.type = func" and return
+    // nothing — the mutation guard for the has-child alias.
+    let funcs = run_query(TEST_INPUT_ESCALATION, r#"mod("modx") has { func }"#);
+    assert_eq!(
+        funcs.nodes.as_vec().len(),
+        11,
+        "modx + its ten contained functions"
+    );
+    // modx contains no data symbols, so a typed has-derive for data is modx
+    // alone.  A wrong-side filter would instead pass modx through regardless.
+    let data = run_query(TEST_INPUT_ESCALATION, r#"mod("modx") has { data }"#);
+    assert_eq!(
+        data.nodes.as_vec().len(),
+        1,
+        "modx alone; it contains no data"
+    );
+}
+
+#[test]
+fn a_capped_composed_statement_warns_the_graph_is_incomplete() {
+    // A statement whose read hit the SAFETY cap is too broad to compute, and
+    // the user must be told — silence there is a confident wrong answer.
+    //
+    // `mod("modx") { func }` at read_cap = 3: the children read caps, so `func`
+    // is capped but its budget is suppressed (it is composed), so the ordinary
+    // "result budget" warning does NOT fire.  The incompleteness warning must.
+    // No total is quoted — a total needs the whole result set.
+    let res = run_query_with_read_cap(TEST_INPUT_ESCALATION, r#"mod("modx") { func }"#, 3);
+    let msgs: Vec<&str> = res.warnings.iter().map(|w| w.message.as_str()).collect();
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("this part of the graph is incomplete")),
+        "a capped composed statement must warn, got {:?}",
+        msgs
+    );
+    assert!(
+        !msgs
+            .iter()
+            .any(|m| m.contains(" of ") && m.contains("symbols")),
+        "the warning must not quote a total, got {:?}",
+        msgs
+    );
+}
+
+#[test]
+fn a_capped_selection_is_not_narrowed_by_a_neighbour() {
+    // The symmetric non-participant rule: a capped selection neither narrows a
+    // neighbour nor is narrowed by one.
+    //
+    // `search("foo") { "fn_basic" }`.  Uncapped, the answer is EMPTY: none of
+    // the search hits contains `fn_basic`, so the composition rules everything
+    // out.  That is the correct, complete answer.
+    let complete =
+        run_query_with_read_cap(TEST_INPUT_SEARCH, r#"search("foo") { "fn_basic" }"#, 1000);
+    assert!(
+        complete.nodes.as_vec().is_empty(),
+        "premise: uncapped the composition is empty, got {:?}",
+        complete.nodes.as_vec()
+    );
+
+    // At read_cap = 2 the search read caps at three rows.  A capped `search` is
+    // an INCOMPLETE set: it read three of its hits, not all of them, so it
+    // cannot prove `fn_basic` unrelated — narrowing by it would assert "matched
+    // nothing" from data never fully read.  The rule refuses that: the capped
+    // search's rows are kept and `fn_basic` survives, four nodes, flagged
+    // incomplete rather than silently emptied.
+    //
+    // Without the rule this returns zero — the capped search wrongly rules
+    // everything out, a confident wrong answer from a partial read.  That is
+    // the difference the two guards in `constrain_selection` make, and it is
+    // why they must be there: 4 with the rule, 0 without.
+    let capped = run_query_with_read_cap(TEST_INPUT_SEARCH, r#"search("foo") { "fn_basic" }"#, 2);
+    assert_eq!(
+        capped.nodes.as_vec().len(),
+        4,
+        "a capped search must not narrow the composition to a confident empty; \
+         got {:?}",
+        capped.nodes.as_vec()
+    );
+}
+
+#[test]
+fn containment_edge_needs_both_endpoints_in_the_answer() {
+    // The module CONTAINS the file and all three functions, and is the only
+    // node in the answer. A has-edge whose child is absent would name a node
+    // the caller never selected, so none may be emitted.
+    //
+    // The container side must be the populated one for this to discriminate:
+    // asking it of a lone CHILD passes even when the scope is broken, because
+    // there is then no container to expand from. That is how the first
+    // version of this test managed to be vacuous.
+    const QUERY: &str = r#""testmodule""#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    assert_eq!(
+        res.nodes.as_vec().len(),
+        1,
+        "expected just the module, got {:?}",
+        res.nodes.as_vec()
+    );
+    assert!(
+        res.has_edges.0.is_empty(),
+        "the module's children are not in the answer, so no has-edge may be \
+         emitted, got {:?}",
+        res.has_edges.0.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn equal_spans_pick_the_container_with_the_most_constraining_power() {
+    // The fixture puts the directory, the file and the module instances all
+    // at [0, 1000) of object 1, so "tightest container" is a genuine TIE for
+    // any function they contain.
+    //
+    // The tie goes to the container that constrains the child most — here the
+    // file, which holds only foo, over the module, which holds the file too.
+    // That is read off the answer's own containment, not off symbol TYPE: at
+    // this point there is only a graph, and "a file is tighter than a module"
+    // is a fact about these rows rather than a rule worth hardcoding.
+    const QUERY: &str = r#""testmodule" ; file("/main.go") ; "testmodule.foo""#;
+    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+
+    // Assert the PREMISE: without both equal-span containers in the answer
+    // there is no tie, and this test would pass under any rule at all. An
+    // earlier version spelled the file as a bare `"/main.go"`, which matched
+    // nothing — leaving `{module, foo}` and no tie to break.
+    let instances: std::collections::HashSet<_> =
+        res.nodes.0.iter().map(|n| n.symbol_instance.id).collect();
+    for (id, what) in [(10, "module"), (510, "file"), (20, "foo")] {
+        assert!(
+            instances.contains(&id),
+            "premise: {} (instance {}) must be in the answer, got {:?}",
+            what,
+            id,
+            instances
+        );
+    }
+
+    // One winner per child, never several.
+    let mut children: Vec<_> = res.has_edges.0.iter().map(|e| e.child_instance).collect();
+    children.sort();
+    let mut deduped = children.clone();
+    deduped.dedup();
+    assert_eq!(
+        children,
+        deduped,
+        "each child keeps exactly one container, got {:?}",
+        res.has_edges.0.iter().collect::<Vec<_>>()
+    );
+
+    let foo_parent = res
+        .has_edges
+        .0
+        .iter()
+        .find(|e| e.child_instance == SymbolInstanceId::new(20))
+        .map(|e| e.parent_instance);
+    assert_eq!(
+        foo_parent,
+        Some(SymbolInstanceId::new(510)),
+        "module (10) and file (510) both span [0,1000); the file holds only \
+         foo while the module holds the file as well, so the file constrains \
+         foo more and wins. Got {:?}",
+        res.has_edges.0.iter().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn containment_does_not_depend_on_how_the_query_was_phrased() {
+    // Four spellings that select the SAME three nodes (module 10, foo 20,
+    // file 510) must describe the same containment.
+    //
+    // They did not used to. Containment was read off each statement's
+    // neighbourhood family, and those families are narrowed by the statement's
+    // own scope — so `file(...) has { foo }` recorded (file, foo) while the
+    // other spellings recorded (module, foo), and the graph disagreed with
+    // itself about who contains foo. Asking the index for the containment
+    // BETWEEN answer nodes removes the phrasing from the answer.
+    const QUERIES: [&str; 4] = [
+        r#""testmodule" ; file("/main.go") ; "testmodule.foo""#,
+        r#"mod("testmodule") has { "testmodule.foo" } ; file("/main.go")"#,
+        r#"file("/main.go") has { "testmodule.foo" } ; "testmodule""#,
+        r#"mod("testmodule") { "testmodule.foo" } ; file("/main.go")"#,
+    ];
+
+    let mut baseline: Option<(Vec<i64>, Vec<(i64, i64)>)> = None;
+    for query in QUERIES {
+        let res = run_query(TEST_INPUT_CONTAINMENT, query);
+        let mut nodes: Vec<i64> = res.nodes.0.iter().map(|n| n.symbol_instance.id).collect();
+        nodes.sort();
+        let mut edges: Vec<(i64, i64)> = res
+            .has_edges
+            .0
+            .iter()
+            .map(|e| (e.parent_instance.into(), e.child_instance.into()))
+            .collect();
+        edges.sort();
+        match &baseline {
+            None => baseline = Some((nodes, edges)),
+            Some((want_nodes, want_edges)) => {
+                assert_eq!(&nodes, want_nodes, "node sets must match for `{}`", query);
+                assert_eq!(
+                    &edges, want_edges,
+                    "same nodes must give the same containment, but `{}` differs",
+                    query
+                );
+            }
+        }
+    }
+}
 
 #[test]
 fn has_children_query() {
@@ -4081,8 +4529,9 @@ fn canary_filtered_by_find_symbol() {
         let result = index
             .find_symbol(
                 &filter,
-                ScopeContext::Skip,
-                ScopeContext::Skip,
+                ScopeContext::Absent,
+                ScopeContext::Absent,
+                FamilyDemands::default(),
                 &EphContext::rooted(roots.clone()),
             )
             .await
@@ -4109,7 +4558,13 @@ fn canary_filtered_by_find_symbol() {
         });
         let canary_eph = EphContext::rooted(canary_roots);
         let result = index
-            .find_symbol(&filter, ScopeContext::Skip, ScopeContext::Skip, &canary_eph)
+            .find_symbol(
+                &filter,
+                ScopeContext::Absent,
+                ScopeContext::Absent,
+                FamilyDemands::default(),
+                &canary_eph,
+            )
             .await
             .expect("find_symbol with canary visible should succeed")
             .into_inner();
@@ -4850,16 +5305,18 @@ fn search_project_filter_layer_read_parity() {
 
 #[test]
 fn budget_truncation_surfaces_warning() {
-    // cap=1 → leaf LIMIT 8; search("foo") materialises >8 match instances
-    // across the fixture, so the Phase-2 layer-union read is budget-bounded
-    // and the statement must carry a "result budget" warning.  Budget
-    // truncation is acceptable; silent budget truncation is not.
+    // cap=1 → leaf LIMIT 8; search("foo") materialises >8 match instances, so
+    // the read caps and the statement must SURFACE its incompleteness.  The
+    // message is the safety-cap one ("graph is incomplete"), not the old
+    // "result budget" wording: `read_limit = min(leaf_limit, safety)` means a
+    // budget-bounded read is always also capped, and the capped message — which
+    // does not quote a misleading total or say "raise the limit" — subsumes it.
     let res = run_query_with_budget(TEST_INPUT_SEARCH, r#"search("foo")"#, 1);
     assert!(
         res.warnings
             .iter()
-            .any(|w| w.message.contains("result budget")),
-        "expected a result-budget warning, got {:?}",
+            .any(|w| w.message.contains("this part of the graph is incomplete")),
+        "expected an incompleteness warning, got {:?}",
         res.warnings
             .iter()
             .map(|w| w.message.clone())
@@ -4870,12 +5327,12 @@ fn budget_truncation_surfaces_warning() {
         "bounded means truncated, not empty"
     );
 
-    // Unlimited budget: same query, no budget warning.
+    // Unlimited budget: same query, no incompleteness warning.
     let res = run_query_with_budget(TEST_INPUT_SEARCH, r#"search("foo")"#, 0);
     assert!(
         !res.warnings
             .iter()
-            .any(|w| w.message.contains("result budget")),
+            .any(|w| w.message.contains("incomplete")),
         "unlimited budget must not warn",
     );
 }
@@ -4889,12 +5346,14 @@ fn an_echo_child_does_not_cost_the_budget() {
     //
     // Before this rule ANY dependent cleared the budget, which is what made a
     // wide leaf with an empty scope time out where the same leaf alone
-    // answered instantly (`perf/BUDGET_GATE.md`).
+    // answered instantly (`perf/BUDGET_GATE.md`).  The surfaced message is now
+    // the incompleteness one (see `budget_truncation_surfaces_warning`); the
+    // point of this test is that the echo child does not SUPPRESS it.
     let res = run_query_with_budget(TEST_INPUT_SEARCH, r#"search("foo") { }"#, 1);
     assert!(
         res.warnings
             .iter()
-            .any(|w| w.message.contains("result budget")),
+            .any(|w| w.message.contains("this part of the graph is incomplete")),
         "an echo child must not clear the budget, got {:?}",
         res.warnings
             .iter()
@@ -7926,7 +8385,8 @@ fn edges_pick_min_instance_across_branches() {
         let edges = index
             .find_edges_between(&[91, 92, eph_inst], &eph)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
 
         assert_eq!(
             edges.len(),
@@ -8695,16 +9155,18 @@ fn an_empty_sibling_empties_the_parent() {
 }
 
 #[test]
-fn refinement_binds_one_participant_of_the_conjunction() {
-    // Cost side of the conjunction.  A candidate has two neighbour groups
-    // and the refinement round binds the SMALLEST resolved neighbour into
-    // the re-probe.  With conjoining siblings, binding ONE participant is
-    // a RELAXATION of the conjunction — it demands evidence with that
-    // child, which every surviving parent has anyway — so the refined set
-    // is a sound superset that the worklist then narrows the rest of the
-    // way.  (Binding every participant would be tighter still, but
-    // `MAX_ROLE_BRANCHES` caps the probe's Cartesian product at four
-    // branches, so three or more children would silently decline to bind.)
+fn refinement_starts_with_one_participant_of_the_conjunction() {
+    // Cost side of the conjunction.  Both children are resolved, but the
+    // first attempt composes only the TIGHTEST one, and it succeeds — so no
+    // wider composition is tried and the refined set is a superset (5) that
+    // the worklist narrows to the 3 containers.
+    //
+    // Composing both would resolve to exactly 3 and leave the worklist
+    // nothing to do, and `a_capped_attempt_escalates_to_a_composition_that_
+    // bounds_it` shows that happening. It is not done here because it is not
+    // needed here: on the corpus, composing unconditionally took
+    // `mod("amdgpu") { func { "drm_dev_enter" } }` from 400 ms to 2.7 s.
+    // Composition is for when one neighbour is not enough.
     const QUERY: &str = r#"select { "b" ; "e" }"#;
     let (refined, acts) = run_query_probe_traced(TEST_INPUT_A, QUERY, 6);
 
@@ -8724,8 +9186,8 @@ fn refinement_binds_one_participant_of_the_conjunction() {
     assert_eq!(
         outer[1].resolved,
         Some(5),
-        "one child's callers/containers — a superset of the conjunction, \
-         which the worklist narrows to the 3 containers: {acts:?}",
+        "the tightest child alone — a superset of the conjunction, which the \
+         worklist narrows to the 3 containers: {acts:?}",
     );
 
     // The refined regime must still answer like the unprobed one.
@@ -9119,4 +9581,177 @@ fn autovacuum_reloptions_applied() {
             );
         }
     });
+}
+
+#[test]
+fn caps_never_silently_change_a_resolved_answer() {
+    // V, test 1+2: the central property of the whole capping model.  For each
+    // query, sweep read_cap over {3, 5, 1000, 0} (0 = disabled = the reference)
+    // and assert: a run that did NOT warn "incomplete" produces exactly the
+    // cap=0 nodes and edge count.  Equivalently — a capped read may only ever
+    // CHANGE the answer while ALSO saying so.  A silent short answer is the one
+    // outcome forbidden.
+    //
+    // NON-invariant deliberately NOT asserted: node sets are not monotone in
+    // the cap (a tighter cap's refusal-to-narrow can KEEP rows a looser cap
+    // would drop), so this compares each non-capped run to cap=0, never one cap
+    // to another.
+    let queries = [
+        r#"func { "hot" }"#,           // resolves at every cap (2 <= 3)
+        r#"func { "lock" }"#,          // caps at 3/5, resolves at 1000/0
+        r#"{ "lock" }"#,               // anonymous derive; caps at 3/5
+        r#"mod("modx") has { func }"#, // has-derive caps at 3/5
+        r#"g"in_*""#,                  // self-resolve; caps at 3/5
+    ];
+    let mut any_capped = false;
+    for q in queries {
+        let reference = run_query_with_read_cap(TEST_INPUT_ESCALATION, q, 0);
+        let mut ref_nodes: Vec<i64> = reference
+            .nodes
+            .as_vec()
+            .iter()
+            .map(|id| (*id).into())
+            .collect();
+        ref_nodes.sort_unstable();
+        let ref_edges = reference.edges.0.len();
+
+        for cap in [3usize, 5, 1000, 0] {
+            let r = run_query_with_read_cap(TEST_INPUT_ESCALATION, q, cap);
+            let warned = r.warnings.iter().any(|w| w.message.contains("incomplete"));
+            any_capped |= warned;
+            if warned {
+                continue; // a capped run is allowed to differ — it said so
+            }
+            let mut nodes: Vec<i64> = r.nodes.as_vec().iter().map(|id| (*id).into()).collect();
+            nodes.sort_unstable();
+            assert_eq!(
+                nodes, ref_nodes,
+                "{q} at read_cap={cap}: did not warn, so its nodes must equal the cap=0 answer"
+            );
+            assert_eq!(
+                r.edges.0.len(),
+                ref_edges,
+                "{q} at read_cap={cap}: did not warn, so its edge count must equal the cap=0 answer"
+            );
+        }
+    }
+    assert!(
+        any_capped,
+        "premise: at least one query must actually cap at a small read_cap, \
+         or this sweep proves nothing"
+    );
+}
+
+#[test]
+fn an_edge_cap_bounds_edges_without_touching_nodes_or_warnings() {
+    // E1 at the query level: the per-node out-edge cap is ASSEMBLY capping —
+    // an invitation to paginate — so it may shrink edge lists and nothing
+    // else.  `"hub"; g"t_*"` selects hub and its four targets as independent
+    // statements, so every hub→t_i edge is IMPLICIT (found by
+    // find_edges_between over the answer, the only reads E1 bounds; edges a
+    // brace-query fetches as a child family are discovery reads, bounded by
+    // read_cap instead).
+    let free = run_query_with_edge_cap(TEST_INPUT_ESCALATION, r#""hub"; g"t_*""#, 0);
+    let capped = run_query_with_edge_cap(TEST_INPUT_ESCALATION, r#""hub"; g"t_*""#, 2);
+
+    let ids = |r: &crate::statement::ExecutionResult| {
+        let mut v: Vec<i64> = r.nodes.as_vec().iter().map(|id| (*id).into()).collect();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(
+        free.edges.0.len(),
+        4,
+        "premise: hub has four out-edges uncapped"
+    );
+    assert_eq!(
+        capped.edges.0.len(),
+        2,
+        "edge_cap = 2 bounds hub to two edges"
+    );
+    assert_eq!(
+        ids(&free),
+        ids(&capped),
+        "the edge cap must not change the node set"
+    );
+    assert!(
+        free.warnings.is_empty() && capped.warnings.is_empty(),
+        "assembly capping must not warn — the graph is not incomplete, an \
+         edge list is merely paged; got {:?} / {:?}",
+        free.warnings
+            .iter()
+            .map(|w| w.message.clone())
+            .collect::<Vec<_>>(),
+        capped
+            .warnings
+            .iter()
+            .map(|w| w.message.clone())
+            .collect::<Vec<_>>(),
+    );
+
+    // Layer boundary: a COMPOSED query resolves identically under a tiny edge
+    // cap — pagination capping cannot leak into discovery (it runs strictly
+    // after the fixpoint).  Would fail if find_edges_between output ever fed
+    // back into constraining.
+    let comp_free = run_query_with_edge_cap(TEST_INPUT_ESCALATION, r#"g"in_*" { "lock" }"#, 0);
+    let comp_capped = run_query_with_edge_cap(TEST_INPUT_ESCALATION, r#"g"in_*" { "lock" }"#, 1);
+    assert_eq!(
+        ids(&comp_free),
+        ids(&comp_capped),
+        "a composed query's resolution must not depend on the edge cap"
+    );
+    assert_eq!(
+        comp_free.warnings.len(),
+        comp_capped.warnings.len(),
+        "nor its warnings"
+    );
+}
+
+#[test]
+fn a_capped_provider_is_flagged_through_the_label_path() {
+    // The label path is the one notification route that does not go through
+    // `notify_from_selection`: `#res` receives the provider\'s selection via
+    // `derive_from_provider` (a clone) and constrains through `labels.rs`\'s
+    // own `try_constrain_notification` override.  This is a black-box pin on
+    // that route: a capped provider must mirror the same short answer and the
+    // incompleteness warning must be beside it; uncapped must mirror the full
+    // answer silently.  (Scope, honestly: a mutant that scrubs `capped` on
+    // the clone is currently observation-EQUIVALENT here, because every
+    // `#res` render is unioned with the provider tree\'s own render — so this
+    // test guards the route\'s end-to-end behaviour, not the clone\'s flag in
+    // isolation.  If a future renderer projects `#res` alone, add the
+    // discriminating assertion there.)
+    let capped = run_query_with_read_cap(TEST_INPUT_ESCALATION, r#"@res { "lock" }; #res"#, 3);
+    assert_eq!(
+        capped.nodes.as_vec().len(),
+        5,
+        "lock + 4-of-10 derived callers, mirrored through the label"
+    );
+    assert!(
+        capped
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("this part of the graph is incomplete")),
+        "the capped provider must stay said through the label path; got {:?}",
+        capped
+            .warnings
+            .iter()
+            .map(|w| w.message.clone())
+            .collect::<Vec<_>>(),
+    );
+
+    // Uncapped: the full answer, and silence.
+    let full = run_query_with_read_cap(TEST_INPUT_ESCALATION, r#"@res { "lock" }; #res"#, 1000);
+    assert_eq!(
+        full.nodes.as_vec().len(),
+        12,
+        "lock + instance + ten callers"
+    );
+    assert!(
+        !full
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("incomplete")),
+        "an uncapped provider must not warn through the label"
+    );
 }

@@ -107,6 +107,23 @@ pub struct EphContext {
     /// via [`EphContext::set_result_budget`].  Read by `find_symbol` to bound a
     /// bare selector's neighbourhood queries.
     result_budget: ResultBudget,
+    /// Safety bound on rows any single read may return (P1: "SQL never returns
+    /// too much data, at no level").  ALWAYS present — unlike `result_budget`,
+    /// which can be unlimited — because a read with no bound is the failure
+    /// this exists to prevent.  Equal to the request's `probe_cap`, so a read
+    /// that returns more than this is exactly a read that could not have been
+    /// probe-resolved: probe and read agree on what "too big" means, which is
+    /// what makes "Resolved ⇔ read ≤ cap" hold.  The `+1` sentinel row that
+    /// distinguishes "exactly cap" from "more than cap" is added at the query.
+    read_cap: usize,
+    /// Assembly cap (E1): the maximum out-edges `find_edges_between` returns
+    /// per source node before recording the node as truncated.  Unlike
+    /// `read_cap` this is NOT a soundness bound — the node set is already
+    /// settled when edges are assembled, so hitting it is an invitation to
+    /// paginate, never a reason to flag `Selection.capped` or warn.  0 =
+    /// disabled (no per-node bound), the default: edge pagination is inert
+    /// until the front end can fetch more.
+    edge_cap: usize,
 }
 
 impl EphContext {
@@ -121,6 +138,8 @@ impl EphContext {
             roots,
             chains,
             result_budget: ResultBudget::UNLIMITED,
+            read_cap: crate::db_diesel::DEFAULT_READ_CAP,
+            edge_cap: 0,
         }
     }
 
@@ -133,6 +152,29 @@ impl EphContext {
     /// the API layer; `clone()`/`push_materialisation` carry it forward unchanged.
     pub fn set_result_budget(&mut self, budget: ResultBudget) {
         self.result_budget = budget;
+    }
+
+    /// The per-read safety cap (rows).  See the field docs.
+    pub fn read_cap(&self) -> usize {
+        self.read_cap
+    }
+
+    /// Set the per-read safety cap for this request; carried forward by
+    /// `clone()`/`push_materialisation` like the budget.  Set from the
+    /// request's `probe_cap` at the API layer.
+    pub fn set_read_cap(&mut self, cap: usize) {
+        self.read_cap = cap;
+    }
+
+    /// The per-node out-edge assembly cap (E1).  0 = disabled.  See the field.
+    pub fn edge_cap(&self) -> usize {
+        self.edge_cap
+    }
+
+    /// Set the per-node out-edge cap for this request (assembly capping, E1).
+    /// Carried forward by `clone()`/`push_materialisation` like the other caps.
+    pub fn set_edge_cap(&mut self, cap: usize) {
+        self.edge_cap = cap;
     }
 
     fn root_index(&self, root_id: i64) -> Option<usize> {
@@ -369,6 +411,13 @@ pub struct Selection {
     /// surface this as a truncation warning on the owning command; it must
     /// never be silently dropped.
     pub budget_bounded: bool,
+    /// Soundness flag, distinct from `budget_bounded`: true when any read that
+    /// produced this selection hit the safety cap and so is INCOMPLETE.  A
+    /// capped selection is not a participant in composition — it may neither
+    /// narrow another selection nor be narrowed by one, because `retain` over a
+    /// truncated set drops rows whose evidence sat in the part never read.
+    /// `budget_bounded` drives a warning; this drives a refusal.
+    pub capped: bool,
 }
 
 impl Selection {
@@ -380,6 +429,7 @@ impl Selection {
             has_parents: Vec::new(),
             has_children: Vec::new(),
             budget_bounded: false,
+            capped: false,
         }
     }
 
@@ -445,6 +495,7 @@ impl Selection {
             (hc.parent_instance.id, hc.child_instance.id)
         });
         self.budget_bounded |= other.budget_bounded;
+        self.capped |= other.capped;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -857,6 +908,24 @@ mod tests {
         b.budget_bounded = true;
         a.extend(b);
         assert!(a.budget_bounded);
+    }
+
+    /// Mirror of `extend_ors_budget_bounded` for the discovery-capping flag:
+    /// a union with a capped selection is itself capped — extending must
+    /// never launder the flag away.
+    #[test]
+    fn extend_ors_capped() {
+        let mut a = Selection::new();
+        let mut b = Selection::new();
+        b.capped = true;
+        a.extend(b);
+        assert!(a.capped);
+        // And symmetrically: an already-capped receiver stays capped when
+        // extended with a clean selection.
+        let mut c = Selection::new();
+        c.capped = true;
+        c.extend(Selection::new());
+        assert!(c.capped);
     }
 }
 

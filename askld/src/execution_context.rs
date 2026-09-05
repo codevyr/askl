@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use index::db_diesel::{EphContext, Selection};
 
@@ -17,7 +18,12 @@ impl SelectorRegistry {
     }
 
     pub fn add_by_id(&mut self, id: SelectorId, selection: Option<Selection>) {
-        self.0.insert(id, SelectorState { selection });
+        self.0.insert(
+            id,
+            SelectorState {
+                selection: selection.map(Rc::new),
+            },
+        );
     }
 
     pub fn contains(&self, id: &SelectorId) -> bool {
@@ -50,6 +56,36 @@ impl SelectorRegistry {
                 .expect("Selector should have been added");
             f(selector, entry);
         }
+    }
+
+    /// The selections contributing to one statement, in selector order,
+    /// borrowed rather than cloned.
+    ///
+    /// Applies the same accumulation rule as [`crate::statement::Statement::
+    /// get_selection`]: a selector that has no selection RESETS the
+    /// accumulation (the statement is not ready), and a later selector with
+    /// one starts it again.  `None` means the statement has no selection;
+    /// a returned vector is never empty.
+    pub fn contributing_selections<'a, S>(&'a self, selectors: S) -> Option<Vec<&'a Rc<Selection>>>
+    where
+        S: Iterator<Item = &'a dyn Selector>,
+    {
+        let mut acc: Option<Vec<&'a Rc<Selection>>> = None;
+        for selector in selectors {
+            let entry = self
+                .0
+                .get(&selector.id())
+                .expect("Selector should have been added");
+            // Reads the state directly rather than through
+            // `Selector::get_selection`, which is that field behind a deref
+            // and has no overrides; going direct keeps the `Rc` so a
+            // single-selector statement hands out a refcount bump.
+            match entry.selection.as_ref() {
+                Some(sel) => acc.get_or_insert_with(Vec::new).push(sel),
+                None => acc = None,
+            }
+        }
+        acc
     }
 }
 

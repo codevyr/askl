@@ -11,6 +11,7 @@ use crate::statement::Statement;
 use crate::verb::Args;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
+use index::db_diesel::FamilyDemands;
 use index::db_diesel::{
     CompositeFilter, CompoundNameMixin, EphContext, ExactNameMixin, Index, LeafNameMixin,
     ParentReference, ScopeContext, Selection, SymbolTypeMixin,
@@ -106,12 +107,13 @@ impl Selector for NameSelector {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        demands: FamilyDemands,
         eph: &EphContext,
     ) -> Result<Option<Selection>> {
         let combined = CompositeFilter::and(vec![filter, name_filter(&self.pattern)]);
         let selection = cfg
             .index
-            .find_symbol(&combined, parent_scope, children_scope, eph)
+            .find_symbol(&combined, parent_scope, children_scope, demands, eph)
             .await?
             .into_inner();
         Ok(Some(selection))
@@ -208,12 +210,13 @@ impl Selector for ForcedVerb {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        demands: FamilyDemands,
         eph: &EphContext,
     ) -> Result<Option<Selection>> {
         let combined = CompositeFilter::and(vec![filter, name_filter(&self.pattern)]);
         let selection = cfg
             .index
-            .find_symbol(&combined, parent_scope, children_scope, eph)
+            .find_symbol(&combined, parent_scope, children_scope, demands, eph)
             .await?
             .into_inner();
 
@@ -237,6 +240,7 @@ impl Selector for ForcedVerb {
         _notif_ctx: &super::super::NotificationContext,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
+        _demands: FamilyDemands,
     ) -> Result<Option<Selection>> {
         let parent_selection = match parent.get_selection(ctx) {
             Some(selection) => selection,
@@ -337,6 +341,7 @@ impl Selector for UnitVerb {
         _filter: CompositeFilter,
         _parent_scope: ScopeContext,
         _children_scope: ScopeContext,
+        _demands: FamilyDemands,
         _eph: &EphContext,
     ) -> Result<Option<Selection>> {
         Ok(None)
@@ -714,6 +719,7 @@ impl Selector for TypeSelector {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        demands: FamilyDemands,
         eph: &EphContext,
     ) -> Result<Option<Selection>> {
         if self.name_pattern.is_none() {
@@ -725,7 +731,7 @@ impl Selector for TypeSelector {
         // (collected at compute_selected). Just use it directly.
         let selection = cfg
             .index
-            .find_symbol(&filter, parent_scope, children_scope, eph)
+            .find_symbol(&filter, parent_scope, children_scope, demands, eph)
             .await?
             .into_inner();
         Ok(Some(selection))
@@ -841,11 +847,12 @@ impl Selector for GenericSelector {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        demands: FamilyDemands,
         eph: &EphContext,
     ) -> Result<Option<Selection>> {
         let selection = cfg
             .index
-            .find_symbol(&filter, parent_scope, children_scope, eph)
+            .find_symbol(&filter, parent_scope, children_scope, demands, eph)
             .await?
             .into_inner();
         Ok(Some(selection))

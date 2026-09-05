@@ -8,6 +8,7 @@ use crate::span::Span;
 use crate::statement::Statement;
 use anyhow::Result;
 use async_trait::async_trait;
+use index::db_diesel::FamilyDemands;
 use index::db_diesel::{
     CompositeFilter, DirectOnlyMixin, EphContext, EphScopedFut, EphTransaction, Index,
     OuterParentFilterMixin, RootLayer, RootShardRef, ScopeContext, Selection,
@@ -645,12 +646,62 @@ pub trait Filter: std::fmt::Debug + Display + Verb {
 
 #[derive(Debug)]
 pub struct SelectorState {
-    pub selection: Option<Selection>,
+    /// Behind an `Rc` so handing the selection to a consumer is a refcount
+    /// bump, not a deep copy.  A wide statement's neighbourhood families run
+    /// to six figures of rows, and the final graph-assembly phase asks for
+    /// the selection once per consumer while each consumer reads ONE field.
+    /// Mutation goes through `Rc::make_mut`, so the sole owner (the normal
+    /// case during execution) still mutates in place.
+    pub selection: Option<Rc<Selection>>,
 }
 
 impl SelectorState {
     pub fn new() -> Self {
         Self { selection: None }
+    }
+
+    /// `Rc::make_mut` on the stored selection, with the copy made visible.
+    ///
+    /// Copy-on-write: the sole owner mutates in place, which is the normal
+    /// case and the reason the `Rc` pays off.  But a handle held elsewhere —
+    /// `derive_from_parent` keeps the parent's across two awaits, and
+    /// `Statement::notify` holds every participant's for a constrain loop —
+    /// makes this deep-copy the whole selection.  That is still correct, and
+    /// never costs more than the unconditional copy this replaced, but it IS
+    /// the cost the `Rc` exists to avoid, so it gets traced instead of
+    /// silently reappearing under a future concurrency change.
+    fn selection_mut(&mut self) -> &mut Selection {
+        let rc = self.selection.as_mut().unwrap();
+        if Rc::strong_count(rc) > 1 {
+            tracing::debug!(
+                nodes = rc.nodes.len(),
+                holders = Rc::strong_count(rc),
+                "selection copy-on-write: a handle was outstanding",
+            );
+        }
+        Rc::make_mut(rc)
+    }
+
+    /// Replace this selector's selection and report whether it actually
+    /// CHANGED — by node set, the only thing a neighbour constrains against.
+    ///
+    /// The worklist reschedules a neighbour when a notifier's selection
+    /// changed; a derive that reproduces the same nodes (a capped statement
+    /// re-deriving the same capped set each round is the case that matters)
+    /// must not reschedule, or the worklist churns — re-running a full
+    /// `find_symbol` per round for no new information.  Comparing node sets is
+    /// enough: families are derived from nodes, so equal nodes ⇒ equal
+    /// constraint.  Both sets are ≤ `read_cap` since M1, so the sort is cheap.
+    pub fn set_selection_reporting_change(&mut self, new: Option<Selection>) -> bool {
+        let key = |s: &Selection| {
+            let mut v = s.get_instance_ids();
+            v.sort_unstable();
+            v
+        };
+        let before = self.selection.as_deref().map(key);
+        let after = new.as_ref().map(key);
+        self.selection = new.map(Rc::new);
+        before != after
     }
 
     pub fn constrain_selection(
@@ -659,18 +710,33 @@ impl SelectorState {
         role: &DependencyRole,
         rel_type: RelationshipType,
     ) -> bool {
-        // Every arm below RETAINS against `dependency`'s rows, so a dependency
-        // that stopped at a `LIMIT` would silently prune neighbours that do
-        // relate to the rows it never fetched.  What keeps that unreachable is
-        // the budget law — *truncated rows may only travel where they cannot
-        // narrow an independent selection* — established by
-        // `edge_consumes_rows` and fenced in `Statement::notify`, the one
-        // place that can see whether the receiving statement is an echo.  A
-        // bare `Selection` cannot answer that, which is why the assert is not
-        // here.
-        // Cost of the gate: `perf/BUDGET_GATE.md`.
+        // A capped selection is not a participant in composition — the
+        // symmetric rule, enforced HERE because this is the one point every
+        // constrain path reaches (`Command::notify_from_selection` and
+        // `UserVerb` call it directly, bypassing `try_constrain_notification`).
+        //
+        //  * A capped DEPENDENCY is a truncated set; every arm below RETAINS
+        //    against it, so narrowing by it would drop nodes whose evidence sat
+        //    in the rows the limit never fetched.
+        //  * A capped SELF is equally a truncated set; narrowing IT runs
+        //    `retain` over a partial selection and then reports "matched
+        //    nothing" from data never fully read.
+        //
+        // Either way: do nothing and report no change.  Returning `false` means
+        // "nothing changed", NOT "derive instead" — `constrain_with_warning`'s
+        // first element is `selection.is_some()`, decided before this call.
+        // The capped statement keeps its (incomplete) rows and is reported to
+        // the user as an incomplete part of the graph, rather than silently
+        // narrowing or being narrowed into a wrong answer.
+        if dependency.capped {
+            return false;
+        }
 
         if self.selection.is_none() {
+            return false;
+        }
+
+        if self.selection.as_ref().unwrap().capped {
             return false;
         }
 
@@ -711,7 +777,7 @@ impl SelectorState {
         } else {
             Default::default()
         };
-        let selection = self.selection.as_mut().unwrap();
+        let selection = self.selection_mut();
         // A relationship is accepted on evidence from EITHER side's edge
         // lists.  The parent's children/has_children are computed when the
         // parent's statement runs — BEFORE a layer-creating child (e.g.
@@ -766,7 +832,7 @@ impl SelectorState {
         } else {
             Default::default()
         };
-        let selection = self.selection.as_mut().unwrap();
+        let selection = self.selection_mut();
         // Same evidence-union as `constrain_by_parent`, mirrored: a
         // relationship is accepted from EITHER side's edge lists.  With
         // two-phase execution both sides are computed under the same
@@ -835,7 +901,7 @@ impl SelectorState {
     }
 
     fn constrain_by_owner(&mut self, owner: &Selection) {
-        let selection = self.selection.as_mut().unwrap();
+        let selection = self.selection_mut();
         selection.nodes.retain(|u| {
             owner
                 .nodes
@@ -935,11 +1001,11 @@ pub trait Selector: std::fmt::Debug + Verb {
     fn update_state(&self, _state: &mut SelectorState) {}
 
     fn get_selection_mut<'a>(&'a self, state: &'a mut SelectorState) -> Option<&'a mut Selection> {
-        state.selection.as_mut()
+        state.selection.as_mut().map(Rc::make_mut)
     }
 
     fn get_selection<'a>(&'a self, state: &'a SelectorState) -> Option<&'a Selection> {
-        state.selection.as_ref()
+        state.selection.as_deref()
     }
 
     /// Per-selector constraint logic for `accept_notification`.
@@ -1054,11 +1120,12 @@ pub trait Selector: std::fmt::Debug + Verb {
         filter: CompositeFilter,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        demands: FamilyDemands,
         eph: &EphContext,
     ) -> Result<Option<Selection>> {
         let selection = cfg
             .index
-            .find_symbol(&filter, parent_scope, children_scope, eph)
+            .find_symbol(&filter, parent_scope, children_scope, demands, eph)
             .await?;
         Ok(Some(selection.into_inner()))
     }
@@ -1072,12 +1139,14 @@ pub trait Selector: std::fmt::Debug + Verb {
         notif_ctx: &NotificationContext,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        demands: FamilyDemands,
     ) -> Result<Option<Selection>> {
         let parent_sel = match parent.get_selection(&ctx) {
             Some(selection) => selection,
             None => return Ok(None),
         };
         let parent_ids = parent_sel.get_instance_ids();
+        let eph = &ctx.eph;
         let mut find_parts: Vec<CompositeFilter> = vec![];
         if !notif_ctx.unnest {
             find_parts.push(CompositeFilter::leaf(DirectOnlyMixin::new()));
@@ -1085,9 +1154,18 @@ pub trait Selector: std::fmt::Debug + Verb {
                 &parent_ids,
             )));
         }
+        // M4: carry the receiver's own predicate into the derive read so it
+        // fetches only matching children.  `find_child_instance_ids` extracts
+        // it through the dedicated `compose_derive_*` channel — NOT the shared
+        // `compose_children`/`compose_has_children`, which relate a node to its
+        // displayed family and must stay type-agnostic.
+        find_parts.extend(
+            selector_filters
+                .iter()
+                .filter_map(|f| f.get_composite_filter(eph)),
+        );
         let find_filter = CompositeFilter::and(find_parts);
-        let eph = &ctx.eph;
-        let decl_ids = index
+        let (decl_ids, derive_capped) = index
             .find_child_instance_ids(
                 &parent_ids,
                 notif_ctx.rel_type.contains(RelationshipType::REFS),
@@ -1104,6 +1182,7 @@ pub trait Selector: std::fmt::Debug + Verb {
             &decl_ids,
             parent_scope,
             children_scope,
+            demands,
             eph,
         )
         .await?;
@@ -1114,6 +1193,12 @@ pub trait Selector: std::fmt::Debug + Verb {
         // query above cannot notice that, so carry the flag across — otherwise
         // the echo renders short with nothing saying why.
         selection.budget_bounded |= parent_sel.budget_bounded;
+        // A truncated derive read must not launder into an unflagged selection:
+        // the id-fetch above hit the safety limit, so the derived set is
+        // incomplete regardless of what the by-id re-read (which a selector
+        // predicate can shrink below the cap) reports.  M3 then keeps this
+        // selection out of composition; M8 says it.
+        selection.capped |= derive_capped;
 
         Ok(Some(selection))
     }
@@ -1129,7 +1214,7 @@ pub trait Selector: std::fmt::Debug + Verb {
             Some(selection) => selection,
             None => return Ok(None),
         };
-        Ok(Some(provider.clone()))
+        Ok(Some((*provider).clone()))
     }
 }
 
@@ -1139,6 +1224,7 @@ pub(crate) async fn find_symbol_by_instance_id(
     instances: &Vec<SymbolInstanceId>,
     parent_scope: ScopeContext,
     children_scope: ScopeContext,
+    demands: FamilyDemands,
     eph: &EphContext,
 ) -> Result<Selection> {
     let mut parts: Vec<CompositeFilter> = selector_filters
@@ -1148,7 +1234,7 @@ pub(crate) async fn find_symbol_by_instance_id(
     parts.push(CompositeFilter::leaf(SymbolInstanceIdMixin::new(instances)));
     let filter = CompositeFilter::and(parts);
     Ok(index
-        .find_symbol(&filter, parent_scope, children_scope, eph)
+        .find_symbol(&filter, parent_scope, children_scope, demands, eph)
         .await?
         .into_inner())
 }

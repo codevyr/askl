@@ -1,6 +1,8 @@
 use crate::execution_context::ExecutionContext;
+use crate::execution_state::RelationshipType;
 use crate::hierarchy::Hierarchy;
 use index::db_diesel::{CompositeFilter, EphContext, ScopeContext};
+use index::db_diesel::{FamilyDemand, FamilyDemands};
 
 use super::Statement;
 
@@ -110,7 +112,7 @@ pub(super) fn build_parent_scope(
                             // The parent's children-side query is scoped by
                             // THIS statement's condition and covers the edge;
                             // the evidence union accepts it from that side.
-                            ScopeContext::Skip
+                            ScopeContext::Deferred
                         } else {
                             ScopeContext::Unscoped
                         }
@@ -118,7 +120,15 @@ pub(super) fn build_parent_scope(
                 }
             }
         }
-        None => ScopeContext::Unscoped, // Root-level: run parents unscoped
+        // Root-level: there is no statement above, so nothing reads this
+        // family.  `constrain_by_parent` needs a parent to constrain against
+        // and `constrain_by_child` reads the CHILD's parents, not its own; the
+        // display path rediscovers any edge between two answer nodes through
+        // `find_edges_between`, and forced edges are fabricated rather than
+        // queried (they overwrite `parents` outright).  This mirrors
+        // `build_children_scope`, which has always returned `Absent` when a
+        // statement has no children.
+        None => ScopeContext::Absent,
     }
 }
 
@@ -166,7 +176,7 @@ pub(super) fn build_children_scope(
     }
 
     if !has_children {
-        return ScopeContext::Skip;
+        return ScopeContext::Absent;
     }
 
     let combined_filter = if unselected_filters.is_empty() {
@@ -190,12 +200,56 @@ pub(super) fn build_children_scope(
             // (`mod("x") { func { … } }`) from materialising millions of edge
             // rows it then throws away.  (No children at all was returned as
             // Skip above.)
-            ScopeContext::Skip
+            ScopeContext::Deferred
         }
     } else {
         ScopeContext::Scope {
             ids: selected_ids,
             filter: combined_filter,
         }
+    }
+}
+
+/// Which neighbourhood families each side of `statement` can actually feed.
+///
+/// `constrain_by_parent`/`constrain_by_child` consult the REFS families only
+/// when the relationship carries REFS, and the containment families only when
+/// it carries HAS.  So `mod("x") { has func }` never reads a REFS family, and
+/// fetching one is work whose every row is discarded -- 10.9 s of it for
+/// `mod("amdgpu") { derive(type="has") func }` on the real index.
+///
+/// A side with no statement is left demanding everything; `ScopeContext::
+/// Absent` already suppresses it, and saying so twice would only invite the
+/// two rules to disagree.
+///
+/// Display is unaffected: an edge between two nodes that are both in the
+/// answer is rediscovered by `find_edges_between` / `find_has_edges_between`,
+/// which ask about the answer rather than about a neighbourhood.
+pub(super) fn build_family_demands(statement: &Statement) -> FamilyDemands {
+    let parent = match statement.parent().and_then(|p| p.upgrade()) {
+        // `relationship_type` describes THIS statement's edge to its parent,
+        // which is the same edge `constrain_by_child` uses when it reads this
+        // statement's parents families from the other end.
+        Some(_) => demand_of(statement.relationship_type),
+        None => FamilyDemand::both(),
+    };
+    let mut children_rel: Option<RelationshipType> = None;
+    for child in statement.children() {
+        children_rel = Some(match children_rel {
+            None => child.relationship_type,
+            Some(acc) => acc | child.relationship_type,
+        });
+    }
+    let children = match children_rel {
+        Some(rel) => demand_of(rel),
+        None => FamilyDemand::both(),
+    };
+    FamilyDemands { parent, children }
+}
+
+fn demand_of(rel: RelationshipType) -> FamilyDemand {
+    FamilyDemand {
+        refs: rel.contains(RelationshipType::REFS),
+        has: rel.contains(RelationshipType::HAS),
     }
 }

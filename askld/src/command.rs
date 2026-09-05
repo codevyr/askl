@@ -12,6 +12,7 @@ use crate::verb::{
 };
 use anyhow::Result;
 use core::fmt::Debug;
+use index::db_diesel::FamilyDemands;
 use index::db_diesel::{
     CompositeFilter, EphContext, Index, InnermostOnlyMixin, ScopeContext, Selection,
     SymbolInstanceIdMixin,
@@ -604,9 +605,11 @@ impl Command {
         unnest: bool,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        demands: FamilyDemands,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         let mut changed = false;
         let mut warnings = vec![];
+        let mut derive_cap_warned = false;
         let selector_filters: Vec<&dyn Filter> = self.filters().collect();
         let mut derivation_ids = None;
         for selector in self.selectors() {
@@ -644,6 +647,13 @@ impl Command {
                 if !unnest {
                     find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new()));
                 }
+                // M4: carry the receiver's predicate into the derive read; it
+                // is extracted through the dedicated `compose_derive_*` channel.
+                find_parts.extend(
+                    selector_filters
+                        .iter()
+                        .filter_map(|f| f.get_composite_filter(&ctx.eph)),
+                );
                 let find_filter = CompositeFilter::and(find_parts);
                 derivation_ids = Some(
                     index
@@ -665,7 +675,7 @@ impl Command {
                         })?,
                 );
             }
-            let decl_ids = derivation_ids.as_ref().unwrap();
+            let (decl_ids, derive_capped) = derivation_ids.as_ref().unwrap();
 
             let selection = find_symbol_by_instance_id(
                 index,
@@ -673,6 +683,7 @@ impl Command {
                 decl_ids,
                 parent_scope.clone(),
                 children_scope.clone(),
+                demands,
                 &ctx.eph,
             )
             .await
@@ -684,11 +695,30 @@ impl Command {
                     selector.span(),
                 )
             })?;
+            // A truncated derive read must not launder into an unflagged
+            // selection.  The by-id re-read cannot re-detect the truncation
+            // once a selector predicate shrinks the survivors below the cap, so
+            // carry the read's own signal.  (When the predicate does NOT shrink
+            // it, M1's re-read of a cap+1 id set already re-trips the flag; this
+            // carry is the case it misses.)
+            let mut selection = selection;
+            selection.capped |= *derive_capped;
+            // The Phase-R emission sites cannot warn for a derived selection —
+            // it is created here, after they ran — so a capped derive would
+            // otherwise render a short answer silently.  Same message, no totals.
+            if selection.capped && !derive_cap_warned {
+                derive_cap_warned = true;
+                warnings.push(Diagnostic::truncation(
+                    Span::from_pest(selector.span(), self.span().input()),
+                    "too many results: this part of the graph is incomplete. Narrow it with a name or glob, a type filter, `ignore(...)`, `project(...)`, or fewer hops"
+                        .to_string(),
+                ));
+            }
 
-            selector_state_with(&mut ctx.registry, selector, |state| {
-                state.selection = Some(selection);
+            let changed_here = selector_state_with(&mut ctx.registry, selector, |state| {
+                state.set_selection_reporting_change(Some(selection))
             });
-            changed = true;
+            changed |= changed_here;
         }
         Ok(NotificationResult::new(changed, warnings))
     }
@@ -701,6 +731,7 @@ impl Command {
         notif_ctx: NotificationContext,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        demands: FamilyDemands,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         if !notifier.command().has_selectors() {
             return Ok(NotificationResult::new(false, vec![]));
@@ -712,6 +743,7 @@ impl Command {
         };
 
         let mut changed = false;
+        let mut derive_cap_warned = false;
         let mut warnings = vec![];
         let selector_filters: Vec<&dyn Filter> = self.filters().collect();
         let notifier_labels = if notif_ctx.role == DependencyRole::User {
@@ -758,6 +790,7 @@ impl Command {
                             &notif_ctx,
                             parent_scope.clone(),
                             children_scope.clone(),
+                            demands,
                         )
                         .await
                 }
@@ -786,10 +819,21 @@ impl Command {
                 )
             })?;
 
-            selector_state_with(&mut ctx.registry, selector, |state| {
-                state.selection = selection;
+            // A derive that came back discovery-capped must be SAID here: the
+            // Phase-R warning sites ran before this selection existed.  Same
+            // message, no totals.
+            if selection.as_ref().is_some_and(|sel| sel.capped) && !derive_cap_warned {
+                derive_cap_warned = true;
+                warnings.push(Diagnostic::truncation(
+                    Span::from_pest(selector.span(), self.span().input()),
+                    "too many results: this part of the graph is incomplete. Narrow it with a name or glob, a type filter, `ignore(...)`, `project(...)`, or fewer hops"
+                        .to_string(),
+                ));
+            }
+            let changed_here = selector_state_with(&mut ctx.registry, selector, |state| {
+                state.set_selection_reporting_change(selection)
             });
-            changed = true;
+            changed |= changed_here;
         }
         Ok(NotificationResult::new(changed, warnings))
     }
@@ -941,6 +985,7 @@ impl Command {
         cfg: &ControlFlowGraph,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
+        demands: FamilyDemands,
         eph: &EphContext,
         layer_ids: &[i64],
         phase1_warnings: Vec<Diagnostic>,
@@ -979,6 +1024,12 @@ impl Command {
             .collect();
 
         let mut budget_warned = false;
+        // Separate from the budget warning: `capped` means a read hit the
+        // SAFETY cap (P1), so this part of the graph is genuinely too broad
+        // to compute — not just trimmed to the requested limit.  Only warn
+        // when the budget warning does NOT already cover it, and never quote
+        // a total (a total needs the whole result set, the expense avoided).
+        let mut capped_warned = false;
         // Plain predicate-only selectors fold into ONE statement query (the
         // fused block below); layer-backed and side-effectful selectors keep
         // their own paths.
@@ -1036,7 +1087,13 @@ impl Command {
                     let filter = CompositeFilter::and(parts);
                     Some(
                         cfg.index
-                            .find_symbol(&filter, parent_scope.clone(), children_scope.clone(), eph)
+                            .find_symbol(
+                                &filter,
+                                parent_scope.clone(),
+                                children_scope.clone(),
+                                demands,
+                                eph,
+                            )
                             .await
                             .map_err(to_pest)?
                             .into_inner(),
@@ -1055,6 +1112,7 @@ impl Command {
                         filter,
                         parent_scope.clone(),
                         children_scope.clone(),
+                        demands,
                         eph,
                     )
                     .await
@@ -1066,7 +1124,7 @@ impl Command {
                 // request's result-budget LIMIT, so this selection may be
                 // missing rows.  One warning per statement, attributed to the
                 // selector that produced the bounded selection.
-                if selection.budget_bounded && !budget_warned {
+                if selection.budget_bounded && !selection.capped && !budget_warned {
                     budget_warned = true;
                     let bound = eph.result_budget().leaf_limit().unwrap_or(0);
                     warnings.push(Diagnostic::truncation(
@@ -1076,6 +1134,14 @@ impl Command {
                              result budget and may be incomplete — narrow the \
                              query or raise the request `limit`"
                         ),
+                    ));
+                }
+                if selection.capped && !capped_warned {
+                    capped_warned = true;
+                    warnings.push(Diagnostic::truncation(
+                        Span::from_pest(selector.span(), self.span().input()),
+                        "too many results: this part of the graph is incomplete. Narrow it with a name or glob, a type filter, `ignore(...)`, `project(...)`, or fewer hops"
+                            .to_string(),
                     ));
                 }
                 if selection.is_empty() {
@@ -1112,12 +1178,18 @@ impl Command {
             let _fused_span = tracing::debug_span!("select_fused", n = fused.len()).entered();
             let selection = cfg
                 .index
-                .find_symbol(&filter, parent_scope.clone(), children_scope.clone(), eph)
+                .find_symbol(
+                    &filter,
+                    parent_scope.clone(),
+                    children_scope.clone(),
+                    demands,
+                    eph,
+                )
                 .await
                 .map_err(to_pest)?
                 .into_inner();
 
-            if selection.budget_bounded && !budget_warned {
+            if selection.budget_bounded && !selection.capped && !budget_warned {
                 let bound = eph.result_budget().leaf_limit().unwrap_or(0);
                 warnings.push(Diagnostic::truncation(
                     Span::from_pest(fused[0].span(), self.span().input()),
@@ -1126,6 +1198,14 @@ impl Command {
                          result budget and may be incomplete — narrow the \
                          query or raise the request `limit`"
                     ),
+                ));
+            }
+
+            if selection.capped && !capped_warned {
+                warnings.push(Diagnostic::truncation(
+                    Span::from_pest(fused[0].span(), self.span().input()),
+                    "too many results: this part of the graph is incomplete. Narrow it with a name or glob, a type filter, `ignore(...)`, `project(...)`, or fewer hops"
+                        .to_string(),
                 ));
             }
 

@@ -28,7 +28,10 @@ mod scope_helpers;
 
 pub use self::parse::{build_dependency_graph, build_empty_statement, build_statement};
 
-use self::scope_helpers::{build_children_scope, build_parent_scope, is_echo};
+use self::scope_helpers::{
+    build_children_scope, build_family_demands, build_parent_scope, is_echo,
+};
+use index::db_diesel::FamilyDemands;
 
 pub struct ExecutionResult {
     pub nodes: NodeList,
@@ -158,7 +161,7 @@ fn edge_consumes_rows(role: &DependencyRole, neighbour: &Rc<Statement>) -> bool 
 fn stage_read(
     ctx: &ExecutionContext,
     statement: &Rc<Statement>,
-) -> (EphContext, ScopeContext, ScopeContext) {
+) -> (EphContext, ScopeContext, ScopeContext, FamilyDemands) {
     let mut eph = ctx.eph.clone();
     {
         let st = statement.get_state();
@@ -176,7 +179,8 @@ fn stage_read(
     }
     let parent_scope = build_parent_scope(statement, ctx, &eph);
     let children_scope = build_children_scope(statement, ctx, &eph);
-    (eph, parent_scope, children_scope)
+    let demands = build_family_demands(statement);
+    (eph, parent_scope, children_scope, demands)
 }
 
 /// Phase-M handoff to the Phase-R batch: one substatement's
@@ -338,27 +342,35 @@ impl Statement {
         self.execution_state.borrow()
     }
 
-    pub fn get_selection(&self, ctx: &ExecutionContext) -> Option<Selection> {
-        let mut selection: Option<Selection> = None;
-        ctx.registry
-            .for_each_selector(self.command().selectors(), |selector, state| {
-                if let Some(sel) = selector.get_selection(state) {
-                    if let Some(current_selection) = &mut selection {
-                        current_selection.extend(sel.clone());
-                    } else {
-                        selection = Some(sel.clone());
-                    }
-                } else {
-                    // Selector has no selection (not yet resolved, filter-only, etc.).
-                    // Reset accumulation — a later selector with Some can still overwrite.
-                    // This ensures that e.g. [NameSel=Some, UserVerb=None] → None
-                    // (statement not ready until UserVerb resolves), while
-                    // [TypeSel(filter_only)=None, NameSel=Some] → Some (filter-only
-                    // is overwritten by the real selector that follows).
-                    selection = None;
-                }
-            });
-        selection
+    /// This statement's selection, merged across its selectors.
+    ///
+    /// Returns an `Rc`: a single-selector statement — the common case, and the
+    /// one where copying costs most, since a wide statement's neighbourhood
+    /// families run to six figures of rows — hands out a refcount bump. Only a
+    /// genuine multi-selector merge allocates, which is exactly what the old
+    /// unconditional deep copy was buying. The final graph-assembly phase asks
+    /// for the selection once per consumer while each consumer reads ONE field,
+    /// so the copy was paid five times over per statement.
+    ///
+    /// Accumulation rule: a selector with no selection RESETS the accumulation
+    /// (the statement is not ready) and a later selector with one starts it
+    /// again — so [NameSel=Some, UserVerb=None] is None (not ready until
+    /// UserVerb resolves), while [TypeSel(filter_only)=None, NameSel=Some] is
+    /// Some. See
+    /// [`crate::execution_context::SelectorRegistry::contributing_selections`].
+    pub fn get_selection(&self, ctx: &ExecutionContext) -> Option<Rc<Selection>> {
+        let contributing = ctx
+            .registry
+            .contributing_selections(self.command().selectors())?;
+        let (first, rest) = contributing.split_first()?;
+        if rest.is_empty() {
+            return Some(Rc::clone(first));
+        }
+        let mut merged = first.as_ref().clone();
+        for sel in rest {
+            merged.extend(sel.as_ref().clone());
+        }
+        Some(Rc::new(merged))
     }
 
     /// Count total selected nodes across all selectors, without cloning.
@@ -688,7 +700,16 @@ impl Statement {
             // Refinement rounds, to fixpoint.  A candidate re-probes only
             // when a NEW neighbour resolved since its last attempt.
             const MAX_ROLE_BRANCHES: usize = 4;
-            let mut last_neighbor_count: HashMap<usize, usize> = HashMap::new();
+            // Per candidate: the binding set its last derivation was built
+            // from, as sorted (neighbour, size) pairs.  Memoising the INPUT
+            // rather than the trigger is what stops a capped statement
+            // re-running an identical query every time any neighbour moves.
+            // Per candidate: the composition its last probe actually used, as
+            // sorted (neighbour, size) pairs, and how many neighbours that was.
+            // Retrying is worth it only when the next attempt would be strictly
+            // more restrictive than what is recorded here.
+            let mut last_used: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
+            let mut attempts: HashMap<usize, usize> = HashMap::new();
             for round in 1..=staged.len() {
                 let mut wave: Vec<(
                     Rc<Statement>,
@@ -730,68 +751,146 @@ impl Statement {
                     let Some(predicate) = pp.or(sc).or(cp) else {
                         continue;
                     };
-                    // Bind ONLY the smallest resolved neighbour's roles: a
-                    // role's probe cost scales with the bound id set, and a
-                    // broad neighbour (a resolved container with hundreds of
-                    // instances) can cost more to AND in than it narrows —
-                    // measured as 2.7s of the amdgpu worst case.  The result
-                    // is a (still sound) superset; the worklist narrows the
-                    // rest.  A pure refs or has relationship contributes one
-                    // branch, the combined default contributes both (union
-                    // semantics).
+                    // Compose ONE query from every resolved neighbour, rather
+                    // than picking a method and hoping it narrows.  The
+                    // conjunction is contained in each single-neighbour
+                    // derivation, so it resolves whenever any of them would --
+                    // and where none of them does:
+                    //
+                    //     "a" { { "b" } }
+                    //
+                    // `a` has too many children to bound the middle statement
+                    // and `b` too many parents; each derivation caps, while
+                    // "children of a AND parents of b" is small.  Trying
+                    // methods one at a time cannot reach that.
+                    //
+                    // A capped neighbour is absent by construction: it is not
+                    // in `probe_resolved`, and it constrains nothing anyway.
+                    // That is the same law that stops us narrowing BY a capped
+                    // selection, applied to composing one into a query.
+                    //
+                    // Cost note: `dc495ef` went the other way, binding only the
+                    // smallest, because ANDing a broad neighbour cost 2.7 s and
+                    // narrowed nothing.  The trade-off inverted -- failing to
+                    // bind used to mean a slow success via the predicate path,
+                    // and now means the statement stays capped.
                     use index::db_diesel::ProbeRole;
-                    let mut smallest: Option<(usize, Vec<ProbeRole>)> = None;
-                    let mut consider =
-                        |ids: &Vec<i64>, rel: RelationshipType, parent_side: bool| {
-                            let mut branches = Vec::new();
-                            if rel.contains(RelationshipType::REFS) {
-                                branches.push(if parent_side {
-                                    ProbeRole::RefsChildrenOf(ids.clone())
-                                } else {
-                                    ProbeRole::RefsParentsOf(ids.clone())
-                                });
-                            }
-                            if rel.contains(RelationshipType::HAS) {
-                                branches.push(if parent_side {
-                                    ProbeRole::HasChildrenOf(ids.clone())
-                                } else {
-                                    ProbeRole::HasParentsOf(ids.clone())
-                                });
-                            }
-                            if branches.is_empty() {
-                                return; // EMPTY relationship: no constraint
-                            }
-                            let better = match &smallest {
-                                None => true,
-                                Some((best_len, _)) => ids.len() < *best_len,
-                            };
-                            if better {
-                                smallest = Some((ids.len(), branches));
-                            }
-                        };
+                    let mut neighbours: Vec<(usize, usize, Vec<ProbeRole>)> = Vec::new();
+                    let mut consider = |neighbour: usize,
+                                        ids: &Vec<i64>,
+                                        rel: RelationshipType,
+                                        parent_side: bool| {
+                        let mut branches = Vec::new();
+                        if rel.contains(RelationshipType::REFS) {
+                            branches.push(if parent_side {
+                                ProbeRole::RefsChildrenOf(ids.clone())
+                            } else {
+                                ProbeRole::RefsParentsOf(ids.clone())
+                            });
+                        }
+                        if rel.contains(RelationshipType::HAS) {
+                            branches.push(if parent_side {
+                                ProbeRole::HasChildrenOf(ids.clone())
+                            } else {
+                                ProbeRole::HasParentsOf(ids.clone())
+                            });
+                        }
+                        if branches.is_empty() {
+                            return; // EMPTY relationship: no constraint
+                        }
+                        neighbours.push((neighbour, ids.len(), branches));
+                    };
                     if let Some(parent) = stmt.parent().and_then(|p| p.upgrade()) {
-                        if let Some(ids) = ctx.probe_resolved.get(&statement_key(&parent)) {
-                            consider(ids, stmt.relationship_type, true);
+                        let neighbour = statement_key(&parent);
+                        if let Some(ids) = ctx.probe_resolved.get(&neighbour) {
+                            consider(neighbour, ids, stmt.relationship_type, true);
                         }
                     }
                     for child in stmt.children() {
-                        if let Some(ids) = ctx.probe_resolved.get(&statement_key(&child)) {
-                            consider(ids, child.relationship_type, false);
+                        let neighbour = statement_key(&child);
+                        if let Some(ids) = ctx.probe_resolved.get(&neighbour) {
+                            consider(neighbour, ids, child.relationship_type, false);
                         }
                     }
-                    let Some((best_len, branches)) = smallest else {
-                        continue;
-                    };
-                    // Re-probe only when a strictly smaller binding appeared
-                    // since the last attempt.
-                    if last_neighbor_count
-                        .get(&key)
-                        .is_some_and(|prev| *prev <= best_len)
-                    {
+                    if neighbours.is_empty() {
                         continue;
                     }
-                    let branch_sets: Vec<Vec<ProbeRole>> = vec![branches];
-                    let neighbors = best_len;
+
+                    // Re-derive only when the INPUTS improved: a neighbour
+                    // resolved that had not, or one of them narrowed.  Keyed on
+                    // the whole binding set rather than on what notified us,
+                    // because with one composed query there is no "which
+                    // method" to track -- only whether the composition can now
+                    // be tighter than the one already tried.
+                    // ONE method, retried only when the new attempt is
+                    // strictly MORE RESTRICTIVE than the last one -- either
+                    // because it composes a neighbour that was not in it, or
+                    // because a neighbour it already had has narrowed.  Both
+                    // are the same question, so they are one test rather than
+                    // two rules that have to agree.
+                    //
+                    // Reaching here at all means the statement is still
+                    // unresolved, so the previous attempt capped; that is what
+                    // licenses widening by one.
+                    let neighbour_count = neighbours.len();
+                    let level = (attempts.get(&key).copied().unwrap_or(0) + 1).min(neighbour_count);
+                    neighbours.sort_by_key(|(_, len, _)| *len);
+                    let used: Vec<(usize, usize)> = neighbours
+                        .iter()
+                        .take(level)
+                        .map(|(n, len, _)| (*n, *len))
+                        .collect();
+                    let more_restrictive = match last_used.get(&key) {
+                        None => true,
+                        Some(prev) => used.iter().any(|(n, len)| {
+                            match prev.iter().find(|(pn, _)| pn == n) {
+                                None => true,                  // composed in anew
+                                Some((_, plen)) => len < plen, // narrowed
+                            }
+                        }),
+                    };
+                    if !more_restrictive {
+                        continue;
+                    }
+                    last_used.insert(key, used);
+                    attempts.insert(key, level);
+
+                    // Compose on DEMAND, tightest neighbour first.
+                    //
+                    // Composition only pays when one neighbour cannot bound the
+                    // statement.  When one can -- the common case -- ANDing a
+                    // broad neighbour buys no resolving power and costs a great
+                    // deal: on the corpus `mod("amdgpu") { func {
+                    // "drm_dev_enter" } }` went 400 ms -> 2.7 s when every
+                    // neighbour was composed unconditionally, because a probe
+                    // that took 3-51 ms with one neighbour took 1240 ms and
+                    // 2353 ms with two.  That is `dc495ef`'s 2.7 s, and it does
+                    // not go away because the alternative got worse.
+                    //
+                    // So start with the tightest neighbour alone and widen only
+                    // after a level has actually capped.  Cheap queries never
+                    // pay for composition; the ones that need it --
+                    // `mod("x") { { "spinlock_t" } }`, too many children one way
+                    // and too many parents the other -- escalate until they
+                    // resolve or the neighbours run out.
+                    //
+                    // Within a level the probe count is the product of the
+                    // per-neighbour branch counts (`{ }` contributes REFS and
+                    // HAS), so `MAX_ROLE_BRANCHES` bounds it.
+                    let mut branch_sets: Vec<Vec<ProbeRole>> = Vec::new();
+                    let mut product = 1usize;
+                    for (_, _, branches) in neighbours.into_iter().take(level) {
+                        let next = product.saturating_mul(branches.len());
+                        if next > MAX_ROLE_BRANCHES {
+                            break;
+                        }
+                        product = next;
+                        branch_sets.push(branches);
+                    }
+                    if branch_sets.is_empty() {
+                        continue;
+                    }
+
                     // Cartesian product of the branch sets: one probe per
                     // combination, ANDing one branch per neighbour.
                     let mut combos: Vec<Vec<ProbeRole>> = vec![Vec::new()];
@@ -806,10 +905,6 @@ impl Statement {
                         }
                         combos = next;
                     }
-                    if combos.len() > MAX_ROLE_BRANCHES {
-                        continue; // pathological fan-in: keep the predicate path
-                    }
-                    last_neighbor_count.insert(key, neighbors);
                     for combo in combos {
                         wave.push((stmt.clone(), predicate.clone(), combo));
                     }
@@ -818,9 +913,13 @@ impl Statement {
                     break;
                 }
                 let outcomes = run_probe_wave(wave, ctx.probe_cap, ctx.eph.clone()).await?;
-                if !settle(outcomes, ctx, round) {
-                    break;
-                }
+                // Deliberately NOT `if !settle(..) { break }`.  A round that
+                // resolves nothing is exactly when a wider composition is worth
+                // trying -- breaking there is what stopped escalation from ever
+                // happening.  Emptiness of the next wave is the real fixpoint:
+                // the more-restrictive test refuses to repeat a composition, and
+                // levels are bounded by the neighbour count, so the loop ends.
+                settle(outcomes, ctx, round);
             }
 
             // ---- Phase R: concurrent reads under tree-complete
@@ -834,7 +933,7 @@ impl Statement {
             let mut pending: Vec<PendingRead<'_>> = Vec::new();
             for m in staged {
                 let (layer_ids, warnings) = (m.layer_ids, m.warnings);
-                let (eph, parent_scope, children_scope) = stage_read(ctx, &m.statement);
+                let (eph, parent_scope, children_scope, demands) = stage_read(ctx, &m.statement);
                 let probe_ids = ctx
                     .probe_resolved
                     .get(&statement_key(&m.statement))
@@ -848,6 +947,7 @@ impl Statement {
                                 cfg,
                                 parent_scope,
                                 children_scope,
+                                demands,
                                 &eph,
                                 &layer_ids,
                                 warnings,
@@ -1315,7 +1415,13 @@ impl Statement {
         // order, and these ids become rendered binds in the SQL-cache key
         // for find_edges_between.
         let all_ids = canonical_ids(all_nodes.iter().map(|id| Into::<i64>::into(*id)));
-        if let Ok(implicit_edges) = index.find_edges_between(&all_ids, &ctx.eph).await {
+        // E1: `_edges_truncated` names the source nodes whose out-edge list hit
+        // the per-node cap.  With `edge_cap` disabled by default it is always
+        // empty; surfacing it to the API Graph is the front-end fetch-more work
+        // (F2/F3), deliberately deferred.
+        if let Ok((implicit_edges, _edges_truncated)) =
+            index.find_edges_between(&all_ids, &ctx.eph).await
+        {
             for edge in implicit_edges {
                 let from_node = instance_to_node.get(&edge.from_instance_id);
                 let to_node = instance_to_node.get(&edge.to_instance_id);
@@ -1351,83 +1457,108 @@ impl Statement {
         all_references
     }
 
-    fn collect_has_edges(
-        statements: &[Rc<Statement>],
+    /// Containment edges among the answer's nodes.
+    ///
+    /// Asks the index for the containments BETWEEN result nodes rather than
+    /// reading each statement's `has_parents`/`has_children` families and
+    /// discarding every pair with an endpoint outside the answer. Those
+    /// families are sized by the neighbourhood, not the answer: bare
+    /// `mod("amdgpu")` walked 178,807 of them to emit **zero** has-edges.
+    /// This mirrors what `collect_ref_edges` already does for reference edges
+    /// via `find_edges_between`.
+    ///
+    /// Keeps the TIGHTEST container per child. Ties are real — a module
+    /// instance and a file instance both span `[0, EOF)` of the same object —
+    /// and the old traversal broke them by statement iteration order, which
+    /// was arbitrary but not meaningfully stable. The tie-break is now an
+    /// explicit total order (span, then parent instance id) so the same query
+    /// gives the same graph.
+    async fn collect_has_edges(
         ctx: &ExecutionContext,
         all_nodes: &HashSet<SymbolInstanceId>,
-    ) -> HasEdgeList {
+        index: &index::db_diesel::Index,
+    ) -> anyhow::Result<HasEdgeList> {
         let _span = tracing::debug_span!("collect_has_edges").entered();
-        // For each child instance, track only the best (tightest) parent.
-        // Key: child instance ID, Value: (HasEdge, parent_span) where smaller span = tighter container.
-        let mut best_per_child: HashMap<SymbolInstanceId, (HasEdge, i64)> = HashMap::new();
 
-        for statement in statements {
-            let current = if let Some(current) = statement.get_selection(ctx) {
-                current
-            } else {
-                continue;
-            };
+        // Canonical order: `all_nodes` is a HashSet with random iteration
+        // order, and these ids become rendered binds in the SQL-cache key.
+        let all_ids = canonical_ids(all_nodes.iter().map(|id| Into::<i64>::into(*id)));
+        // Propagated, not swallowed: this call is where a layer-isolation
+        // breach bails, and returning an empty list there would hand back a
+        // plausible answer that merely has no containment in it.
+        let pairs = index.find_has_edges_between(&all_ids, &ctx.eph).await?;
 
-            // Both has_children and has_parents express the same relationship
-            // (parent contains child) but from different traversal directions.
-            // Unify them into a single iterator of (parent_instance, child_instance,
-            // parent_symbol_id, child_symbol_id).
-            let from_children = current.has_children.iter().map(|h| {
-                (
-                    &h.parent_instance,
-                    &h.child_instance,
-                    h.parent_symbol.id,
-                    h.child_symbol.id,
-                )
-            });
-            let from_parents = current.has_parents.iter().map(|h| {
-                (
-                    &h.parent_instance,
-                    &h.child_instance,
-                    h.parent_symbol.id,
-                    h.child_symbol.id,
-                )
-            });
-
-            for (parent_inst, child_inst, parent_sym, child_sym) in
-                from_children.chain(from_parents)
-            {
-                let parent_id = SymbolInstanceId::new(parent_inst.id);
-                let child_id = SymbolInstanceId::new(child_inst.id);
-
-                if !all_nodes.contains(&parent_id) || !all_nodes.contains(&child_id) {
-                    continue;
-                }
-
-                let parent_span = range_bounds_to_offsets(&parent_inst.offset_range)
-                    .map(|(s, e)| (e - s) as i64)
-                    .unwrap_or(i64::MAX);
-
-                let edge = HasEdge {
-                    parent: SymbolId::new(parent_sym),
-                    child: SymbolId::new(child_sym),
-                    parent_instance: parent_id,
-                    child_instance: child_id,
-                };
-
-                best_per_child
-                    .entry(child_id)
-                    .and_modify(|(existing_edge, existing_span)| {
-                        if parent_span < *existing_span {
-                            *existing_edge = edge.clone();
-                            *existing_span = parent_span;
-                        }
-                    })
-                    .or_insert((edge, parent_span));
+        // How many of the answer's nodes each candidate container holds.
+        // This is the tie-break: see the fold below.
+        let mut children_of: HashMap<i64, usize> = HashMap::new();
+        for pair in &pairs {
+            let parent_id = SymbolInstanceId::new(pair.parent_instance);
+            let child_id = SymbolInstanceId::new(pair.child_instance);
+            if all_nodes.contains(&parent_id) && all_nodes.contains(&child_id) {
+                *children_of.entry(pair.parent_instance).or_insert(0) += 1;
             }
+        }
+
+        // child instance -> (edge, rank) where rank orders containers by how
+        // tightly they constrain the child.
+        let mut best_per_child: HashMap<SymbolInstanceId, (HasEdge, (i64, usize, i64))> =
+            HashMap::new();
+        for pair in pairs {
+            let parent_id = SymbolInstanceId::new(pair.parent_instance);
+            let child_id = SymbolInstanceId::new(pair.child_instance);
+            // Binding both ends in SQL is what makes this cheap; this check is
+            // what makes it CORRECT. They are deliberately not the same
+            // mechanism — a graph must never name a node the answer does not
+            // contain, and that must not depend on a query staying right.
+            if !all_nodes.contains(&parent_id) || !all_nodes.contains(&child_id) {
+                continue;
+            }
+            let parent_span = range_bounds_to_offsets(&pair.parent_offset_range)
+                .map(|(start, end)| (end - start) as i64)
+                .unwrap_or(i64::MAX);
+            let edge = HasEdge {
+                parent: SymbolId::new(pair.parent_symbol),
+                child: SymbolId::new(pair.child_symbol),
+                parent_instance: parent_id,
+                child_instance: child_id,
+            };
+            // Rank a container by how much it constrains this child:
+            //   1. byte extent — a tighter range admits less;
+            //   2. how many of the answer's nodes it holds — with equal
+            //      extent, the container holding fewer of them pins the child
+            //      down more (and is itself held by the roomier ones);
+            //   3. instance id, purely so the result is reproducible.
+            //
+            // Neither the container's TYPE nor its nesting in the query
+            // appears here on purpose. At this point there is only a graph;
+            // "a file is tighter than a module" is a fact about this answer's
+            // containment, not a rule to hardcode — and reading it off the
+            // data gets `dir`/`file`/`module` right without knowing what
+            // those are.
+            let rank = (
+                parent_span,
+                children_of
+                    .get(&pair.parent_instance)
+                    .copied()
+                    .unwrap_or(usize::MAX),
+                pair.parent_instance,
+            );
+            best_per_child
+                .entry(child_id)
+                .and_modify(|(best_edge, best_rank)| {
+                    if rank < *best_rank {
+                        *best_edge = edge.clone();
+                        *best_rank = rank;
+                    }
+                })
+                .or_insert((edge, rank));
         }
 
         let mut result = HasEdgeList::new();
         for (_, (edge, _)) in best_per_child {
             result.add(edge);
         }
-
-        result
+        Ok(result)
     }
 
     pub async fn execute(
@@ -1450,16 +1581,20 @@ impl Statement {
                     end: span.end(),
                     text: span.as_pest_span().as_str().to_string(),
                 };
-                for mut node in selection.nodes {
-                    node.query_statements.push(stmt_info.clone());
-                    node_map
-                        .entry(node.symbol_instance.id)
-                        .and_modify(|existing| {
-                            existing
-                                .query_statements
-                                .extend(node.query_statements.iter().cloned());
-                        })
-                        .or_insert(node);
+                for node in &selection.nodes {
+                    // Clone only on the vacant path: a node selected by two
+                    // `;` statements is the common case, and there only its
+                    // provenance is read out of the copy.
+                    match node_map.entry(node.symbol_instance.id) {
+                        std::collections::hash_map::Entry::Occupied(mut existing) => {
+                            existing.get_mut().query_statements.push(stmt_info.clone());
+                        }
+                        std::collections::hash_map::Entry::Vacant(slot) => {
+                            let mut node = node.clone();
+                            node.query_statements.push(stmt_info.clone());
+                            slot.insert(node);
+                        }
+                    }
                 }
             }
         }
@@ -1469,7 +1604,16 @@ impl Statement {
         );
 
         let ref_edges = Self::collect_ref_edges(&statements, ctx, &all_nodes, &cfg.index).await;
-        let has_edges = Self::collect_has_edges(&statements, ctx, &all_nodes);
+        let has_edges = Self::collect_has_edges(ctx, &all_nodes, &cfg.index)
+            .await
+            .map_err(|e| {
+                pest::error::Error::new_from_span(
+                    pest::error::ErrorVariant::CustomError {
+                        message: e.to_string(),
+                    },
+                    self.command.query_statement_span().as_pest_span(),
+                )
+            })?;
 
         Ok(ExecutionResult::new(
             NodeList(node_map.into_values().collect()),
@@ -1549,12 +1693,18 @@ impl Statement {
             // A child takes part iff it has selectors and is not a
             // display-only weak unit — the membership test is unchanged;
             // only what we do with the members is.  Collect the
-            // participants' selections up front: they are owned clones, so
-            // the immutable `ctx` read is over before the mutable
-            // `notify_from_selection` calls begin.  Each carries its own
-            // weakness, because a weak participant may seed the parent but
-            // may not narrow it (`weak_notifier_blocks`).
-            let selections: Vec<(bool, Selection)> = dependent
+            // participants' selections up front so the immutable `ctx` read
+            // is over before the mutable `notify_from_selection` calls begin.
+            // These are `Rc` HANDLES, not owned copies -- they alias the
+            // children's live registry entries.  What keeps the snapshot
+            // honest is `Rc::make_mut` in `constrain_by_*`: a constrain that
+            // fires while these are held copies first, so no participant
+            // observes a mid-loop narrowing.  Mutating a selection through
+            // any path that is not copy-on-write would break the conjunction
+            // fixpoint here.  Each carries its own weakness, because a weak
+            // participant may seed the parent but may not narrow it
+            // (`weak_notifier_blocks`).
+            let selections: Vec<(bool, Rc<Selection>)> = dependent
                 .statement
                 .children()
                 .filter(|child| child.command().has_selectors() && !is_echo(child))
@@ -1576,6 +1726,7 @@ impl Statement {
 
             let unnest = dependent.statement.is_unnest();
             let parent_scope = build_parent_scope(&dependent.statement, ctx, &ctx.eph);
+            let demands = build_family_demands(&dependent.statement);
             // The children scope stays the UNION of the participants' ids.
             // It bounds the neighbourhood PREFETCH, not the semantics: the
             // gate is the per-child constrain below.  Intersecting it would
@@ -1611,6 +1762,7 @@ impl Statement {
                         unnest,
                         parent_scope.clone(),
                         children_scope.clone(),
+                        demands,
                     )
                     .await?;
 
@@ -1644,6 +1796,7 @@ impl Statement {
         };
         let parent_scope = build_parent_scope(&dependent.statement, ctx, &ctx.eph);
         let children_scope = build_children_scope(&dependent.statement, ctx, &ctx.eph);
+        let demands = build_family_demands(&dependent.statement);
         let res = dependent
             .statement
             .command()
@@ -1654,6 +1807,7 @@ impl Statement {
                 notif_ctx,
                 parent_scope,
                 children_scope,
+                demands,
             )
             .await?;
 
