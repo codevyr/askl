@@ -32,7 +32,9 @@ use self::ephemeral::{EphemeralInstanceVerb, EphemeralRefVerb, EphemeralSymbolVe
 pub(crate) use self::ephemeral::{EphemeralOps, LabelResolutions};
 pub(super) use self::filters::{IgnoreVerb, PackageFilter, ProjectFilter};
 pub(super) use self::loc::LocSelector;
-pub(super) use self::modifiers::{DeriveModifier, HasModifier, RefsModifier, UnnestModifier};
+pub(super) use self::modifiers::{
+    DeriveModifier, HasModifier, LimitsVerb, RefsModifier, UnnestModifier,
+};
 pub(super) use self::search::SearchSelector;
 pub(super) use self::selectors::{ForcedVerb, TypeSelector};
 
@@ -104,6 +106,7 @@ pub(crate) fn build_generic_verb(
         HasModifier::NAME => HasModifier::new(verb_span, &args),
         RefsModifier::NAME => RefsModifier::new(verb_span, &args),
         DeriveModifier::NAME => DeriveModifier::new(verb_span, &args),
+        LimitsVerb::NAME => LimitsVerb::new(verb_span, &args),
         UnnestModifier::NAME => UnnestModifier::new(verb_span, &args),
         TypeSelector::NAME_ANY => TypeSelector::new(verb_span, &args, None),
         TypeSelector::NAME_FUNCTION => {

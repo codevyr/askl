@@ -364,6 +364,22 @@ impl Statement {
     /// UserVerb resolves), while [TypeSel(filter_only)=None, NameSel=Some] is
     /// Some. See
     /// [`crate::execution_context::SelectorRegistry::contributing_selections`].
+    /// The largest `listing` any command in this query requests (via the
+    /// `limits()` verb).  Used before execution to size the discovery-side
+    /// edge fetch so the SQL never under-fetches for the most generous
+    /// command; render then trims each node to its own listing.  `None` when
+    /// no command sets one.
+    pub fn max_listing_limit(&self) -> Option<usize> {
+        let mut max: Option<usize> = None;
+        let _ = crate::scope::visit::<_, ()>(self.scope(), &mut |stmt| {
+            if let Some(v) = stmt.command().limits().listing {
+                max = Some(max.map_or(v, |m| m.max(v)));
+            }
+            Ok(true)
+        });
+        max
+    }
+
     pub fn get_selection(&self, ctx: &ExecutionContext) -> Option<Rc<Selection>> {
         let contributing = ctx
             .registry
@@ -1602,10 +1618,13 @@ impl Statement {
         for statement in &statements {
             if let Some(selection) = statement.get_selection(ctx) {
                 let span = statement.command.query_statement_span();
+                let limits = statement.command.limits();
                 let stmt_info = index::db_diesel::QueryStatementRange {
                     start: span.start(),
                     end: span.end(),
                     text: span.as_pest_span().as_str().to_string(),
+                    symbols_limit: limits.symbols,
+                    listing_limit: limits.listing,
                 };
                 for node in &selection.nodes {
                     // Clone only on the vacant path: a node selected by two

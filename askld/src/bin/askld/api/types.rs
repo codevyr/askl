@@ -11,15 +11,10 @@ pub struct AsklData {
     pub max_result_symbols: usize,
     /// Cardinality-probe cap (see `ExecutionContext::probe_cap`).
     pub probe_cap: usize,
-    /// Default per-node out-edge cap (assembly capping; 0 = disabled).
-    /// Per-request `?edge_cap=` overrides.
-    pub edge_cap: usize,
-    /// Default per-node instance cap (render-side assembly capping;
-    /// 0 = disabled).  Per-request `?instance_cap=` overrides.
-    pub instance_cap: usize,
-    /// Default per-pair edge-occurrence cap (render-side; 0 = disabled).
-    /// Per-request `?occurrence_cap=` overrides.
-    pub occurrence_cap: usize,
+    /// Default per-node listing cap: instances per node, distinct out-edges
+    /// per node, and call-sites per pair (0 = disabled). Overridable per
+    /// request (`?listing=`) and per command (`limits(listing=N)`).
+    pub listing_cap: usize,
 }
 
 fn symbolid_as_string<S>(x: &SymbolId, s: S) -> Result<S::Ok, S::Error>

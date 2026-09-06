@@ -324,6 +324,10 @@ pub struct QueryStatementRange {
     pub start: usize,
     pub end: usize,
     pub text: String,
+    /// Per-command result limits resolved from the `limits()` verb (with
+    /// inheritance). `None` = fall back to the server default at assembly.
+    pub symbols_limit: Option<usize>,
+    pub listing_limit: Option<usize>,
 }
 
 /// A node selected by a query. `query_statements` is metadata excluded from
@@ -821,6 +825,8 @@ mod tests {
                 start: span_start,
                 end: span_start + text.len(),
                 text: text.into(),
+                symbols_limit: None,
+                listing_limit: None,
             }],
         }
     }
