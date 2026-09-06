@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail, Result};
 use std::fmt::Display;
 use std::sync::Arc;
 
-use super::super::{DeriveMethod, Verb, VerbClass};
+use super::super::{DeriveMethod, Limits, Verb, VerbClass};
 
 /// HasModifier - sets the relationship type to Has (containment) for child scopes
 #[derive(Debug)]
@@ -219,5 +219,82 @@ impl Verb for UnnestModifier {
 impl Display for UnnestModifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "UnnestModifier")
+    }
+}
+
+/// LimitsVerb — per-command result limits (`limits(symbols=N, listing=M)`).
+///
+/// Stays on the command (class `Env`) and inherits into child scopes by
+/// cloning (unless `inherit=false`), so [`crate::command::Command::limits`]
+/// reads the effective value at each selecting command.  Each field is
+/// optional: an unset field inherits from the parent or falls back to the
+/// server default.
+#[derive(Debug, Clone)]
+pub(in crate::verb) struct LimitsVerb {
+    span: Span,
+    limits: Limits,
+    inherit: bool,
+}
+
+impl LimitsVerb {
+    pub(in crate::verb) const NAME: &'static str = "limits";
+
+    pub fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        args.accepts(0, &["symbols", "listing", "inherit"])?;
+        let symbols = args.named_usize("symbols")?;
+        let listing = args.named_usize("listing")?;
+        if symbols.is_none() && listing.is_none() {
+            bail!("limits requires at least one of 'symbols' or 'listing'");
+        }
+        let inherit = args.named_bool("inherit")?.unwrap_or(true);
+        Ok(Arc::new(Self {
+            span,
+            limits: Limits { symbols, listing },
+            inherit,
+        }))
+    }
+}
+
+impl Verb for LimitsVerb {
+    fn name(&self) -> &str {
+        LimitsVerb::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn class(&self) -> VerbClass {
+        VerbClass::Env
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        if self.inherit {
+            DeriveMethod::Clone
+        } else {
+            DeriveMethod::Skip
+        }
+    }
+
+    fn derive_new_instance(&self) -> Option<Arc<dyn Verb>> {
+        if self.inherit {
+            Some(Arc::new(self.clone()))
+        } else {
+            None
+        }
+    }
+
+    fn as_limits(&self) -> Option<Limits> {
+        Some(self.limits)
+    }
+}
+
+impl Display for LimitsVerb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "LimitsVerb(symbols={:?}, listing={:?})",
+            self.limits.symbols, self.limits.listing
+        )
     }
 }

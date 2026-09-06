@@ -215,6 +215,25 @@ impl Command {
             .unwrap_or_else(|| self.span.as_ref().unwrap())
     }
 
+    /// The effective result limits for this command: per-field last-wins
+    /// over all verbs (the inherited clone is pushed before the child's own
+    /// `limits()`), so `limits(symbols=5) { limits(listing=9) }` yields
+    /// `symbols=5, listing=9` on the child.
+    pub fn limits(&self) -> crate::verb::Limits {
+        let mut result = crate::verb::Limits::default();
+        for verb in self.all_verbs() {
+            if let Some(l) = verb.as_limits() {
+                if l.symbols.is_some() {
+                    result.symbols = l.symbols;
+                }
+                if l.listing.is_some() {
+                    result.listing = l.listing;
+                }
+            }
+        }
+        result
+    }
+
     pub fn extend(&mut self, other: Arc<dyn Verb>) {
         // A verb's declared class must agree with the roles it exposes:
         // predicate verbs filter or select; bindings label or select (`use`

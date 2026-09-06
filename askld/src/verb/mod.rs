@@ -392,6 +392,18 @@ pub enum DeriveMethod {
     Skip,
 }
 
+/// Per-command result limits set by the `limits()` verb.  Each field is
+/// `None` when unset (inherit from parent / fall back to the server
+/// default); resolved per field with last-wins in [`crate::command::Command::limits`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Limits {
+    /// Max distinct symbols (nodes) this command's selection ships.
+    pub symbols: Option<usize>,
+    /// Max rows in any single per-node listing (instances, out-edges,
+    /// call-sites per pair).
+    pub listing: Option<usize>,
+}
+
 /// Which aspect of a statement this verb contributes to.  A statement is a
 /// record of aspects (see the filter-expressions design page): the predicate
 /// is the only truth-valued one, relationship mode configures how a scope
@@ -594,6 +606,11 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
 
     /// This verb's label-definition contribution, if it has one.
     fn as_labeler<'a>(&'a self) -> Option<&'a dyn Labeler> {
+        None
+    }
+
+    /// The result limits this verb carries, if it is a `limits()` verb.
+    fn as_limits(&self) -> Option<Limits> {
         None
     }
 

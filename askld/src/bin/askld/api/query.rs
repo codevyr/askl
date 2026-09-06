@@ -145,20 +145,11 @@ pub async fn query(
     };
 
     let projects = parse_project_list(opts.projects.as_deref());
-    let result_graph = match build_result_graph(
-        &data,
-        &req_body,
-        opts.limit,
-        &projects,
-        opts.edge_cap,
-        opts.instance_cap,
-        opts.occurrence_cap,
-    )
-    .await
-    {
-        Ok(graph) => graph,
-        Err(err) => return err.into_http_response(want_markdown),
-    };
+    let result_graph =
+        match build_result_graph(&data, &req_body, opts.limit, &projects, opts.listing).await {
+            Ok(graph) => graph,
+            Err(err) => return err.into_http_response(want_markdown),
+        };
 
     if want_markdown {
         let md = render_graph_markdown(&data, &req_body, &result_graph, projection).await;
@@ -234,9 +225,7 @@ pub async fn build_result_graph(
     query_text: &str,
     limit: Option<usize>,
     projects: &[String],
-    edge_cap: Option<usize>,
-    instance_cap: Option<usize>,
-    occurrence_cap: Option<usize>,
+    listing: Option<usize>,
 ) -> Result<Graph, QueryError> {
     debug!("Received query: {}", query_text);
     let ast = parse(query_text).map_err(|err| {
@@ -258,13 +247,23 @@ pub async fn build_result_graph(
     // Read and probe share one cap, so "Resolved" (probe ≤ cap) and "not
     // truncated" (read ≤ cap) name the same threshold.
     ctx.eph.set_read_cap(data.probe_cap);
-    // Per-node out-edge assembly cap (request override, else server default).
-    ctx.eph.set_edge_cap(edge_cap.unwrap_or(data.edge_cap));
-    // Per-node instance cap is RENDER-side (the engine's instances are
-    // already bounded by read_cap; only serialization needs bounding) —
-    // resolved here, applied at node assembly below.
-    let instance_cap = instance_cap.unwrap_or(data.instance_cap);
-    let occurrence_cap = occurrence_cap.unwrap_or(data.occurrence_cap);
+    // Result limits. `symbols` bounds distinct nodes per command; `listing`
+    // bounds every per-node listing (instances, out-edges, call-sites per
+    // pair). Both have a server default here, are overridable per request,
+    // and are overridden per command by the `limits()` verb (carried on each
+    // node's query_statements provenance, applied below). 0 = unlimited.
+    let symbols_default = limit.unwrap_or(data.max_result_symbols);
+    let listing_default = listing.unwrap_or(data.listing_cap);
+    // The out-edge fetch is DISCOVERY-side (a windowed SQL LIMIT set on the
+    // eph before execution), so it must cover the largest `listing` any
+    // command requests; render then trims each node's instances and
+    // call-sites to its own listing. `0` (unlimited) on either side wins.
+    let combine_unlimited = |a: usize, b: usize| if a == 0 || b == 0 { 0 } else { a.max(b) };
+    let max_listing = match ast.max_listing_limit() {
+        Some(v) => combine_unlimited(listing_default, v),
+        None => listing_default,
+    };
+    ctx.eph.set_edge_cap(max_listing);
     // Push the result cap into the leaf SQL (the budget facet of fusion): the
     // renderer below still applies the exact per-symbol cap, but bounding the
     // leaves stops bare selectors from materialising far more rows than the cap
@@ -322,16 +321,28 @@ pub async fn build_result_graph(
     let mut all_symbols = HashSet::new();
     let mut object_projects = HashMap::new();
     let mut sym_key: HashMap<i64, (String, i32)> = HashMap::new();
-    // Symbols per originating STATEMENT (keyed by the statement's query-text
-    // range, carried on every node): the result cap is per statement.
+    // Symbols per originating COMMAND (keyed by the command's query-text
+    // range, carried on every node): the result cap is per command.
     let mut stmt_symbols: HashMap<(usize, usize), HashSet<i64>> = HashMap::new();
+    // Per-command `symbols` limit and per-symbol `listing` limit from the
+    // `limits()` verb (None = fall back to the server default). A symbol
+    // reachable from several commands takes the most generous listing.
+    let mut stmt_symbols_limit: HashMap<(usize, usize), Option<usize>> = HashMap::new();
+    let mut sym_listing: HashMap<i64, Option<usize>> = HashMap::new();
     for node in res.nodes.0.iter() {
         all_symbols.insert(node.symbol.clone());
         for stmt in &node.query_statements {
-            stmt_symbols
-                .entry((stmt.start, stmt.end))
-                .or_default()
-                .insert(node.symbol.id);
+            let span = (stmt.start, stmt.end);
+            stmt_symbols.entry(span).or_default().insert(node.symbol.id);
+            stmt_symbols_limit.entry(span).or_insert(stmt.symbols_limit);
+            if let Some(v) = stmt.listing_limit {
+                sym_listing
+                    .entry(node.symbol.id)
+                    .and_modify(|cur| *cur = Some(cur.map_or(v, |c| c.max(v))))
+                    .or_insert(Some(v));
+            } else {
+                sym_listing.entry(node.symbol.id).or_insert(None);
+            }
         }
         let object_id = FileId::new(node.object.id);
         object_projects
@@ -356,9 +367,13 @@ pub async fn build_result_graph(
     // another statement's derived fan-out. Within a statement, survivors are
     // deterministic by (path, offset, id); a symbol kept by ANY of its
     // statements survives. `limit=0` (or a 0 default) means unlimited.
-    let cap = limit.unwrap_or(data.max_result_symbols);
     result_graph.total_symbols = all_symbols.len();
-    let (kept, truncated) = select_kept_per_statement(&sym_key, &stmt_symbols, cap);
+    let (kept, truncated) = select_kept_per_command(
+        &sym_key,
+        &stmt_symbols,
+        &stmt_symbols_limit,
+        symbols_default,
+    );
     result_graph.truncated = truncated;
 
     // Truncated-node list (assembly capping): keep only symbols that survive
@@ -392,6 +407,13 @@ pub async fn build_result_graph(
             loc.as_ref().map(|o| (o.file.to_string(), o.offset_range.0)),
         )
     });
+    let listing_for = |sym: i64| -> usize {
+        sym_listing
+            .get(&sym)
+            .copied()
+            .flatten()
+            .unwrap_or(listing_default)
+    };
     let mut pair_counts: HashMap<(i64, i64), usize> = HashMap::new();
     let mut occurrence_overflow: HashSet<i64> = HashSet::new();
     for (from, to, loc) in kept_edges {
@@ -399,7 +421,8 @@ pub async fn build_result_graph(
             .entry((from.symbol_id.0, to.symbol_id.0))
             .or_insert(0);
         *n += 1;
-        if occurrence_cap != 0 && *n > occurrence_cap {
+        let occ_cap = listing_for(from.symbol_id.0);
+        if occ_cap != 0 && *n > occ_cap {
             occurrence_overflow.insert(from.symbol_id.0);
             continue;
         }
@@ -481,7 +504,7 @@ pub async fn build_result_graph(
         }
 
         let (symbol_instances, instances_truncated, result_instances) =
-            cap_instances(symbol_instances, instance_cap);
+            cap_instances(symbol_instances, listing_for(symbol.id));
         // The result's own instance count is bounded by the leaf budget
         // (limit x 8), so it is NOT the symbol's real total — amdgpu showed
         // "800" for a symbol with 931 instances. For truncated nodes (the
@@ -565,18 +588,12 @@ pub struct QueryOpts {
     /// Comma-separated project names to make visible; absent = every indexed
     /// project. Names come from `/projects`; an unknown one is a 400.
     projects: Option<String>,
-    /// Per-node out-edge cap; `0` = uncapped for this request. Defaults to
-    /// the server's `edge_cap`. Assembly capping: truncated nodes are listed
-    /// in `edges_truncated` for fetch-more, never warned about.
-    edge_cap: Option<usize>,
-    /// Per-node instance cap; `0` = uncapped for this request. Defaults to
-    /// the server's `instance_cap`. Render-side assembly capping: truncated
-    /// nodes carry `instances_truncated` + exact `total_instances`.
-    instance_cap: Option<usize>,
-    /// Per-(from, to)-pair edge-occurrence cap; `0` = uncapped. Defaults to
-    /// the server's `occurrence_cap`. Overflowing from-symbols join
-    /// `edges_truncated`; the references endpoint pages the rest.
-    occurrence_cap: Option<usize>,
+    /// Per-node listing cap (instances, out-edges, call-sites per pair);
+    /// `0` = uncapped for this request. Defaults to the server's
+    /// `listing_cap`, and is overridden per command by the `limits()` verb.
+    /// Truncated listings are surfaced via `edges_truncated` /
+    /// `instances_truncated` for fetch-more, never warned about.
+    listing: Option<usize>,
 }
 
 /// Split a `projects=a,b` query parameter into names, dropping empty entries so
@@ -593,26 +610,25 @@ pub(crate) fn parse_project_list(raw: Option<&str>) -> Vec<String> {
 }
 
 /// Choose which symbols survive the result cap.  The cap applies PER
-/// STATEMENT — each selector is its own request with its own budget, so a
-/// statement's nodes never compete with another statement's (a dedicated
-/// anchor cannot be evicted by a neighbour tree's fan-out; the failure mode
-/// is unrepresentable rather than merely deprioritised).  Within a
-/// statement, the first `cap` symbols by `(path, offset, symbol id)` are
-/// kept; a symbol kept by ANY of its statements survives (`;`-statements
-/// sharing a node is the common case).  `cap == 0` means unlimited.
-/// Returns the kept id set and whether ANY statement was truncated.
-fn select_kept_per_statement(
+/// COMMAND — each selector is its own request with its own budget, so a
+/// command's nodes never compete with another command's (a dedicated anchor
+/// cannot be evicted by a neighbour's fan-out; the failure mode is
+/// unrepresentable rather than merely deprioritised).  Each command's cap is
+/// its `limits(symbols=)` value (from `stmt_limit`) or `default` when unset.
+/// Within a command, the first `cap` symbols by `(path, offset, symbol id)`
+/// are kept; a symbol kept by ANY command survives.  `cap == 0` = unlimited.
+/// Returns the kept id set and whether ANY command was truncated.
+fn select_kept_per_command(
     sym_key: &HashMap<i64, (String, i32)>,
     stmt_symbols: &HashMap<(usize, usize), HashSet<i64>>,
-    cap: usize,
+    stmt_limit: &HashMap<(usize, usize), Option<usize>>,
+    default: usize,
 ) -> (HashSet<i64>, bool) {
-    if cap == 0 {
-        return (sym_key.keys().copied().collect(), false);
-    }
     let mut kept: HashSet<i64> = HashSet::new();
     let mut truncated = false;
-    for symbols in stmt_symbols.values() {
-        if symbols.len() <= cap {
+    for (span, symbols) in stmt_symbols.iter() {
+        let cap = stmt_limit.get(span).copied().flatten().unwrap_or(default);
+        if cap == 0 || symbols.len() <= cap {
             kept.extend(symbols.iter().copied());
             continue;
         }
@@ -745,6 +761,11 @@ mod tests {
             .collect()
     }
 
+    /// No per-command `limits()` overrides — every group uses the default.
+    fn no_limits() -> HashMap<(usize, usize), Option<usize>> {
+        HashMap::new()
+    }
+
     #[test]
     fn select_kept_unlimited_and_under_cap() {
         let mut m = HashMap::new();
@@ -752,17 +773,17 @@ mod tests {
         m.insert(2, key("/b", 0));
         let st = stmts(&[(0, &[1, 2])]);
 
-        let (kept, trunc) = select_kept_per_statement(&m, &st, 0); // 0 = unlimited
+        let (kept, trunc) = select_kept_per_command(&m, &st, &no_limits(), 0); // 0 = unlimited
         assert!(!trunc);
         assert_eq!(kept.len(), 2);
 
-        let (kept, trunc) = select_kept_per_statement(&m, &st, 5); // total <= cap
+        let (kept, trunc) = select_kept_per_command(&m, &st, &no_limits(), 5); // total <= cap
         assert!(!trunc);
         assert_eq!(kept.len(), 2);
     }
 
     #[test]
-    fn the_cap_is_per_statement_so_a_dedicated_selector_always_shows() {
+    fn the_cap_is_per_command_so_a_dedicated_selector_always_shows() {
         // The live scenario: statement 0 fans out over symbols whose paths
         // sort FIRST and overflow the cap; statement 1 anchors one symbol
         // whose path sorts LAST.  Under a global cap the anchor loses the
@@ -774,7 +795,7 @@ mod tests {
         m.insert(4, key("/fs/sysfs", 0));
         let st = stmts(&[(0, &[1, 2, 3]), (10, &[4])]);
 
-        let (kept, trunc) = select_kept_per_statement(&m, &st, 2);
+        let (kept, trunc) = select_kept_per_command(&m, &st, &no_limits(), 2);
         assert!(trunc, "statement 0 overflowed its budget");
         assert!(kept.contains(&4), "the dedicated selector keeps its node");
         assert!(
@@ -793,13 +814,39 @@ mod tests {
         m.insert(3, key("/c", 0));
         let st = stmts(&[(0, &[1, 2, 3]), (10, &[3])]);
 
-        let (kept, trunc) = select_kept_per_statement(&m, &st, 2);
+        let (kept, trunc) = select_kept_per_command(&m, &st, &no_limits(), 2);
         assert!(trunc);
         assert!(
             kept.contains(&3),
             "statement 1 keeps what statement 0 dropped"
         );
         assert_eq!(kept.len(), 3);
+    }
+
+    #[test]
+    fn a_per_command_limits_verb_raises_that_commands_budget() {
+        // Command at span (0,1) has 4 symbols; its `limits(symbols=3)` lets 3
+        // through while command (10,11) uses the (smaller) default of 1.
+        let mut m = HashMap::new();
+        m.insert(1i64, key("/a", 0));
+        m.insert(2, key("/b", 0));
+        m.insert(3, key("/c", 0));
+        m.insert(4, key("/d", 0));
+        m.insert(5, key("/e", 0));
+        let st = stmts(&[(0, &[1, 2, 3, 4]), (10, &[5])]);
+        let mut limits = HashMap::new();
+        limits.insert((0usize, 1usize), Some(3usize));
+
+        let (kept, trunc) = select_kept_per_command(&m, &st, &limits, 1);
+        assert!(trunc);
+        assert!(
+            kept.contains(&1) && kept.contains(&2) && kept.contains(&3) && !kept.contains(&4),
+            "the verb command keeps its own first 3"
+        );
+        assert!(
+            kept.contains(&5),
+            "the other command keeps its 1 (the default)"
+        );
     }
 
     #[test]
@@ -811,7 +858,7 @@ mod tests {
         m.insert(12, key("/a", 10)); // 1st
         let st = stmts(&[(0, &[10, 11, 12])]);
 
-        let (kept, trunc) = select_kept_per_statement(&m, &st, 2);
+        let (kept, trunc) = select_kept_per_command(&m, &st, &no_limits(), 2);
         assert!(trunc);
         assert_eq!(kept.len(), 2);
         assert!(kept.contains(&12) && kept.contains(&11));

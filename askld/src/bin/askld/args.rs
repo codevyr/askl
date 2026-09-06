@@ -51,28 +51,16 @@ pub struct ServeArgs {
     #[clap(long, default_value = "1000", env = "ASKL_PROBE_CAP")]
     pub probe_cap: usize,
 
-    /// Per-node out-edge cap (assembly capping): a node keeps at most this
-    /// many implicit ref edges and is listed in the response's
-    /// `edges_truncated` so a client can fetch the rest.  0 disables the
-    /// cap; per-request `?edge_cap=` overrides.
-    #[clap(long, default_value = "100", env = "ASKL_EDGE_CAP")]
-    pub edge_cap: usize,
-
-    /// Per-node instance cap (assembly capping, render-side): a node ships at
-    /// most this many `symbol_instances`, marked `instances_truncated` with an
-    /// exact `total_instances` so a client can page the rest.  0 disables;
-    /// per-request `?instance_cap=` overrides.  Without a cap a hub node's
-    /// instance list alone can blow the 1 MB response ceiling (amdgpu: 931).
-    #[clap(long, default_value = "25", env = "ASKL_INSTANCE_CAP")]
-    pub instance_cap: usize,
-
-    /// Per-(from, to)-pair edge-occurrence cap (render-side assembly
-    /// capping): a symbol pair ships at most this many call-site entries;
-    /// overflowing from-symbols join `edges_truncated` and the references
-    /// endpoint pages the rest.  One hot pair measured 2,454 occurrences.
-    /// 0 disables; per-request `?occurrence_cap=` overrides.
-    #[clap(long, default_value = "10", env = "ASKL_OCCURRENCE_CAP")]
-    pub occurrence_cap: usize,
+    /// Per-node listing cap (assembly capping): the most rows any single
+    /// per-node listing ships — instances per node, distinct out-edges per
+    /// node, and call-sites per (from, to) pair — all bounded by this one
+    /// number. Truncated listings are surfaced via `edges_truncated` /
+    /// `instances_truncated` so a client can page the rest. 0 disables;
+    /// per-request `?listing=` overrides; the `limits(listing=N)` verb
+    /// overrides per command. Without a cap a single hub node's instance or
+    /// edge listing can blow the 1 MB response ceiling (amdgpu: 931).
+    #[clap(long, default_value = "100", env = "ASKL_LISTING_CAP")]
+    pub listing_cap: usize,
 
     /// Boot-time planner-statistics refresh.
     ///

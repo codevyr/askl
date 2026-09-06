@@ -541,6 +541,9 @@ fn whitespace_may_surround_a_named_argument_equals() {
         r#"search("abc", limit= 5)"#,
         r#"func("a", inherit = true)"#,
         r#"ignore("a", package = "p")"#,
+        r#"func limits(symbols=200)"#,
+        r#"func limits(symbols = 200, listing = 50)"#,
+        r#"mod("amdgpu") { func limits(listing=100, inherit=false) }"#,
     ] {
         assert!(parse(query).is_ok(), "must parse: {query}");
     }
@@ -564,6 +567,12 @@ fn unknown_arguments_are_rejected_not_swallowed() {
         (r#"func("a", "b")"#, "takes at most 1 positional"),
         (r#"project("a", "b")"#, "takes at most 1 positional"),
         (r#"select("a")"#, "takes no positional arguments"),
+        (r#"limits(symbol=1)"#, "unknown argument 'symbol'"),
+        (r#"limits(symbols=1, bogus=2)"#, "unknown argument 'bogus'"),
+        (
+            r#"limits(inherit=true)"#,
+            "at least one of 'symbols' or 'listing'",
+        ),
     ] {
         let err = parse(query).unwrap_err();
         let msg = format!("{err}");
