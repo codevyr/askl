@@ -11,6 +11,15 @@ pub struct AsklData {
     pub max_result_symbols: usize,
     /// Cardinality-probe cap (see `ExecutionContext::probe_cap`).
     pub probe_cap: usize,
+    /// Default per-node out-edge cap (assembly capping; 0 = disabled).
+    /// Per-request `?edge_cap=` overrides.
+    pub edge_cap: usize,
+    /// Default per-node instance cap (render-side assembly capping;
+    /// 0 = disabled).  Per-request `?instance_cap=` overrides.
+    pub instance_cap: usize,
+    /// Default per-pair edge-occurrence cap (render-side; 0 = disabled).
+    /// Per-request `?occurrence_cap=` overrides.
+    pub occurrence_cap: usize,
 }
 
 fn symbolid_as_string<S>(x: &SymbolId, s: S) -> Result<S::Ok, S::Error>
@@ -46,6 +55,18 @@ pub struct Node {
     label: String,
     symbol_instances: Vec<NodeSymbolInstance>,
     query_statements: Vec<QueryStatement>,
+    /// True when `symbol_instances` was capped by `instance_cap` — assembly
+    /// capping: the node is complete, its instance LISTING is paged
+    /// (`/v1/symbol/{id}/instances` serves the rest).
+    #[serde(default)]
+    pub instances_truncated: bool,
+    /// Exact instance count for this symbol.  For truncated nodes this is
+    /// the symbol's REAL total from an index count (the result's own
+    /// instance list is leaf-budget-bounded and would understate it);
+    /// untruncated nodes report their shipped length.  Exact is fine here:
+    /// a per-symbol count is bounded by the symbol's own size.
+    #[serde(default)]
+    pub total_instances: usize,
 }
 
 impl Node {
@@ -54,12 +75,16 @@ impl Node {
         label: String,
         symbol_instances: Vec<NodeSymbolInstance>,
         query_statements: Vec<QueryStatement>,
+        instances_truncated: bool,
+        total_instances: usize,
     ) -> Self {
         Self {
             id,
             label,
             symbol_instances,
             query_statements,
+            instances_truncated,
+            total_instances,
         }
     }
 
@@ -174,6 +199,11 @@ pub struct Graph {
     pub truncated: bool,
     /// Distinct symbol count before capping (== `nodes.len()` when not truncated).
     pub total_symbols: usize,
+    /// Node ids (symbol ids, same encoding as `Node.id`) whose implicit
+    /// out-edge list was capped by `edge_cap` — assembly capping: each is an
+    /// invitation to fetch that node's remaining references, never a sign the
+    /// symbol set is incomplete.
+    pub edges_truncated: Vec<String>,
 }
 
 impl Graph {
@@ -186,6 +216,7 @@ impl Graph {
             warnings: vec![],
             truncated: false,
             total_symbols: 0,
+            edges_truncated: vec![],
         }
     }
 

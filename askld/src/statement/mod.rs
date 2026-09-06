@@ -38,6 +38,10 @@ pub struct ExecutionResult {
     pub edges: EdgeList,
     pub has_edges: HasEdgeList,
     pub warnings: Vec<Diagnostic>,
+    /// Symbols whose implicit out-edge list hit the per-node `edge_cap`
+    /// (assembly capping) — an invitation to fetch the rest per node, never
+    /// an incompleteness warning.
+    pub edges_truncated: Vec<SymbolId>,
 }
 
 impl ExecutionResult {
@@ -46,12 +50,14 @@ impl ExecutionResult {
         edges: EdgeList,
         has_edges: HasEdgeList,
         warnings: Vec<Diagnostic>,
+        edges_truncated: Vec<SymbolId>,
     ) -> ExecutionResult {
         ExecutionResult {
             nodes,
             edges,
             has_edges,
             warnings,
+            edges_truncated,
         }
     }
 }
@@ -1254,12 +1260,15 @@ impl Statement {
     /// 3. **Implicit edges**: discovered via DB query between all selected instances.
     ///
     /// Deduplication key: (from_instance_id, to_instance_id, symbol_ref_id).
+    /// Returns the reference edges among the answer's nodes and, second, the
+    /// SYMBOLS whose implicit out-edge list hit the per-node `edge_cap`
+    /// (assembly capping: paginable via fetch-more, never a warning).
     async fn collect_ref_edges(
         statements: &[Rc<Statement>],
         ctx: &ExecutionContext,
         all_nodes: &HashSet<SymbolInstanceId>,
         index: &index::db_diesel::Index,
-    ) -> EdgeList {
+    ) -> (EdgeList, Vec<SymbolId>, Vec<Diagnostic>) {
         let _span = tracing::debug_span!("collect_ref_edges").entered();
         let mut all_references = EdgeList::new();
         // Dedup key: (from_instance_id, to_symbol_id, occurrence)
@@ -1415,46 +1424,63 @@ impl Statement {
         // order, and these ids become rendered binds in the SQL-cache key
         // for find_edges_between.
         let all_ids = canonical_ids(all_nodes.iter().map(|id| Into::<i64>::into(*id)));
-        // E1: `_edges_truncated` names the source nodes whose out-edge list hit
-        // the per-node cap.  With `edge_cap` disabled by default it is always
-        // empty; surfacing it to the API Graph is the front-end fetch-more work
-        // (F2/F3), deliberately deferred.
-        if let Ok((implicit_edges, _edges_truncated)) =
-            index.find_edges_between(&all_ids, &ctx.eph).await
-        {
-            for edge in implicit_edges {
-                let from_node = instance_to_node.get(&edge.from_instance_id);
-                let to_node = instance_to_node.get(&edge.to_instance_id);
-                if let (Some((from_sym, from_inst)), Some((_to_sym, to_inst))) =
-                    (from_node, to_node)
-                {
-                    let occurrence = Occurrence {
-                        file: FileId::new(edge.from_object),
-                        offset_range: range_bounds_to_offsets(&edge.from_offset_range).unwrap(),
-                    };
-
-                    let to_symbol = SymbolId::new(edge.to_symbol);
-                    let edge_key = (*from_inst, to_symbol.clone(), Some(occurrence.clone()));
-                    if !seen_edges.insert(edge_key) {
-                        continue; // Already seen from explicit/forced
+        // E1/F2: `truncated_instances` names the source instances whose
+        // out-edge list hit the per-node cap.  Mapped to SYMBOLS below (the
+        // client's fetch-more request is symbol-keyed) and surfaced on the
+        // response as `edges_truncated`.
+        let mut edges_truncated: Vec<SymbolId> = Vec::new();
+        let mut edge_warnings: Vec<Diagnostic> = Vec::new();
+        match index.find_edges_between(&all_ids, &ctx.eph).await {
+            Err(err) => {
+                // An edge-discovery failure used to be swallowed silently,
+                // rendering a graph with zero implicit edges and no hint why.
+                edge_warnings.push(Diagnostic::truncation(
+                    crate::span::Span::synthetic("edges"),
+                    format!("edge discovery failed: {err}; reference edges may be missing"),
+                ));
+            }
+            Ok((implicit_edges, truncated_instances)) => {
+                for inst_id in truncated_instances {
+                    if let Some((sym, _)) = instance_to_node.get(&inst_id) {
+                        edges_truncated.push(sym.clone());
                     }
+                }
+                edges_truncated.sort_unstable_by_key(|s| s.0);
+                edges_truncated.dedup();
+                for edge in implicit_edges {
+                    let from_node = instance_to_node.get(&edge.from_instance_id);
+                    let to_node = instance_to_node.get(&edge.to_instance_id);
+                    if let (Some((from_sym, from_inst)), Some((_to_sym, to_inst))) =
+                        (from_node, to_node)
+                    {
+                        let occurrence = Occurrence {
+                            file: FileId::new(edge.from_object),
+                            offset_range: range_bounds_to_offsets(&edge.from_offset_range).unwrap(),
+                        };
 
-                    all_references.add_reference(
-                        SymbolNodeId {
-                            symbol_id: from_sym.clone(),
-                            instance_id: *from_inst,
-                        },
-                        SymbolNodeId {
-                            symbol_id: to_symbol,
-                            instance_id: *to_inst,
-                        },
-                        Some(occurrence),
-                    );
+                        let to_symbol = SymbolId::new(edge.to_symbol);
+                        let edge_key = (*from_inst, to_symbol.clone(), Some(occurrence.clone()));
+                        if !seen_edges.insert(edge_key) {
+                            continue; // Already seen from explicit/forced
+                        }
+
+                        all_references.add_reference(
+                            SymbolNodeId {
+                                symbol_id: from_sym.clone(),
+                                instance_id: *from_inst,
+                            },
+                            SymbolNodeId {
+                                symbol_id: to_symbol,
+                                instance_id: *to_inst,
+                            },
+                            Some(occurrence),
+                        );
+                    }
                 }
             }
         }
 
-        all_references
+        (all_references, edges_truncated, edge_warnings)
     }
 
     /// Containment edges among the answer's nodes.
@@ -1603,7 +1629,9 @@ impl Statement {
             node_map.keys().map(|id| SymbolInstanceId::new(*id)),
         );
 
-        let ref_edges = Self::collect_ref_edges(&statements, ctx, &all_nodes, &cfg.index).await;
+        let (ref_edges, edges_truncated, edge_warnings) =
+            Self::collect_ref_edges(&statements, ctx, &all_nodes, &cfg.index).await;
+        warnings.extend(edge_warnings);
         let has_edges = Self::collect_has_edges(ctx, &all_nodes, &cfg.index)
             .await
             .map_err(|e| {
@@ -1620,6 +1648,7 @@ impl Statement {
             ref_edges,
             has_edges,
             warnings,
+            edges_truncated,
         ))
     }
 

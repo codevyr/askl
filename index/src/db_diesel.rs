@@ -6,6 +6,7 @@ pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("../migrations");
 mod cte;
 mod index_impl;
 pub(crate) mod mixins;
+mod references;
 mod selection;
 mod sql_cache;
 pub mod stats;
@@ -28,6 +29,9 @@ pub use mixins::{
     INSTANCE_TYPE_SOURCE, SYMBOL_TYPE_CONTENT, SYMBOL_TYPE_DATA, SYMBOL_TYPE_DIRECTORY,
     SYMBOL_TYPE_FIELD, SYMBOL_TYPE_FILE, SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MACRO,
     SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
+};
+pub use references::{
+    ContainedInstanceRow, ReferenceCursor, SymbolInstancePageRow, SymbolReferenceRow,
 };
 pub use selection::{
     Checked, ChildReference, EphContext, HasChildReference, HasEphLeak, HasParentReference,
