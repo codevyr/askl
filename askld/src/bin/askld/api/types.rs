@@ -195,9 +195,11 @@ pub struct Graph {
     pub has_edges: Vec<HasEdge>,
     pub objects: Vec<GraphObjectEntry>,
     pub warnings: Vec<ErrorResponse>,
-    /// True when the result was capped to `max_result_symbols`.
+    /// True when ANY statement's symbols were capped to `max_result_symbols`
+    /// (the cap is per statement — a selector never competes with another
+    /// statement's fan-out).
     pub truncated: bool,
-    /// Distinct symbol count before capping (== `nodes.len()` when not truncated).
+    /// Distinct symbol count across the whole result before capping.
     pub total_symbols: usize,
     /// Node ids (symbol ids, same encoding as `Node.id`) whose implicit
     /// out-edge list was capped by `edge_cap` — assembly capping: each is an

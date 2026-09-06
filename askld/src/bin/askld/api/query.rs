@@ -322,8 +322,17 @@ pub async fn build_result_graph(
     let mut all_symbols = HashSet::new();
     let mut object_projects = HashMap::new();
     let mut sym_key: HashMap<i64, (String, i32)> = HashMap::new();
+    // Symbols per originating STATEMENT (keyed by the statement's query-text
+    // range, carried on every node): the result cap is per statement.
+    let mut stmt_symbols: HashMap<(usize, usize), HashSet<i64>> = HashMap::new();
     for node in res.nodes.0.iter() {
         all_symbols.insert(node.symbol.clone());
+        for stmt in &node.query_statements {
+            stmt_symbols
+                .entry((stmt.start, stmt.end))
+                .or_default()
+                .insert(node.symbol.id);
+        }
         let object_id = FileId::new(node.object.id);
         object_projects
             .entry(object_id)
@@ -342,12 +351,14 @@ pub async fn build_result_graph(
             .or_insert(key);
     }
 
-    // E1 cap: keep the first `cap` distinct symbols (by path, offset, id) and
-    // prune edges/has_edges to that set so the subgraph stays referentially
-    // valid. `limit=0` (or a 0 default) means unlimited.
+    // The result cap is PER STATEMENT: every selector is its own request
+    // with its own budget, so a dedicated anchor can never be evicted by
+    // another statement's derived fan-out. Within a statement, survivors are
+    // deterministic by (path, offset, id); a symbol kept by ANY of its
+    // statements survives. `limit=0` (or a 0 default) means unlimited.
     let cap = limit.unwrap_or(data.max_result_symbols);
     result_graph.total_symbols = all_symbols.len();
-    let (kept, truncated) = select_kept(&sym_key, cap);
+    let (kept, truncated) = select_kept_per_statement(&sym_key, &stmt_symbols, cap);
     result_graph.truncated = truncated;
 
     // Truncated-node list (assembly capping): keep only symbols that survive
@@ -547,8 +558,9 @@ pub struct QueryOpts {
     format: Option<String>,
     /// `names` | `signature` | `body` (default `signature`), markdown only.
     projection: Option<String>,
-    /// Max distinct symbols in the result; `0` = unlimited. Defaults to the
-    /// server's `max_result_symbols`.
+    /// Max distinct symbols PER STATEMENT (each selector gets its own
+    /// budget); `0` = unlimited. Defaults to the server's
+    /// `max_result_symbols`.
     limit: Option<usize>,
     /// Comma-separated project names to make visible; absent = every indexed
     /// project. Names come from `/projects`; an unknown one is a 400.
@@ -580,21 +592,41 @@ pub(crate) fn parse_project_list(raw: Option<&str>) -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// Choose which symbols survive the E1 cap, deterministically keeping the first
-/// `cap` by `(path, offset, symbol id)`. `cap == 0` means unlimited. Returns the
-/// kept id set and whether truncation occurred.
-fn select_kept(sym_key: &HashMap<i64, (String, i32)>, cap: usize) -> (HashSet<i64>, bool) {
-    if cap == 0 || sym_key.len() <= cap {
+/// Choose which symbols survive the result cap.  The cap applies PER
+/// STATEMENT — each selector is its own request with its own budget, so a
+/// statement's nodes never compete with another statement's (a dedicated
+/// anchor cannot be evicted by a neighbour tree's fan-out; the failure mode
+/// is unrepresentable rather than merely deprioritised).  Within a
+/// statement, the first `cap` symbols by `(path, offset, symbol id)` are
+/// kept; a symbol kept by ANY of its statements survives (`;`-statements
+/// sharing a node is the common case).  `cap == 0` means unlimited.
+/// Returns the kept id set and whether ANY statement was truncated.
+fn select_kept_per_statement(
+    sym_key: &HashMap<i64, (String, i32)>,
+    stmt_symbols: &HashMap<(usize, usize), HashSet<i64>>,
+    cap: usize,
+) -> (HashSet<i64>, bool) {
+    if cap == 0 {
         return (sym_key.keys().copied().collect(), false);
     }
-    let mut ids: Vec<i64> = sym_key.keys().copied().collect();
-    ids.sort_by(|a, b| {
-        let ka = &sym_key[a];
-        let kb = &sym_key[b];
-        (ka.0.as_str(), ka.1, *a).cmp(&(kb.0.as_str(), kb.1, *b))
-    });
-    ids.truncate(cap);
-    (ids.into_iter().collect(), true)
+    let mut kept: HashSet<i64> = HashSet::new();
+    let mut truncated = false;
+    for symbols in stmt_symbols.values() {
+        if symbols.len() <= cap {
+            kept.extend(symbols.iter().copied());
+            continue;
+        }
+        truncated = true;
+        let mut ids: Vec<i64> = symbols.iter().copied().collect();
+        ids.sort_by(|a, b| {
+            let ka = &sym_key[a];
+            let kb = &sym_key[b];
+            (ka.0.as_str(), ka.1, *a).cmp(&(kb.0.as_str(), kb.1, *b))
+        });
+        ids.truncate(cap);
+        kept.extend(ids);
+    }
+    (kept, truncated)
 }
 
 /// Filter the truncated-node report to symbols that survived the symbol cap
@@ -706,29 +738,80 @@ mod tests {
         );
     }
 
+    fn stmts(groups: &[(usize, &[i64])]) -> HashMap<(usize, usize), HashSet<i64>> {
+        groups
+            .iter()
+            .map(|(i, ids)| ((*i, *i + 1), ids.iter().copied().collect()))
+            .collect()
+    }
+
     #[test]
     fn select_kept_unlimited_and_under_cap() {
         let mut m = HashMap::new();
         m.insert(1i64, key("/a", 0));
         m.insert(2, key("/b", 0));
+        let st = stmts(&[(0, &[1, 2])]);
 
-        let (kept, trunc) = select_kept(&m, 0); // 0 = unlimited
+        let (kept, trunc) = select_kept_per_statement(&m, &st, 0); // 0 = unlimited
         assert!(!trunc);
         assert_eq!(kept.len(), 2);
 
-        let (kept, trunc) = select_kept(&m, 5); // total <= cap
+        let (kept, trunc) = select_kept_per_statement(&m, &st, 5); // total <= cap
         assert!(!trunc);
         assert_eq!(kept.len(), 2);
     }
 
     #[test]
+    fn the_cap_is_per_statement_so_a_dedicated_selector_always_shows() {
+        // The live scenario: statement 0 fans out over symbols whose paths
+        // sort FIRST and overflow the cap; statement 1 anchors one symbol
+        // whose path sorts LAST.  Under a global cap the anchor loses the
+        // lottery; per statement, it cannot even compete.
+        let mut m = HashMap::new();
+        m.insert(1i64, key("/drivers/a", 0));
+        m.insert(2, key("/drivers/b", 0));
+        m.insert(3, key("/drivers/c", 0));
+        m.insert(4, key("/fs/sysfs", 0));
+        let st = stmts(&[(0, &[1, 2, 3]), (10, &[4])]);
+
+        let (kept, trunc) = select_kept_per_statement(&m, &st, 2);
+        assert!(trunc, "statement 0 overflowed its budget");
+        assert!(kept.contains(&4), "the dedicated selector keeps its node");
+        assert!(
+            kept.contains(&1) && kept.contains(&2) && !kept.contains(&3),
+            "statement 0 keeps its own first `cap` by (path, offset, id)"
+        );
+    }
+
+    #[test]
+    fn a_shared_symbol_survives_if_any_statement_keeps_it() {
+        // Symbol 3 sorts past statement 0's budget but is also statement 1's
+        // only node — kept.
+        let mut m = HashMap::new();
+        m.insert(1i64, key("/a", 0));
+        m.insert(2, key("/b", 0));
+        m.insert(3, key("/c", 0));
+        let st = stmts(&[(0, &[1, 2, 3]), (10, &[3])]);
+
+        let (kept, trunc) = select_kept_per_statement(&m, &st, 2);
+        assert!(trunc);
+        assert!(
+            kept.contains(&3),
+            "statement 1 keeps what statement 0 dropped"
+        );
+        assert_eq!(kept.len(), 3);
+    }
+
+    #[test]
     fn select_kept_caps_by_path_offset_id() {
+        // A single statement behaves exactly as the old global cap did.
         let mut m = HashMap::new();
         m.insert(10i64, key("/b", 0)); // 3rd by (path, offset)
         m.insert(11, key("/a", 50)); // 2nd
         m.insert(12, key("/a", 10)); // 1st
+        let st = stmts(&[(0, &[10, 11, 12])]);
 
-        let (kept, trunc) = select_kept(&m, 2);
+        let (kept, trunc) = select_kept_per_statement(&m, &st, 2);
         assert!(trunc);
         assert_eq!(kept.len(), 2);
         assert!(kept.contains(&12) && kept.contains(&11));
