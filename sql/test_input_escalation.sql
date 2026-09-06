@@ -123,6 +123,45 @@ SELECT 500 + i, 4, int4range(i * 10, i * 10 + 5) FROM generate_series(1, 4) AS i
 INSERT INTO symbol_refs(to_symbol, from_object, from_offset_range)
 VALUES (501, 4, int4range(520, 525));
 
+-- ---------------------------------------------------------------------------
+-- Macro expansion, for the F2 references-pagination test.  `mac` (symbol 8)
+-- has a Definition instance and an EXPANSION instance (instance_type 3), each
+-- containing one reference to t_1.  A symbol-keyed references listing must
+-- return refs from BOTH — macro expansion sites are ordinary instances.
+-- Isolated in object 5 so no existing fixture count changes.
+INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, content_hash)
+VALUES (5, 1, 'mac.c', '/mac.c', 'cc', 'h5');
+
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
+VALUES (8, 'mac', 1, 1, 1);
+
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES (5001, 8, 5, int4range(0, 100), 1),    -- definition
+       (5002, 8, 5, int4range(200, 300), 3);  -- expansion
+
+INSERT INTO symbol_refs(to_symbol, from_object, from_offset_range)
+VALUES (501, 5, int4range(10, 20)),
+       (501, 5, int4range(210, 220));
+
+-- ---------------------------------------------------------------------------
+-- Self-reference, for the pagination-honesty test.  `selfy` (symbol 9) has ONE
+-- instance which references ITSELF (ref A) and then t_1 (ref B).  The target
+-- lookup finds no other instance for ref A, so that row is dropped from the
+-- response — but it must still occupy a scan position, or a page boundary
+-- landing on it reports has_more = false with rows remaining (production bug).
+INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, content_hash)
+VALUES (6, 1, 'selfy.c', '/selfy.c', 'cc', 'h6');
+
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
+VALUES (9, 'selfy', 1, 1, 1);
+
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES (6001, 9, 6, int4range(0, 100), 1);
+
+INSERT INTO symbol_refs(to_symbol, from_object, from_offset_range)
+VALUES (9, 6, int4range(10, 20)),
+       (501, 6, int4range(30, 40));
+
 ALTER TABLE symbols          ALTER COLUMN layer DROP DEFAULT;
 ALTER TABLE symbol_instances ALTER COLUMN layer DROP DEFAULT;
 ALTER TABLE symbol_refs      ALTER COLUMN layer DROP DEFAULT;

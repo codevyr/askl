@@ -9669,6 +9669,21 @@ fn an_edge_cap_bounds_edges_without_touching_nodes_or_warnings() {
         2,
         "edge_cap = 2 bounds hub to two edges"
     );
+    // F2: the truncation is REPORTED per symbol so a client can fetch more —
+    // hub (symbol 5) and only hub; nothing when the cap is off.
+    assert!(
+        free.edges_truncated.is_empty(),
+        "cap disabled => no truncated nodes reported"
+    );
+    assert_eq!(
+        capped
+            .edges_truncated
+            .iter()
+            .map(|s| s.0)
+            .collect::<Vec<_>>(),
+        vec![5],
+        "hub's symbol id, and only hub's, is reported truncated"
+    );
     assert_eq!(
         ids(&free),
         ids(&capped),

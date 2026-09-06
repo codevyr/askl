@@ -184,6 +184,9 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
         query_timeout: std::time::Duration::from_secs(query_timeout_secs),
         max_result_symbols: serve_args.max_result_symbols,
         probe_cap: serve_args.probe_cap,
+        edge_cap: serve_args.edge_cap,
+        instance_cap: serve_args.instance_cap,
+        occurrence_cap: serve_args.occurrence_cap,
     });
 
     // Background GC: periodically purge ephemeral layers idle past the TTL.

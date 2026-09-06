@@ -1006,3 +1006,202 @@ async fn a_per_node_edge_cap_bounds_out_edges_and_records_truncation() -> anyhow
     );
     Ok(())
 }
+
+/// F2: the per-symbol references listing pages deterministically with a
+/// keyset cursor, mirrors the engine's (from_instance, ref) row unit, and
+/// includes references made from EXPANSION instances (macro sites are
+/// ordinary instances).  `hub` (symbol 5) references t_1..t_4 from one
+/// instance; `mac` (symbol 8) references t_1 from a definition AND an
+/// expansion instance.
+#[tokio::test(flavor = "current_thread")]
+async fn symbol_references_page_with_a_cursor_and_cover_expansions() -> anyhow::Result<()> {
+    use crate::db_diesel::Index;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_ESCALATION).await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+
+    // Page 1 of hub's references: two rows, more remain.
+    let (p1, more1) = index.find_symbol_references(5, None, 2, &eph).await?;
+    assert_eq!(p1.len(), 2, "limit bounds the page");
+    assert!(more1, "hub has four references, so page one reports more");
+
+    // Page 2 via the cursor: the remaining two, disjoint from page 1, done.
+    let last = p1.last().unwrap();
+    let cursor = Some((last.from_instance_id, last.ref_id));
+    let (p2, more2) = index.find_symbol_references(5, cursor, 2, &eph).await?;
+    assert_eq!(p2.len(), 2, "second page holds the rest");
+    assert!(!more2, "four references, two pages, nothing after");
+    let ids1: Vec<i64> = p1.iter().map(|r| r.ref_id).collect();
+    let ids2: Vec<i64> = p2.iter().map(|r| r.ref_id).collect();
+    assert!(
+        ids1.iter().all(|id| !ids2.contains(id)),
+        "pages must be disjoint; got {:?} then {:?}",
+        ids1,
+        ids2
+    );
+    let mut targets: Vec<i64> = p1.iter().chain(&p2).map(|r| r.to_symbol).collect();
+    targets.sort_unstable();
+    assert_eq!(
+        targets,
+        vec![501, 502, 503, 504],
+        "all four targets, once each"
+    );
+    assert!(
+        p1[0].path == "/hub.c" && p1[0].to_symbol_name.starts_with("t_"),
+        "rows carry the call-site path and the target's name for rendering"
+    );
+
+    // Expansion coverage: mac's two references come from two different
+    // instances (definition 5001 and expansion 5002) of the same symbol.
+    let (mac, mac_more) = index.find_symbol_references(8, None, 10, &eph).await?;
+    assert!(!mac_more);
+    let mut from: Vec<i64> = mac.iter().map(|r| r.from_instance_id).collect();
+    from.sort_unstable();
+    assert_eq!(
+        from,
+        vec![5001, 5002],
+        "one reference from the definition, one from the EXPANSION instance"
+    );
+
+    // Capped count: exact under the cap, `cap+` above it.
+    assert_eq!(
+        index.count_symbol_references(5, 10, &eph).await?,
+        (4, false),
+        "hub's four references, exactly"
+    );
+    assert_eq!(
+        index.count_symbol_references(5, 2, &eph).await?,
+        (2, true),
+        "capped at two means '2+', not a total"
+    );
+    Ok(())
+}
+
+/// F2 has-kind: the contained-instances listing pages the same way.  `modx`
+/// (symbol 1) contains the ten in_* function instances.
+#[tokio::test(flavor = "current_thread")]
+async fn symbol_contained_pages_with_a_cursor() -> anyhow::Result<()> {
+    use crate::db_diesel::Index;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_ESCALATION).await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+
+    let (p1, more1) = index.find_symbol_contained(1, None, 6, &eph).await?;
+    assert_eq!(p1.len(), 6);
+    assert!(more1, "modx contains ten instances");
+    let last = p1.last().unwrap();
+    let (p2, more2) = index
+        .find_symbol_contained(
+            1,
+            Some((last.parent_instance_id, last.child_instance_id)),
+            6,
+            &eph,
+        )
+        .await?;
+    assert_eq!(p2.len(), 4, "the remaining four");
+    assert!(!more2);
+    let mut children: Vec<i64> = p1.iter().chain(&p2).map(|r| r.child_instance_id).collect();
+    children.sort_unstable();
+    children.dedup();
+    assert_eq!(
+        children.len(),
+        10,
+        "ten distinct contained instances, no repeats"
+    );
+    assert!(
+        p2[0].child_symbol_name.starts_with("in_"),
+        "rows carry the contained symbol's name"
+    );
+    Ok(())
+}
+
+/// A self-reference must not lie to pagination.  `selfy`'s first reference is
+/// to itself — no other instance exists, so the row carries no target and is
+/// excluded from any rendering — but it still occupies a scan position: with
+/// `limit = 1` the first page must say more remains, and the cursor must walk
+/// through to the real reference.  (Production bug: the target lookup was an
+/// inner join, the self-ref row vanished BEFORE the `limit + 1` sentinel was
+/// counted, and a page boundary landing on one reported `has_more = false`
+/// with a thousand rows remaining.)
+#[tokio::test(flavor = "current_thread")]
+async fn a_self_reference_keeps_its_scan_position_in_pagination() -> anyhow::Result<()> {
+    use crate::db_diesel::Index;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_ESCALATION).await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+
+    // Page 1 (limit 1) lands on the self-ref: target-less, but has_more MUST
+    // be true — the real reference is still ahead.
+    let (p1, more1) = index.find_symbol_references(9, None, 1, &eph).await?;
+    assert_eq!(p1.len(), 1);
+    assert_eq!(
+        p1[0].to_symbol, 9,
+        "first scan position is the self-reference"
+    );
+    assert_eq!(
+        p1[0].to_instance_id, None,
+        "a self-reference has no other target instance"
+    );
+    assert!(
+        more1,
+        "the real reference is behind the self-ref — has_more must say so"
+    );
+
+    // The cursor from the RAW row walks past it to the real reference.
+    let cursor = Some((p1[0].from_instance_id, p1[0].ref_id));
+    let (p2, more2) = index.find_symbol_references(9, cursor, 1, &eph).await?;
+    assert_eq!(p2.len(), 1);
+    assert_eq!(p2[0].to_symbol, 501, "page two reaches t_1");
+    assert!(p2[0].to_instance_id.is_some());
+    assert!(!more2);
+    Ok(())
+}
+
+/// F3: the per-symbol instance listing pages by instance-id keyset and the
+/// count is EXACT (a per-symbol count is bounded by that symbol's own size —
+/// unlike edge counts, which must stay capped).  `mac` has two instances
+/// (definition 5001, expansion 5002).
+#[tokio::test(flavor = "current_thread")]
+async fn symbol_instances_page_with_a_cursor_and_count_exactly() -> anyhow::Result<()> {
+    use crate::db_diesel::Index;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_ESCALATION).await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+
+    let (p1, more1) = index.list_symbol_instances(8, None, 1, &eph).await?;
+    assert_eq!(p1.len(), 1);
+    assert_eq!(p1[0].instance_id, 5001, "id order: the definition first");
+    assert!(more1, "the expansion instance is still ahead");
+    assert_eq!(p1[0].path, "/mac.c", "rows carry the path for rendering");
+
+    let (p2, more2) = index
+        .list_symbol_instances(8, Some(p1[0].instance_id), 1, &eph)
+        .await?;
+    assert_eq!(p2.len(), 1);
+    assert_eq!(p2[0].instance_id, 5002);
+    assert_eq!(p2[0].instance_type, 3, "the expansion instance, typed");
+    assert!(!more2);
+
+    assert_eq!(index.count_symbol_instances(8, &eph).await?, 2);
+    // A symbol with no instances counts zero, pages empty.
+    let (empty, more) = index.list_symbol_instances(999_999, None, 5, &eph).await?;
+    assert!(empty.is_empty() && !more);
+    assert_eq!(index.count_symbol_instances(999_999, &eph).await?, 0);
+    Ok(())
+}

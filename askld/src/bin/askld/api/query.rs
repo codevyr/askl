@@ -145,7 +145,17 @@ pub async fn query(
     };
 
     let projects = parse_project_list(opts.projects.as_deref());
-    let result_graph = match build_result_graph(&data, &req_body, opts.limit, &projects).await {
+    let result_graph = match build_result_graph(
+        &data,
+        &req_body,
+        opts.limit,
+        &projects,
+        opts.edge_cap,
+        opts.instance_cap,
+        opts.occurrence_cap,
+    )
+    .await
+    {
         Ok(graph) => graph,
         Err(err) => return err.into_http_response(want_markdown),
     };
@@ -181,7 +191,10 @@ pub async fn query(
 /// (`root_shard_hash` folds `root.hash`), so a narrowed run REUSES the shards
 /// a broader run populated — never mints a parallel set.
 /// `per_root_root_shard_reused_under_narrowed_roots` fences that property.
-fn narrow_roots(all: Vec<RootLayer>, names: &[String]) -> Result<Vec<RootLayer>, QueryError> {
+pub(crate) fn narrow_roots(
+    all: Vec<RootLayer>,
+    names: &[String],
+) -> Result<Vec<RootLayer>, QueryError> {
     if names.is_empty() {
         return Ok(all);
     }
@@ -221,6 +234,9 @@ pub async fn build_result_graph(
     query_text: &str,
     limit: Option<usize>,
     projects: &[String],
+    edge_cap: Option<usize>,
+    instance_cap: Option<usize>,
+    occurrence_cap: Option<usize>,
 ) -> Result<Graph, QueryError> {
     debug!("Received query: {}", query_text);
     let ast = parse(query_text).map_err(|err| {
@@ -242,6 +258,13 @@ pub async fn build_result_graph(
     // Read and probe share one cap, so "Resolved" (probe ≤ cap) and "not
     // truncated" (read ≤ cap) name the same threshold.
     ctx.eph.set_read_cap(data.probe_cap);
+    // Per-node out-edge assembly cap (request override, else server default).
+    ctx.eph.set_edge_cap(edge_cap.unwrap_or(data.edge_cap));
+    // Per-node instance cap is RENDER-side (the engine's instances are
+    // already bounded by read_cap; only serialization needs bounding) —
+    // resolved here, applied at node assembly below.
+    let instance_cap = instance_cap.unwrap_or(data.instance_cap);
+    let occurrence_cap = occurrence_cap.unwrap_or(data.occurrence_cap);
     // Push the result cap into the leaf SQL (the budget facet of fusion): the
     // renderer below still applies the exact per-symbol cap, but bounding the
     // leaves stops bare selectors from materialising far more rows than the cap
@@ -327,8 +350,46 @@ pub async fn build_result_graph(
     let (kept, truncated) = select_kept(&sym_key, cap);
     result_graph.truncated = truncated;
 
-    for (from, to, loc) in res.edges.0 {
-        if !(kept.contains(&from.symbol_id.0) && kept.contains(&to.symbol_id.0)) {
+    // Truncated-node list (assembly capping): keep only symbols that survive
+    // the symbol cap, same referential rule as edges below.
+    result_graph.edges_truncated = kept_truncated_ids(&res.edges_truncated, &kept);
+
+    // Objects ship only if something in the RESPONSE references them — a
+    // kept edge occurrence or a kept (post-cap) instance.  Registering every
+    // result instance's object shipped hundreds of entries nothing pointed
+    // at once the caps trimmed the payload.
+    let mut shipped_objects: HashSet<String> = HashSet::new();
+
+    // The client draws ONE edge per (from, to) symbol pair; every entry
+    // beyond the first only feeds that pair's call-site listing.  A single
+    // hot pair can carry thousands of occurrences (measured: 2,454 of 2,898
+    // entries on ONE amdgpu pair), so occurrences are capped PER PAIR at
+    // render — assembly capping: the overflowing from-symbol joins
+    // `edges_truncated` and the references endpoint pages the rest.  The
+    // edge set is a HashSet, so sort first or the surviving occurrences
+    // would be iteration-order lottery.
+    let mut kept_edges: Vec<_> = res
+        .edges
+        .0
+        .iter()
+        .filter(|(from, to, _)| kept.contains(&from.symbol_id.0) && kept.contains(&to.symbol_id.0))
+        .collect();
+    kept_edges.sort_by_key(|(from, to, loc)| {
+        (
+            from.symbol_id.0,
+            to.symbol_id.0,
+            loc.as_ref().map(|o| (o.file.to_string(), o.offset_range.0)),
+        )
+    });
+    let mut pair_counts: HashMap<(i64, i64), usize> = HashMap::new();
+    let mut occurrence_overflow: HashSet<i64> = HashSet::new();
+    for (from, to, loc) in kept_edges {
+        let n = pair_counts
+            .entry((from.symbol_id.0, to.symbol_id.0))
+            .or_insert(0);
+        *n += 1;
+        if occurrence_cap != 0 && *n > occurrence_cap {
+            occurrence_overflow.insert(from.symbol_id.0);
             continue;
         }
         let from_project_id = loc.as_ref().and_then(|occurrence| {
@@ -336,13 +397,21 @@ pub async fn build_result_graph(
                 .get(&occurrence.file)
                 .map(|id| id.to_string())
         });
+        if let Some(occurrence) = loc {
+            shipped_objects.insert(occurrence.file.to_string());
+        }
         result_graph.add_edge(Edge::new(
             from.symbol_id,
             to.symbol_id,
-            loc,
+            loc.clone(),
             from_project_id,
         ));
     }
+    for sym in occurrence_overflow {
+        result_graph.edges_truncated.push(sym.to_string());
+    }
+    result_graph.edges_truncated.sort_unstable();
+    result_graph.edges_truncated.dedup();
 
     for has_edge in res.has_edges.0 {
         if !(kept.contains(&has_edge.parent.0) && kept.contains(&has_edge.child.0)) {
@@ -400,15 +469,42 @@ pub async fn build_result_graph(
             });
         }
 
+        let (symbol_instances, instances_truncated, result_instances) =
+            cap_instances(symbol_instances, instance_cap);
+        // The result's own instance count is bounded by the leaf budget
+        // (limit x 8), so it is NOT the symbol's real total — amdgpu showed
+        // "800" for a symbol with 931 instances. For truncated nodes (the
+        // only ones that display a total) ask the index for the exact
+        // per-symbol count: index-driven and bounded by the symbol's own
+        // size. On error, fall back to the result count rather than failing
+        // the whole response.
+        let total_instances = if instances_truncated {
+            data.cfg
+                .index
+                .count_symbol_instances(symbol.id, &ctx.eph)
+                .await
+                .unwrap_or(result_instances)
+        } else {
+            result_instances
+        };
+        for inst in &symbol_instances {
+            shipped_objects.insert(inst.object_id.clone());
+        }
         result_graph.add_node(Node::new(
             SymbolId(symbol.id),
             symbol.name.clone(),
             symbol_instances,
             query_stmts,
+            instances_truncated,
+            total_instances,
         ));
     }
 
-    result_graph.objects = result_objects.into_values().collect();
+    result_graph.objects = result_objects
+        .into_iter()
+        .filter(|(id, _)| shipped_objects.contains(&id.to_string()))
+        .map(|(_, entry)| entry)
+        .collect();
     result_graph.add_warnings(res.warnings);
 
     Ok(result_graph)
@@ -457,11 +553,23 @@ pub struct QueryOpts {
     /// Comma-separated project names to make visible; absent = every indexed
     /// project. Names come from `/projects`; an unknown one is a 400.
     projects: Option<String>,
+    /// Per-node out-edge cap; `0` = uncapped for this request. Defaults to
+    /// the server's `edge_cap`. Assembly capping: truncated nodes are listed
+    /// in `edges_truncated` for fetch-more, never warned about.
+    edge_cap: Option<usize>,
+    /// Per-node instance cap; `0` = uncapped for this request. Defaults to
+    /// the server's `instance_cap`. Render-side assembly capping: truncated
+    /// nodes carry `instances_truncated` + exact `total_instances`.
+    instance_cap: Option<usize>,
+    /// Per-(from, to)-pair edge-occurrence cap; `0` = uncapped. Defaults to
+    /// the server's `occurrence_cap`. Overflowing from-symbols join
+    /// `edges_truncated`; the references endpoint pages the rest.
+    occurrence_cap: Option<usize>,
 }
 
 /// Split a `projects=a,b` query parameter into names, dropping empty entries so
 /// a trailing comma is not an unknown project called "".
-fn parse_project_list(raw: Option<&str>) -> Vec<String> {
+pub(crate) fn parse_project_list(raw: Option<&str>) -> Vec<String> {
     raw.map(|s| {
         s.split(',')
             .map(str::trim)
@@ -489,12 +597,113 @@ fn select_kept(sym_key: &HashMap<i64, (String, i32)>, cap: usize) -> (HashSet<i6
     (ids.into_iter().collect(), true)
 }
 
+/// Filter the truncated-node report to symbols that survived the symbol cap
+/// (same referential rule as edges: never name a node the response dropped),
+/// serialized in `Node.id`'s string encoding.
+fn kept_truncated_ids(edges_truncated: &[SymbolId], kept: &HashSet<i64>) -> Vec<String> {
+    edges_truncated
+        .iter()
+        .filter(|sym| kept.contains(&sym.0))
+        .map(|sym| sym.0.to_string())
+        .collect()
+}
+
+/// Render-side instance cap (assembly capping): keep at most `cap` instances
+/// per node, REAL ones first.  Sorted by (directory-instance?, object,
+/// offset, id): sentinel/containment instances sort last so a truncated list
+/// can never misrepresent a code symbol as a directory node, and the
+/// definition a renderer looks for stays in the kept prefix.  `cap == 0`
+/// disables.  Returns `(kept, truncated, total)` — the total is the result's
+/// exact count, not a corpus total.
+fn cap_instances(
+    mut instances: Vec<NodeSymbolInstance>,
+    cap: usize,
+) -> (Vec<NodeSymbolInstance>, bool, usize) {
+    let total = instances.len();
+    if cap == 0 || total <= cap {
+        return (instances, false, total);
+    }
+    let is_directory = |i: &NodeSymbolInstance| {
+        matches!(
+            i.instance_type,
+            index::symbols::InstanceType::Sentinel | index::symbols::InstanceType::Containment
+        )
+    };
+    instances.sort_by(|a, b| {
+        (is_directory(a), &a.object_id, a.start_offset, &a.id).cmp(&(
+            is_directory(b),
+            &b.object_id,
+            b.start_offset,
+            &b.id,
+        ))
+    });
+    instances.truncate(cap);
+    (instances, true, total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn key(path: &str, off: i32) -> (String, i32) {
         (path.to_string(), off)
+    }
+
+    fn inst(id: &str, itype: index::symbols::InstanceType, off: i32) -> NodeSymbolInstance {
+        NodeSymbolInstance {
+            id: id.to_string(),
+            symbol: "1".to_string(),
+            object_id: "1".to_string(),
+            project_id: "p".to_string(),
+            symbol_type: index::symbols::SymbolType::Function,
+            instance_type: itype,
+            start_offset: off,
+            end_offset: off + 1,
+        }
+    }
+
+    #[test]
+    fn cap_instances_keeps_real_instances_first_and_reports_the_total() {
+        use index::symbols::InstanceType::{Containment, Definition, Sentinel};
+        let all = || {
+            vec![
+                inst("a", Containment, 0),
+                inst("b", Sentinel, 5),
+                inst("c", Definition, 10),
+                inst("d", Definition, 20),
+            ]
+        };
+        // Under the cap: untouched, unsorted, not truncated.
+        let (kept, trunc, total) = cap_instances(all(), 10);
+        assert!(!trunc);
+        assert_eq!((kept.len(), total), (4, 4));
+        assert_eq!(kept[0].id, "a", "no cap hit => original order preserved");
+
+        // Capped: the DEFINITIONS survive, the directory instances drop —
+        // a truncated list must never turn a code symbol into a directory
+        // node or lose the definition the renderer looks for.
+        let (kept, trunc, total) = cap_instances(all(), 2);
+        assert!(trunc);
+        assert_eq!(total, 4);
+        let ids: Vec<&str> = kept.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["c", "d"]);
+
+        // cap == 0 disables.
+        let many = vec![inst("x", Definition, 0), inst("y", Definition, 1)];
+        let (kept, trunc, _) = cap_instances(many, 0);
+        assert!(!trunc);
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn kept_truncated_ids_drops_symbols_the_cap_dropped() {
+        let truncated = vec![SymbolId::new(5), SymbolId::new(7)];
+        let kept: HashSet<i64> = [5i64, 6].into_iter().collect();
+        assert_eq!(
+            kept_truncated_ids(&truncated, &kept),
+            vec!["5".to_string()],
+            "a truncated node the symbol cap dropped must not be reported"
+        );
     }
 
     #[test]

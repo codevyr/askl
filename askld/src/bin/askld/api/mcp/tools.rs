@@ -110,7 +110,17 @@ async fn tool_askl_run(data: &web::Data<AsklData>, arguments: Value) -> ToolOutp
         },
     };
 
-    match build_result_graph(data, &args.query, args.limit, &args.projects).await {
+    match build_result_graph(
+        data,
+        &args.query,
+        args.limit,
+        &args.projects,
+        None,
+        None,
+        None,
+    )
+    .await
+    {
         Ok(graph) => {
             ToolOutput::ok(render_graph_markdown(data, &args.query, &graph, projection).await)
         }

@@ -511,11 +511,14 @@ mod tests {
     }
 
     fn node(id: i64, label: &str, insts: Vec<NodeSymbolInstance>) -> Node {
+        let total = insts.len();
         Node::new(
             SymbolId(id),
             label.into(),
             insts,
             Vec::<QueryStatement>::new(),
+            false,
+            total,
         )
     }
 
