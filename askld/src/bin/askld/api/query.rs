@@ -7,7 +7,7 @@ use index::db_diesel::RootLayer;
 use index::symbols::{FileId, InstanceType, SymbolId, SymbolInstanceId, SymbolType};
 use log::{debug, info, warn};
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use tokio::time::timeout;
 
 use super::render::{render_markdown, Projection, SourceMap};
@@ -414,35 +414,33 @@ pub async fn build_result_graph(
             .flatten()
             .unwrap_or(listing_default)
     };
-    let mut pair_counts: HashMap<(i64, i64), usize> = HashMap::new();
-    let mut occurrence_overflow: HashSet<i64> = HashSet::new();
+    // An edge is a (from, to) SYMBOL pair; its call sites are display detail
+    // fetched from /v1/edge/{from}/{to}/occurrences when the edge is opened.
+    // Ship one edge per pair with its occurrence count — this removes the
+    // per-occurrence rows that dominated the payload (one hot pair carried
+    // 2,454 of 2,898 entries) and with them the need to cap occurrences.
+    // The distinct source files per pair ride along: the client's
+    // multi-parent split needs them to route an edge to the right split.
+    let mut pair_counts: HashMap<(i64, i64), (usize, BTreeSet<String>)> = HashMap::new();
     for (from, to, loc) in kept_edges {
-        let n = pair_counts
+        let entry = pair_counts
             .entry((from.symbol_id.0, to.symbol_id.0))
-            .or_insert(0);
-        *n += 1;
-        let occ_cap = listing_for(from.symbol_id.0);
-        if occ_cap != 0 && *n > occ_cap {
-            occurrence_overflow.insert(from.symbol_id.0);
-            continue;
-        }
-        let from_project_id = loc.as_ref().and_then(|occurrence| {
-            object_projects
-                .get(&occurrence.file)
-                .map(|id| id.to_string())
-        });
+            .or_insert_with(|| (0, BTreeSet::new()));
+        entry.0 += 1;
         if let Some(occurrence) = loc {
+            entry.1.insert(occurrence.file.to_string());
             shipped_objects.insert(occurrence.file.to_string());
         }
-        result_graph.add_edge(Edge::new(
-            from.symbol_id,
-            to.symbol_id,
-            loc.clone(),
-            from_project_id,
-        ));
     }
-    for sym in occurrence_overflow {
-        result_graph.edges_truncated.push(sym.to_string());
+    let mut pairs: Vec<((i64, i64), (usize, BTreeSet<String>))> = pair_counts.into_iter().collect();
+    pairs.sort_unstable_by_key(|((f, t), _)| (*f, *t));
+    for ((from, to), (count, objects)) in pairs {
+        result_graph.add_edge(Edge::new(
+            SymbolId(from),
+            SymbolId(to),
+            count,
+            objects.into_iter().collect(),
+        ));
     }
     result_graph.edges_truncated.sort_unstable();
     result_graph.edges_truncated.dedup();

@@ -114,6 +114,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(query::query)
         .service(references::symbol_references)
         .service(references::symbol_instances)
+        .service(references::edge_occurrences)
         .service(query::file)
         .service(web::resource("/mcp").route(web::post().to(mcp::mcp_handler)));
 }
