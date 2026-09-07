@@ -109,7 +109,7 @@ fn format_instance_cursor(object_id: i32, start_offset: i32, instance_id: i64) -
 }
 
 /// Parse an instance-page cursor. `None` = first page; malformed = `Err`.
-fn parse_instance_cursor(after: Option<&str>) -> Result<index::db_diesel::InstanceCursor, String> {
+fn parse_instance_cursor(after: Option<&str>) -> Result<index::db_diesel::DisplayCursor, String> {
     let Some(raw) = after else { return Ok(None) };
     let mut parts = raw.splitn(3, ':');
     let (Some(o), Some(off), Some(i)) = (parts.next(), parts.next(), parts.next()) else {
@@ -368,6 +368,102 @@ pub async fn symbol_instances(
         }
         (Err(err), _) | (_, Err(err)) => {
             HttpResponse::InternalServerError().body(format!("instances query failed: {err}"))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EdgeOccurrencesOpts {
+    /// Opaque cursor from the previous page's `next`.
+    after: Option<String>,
+    /// Rows per page (default 50, max 500).
+    limit: Option<usize>,
+    /// Same narrowing as `/query`'s `projects=`.
+    projects: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EdgeOccurrenceRowJson {
+    pub ref_id: String,
+    pub from_instance_id: String,
+    pub object_id: String,
+    pub path: String,
+    pub project_id: Option<String>,
+    pub start_offset: i32,
+    pub end_offset: i32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EdgeOccurrencesResponse {
+    pub rows: Vec<EdgeOccurrenceRowJson>,
+    /// Opaque `object:offset:id` cursor for the next page; `null` when done.
+    pub next: Option<String>,
+}
+
+/// `GET /v1/edge/{from_symbol}/{to_symbol}/occurrences` — the call sites of
+/// ONE edge. An edge is a (from, to) symbol pair, so its occurrences are their
+/// own listing; `/query` ships only the pair plus a count, and a client pages
+/// the call sites here when it opens the edge.
+#[get("/v1/edge/{from_symbol}/{to_symbol}/occurrences")]
+pub async fn edge_occurrences(
+    data: web::Data<AsklData>,
+    path: web::Path<(i64, i64)>,
+    opts: web::Query<EdgeOccurrencesOpts>,
+) -> impl Responder {
+    let (from_symbol, to_symbol) = path.into_inner();
+    let limit = clamp_limit(opts.limit);
+
+    let index = &data.cfg.index;
+    let roots = match index.load_root_layers().await {
+        Ok(roots) => roots,
+        Err(err) => {
+            return HttpResponse::InternalServerError()
+                .body(format!("Failed to resolve root layers: {err}"))
+        }
+    };
+    let projects = parse_project_list(opts.projects.as_deref());
+    let roots = match narrow_roots(roots, &projects) {
+        Ok(roots) => roots,
+        Err(QueryError::Request(msg)) => return HttpResponse::BadRequest().body(msg),
+        Err(_) => return HttpResponse::InternalServerError().body("project narrowing failed"),
+    };
+    let eph = index::db_diesel::EphContext::rooted(roots);
+
+    let after = match parse_instance_cursor(opts.after.as_deref()) {
+        Ok(cursor) => cursor,
+        Err(msg) => return HttpResponse::BadRequest().body(msg),
+    };
+
+    match index
+        .find_edge_occurrences(from_symbol, to_symbol, after, limit, &eph)
+        .await
+    {
+        Ok((rows, has_more)) => {
+            let next = if has_more {
+                rows.last()
+                    .map(|r| format_instance_cursor(r.from_object, r.start_offset(), r.ref_id))
+            } else {
+                None
+            };
+            let rows = rows
+                .into_iter()
+                .filter_map(|r| {
+                    let (start_offset, end_offset) = range_bounds_to_offsets(&r.from_offset_range)?;
+                    Some(EdgeOccurrenceRowJson {
+                        ref_id: r.ref_id.to_string(),
+                        from_instance_id: r.from_instance_id.to_string(),
+                        object_id: r.from_object.to_string(),
+                        path: r.path,
+                        project_id: r.project_id,
+                        start_offset,
+                        end_offset,
+                    })
+                })
+                .collect();
+            HttpResponse::Ok().json(EdgeOccurrencesResponse { rows, next })
+        }
+        Err(err) => {
+            HttpResponse::InternalServerError().body(format!("edge occurrences failed: {err}"))
         }
     }
 }

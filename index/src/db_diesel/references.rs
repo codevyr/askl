@@ -109,6 +109,34 @@ impl SymbolInstancePageRow {
     }
 }
 
+/// One call site of an edge (a reference from one symbol to another).
+#[derive(diesel::QueryableByName, Debug, Clone)]
+pub struct EdgeOccurrenceRow {
+    #[diesel(sql_type = BigInt)]
+    pub ref_id: i64,
+    #[diesel(sql_type = BigInt)]
+    pub from_instance_id: i64,
+    #[diesel(sql_type = Integer)]
+    pub from_object: i32,
+    #[diesel(sql_type = Text)]
+    pub path: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub project_id: Option<String>,
+    #[diesel(sql_type = Int4range)]
+    pub from_offset_range: (std::ops::Bound<i32>, std::ops::Bound<i32>),
+}
+
+impl EdgeOccurrenceRow {
+    /// Start offset of the call site — middle component of the display cursor.
+    pub fn start_offset(&self) -> i32 {
+        match self.from_offset_range.0 {
+            std::ops::Bound::Included(v) => v,
+            std::ops::Bound::Excluded(v) => v + 1,
+            std::ops::Bound::Unbounded => i32::MIN,
+        }
+    }
+}
+
 #[derive(diesel::QueryableByName, Debug)]
 struct CountRow {
     #[diesel(sql_type = BigInt)]
@@ -119,9 +147,11 @@ struct CountRow {
 /// `None` starts from the beginning.
 pub type ReferenceCursor = Option<(i64, i64)>;
 
-/// Keyset cursor for instance pages: the display order `(object_id,
-/// start_offset, instance_id)`. `None` = first page.
-pub type InstanceCursor = Option<(i32, i32, i64)>;
+/// Keyset cursor in DISPLAY order — `(object_id, start_offset, row_id)`.
+/// Used by instance pages and by edge-occurrence pages: cheap ints, local to
+/// the listing being paged, continuous, so pages append contiguously to what
+/// the UI shows. `None` = first page.
+pub type DisplayCursor = Option<(i32, i32, i64)>;
 
 fn cursor_parts(after: ReferenceCursor) -> (i64, i64) {
     after.unwrap_or((i64::MIN, i64::MIN))
@@ -338,7 +368,7 @@ impl Index {
     pub async fn list_symbol_instances(
         &self,
         symbol_id: i64,
-        after: InstanceCursor,
+        after: DisplayCursor,
         limit: usize,
         eph: &EphContext,
     ) -> Result<(Vec<SymbolInstancePageRow>, bool)> {
@@ -372,6 +402,68 @@ impl Index {
         .get_results(&mut *connection)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to page symbol instances: {}", e))?;
+
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        Ok((rows, has_more))
+    }
+
+    /// One page of the call sites of ONE edge — the references from
+    /// `from_symbol` to `to_symbol`. An edge IS a (from, to) pair, so this is
+    /// its own listing rather than a filter over the whole references stream.
+    /// Same containment rule as edge discovery (a reference belongs to the
+    /// source instance whose range covers it). Paged in DISPLAY order
+    /// `(from_object, from_offset, ref_id)` so pages append contiguously.
+    pub async fn find_edge_occurrences(
+        &self,
+        from_symbol: i64,
+        to_symbol: i64,
+        after: DisplayCursor,
+        limit: usize,
+        eph: &EphContext,
+    ) -> Result<(Vec<EdgeOccurrenceRow>, bool)> {
+        let (a_obj, a_off, a_id) = after.unwrap_or((i32::MIN, i32::MIN, i64::MIN));
+        let vis = eph.visible_ids();
+        let fetch = limit as i64 + 1;
+        let connection = &mut self
+            .pool
+            .get()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+
+        let mut rows: Vec<EdgeOccurrenceRow> = diesel::sql_query(
+            "SELECT sr.id AS ref_id, from_inst.id AS from_instance_id, \
+                    sr.from_object, o.filesystem_path AS path, \
+                    p.project_name AS project_id, sr.from_offset_range \
+             FROM ( \
+               SELECT si.id, si.object_id, si.offset_range \
+               FROM index.symbol_instances si \
+               WHERE si.symbol = $1 AND si.layer = ANY($2) \
+             ) from_inst \
+             CROSS JOIN LATERAL ( \
+               SELECT sr.id, sr.from_object, sr.from_offset_range \
+               FROM index.symbol_refs sr \
+               WHERE sr.from_object = from_inst.object_id \
+                 AND from_inst.offset_range @> sr.from_offset_range \
+                 AND sr.layer = ANY($2) \
+                 AND sr.to_symbol = $3 \
+             ) sr \
+             JOIN index.objects o ON o.id = sr.from_object \
+             LEFT JOIN index.projects p ON p.id = o.project_id \
+             WHERE (sr.from_object, lower(sr.from_offset_range), sr.id) > ($4, $5, $6) \
+             ORDER BY sr.from_object, lower(sr.from_offset_range), sr.id \
+             LIMIT $7",
+        )
+        .bind::<BigInt, _>(from_symbol)
+        .bind::<Array<BigInt>, _>(&vis)
+        .bind::<BigInt, _>(to_symbol)
+        .bind::<Integer, _>(a_obj)
+        .bind::<Integer, _>(a_off)
+        .bind::<BigInt, _>(a_id)
+        .bind::<BigInt, _>(fetch)
+        .get_results(&mut *connection)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to page edge occurrences: {}", e))?;
 
         let has_more = rows.len() > limit;
         rows.truncate(limit);

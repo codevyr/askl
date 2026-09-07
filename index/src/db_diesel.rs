@@ -31,7 +31,7 @@ pub use mixins::{
     SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
 };
 pub use references::{
-    ContainedInstanceRow, InstanceCursor, ReferenceCursor, SymbolInstancePageRow,
+    ContainedInstanceRow, DisplayCursor, EdgeOccurrenceRow, ReferenceCursor, SymbolInstancePageRow,
     SymbolReferenceRow,
 };
 pub use selection::{

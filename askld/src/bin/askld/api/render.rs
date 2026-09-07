@@ -651,8 +651,8 @@ mod tests {
         g.add_edge(crate::api::types::Edge::new(
             SymbolId(1),
             SymbolId(2),
-            None,
-            None,
+            1,
+            Vec::new(),
         ));
 
         let md = render_markdown("\"f\" { func }", &g, &src, Projection::Names);

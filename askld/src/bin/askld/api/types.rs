@@ -1,7 +1,7 @@
 use askld::cfg::ControlFlowGraph;
 use askld::diagnostic::Diagnostic;
 use askld::parser::Rule;
-use index::symbols::{FileId, InstanceType, SymbolId, SymbolInstanceId, SymbolType};
+use index::symbols::{InstanceType, SymbolId, SymbolInstanceId, SymbolType};
 use serde::{Deserialize, Serialize, Serializer};
 
 pub struct AsklData {
@@ -96,35 +96,39 @@ impl Node {
     }
 }
 
+/// One edge of the result graph: a (from, to) SYMBOL pair plus how many call
+/// sites it has.  Individual call sites are display detail, not structure —
+/// a client pages them from `/v1/edge/{from}/{to}/occurrences` when it opens
+/// the edge.  The `id` is recomputable as `from-to` and is not sent.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Edge {
-    id: String,
     #[serde(serialize_with = "symbolid_as_string")]
     from: SymbolId,
     #[serde(serialize_with = "symbolid_as_string")]
     to: SymbolId,
-    from_object: Option<FileId>,
-    from_project_id: Option<String>,
-    from_offset_start: Option<i32>,
-    from_offset_end: Option<i32>,
+    /// Call sites of this pair in the result (bounded by the discovery cap;
+    /// a symbol whose out-edges were capped is listed in `edges_truncated`).
+    occurrence_count: usize,
+    /// Distinct files this pair's call sites live in — STRUCTURAL, not display
+    /// detail: the client's multi-parent split routes an edge to the split
+    /// whose files contain its call sites.  A handful of ints per pair, versus
+    /// the per-occurrence rows this replaced.  Goes away when the split moves
+    /// server-side (which has the occurrences in memory already).
+    from_objects: Vec<String>,
 }
 
 impl Edge {
     pub fn new(
         from: SymbolId,
         to: SymbolId,
-        occurrence: Option<index::symbols::Occurrence>,
-        from_project_id: Option<String>,
+        occurrence_count: usize,
+        from_objects: Vec<String>,
     ) -> Self {
-        let range = occurrence.as_ref().map(|o| o.offset_range.clone());
         Self {
-            id: format!("{}-{}", from, to),
-            from: from,
-            to: to,
-            from_object: occurrence.map(|o| o.file),
-            from_project_id,
-            from_offset_start: range.map(|r| r.0),
-            from_offset_end: range.map(|r| r.1),
+            from,
+            to,
+            occurrence_count,
+            from_objects,
         }
     }
 
