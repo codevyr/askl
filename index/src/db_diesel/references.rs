@@ -24,7 +24,7 @@
 //! partition-cache treatment (acceptable: results are not SQL-cached).
 
 use anyhow::Result;
-use diesel::sql_types::{Array, BigInt, Int4range, Nullable, Text};
+use diesel::sql_types::{Array, BigInt, Int4range, Integer, Nullable, Text};
 use diesel_async::RunQueryDsl;
 
 use super::index_impl::Index;
@@ -97,6 +97,18 @@ pub struct SymbolInstancePageRow {
     pub offset_range: (std::ops::Bound<i32>, std::ops::Bound<i32>),
 }
 
+impl SymbolInstancePageRow {
+    /// The instance's start offset (lower bound of its range) — the middle
+    /// component of the display keyset cursor.
+    pub fn start_offset(&self) -> i32 {
+        match self.offset_range.0 {
+            std::ops::Bound::Included(v) => v,
+            std::ops::Bound::Excluded(v) => v + 1,
+            std::ops::Bound::Unbounded => i32::MIN,
+        }
+    }
+}
+
 #[derive(diesel::QueryableByName, Debug)]
 struct CountRow {
     #[diesel(sql_type = BigInt)]
@@ -106,6 +118,10 @@ struct CountRow {
 /// Keyset cursor: the engine's row key `(from_instance_id, ref/child id)`.
 /// `None` starts from the beginning.
 pub type ReferenceCursor = Option<(i64, i64)>;
+
+/// Keyset cursor for instance pages: the display order `(object_id,
+/// start_offset, instance_id)`. `None` = first page.
+pub type InstanceCursor = Option<(i32, i32, i64)>;
 
 fn cursor_parts(after: ReferenceCursor) -> (i64, i64) {
     after.unwrap_or((i64::MIN, i64::MIN))
@@ -312,18 +328,21 @@ impl Index {
         Ok((n.min(cap), n > cap))
     }
 
-    /// One page of `symbol_id`'s instances, keyset-paginated by instance id
-    /// (`after` = last page's final instance id).  Ordered by id: stable,
-    /// index-driven, and duplicate-free; display ordering is the client's
-    /// concern.  `limit + 1` sentinel decides `has_more`.
+    /// One page of `symbol_id`'s instances, keyset-paginated on the DISPLAY
+    /// order `(object_id, start_offset, id)` — cheap ints local to this
+    /// symbol's instances — so pages are contiguous with what the UI shows
+    /// (file then position) and "load more" is monotone. Replaces the earlier
+    /// global-instance-id cursor, which scattered pages relative to the
+    /// display. `after` = the previous page's last `(object_id, start_offset,
+    /// id)`; `None` = first page. `limit + 1` sentinel decides `has_more`.
     pub async fn list_symbol_instances(
         &self,
         symbol_id: i64,
-        after: Option<i64>,
+        after: InstanceCursor,
         limit: usize,
         eph: &EphContext,
     ) -> Result<(Vec<SymbolInstancePageRow>, bool)> {
-        let after = after.unwrap_or(i64::MIN);
+        let (a_obj, a_off, a_id) = after.unwrap_or((i32::MIN, i32::MIN, i64::MIN));
         let vis = eph.visible_ids();
         let fetch = limit as i64 + 1;
         let connection = &mut self
@@ -339,13 +358,16 @@ impl Index {
              FROM index.symbol_instances si \
              JOIN index.objects o ON o.id = si.object_id \
              LEFT JOIN index.projects p ON p.id = o.project_id \
-             WHERE si.symbol = $1 AND si.layer = ANY($2) AND si.id > $3 \
-             ORDER BY si.id \
-             LIMIT $4",
+             WHERE si.symbol = $1 AND si.layer = ANY($2) \
+               AND (si.object_id, lower(si.offset_range), si.id) > ($3, $4, $5) \
+             ORDER BY si.object_id, lower(si.offset_range), si.id \
+             LIMIT $6",
         )
         .bind::<BigInt, _>(symbol_id)
         .bind::<Array<BigInt>, _>(&vis)
-        .bind::<BigInt, _>(after)
+        .bind::<Integer, _>(a_obj)
+        .bind::<Integer, _>(a_off)
+        .bind::<BigInt, _>(a_id)
         .bind::<BigInt, _>(fetch)
         .get_results(&mut *connection)
         .await

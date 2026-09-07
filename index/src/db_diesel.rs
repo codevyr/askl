@@ -31,7 +31,8 @@ pub use mixins::{
     SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
 };
 pub use references::{
-    ContainedInstanceRow, ReferenceCursor, SymbolInstancePageRow, SymbolReferenceRow,
+    ContainedInstanceRow, InstanceCursor, ReferenceCursor, SymbolInstancePageRow,
+    SymbolReferenceRow,
 };
 pub use selection::{
     Checked, ChildReference, EphContext, HasChildReference, HasEphLeak, HasParentReference,
