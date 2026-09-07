@@ -144,9 +144,26 @@ pub async fn query(
         },
     };
 
+    // `skeleton` answers with symbol relationships only — instances and call
+    // sites are fetched per node/edge. `full` keeps the inlined shape for
+    // one-shot consumers (MCP) that cannot lazy-load.
+    let want_skeleton = match opts.detail.as_deref() {
+        None | Some("full") => false,
+        Some("skeleton") => true,
+        Some(other) => {
+            return HttpResponse::BadRequest().body(format!(
+                "unknown detail '{other}'; expected 'skeleton' or 'full'"
+            ));
+        }
+    };
+
     let projects = parse_project_list(opts.projects.as_deref());
+    // The split needs every instance's containment, so the skeleton path
+    // assembles uncapped — it ships no instances, so this costs nothing on
+    // the wire.
+    let listing = if want_skeleton { Some(0) } else { opts.listing };
     let result_graph =
-        match build_result_graph(&data, &req_body, opts.limit, &projects, opts.listing).await {
+        match build_result_graph(&data, &req_body, opts.limit, &projects, listing).await {
             Ok(graph) => graph,
             Err(err) => return err.into_http_response(want_markdown),
         };
@@ -158,7 +175,11 @@ pub async fn query(
             .body(md);
     }
 
-    let json_graph = serde_json::to_string_pretty(&result_graph).unwrap();
+    let json_graph = if want_skeleton {
+        serde_json::to_string(&crate::api::skeleton::to_skeleton(result_graph)).unwrap()
+    } else {
+        serde_json::to_string_pretty(&result_graph).unwrap()
+    };
     if json_graph.len() > MAX_RESPONSE_BYTES {
         return HttpResponse::PayloadTooLarge().body("Response too large");
     }
@@ -586,6 +607,10 @@ pub struct QueryOpts {
     /// Comma-separated project names to make visible; absent = every indexed
     /// project. Names come from `/projects`; an unknown one is a 400.
     projects: Option<String>,
+    /// `skeleton` (symbol relationships only; instances and call sites are
+    /// fetched per node/edge) or `full` (everything inlined, the default —
+    /// for one-shot consumers like MCP).
+    detail: Option<String>,
     /// Per-node listing cap (instances, out-edges, call-sites per pair);
     /// `0` = uncapped for this request. Defaults to the server's
     /// `listing_cap`, and is overridden per command by the `limits()` verb.

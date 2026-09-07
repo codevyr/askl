@@ -7,6 +7,7 @@ pub mod mcp;
 pub mod query;
 pub mod references;
 pub mod render;
+pub mod skeleton;
 pub mod types;
 
 #[get("/version")]
