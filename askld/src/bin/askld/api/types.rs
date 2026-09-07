@@ -36,7 +36,7 @@ pub struct NodeSymbolInstance {
     pub end_offset: i32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryStatement {
     pub start: usize,
     pub end: usize,
@@ -94,6 +94,24 @@ impl Node {
     pub fn instances(&self) -> &[NodeSymbolInstance] {
         &self.symbol_instances
     }
+
+    pub fn query_statements(&self) -> &[QueryStatement] {
+        &self.query_statements
+    }
+
+    pub fn total_instances(&self) -> usize {
+        self.total_instances
+    }
+
+    pub fn instances_truncated(&self) -> bool {
+        self.instances_truncated
+    }
+
+    /// The node's symbol type, taken from any instance (all instances of a
+    /// symbol share it).  `None` when the node has no instances.
+    pub fn symbol_type(&self) -> Option<SymbolType> {
+        self.symbol_instances.first().map(|i| i.symbol_type)
+    }
 }
 
 /// One edge of the result graph: a (from, to) SYMBOL pair plus how many call
@@ -139,6 +157,14 @@ impl Edge {
     pub fn to(&self) -> SymbolId {
         self.to
     }
+
+    pub fn occurrence_count(&self) -> usize {
+        self.occurrence_count
+    }
+
+    pub fn from_objects(&self) -> &[String] {
+        &self.from_objects
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -177,6 +203,14 @@ impl HasEdge {
 
     pub fn child(&self) -> SymbolId {
         self.child
+    }
+
+    pub fn parent_instance(&self) -> &str {
+        &self.parent_instance
+    }
+
+    pub fn child_instance(&self) -> &str {
+        &self.child_instance
     }
 }
 
