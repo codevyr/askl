@@ -1184,15 +1184,21 @@ async fn symbol_instances_page_with_a_cursor_and_count_exactly() -> anyhow::Resu
     index.load_test_input(Index::TEST_INPUT_ESCALATION).await?;
     let eph = EphContext::rooted(index.load_root_layers().await?);
 
+    // Display order = (object_id, start_offset, id). Both mac instances are in
+    // object 5 at offsets 0 (def) and 200 (expansion), so the definition pages
+    // first and the cursor walks by that keyset, not the global id.
     let (p1, more1) = index.list_symbol_instances(8, None, 1, &eph).await?;
     assert_eq!(p1.len(), 1);
-    assert_eq!(p1[0].instance_id, 5001, "id order: the definition first");
+    assert_eq!(
+        p1[0].instance_id, 5001,
+        "display order: the definition first"
+    );
+    assert_eq!(p1[0].start_offset(), 0);
     assert!(more1, "the expansion instance is still ahead");
     assert_eq!(p1[0].path, "/mac.c", "rows carry the path for rendering");
 
-    let (p2, more2) = index
-        .list_symbol_instances(8, Some(p1[0].instance_id), 1, &eph)
-        .await?;
+    let cursor = Some((p1[0].object_id, p1[0].start_offset(), p1[0].instance_id));
+    let (p2, more2) = index.list_symbol_instances(8, cursor, 1, &eph).await?;
     assert_eq!(p2.len(), 1);
     assert_eq!(p2[0].instance_id, 5002);
     assert_eq!(p2[0].instance_type, 3, "the expansion instance, typed");

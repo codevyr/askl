@@ -103,6 +103,26 @@ fn parse_cursor(after: Option<&str>) -> Result<Option<(i64, i64)>, String> {
     }
 }
 
+/// Format an instance-page cursor: the display keyset `(object, offset, id)`.
+fn format_instance_cursor(object_id: i32, start_offset: i32, instance_id: i64) -> String {
+    format!("{object_id}:{start_offset}:{instance_id}")
+}
+
+/// Parse an instance-page cursor. `None` = first page; malformed = `Err`.
+fn parse_instance_cursor(after: Option<&str>) -> Result<index::db_diesel::InstanceCursor, String> {
+    let Some(raw) = after else { return Ok(None) };
+    let mut parts = raw.splitn(3, ':');
+    let (Some(o), Some(off), Some(i)) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(format!(
+            "malformed cursor '{raw}'; expected '<object>:<offset>:<id>'"
+        ));
+    };
+    match (o.parse::<i32>(), off.parse::<i32>(), i.parse::<i64>()) {
+        (Ok(o), Ok(off), Ok(i)) => Ok(Some((o, off, i))),
+        _ => Err(format!("malformed cursor '{raw}'; expected three integers")),
+    }
+}
+
 /// Clamp a requested page size into [1, MAX_LIMIT].
 fn clamp_limit(limit: Option<usize>) -> usize {
     limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
@@ -241,8 +261,9 @@ pub async fn symbol_references(
 
 #[derive(Debug, Deserialize)]
 pub struct InstancesOpts {
-    /// Instance id of the previous page's last row.
-    after: Option<i64>,
+    /// Opaque cursor from the previous page's `next` (an `object:offset:id`
+    /// keyset in display order), passed back verbatim.
+    after: Option<String>,
     /// Rows per page (default 50, max 500).
     limit: Option<usize>,
     /// Same narrowing as `/query`'s `projects=`.
@@ -263,8 +284,8 @@ pub struct InstanceRowJson {
 #[derive(Debug, Serialize)]
 pub struct InstancesResponse {
     pub rows: Vec<InstanceRowJson>,
-    /// Instance-id cursor for the next page; `null` when done.
-    pub next: Option<i64>,
+    /// Opaque `object:offset:id` cursor for the next page; `null` when done.
+    pub next: Option<String>,
     /// EXACT instance count (per-symbol counts are bounded by the symbol's
     /// own size, unlike edge counts).
     pub total: usize,
@@ -299,16 +320,31 @@ pub async fn symbol_instances(
     };
     let eph = index::db_diesel::EphContext::rooted(roots);
 
+    let after = match parse_instance_cursor(opts.after.as_deref()) {
+        Ok(cursor) => cursor,
+        Err(msg) => return HttpResponse::BadRequest().body(msg),
+    };
+
     let page = index
-        .list_symbol_instances(symbol_id, opts.after, limit, &eph)
+        .list_symbol_instances(symbol_id, after, limit, &eph)
         .await;
     let total = index.count_symbol_instances(symbol_id, &eph).await;
     match (page, total) {
         (Ok((rows, has_more)), Ok(total)) => {
-            let next = has_more
-                .then(|| rows.last())
-                .flatten()
-                .map(|r| r.instance_id);
+            // `next` is the last row's display keyset. Compute from the raw
+            // row (which carries object_id + offset_range) before mapping.
+            let next = if has_more {
+                rows.last().and_then(|r| {
+                    let (start_offset, _) = range_bounds_to_offsets(&r.offset_range)?;
+                    Some(format_instance_cursor(
+                        r.object_id,
+                        start_offset,
+                        r.instance_id,
+                    ))
+                })
+            } else {
+                None
+            };
             let rows = rows
                 .into_iter()
                 .filter_map(|r| {
