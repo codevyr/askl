@@ -266,6 +266,11 @@ pub struct InstancesOpts {
     after: Option<String>,
     /// Rows per page (default 50, max 500).
     limit: Option<usize>,
+    /// Containment context: list only the instances contained by this PARENT
+    /// symbol. The same symbol under several parents renders as several
+    /// nodes with disjoint instance sets; each pages only its own partition.
+    /// Absent = every instance of the symbol.
+    parent: Option<i64>,
     /// Same narrowing as `/query`'s `projects=`.
     projects: Option<String>,
 }
@@ -325,9 +330,18 @@ pub async fn symbol_instances(
         Err(msg) => return HttpResponse::BadRequest().body(msg),
     };
 
-    let page = index
-        .list_symbol_instances(symbol_id, after, limit, &eph)
-        .await;
+    let page = match opts.parent {
+        Some(parent) => {
+            index
+                .list_symbol_instances_under(symbol_id, parent, after, limit, &eph)
+                .await
+        }
+        None => {
+            index
+                .list_symbol_instances(symbol_id, after, limit, &eph)
+                .await
+        }
+    };
     let total = index.count_symbol_instances(symbol_id, &eph).await;
     match (page, total) {
         (Ok((rows, has_more)), Ok(total)) => {

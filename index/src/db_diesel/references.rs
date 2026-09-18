@@ -408,6 +408,64 @@ impl Index {
         Ok((rows, has_more))
     }
 
+    /// One page of a symbol's instances CONTAINED BY `parent_symbol` — the
+    /// listing behind a node that the server split into a containment
+    /// context. The same symbol under several parents is several nodes with
+    /// disjoint instance sets, so each pages only its own partition; the
+    /// union of all parents plus the parentless case is the symbol's whole
+    /// set, with no overlap. Same display-order keyset as the unscoped page.
+    pub async fn list_symbol_instances_under(
+        &self,
+        symbol_id: i64,
+        parent_symbol: i64,
+        after: DisplayCursor,
+        limit: usize,
+        eph: &EphContext,
+    ) -> Result<(Vec<SymbolInstancePageRow>, bool)> {
+        let (a_obj, a_off, a_id) = after.unwrap_or((i32::MIN, i32::MIN, i64::MIN));
+        let vis = eph.visible_ids();
+        let fetch = limit as i64 + 1;
+        let connection = &mut self
+            .pool
+            .get()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
+
+        let mut rows: Vec<SymbolInstancePageRow> = diesel::sql_query(
+            "SELECT si.id AS instance_id, si.instance_type, si.object_id, \
+                    o.filesystem_path AS path, p.project_name AS project_id, \
+                    si.offset_range \
+             FROM index.symbol_instances si \
+             JOIN index.objects o ON o.id = si.object_id \
+             LEFT JOIN index.projects p ON p.id = o.project_id \
+             WHERE si.symbol = $1 AND si.layer = ANY($2) \
+               AND (si.object_id, lower(si.offset_range), si.id) > ($4, $5, $6) \
+               AND EXISTS ( \
+                 SELECT 1 FROM index.symbol_instances pi \
+                 WHERE pi.symbol = $3 AND pi.layer = ANY($2) \
+                   AND pi.object_id = si.object_id \
+                   AND pi.offset_range @> si.offset_range \
+                   AND pi.id != si.id \
+               ) \
+             ORDER BY si.object_id, lower(si.offset_range), si.id \
+             LIMIT $7",
+        )
+        .bind::<BigInt, _>(symbol_id)
+        .bind::<Array<BigInt>, _>(&vis)
+        .bind::<BigInt, _>(parent_symbol)
+        .bind::<Integer, _>(a_obj)
+        .bind::<Integer, _>(a_off)
+        .bind::<BigInt, _>(a_id)
+        .bind::<BigInt, _>(fetch)
+        .get_results(&mut *connection)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to page scoped instances: {}", e))?;
+
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        Ok((rows, has_more))
+    }
+
     /// One page of the call sites of ONE edge — the references from
     /// `from_symbol` to `to_symbol`. An edge IS a (from, to) pair, so this is
     /// its own listing rather than a filter over the whole references stream.
