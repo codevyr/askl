@@ -74,7 +74,22 @@ pub type CurrentQuery<'a> =
 pub type CurrentIdQuery<'a> =
     BoxedSelectStatement<'a, BigInt, FromClause<SymbolInstanceProjectObjectJoin>, Pg>;
 
-type SymbolInstanceColumnsSqlType = (BigInt, BigInt, Integer, Int4range, Integer, BigInt);
+type SymbolInstanceColumnsSqlType = (
+    BigInt,
+    BigInt,
+    Integer,
+    Int4range,
+    Integer,
+    BigInt,
+    Integer,
+    BigInt,
+    BigInt,
+    Nullable<Int4range>,
+    Nullable<Int4range>,
+    Nullable<Int4range>,
+); // (id, symbol, object_id, offset_range, instance_type, layer,
+   //  nesting_level, dfs_enter, dfs_exit, name_range, signature_range,
+   //  content_range)
 
 type SymbolColumnsSqlType = (
     BigInt,

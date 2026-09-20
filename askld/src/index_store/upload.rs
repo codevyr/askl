@@ -768,6 +768,30 @@ fn build_symbols(
     Ok(rows)
 }
 
+/// Convert an optional proto `Span` into an insertable range.
+///
+/// Presence is real here -- proto3 message fields are optional -- so an absent
+/// span stays `None` rather than collapsing to an empty `0..0`, which is what
+/// lets "the indexer does not know this span" be distinguished from "this span
+/// is genuinely empty".
+fn span_to_range(
+    span: Option<&crate::proto::askl::index::Span>,
+    what: &str,
+) -> Result<Option<std::ops::Range<i32>>, UploadError> {
+    match span {
+        None => Ok(None),
+        Some(s) => {
+            if s.start > s.end {
+                return Err(UploadError::Invalid(format!(
+                    "{} span [{}, {}) is inverted",
+                    what, s.start, s.end
+                )));
+            }
+            Ok(Some(s.start..s.end))
+        }
+    }
+}
+
 fn build_symbol_instances(
     project_id: i32,
     root_layer_id: i64,
@@ -790,6 +814,12 @@ fn build_symbol_instances(
                 offset_range: instance.start_offset..instance.end_offset,
                 instance_type,
                 layer: root_layer_id,
+                nesting_level: instance.nesting_level,
+                dfs_enter: instance.dfs_enter,
+                dfs_exit: instance.dfs_exit,
+                name_range: span_to_range(instance.name.as_ref(), "name")?,
+                signature_range: span_to_range(instance.signature.as_ref(), "signature")?,
+                content_range: span_to_range(instance.content.as_ref(), "content")?,
             });
         }
     }
@@ -812,6 +842,9 @@ fn build_symbol_refs(
                 from_object: object_id,
                 from_offset_range: reference.from_offset_start..reference.from_offset_end,
                 layer: root_layer_id,
+                nesting_level: reference.nesting_level,
+                dfs_enter: reference.dfs_enter,
+                from_full_range: span_to_range(reference.full.as_ref(), "ref full")?,
             });
         }
     }
@@ -1108,6 +1141,7 @@ mod tests {
             instance_type,
             start_offset: start,
             end_offset: end,
+            ..Default::default()
         }
     }
 
@@ -1170,6 +1204,7 @@ mod tests {
             to_symbol_local_id,
             from_offset_start: from_start,
             from_offset_end: from_end,
+            ..Default::default()
         }
     }
 
@@ -1196,6 +1231,167 @@ mod tests {
             ..Default::default()
         };
         assert!(build_symbol_refs(1, 1000001, &[object], &HashMap::new()).is_err());
+    }
+
+    // --- spans and nesting depth ---
+
+    #[test]
+    fn build_symbol_instances_carries_spans_and_nesting() {
+        let mut i = inst(10, 1, 100, 400);
+        i.nesting_level = 2;
+        i.dfs_enter = 2048;
+        i.dfs_exit = 5120;
+        i.name = Some(crate::proto::askl::index::Span {
+            start: 100,
+            end: 115,
+        });
+        i.content = Some(crate::proto::askl::index::Span {
+            start: 115,
+            end: 400,
+        });
+        let object = UploadObject {
+            local_id: 1,
+            symbol_instances: vec![i],
+            ..Default::default()
+        };
+        let obj_map = HashMap::from([(1i64, 100i32)]);
+        let rows = build_symbol_instances(7, 1000001, &[object], &obj_map).unwrap();
+
+        assert_eq!(rows[0].nesting_level, 2);
+        assert_eq!(rows[0].dfs_enter, 2048);
+        assert_eq!(rows[0].dfs_exit, 5120);
+        assert_eq!(rows[0].name_range, Some(100..115));
+        assert_eq!(rows[0].content_range, Some(115..400));
+        // Absent stays absent rather than collapsing to an empty 0..0, so
+        // "unknown" and "genuinely empty" remain distinguishable.
+        assert_eq!(rows[0].signature_range, None);
+    }
+
+    #[test]
+    fn build_symbol_instances_defaults_depth_to_zero() {
+        // An indexer that has not been updated sends no depth at all; it must
+        // keep working, with everything simply at the root.
+        let object = UploadObject {
+            local_id: 1,
+            symbol_instances: vec![inst(10, 1, 5, 10)],
+            ..Default::default()
+        };
+        let obj_map = HashMap::from([(1i64, 100i32)]);
+        let rows = build_symbol_instances(7, 1000001, &[object], &obj_map).unwrap();
+        assert_eq!(rows[0].nesting_level, 0);
+        assert_eq!(rows[0].name_range, None);
+    }
+
+    #[test]
+    fn build_symbol_instances_rejects_inverted_span() {
+        let mut i = inst(10, 1, 0, 10);
+        i.name = Some(crate::proto::askl::index::Span { start: 9, end: 3 });
+        let object = UploadObject {
+            local_id: 1,
+            symbol_instances: vec![i],
+            ..Default::default()
+        };
+        let obj_map = HashMap::from([(1i64, 1i32)]);
+        assert!(build_symbol_instances(1, 1000001, &[object], &obj_map).is_err());
+    }
+
+    #[test]
+    fn dfs_intervals_order_co_extensive_siblings() {
+        // The case this encoding exists for.  PMU_FORMAT_ATTR(event, ...)
+        // generates four symbols that all share ONE extent, because
+        // compiler-synthesised code has no source coordinates of its own.  No
+        // range predicate can say which of them owns which; the DFS interval
+        // can, because siblings get disjoint intervals regardless.
+        //
+        //   enter exit depth
+        //    1024 10240  0   PMU_FORMAT_ATTR
+        //    2048  5120  1     event_show
+        //    3072  4096  2       __compiletime_assert_1121
+        //    6144  7168  1     format_attr_event
+        let mk = |sym: i64, enter: i64, exit: i64, depth: i32| {
+            let mut i = inst(sym, 1, 27763, 27805); // identical extent for all
+            i.dfs_enter = enter;
+            i.dfs_exit = exit;
+            i.nesting_level = depth;
+            i
+        };
+        let object = UploadObject {
+            local_id: 1,
+            symbol_instances: vec![
+                mk(1, 1024, 10240, 0),
+                mk(2, 2048, 5120, 1),
+                mk(3, 3072, 4096, 2),
+                mk(4, 6144, 7168, 1),
+            ],
+            ..Default::default()
+        };
+        let obj_map = HashMap::from([(1i64, 1i32)]);
+        let rows = build_symbol_instances(1, 1000001, &[object], &obj_map).unwrap();
+
+        // Every one of them really does share the same extent.
+        assert!(rows.iter().all(|r| r.offset_range == (27763..27805)));
+
+        // The descendant test, exactly as the SQL will express it.
+        let contains = |p: usize, c: usize| {
+            rows[c].dfs_enter > rows[p].dfs_enter && rows[c].dfs_enter < rows[p].dfs_exit
+        };
+        let (macro_, event_show, assert_decl, format_attr) = (0, 1, 2, 3);
+
+        assert!(
+            contains(event_show, assert_decl),
+            "the assert is inside event_show"
+        );
+        assert!(
+            !contains(format_attr, assert_decl),
+            "and NOT inside its co-extensive sibling -- the whole point"
+        );
+        assert!(contains(macro_, event_show) && contains(macro_, format_attr));
+
+        // Direct children add one term; `unnest` drops it.
+        let direct: Vec<i64> = (0..rows.len())
+            .filter(|&i| {
+                contains(macro_, i) && rows[i].nesting_level == rows[macro_].nesting_level + 1
+            })
+            .map(|i| rows[i].dfs_enter)
+            .collect();
+        assert_eq!(
+            direct,
+            vec![2048, 6144],
+            "the assert is a grandchild, not a direct child"
+        );
+    }
+
+    #[test]
+    fn build_symbol_refs_carries_depth_and_full_span() {
+        // The printk(foo) split: the argument token sits at the caller's depth,
+        // the expanded use one level deeper, under the expansion.  Same target
+        // symbol, different depth -- which is what keeps them apart.
+        let mut arg = sref(20, 157, 160);
+        arg.nesting_level = 3;
+        arg.dfs_enter = 3072;
+        let mut expanded = sref(20, 150, 156);
+        expanded.nesting_level = 4;
+        expanded.dfs_enter = 5120;
+        expanded.full = Some(crate::proto::askl::index::Span {
+            start: 150,
+            end: 161,
+        });
+        let object = UploadObject {
+            local_id: 1,
+            refs: vec![arg, expanded],
+            ..Default::default()
+        };
+        let obj_map = HashMap::from([(1i64, 50i32)]);
+        let rows = build_symbol_refs(3, 1000001, &[object], &obj_map).unwrap();
+
+        assert_eq!(rows[0].nesting_level, 3);
+        assert_eq!(rows[0].dfs_enter, 3072);
+        assert_eq!(rows[0].from_offset_range, 157..160);
+        assert_eq!(rows[0].from_full_range, None);
+        assert_eq!(rows[1].nesting_level, 4);
+        assert_eq!(rows[1].dfs_enter, 5120);
+        assert_eq!(rows[1].from_offset_range, 150..156);
+        assert_eq!(rows[1].from_full_range, Some(150..161));
     }
 
     #[test]
