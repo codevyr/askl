@@ -30,6 +30,8 @@ ALTER TABLE index.symbol_instances
     ADD COLUMN nesting_level   INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN dfs_enter       BIGINT  NOT NULL DEFAULT 0,
     ADD COLUMN dfs_exit        BIGINT  NOT NULL DEFAULT 0,
+    ADD COLUMN folded          BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN fold_depth      INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN name_range      INT4RANGE,
     ADD COLUMN signature_range INT4RANGE,
     ADD COLUMN content_range   INT4RANGE;
@@ -40,6 +42,10 @@ COMMENT ON COLUMN index.symbol_instances.nesting_level IS
     'Depth in this object''s containment tree, counting symbol instances only. A direct child is at exactly parent + 1.';
 COMMENT ON COLUMN index.symbol_instances.dfs_enter IS
     'Depth-first entry number within this object. Descendants are exactly the instances whose dfs_enter lies strictly between this row''s dfs_enter and dfs_exit.';
+COMMENT ON COLUMN index.symbol_instances.folded IS
+    'This instance exists only because of a macro expansion. Folding is orthogonal to depth: nesting_level says where a symbol sits, folded says whether the level is interesting by default.';
+COMMENT ON COLUMN index.symbol_instances.fold_depth IS
+    'Folded ancestors on the path from the object root. `X { Y }` unfolded is fold_depth = X.fold_depth + (X.folded ? 1 : 0), which is why mod { macro { func } } can step one level past a fold.';
 COMMENT ON COLUMN index.symbol_instances.dfs_exit IS
     'Depth-first exit number. Numbered sparsely (stride 1024) so an ephemeral layer can insert between neighbours without renumbering.';
 
@@ -47,6 +53,8 @@ COMMENT ON COLUMN index.symbol_instances.dfs_exit IS
 ALTER TABLE index.symbol_refs
     ADD COLUMN nesting_level   INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN dfs_enter       BIGINT  NOT NULL DEFAULT 0,
+    ADD COLUMN folded          BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN fold_depth      INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN from_full_range INT4RANGE;
 
 COMMENT ON COLUMN index.symbol_refs.from_offset_range IS

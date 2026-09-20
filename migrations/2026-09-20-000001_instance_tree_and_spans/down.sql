@@ -7,12 +7,16 @@ DROP INDEX IF EXISTS index.symbol_refs_parent_idx;
 DROP INDEX IF EXISTS index.symbol_instances_parent_idx;
 
 ALTER TABLE index.symbol_refs
+    DROP COLUMN IF EXISTS fold_depth,
+    DROP COLUMN IF EXISTS folded,
     DROP COLUMN IF EXISTS dfs_enter,
     DROP COLUMN IF EXISTS from_full_range,
     DROP COLUMN IF EXISTS nesting_level,
     DROP COLUMN IF EXISTS parent_instance;
 
 ALTER TABLE index.symbol_instances
+    DROP COLUMN IF EXISTS fold_depth,
+    DROP COLUMN IF EXISTS folded,
     DROP COLUMN IF EXISTS dfs_exit,
     DROP COLUMN IF EXISTS dfs_enter,
     DROP COLUMN IF EXISTS content_range,

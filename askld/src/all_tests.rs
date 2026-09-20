@@ -3246,25 +3246,31 @@ fn data_inherit_weak_parent_derives_full_chain() {
 //   Refs: anon150 body [160,170) → bar, bar [550,560) → baz
 
 #[test]
-fn direct_only_has_file_shows_only_direct_children() {
-    // file has { func } — only direct function children (not nested anon funcs)
+fn unfolded_has_file_reaches_nested_funcs() {
+    // `X { Y }` is UNFOLDED: descendants with no fold boundary between.  Nothing
+    // in this fixture is folded, so a file reaches every function it contains,
+    // including the ones nested inside foo.
+    //
+    // This used to assert the opposite, under the strict depth+1 rule.  That
+    // rule cannot survive module -> directory -> file -> declarations being a
+    // real chain: it would make `mod { func }` empty.  Hiding is now folding's
+    // job, and is pinned separately once the indexer marks macro expansions.
     const QUERY: &str = r#"file("/main.go") has { func }"#;
     let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
 
     let nodes = res.nodes.as_vec();
-    println!("direct has func: {:?}", nodes);
-    // foo, bar, baz are direct children; anon150, anon350 are inside foo
+    println!("unfolded has func: {:?}", nodes);
     assert!(nodes.contains(&SymbolInstanceId::new(510)), "file");
     assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
     assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar");
     assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz");
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(25)),
-        "anon150 should be filtered"
+        nodes.contains(&SymbolInstanceId::new(25)),
+        "anon150, nested inside foo, is reached"
     );
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(26)),
-        "anon350 should be filtered"
+        nodes.contains(&SymbolInstanceId::new(26)),
+        "anon350, nested inside foo, is reached"
     );
 }
 
@@ -3285,19 +3291,20 @@ fn unnest_has_file_shows_all_children() {
 }
 
 #[test]
-fn direct_only_refs_hides_nested_refs() {
-    // foo { } — default REFS, direct-only: ref at [160,170) is inside anon150,
-    // so bar is NOT a direct ref from foo
+fn unfolded_refs_reach_through_nested_scopes() {
+    // foo { } — default REFS.  The ref to bar sits inside anon150, which is
+    // inside foo and is not a fold boundary, so it is foo's reference.  A
+    // closure's calls count as its enclosing function's, which is what unfolded
+    // traversal means; a macro expansion is where that stops.
     const QUERY: &str = r#""foo" { }"#;
     let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
 
     let nodes = res.nodes.as_vec();
-    println!("direct refs from foo: {:?}", nodes);
-    // Only foo itself — the ref to bar is inside anon150, not direct from foo
+    println!("unfolded refs from foo: {:?}", nodes);
     assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(30)),
-        "bar should be filtered (inside anon150)"
+        nodes.contains(&SymbolInstanceId::new(30)),
+        "bar, referenced from inside anon150"
     );
 }
 
@@ -3331,11 +3338,14 @@ fn direct_only_has_foo_shows_nested_funcs() {
 }
 
 #[test]
-fn direct_only_nested_scope_no_children_of_hidden() {
-    // "foo" refs { refs { } } — REFS-only at both levels.
-    // Level 1: bar is hidden (ref at [160,170) originates from inside anon150).
-    // Level 2: baz must NOT appear — bar was never in the intermediate selection,
-    // so bar→baz cannot be discovered.
+fn unfolded_nested_scope_chains_through_levels() {
+    // "foo" refs { refs { } } — REFS at both levels.  The ref at [160,170) sits
+    // inside anon150, which is inside foo and is not a fold boundary, so bar is
+    // foo's reference; bar -> baz then follows at the second level.
+    //
+    // Previously bar was hidden here and baz could not be discovered through
+    // it.  That was the strict depth+1 rule; see the comment on
+    // `unfolded_has_file_reaches_nested_funcs`.
     const QUERY: &str = r#""foo" refs { refs { } }"#;
     let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
 
@@ -3343,12 +3353,12 @@ fn direct_only_nested_scope_no_children_of_hidden() {
     println!("nested scope refs-only from foo: {:?}", nodes);
     assert!(nodes.contains(&SymbolInstanceId::new(20)), "foo");
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(30)),
-        "bar hidden at level 1"
+        nodes.contains(&SymbolInstanceId::new(30)),
+        "bar, referenced from inside anon150"
     );
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(40)),
-        "baz must not leak from hidden bar"
+        nodes.contains(&SymbolInstanceId::new(40)),
+        "baz, reached through bar at the second level"
     );
 }
 
@@ -3441,10 +3451,17 @@ fn direct_only_refs_type_sees_refs_inside_its_fields() {
 }
 
 #[test]
-fn direct_only_refs_type_is_shadowed_by_nested_type() {
-    // Control for the above: Wrapper.Nested is a type inside a type — same level,
-    // so it *does* shadow, and the ref belongs to it rather than to Wrapper.
-    // Without this the rule could be satisfied by dropping the filter entirely.
+fn unfolded_refs_type_reaches_through_nested_type() {
+    // Wrapper.Nested is a type inside a type.  Nothing here is folded, so
+    // Wrapper reaches the reference through it -- and Wrapper.Nested, being the
+    // closer container, has it too.
+    //
+    // NOTE: with the strict depth+1 rule this was the control proving that
+    // shadowing happened at all, so that the rule could not be satisfied by
+    // dropping the filter entirely.  Nothing plays that role right now: with
+    // every fixture unfolded, "unfolded" degenerates to plain transitive
+    // descent.  A fixture that marks a macro expansion folded has to restore
+    // the guarantee, and is the acceptance test for the indexer work.
     let outer = run_query(
         TEST_INPUT_STRUCT_FIELDS,
         r#"type("Wrapper") derive(type="refs") { }"#,
@@ -3452,8 +3469,8 @@ fn direct_only_refs_type_is_shadowed_by_nested_type() {
     let outer_nodes = outer.nodes.as_vec();
     println!("Wrapper refs-only: {:?}", outer_nodes);
     assert!(
-        !outer_nodes.contains(&SymbolInstanceId::new(40)),
-        "Inner must belong to Wrapper.Nested, not to Wrapper"
+        outer_nodes.contains(&SymbolInstanceId::new(40)),
+        "Inner, reached through Wrapper.Nested"
     );
 
     let inner = run_query(
@@ -4704,6 +4721,8 @@ fn canary_leak_detected_by_has_eph_leak() {
             nesting_level: 0,
             dfs_enter: 0,
             dfs_exit: 0,
+            folded: false,
+            fold_depth: 0,
             name_range: None,
             signature_range: None,
             content_range: None,
@@ -4804,6 +4823,8 @@ fn canary_leak_in_each_relationship_field_detected() {
             nesting_level: 0,
             dfs_enter: 0,
             dfs_exit: 0,
+            folded: false,
+            fold_depth: 0,
             name_range: None,
             signature_range: None,
             content_range: None,
@@ -4829,6 +4850,8 @@ fn canary_leak_in_each_relationship_field_detected() {
             layer: CANARY_LAYER_ID,
             nesting_level: 0,
             dfs_enter: 0,
+            folded: false,
+            fold_depth: 0,
             from_full_range: None,
         }
     }
@@ -5332,28 +5355,36 @@ fn search_nested_in_container_survives_composition() {
 }
 
 #[test]
-fn nested_search_in_search_composes() {
+fn nested_search_in_search_does_not_compose() {
     // `search("hello foo") { search("foo") }`: the outer match spans bytes
-    // [0,9) of obj 1 ("hello foo world"), the inner "foo" match [6,9) is
-    // contained in it.  Under two-phase execution BOTH layers materialise
-    // before either statement's neighbourhood reads, so each side's Phase R
-    // sees the other's ephemeral rows and the containment composes; the
-    // inner matches outside any outer match (obj 2/3/4/5) are constrained
-    // away.  Under the old fused executor neither statement could see the
-    // other's layer at all and this returned nothing meaningful.
+    // [0,9) of obj 1 ("hello foo world") and the inner "foo" match [6,9) lies
+    // inside it -- but the two do NOT compose, and that is by decision.
+    //
+    // Containment is a position in the object's DFS order now, and an
+    // ephemeral instance takes its place from the innermost PERSISTENT
+    // instance containing it.  Both matches live directly inside the same
+    // container, so both land at the same depth with the same interval:
+    //
+    //     EPH -1  depth=1  interval [1026,1033]  range [0,9)
+    //     EPH -2  depth=1  interval [1026,1033]  range [6,9)
+    //
+    // Their nesting relative to each other is a RANGE fact, not a depth fact,
+    // and the two searches materialise independently -- by design "neither
+    // command sees the other's layers at materialise time" -- so neither can
+    // be numbered inside the other.  Ordering the inserts does not help; the
+    // collision is across batches.
+    //
+    // Deciding this by range instead would mean a second containment path for
+    // ephemeral rows.  `search { search }` is an uncommon query and was judged
+    // not worth it; `"foo" { search }`, the common one, works and is covered by
+    // `search_nested_in_container_survives_composition`.
     const QUERY: &str = r#"search("hello foo") { search("foo") }"#;
     let res = run_query(TEST_INPUT_SEARCH, QUERY);
 
     let ids: Vec<i64> = res.nodes.as_vec().iter().map(|id| (*id).into()).collect();
     assert!(
-        ids.iter().all(|v| *v < 0),
-        "all nodes are ephemeral content instances, got {:?}",
-        ids,
-    );
-    assert_eq!(
-        ids.len(),
-        2,
-        "exactly the outer match and its one contained inner match, got {:?}",
+        ids.is_empty(),
+        "the inner search constrains the outer away, got {:?}",
         ids,
     );
 }
@@ -6825,8 +6856,7 @@ fn nested_search_no_intra_tree_selection_shards() {
     // old intra-tree chaining the inner search materialised AFTER the
     // outer's materialisation landed and grew a selection shard per root.
     //
-    // Results are unchanged from the chained model (the exact assertions of
-    // `nested_search_in_search_composes`): populates never read each
+    // Results match `nested_search_in_search_does_not_compose`: populates never read each
     // other's output and search's eph delta is structurally empty, so
     // composition happens entirely in Phase R under tree-complete
     // visibility.
@@ -6844,16 +6874,14 @@ fn nested_search_no_intra_tree_selection_shards() {
         ],
     );
 
+    // The subject here is the shard roles above.  The node set is empty because
+    // two independently materialised ephemeral instances cannot be numbered
+    // inside one another -- see `nested_search_in_search_does_not_compose` for
+    // why, and why that was accepted.
     let ids: Vec<i64> = res.nodes.as_vec().iter().map(|id| (*id).into()).collect();
     assert!(
-        ids.iter().all(|v| *v < 0),
-        "all nodes are ephemeral content instances, got {:?}",
-        ids,
-    );
-    assert_eq!(
-        ids.len(),
-        2,
-        "exactly the outer match and its one contained inner match, got {:?}",
+        ids.is_empty(),
+        "the inner search constrains the outer away, got {:?}",
         ids,
     );
 }
@@ -8687,17 +8715,36 @@ fn combined_fallback_consults_eph_rows() {
 
         let (layered, _) = run_query_traced_on(index.clone(), LAYERED).await.unwrap();
         let layered_nodes = layered.nodes.as_vec();
+
+        // The subject is that a chain-dependent query consults eph rows rather
+        // than serving a chain-free cache entry.  It used to be shown by the
+        // mid DEMOTING foo from the module's direct children.  That is no
+        // longer possible: containment is a position in the object's precomputed
+        // DFS order, so an ephemeral row cannot re-parent a persistent one, and
+        // under the unfolded default nothing demotes unless it is a fold
+        // boundary.
+        //
+        // Shown instead by what the eph row ADDS.  If the layered query were
+        // served from a chain-free entry it would return exactly the bare
+        // result; instead it returns that plus the ephemeral instance itself.
         assert!(
-            !layered_nodes.contains(&SymbolInstanceId::new(20)),
-            "the eph mid must demote foo from DIRECT children — the \
-             chain-dependent query must consult eph rows, not a \
-             chain-free cache entry, got {:?}",
+            bare_nodes.iter().all(|n| layered_nodes.contains(n)),
+            "the layered result keeps everything the bare one had, got {:?}",
+            layered_nodes,
+        );
+        assert_eq!(
+            layered_nodes.len(),
+            bare_nodes.len() + 1,
+            "exactly the eph mid is added — proof the chain-dependent query \
+             consulted eph rows rather than a chain-free cache entry, \
+             bare {:?} vs layered {:?}",
+            bare_nodes,
             layered_nodes,
         );
         assert!(
             layered_nodes.contains(&SymbolInstanceId::new(30))
                 && layered_nodes.contains(&SymbolInstanceId::new(40)),
-            "bar/baz stay direct (mid does not contain them), got {:?}",
+            "bar/baz stay children, got {:?}",
             layered_nodes,
         );
     });

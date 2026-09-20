@@ -36,6 +36,13 @@ pub struct SymbolInstance {
     /// walk -- and orders compiler-synthesised siblings that share an extent.
     pub dfs_enter: i64,
     pub dfs_exit: i64,
+    /// This instance exists only because of a macro expansion.  Orthogonal to
+    /// depth: `nesting_level` says where it sits, `folded` says whether the
+    /// level is interesting by default.
+    pub folded: bool,
+    /// Folded ancestors from the object root.  `X { Y }` unfolded is
+    /// `fold_depth = X.fold_depth + (X.folded ? 1 : 0)`.
+    pub fold_depth: i32,
     /// Finer spans within `offset_range`; `None` where the indexer does not
     /// know one (synthesised symbols have no name token, and not every kind
     /// can be declared).
@@ -117,6 +124,10 @@ pub struct SymbolRef {
     /// Position in the same DFS sequence as this object's instances.  A ref is
     /// a point, not an interval.
     pub dfs_enter: i64,
+    /// Fold state of the owning scope -- what separates the argument `foo` in
+    /// `printk(foo)` from each expanded use of it.
+    pub folded: bool,
+    pub fold_depth: i32,
     /// FULL span of the referencing construct (`printk(foo)` where
     /// `from_offset_range` covers only `printk`).  Display only.
     pub from_full_range: Option<(Bound<i32>, Bound<i32>)>,

@@ -21,9 +21,14 @@ fn has_parent_innermost_only() {
     // { "data_macro_only" } — upward derivation from data_macro_only.
     //
     // data_macro_only's has_parents: macro_m, func_a, file_x, dir_root.
-    // With innermost filtering: only macro_m is derived via HAS.
-    // REFS parents also appear (file_x, dir_root contain the ref origin).
-    // Root has DefaultTypeFilter([]) → all types pass.
+    // Parents are UNFOLDED, so the whole ancestor chain comes back, not just
+    // the innermost -- a bare `{"x"}` is expected to surface every container.
+    // Root has DefaultTypeFilter([]) → all types pass.    //
+    // FOLDING ACCEPTANCE: `macro_m` is a macro, so once the indexer marks
+    // macro-generated instances folded, the original expectation here comes
+    // back -- `data_macro_only` sits behind a fold boundary and drops out of
+    // the unfolded default again.  Until then every fixture is unfolded and
+    // "unfolded" degenerates to plain transitive descent.
     const QUERY: &str = r#"{ "data_macro_only" }"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
@@ -35,17 +40,22 @@ fn has_parent_innermost_only() {
         "data_macro_only should be in results"
     );
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(103)),
-        "func_a should NOT leak through multi-level containment"
+        nodes.contains(&SymbolInstanceId::new(103)),
+        "func_a, reached through macro_m -- nothing is folded here"
     );
 }
 
 #[test]
-fn nested_macro_not_in_children() {
+fn nested_macro_reaches_children_until_folded() {
     // func("func_a") {} — downward derivation from func_a.
     //
-    // Direct HAS children of func_a: macro_m, data_d (NOT data_macro_only).
-    // data_macro_only is inside macro_m, not directly inside func_a.
+    // `X { Y }` is UNFOLDED, so func_a reaches macro_m, data_d AND
+    // data_macro_only, which sits inside macro_m.    //
+    // FOLDING ACCEPTANCE: `macro_m` is a macro, so once the indexer marks
+    // macro-generated instances folded, the original expectation here comes
+    // back -- `data_macro_only` sits behind a fold boundary and drops out of
+    // the unfolded default again.  Until then every fixture is unfolded and
+    // "unfolded" degenerates to plain transitive descent.
     const QUERY: &str = r#"func("func_a") {}"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
@@ -62,8 +72,8 @@ fn nested_macro_not_in_children() {
         "data_d (direct child)"
     );
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(107)),
-        "data_macro_only should NOT be a direct child of func_a"
+        nodes.contains(&SymbolInstanceId::new(107)),
+        "data_macro_only, reached through macro_m -- nothing is folded here"
     );
 }
 
@@ -158,10 +168,13 @@ fn unnest_overrides_innermost() {
 fn unnest_downward_does_not_affect_child() {
     // func("func_a") unnest {} — unnest is on the parent statement.
     //
-    // The child {} reads its own unnest flag (false) for downward derivation,
-    // so direct_only filtering still applies. data_macro_only should NOT appear
-    // because it's inside macro_m, not directly inside func_a.
-    // unnest on the parent only affects upward (parent merge) derivation.
+    // unnest on the parent only affects upward (parent merge) derivation; the
+    // child {} reads its own flag for downward derivation.
+    //
+    // NOTE: this no longer DISCRIMINATES.  Unfolded and unnest differ only by a
+    // fold-depth term, and with every fixture unfolded the two are the same
+    // query, so both reach data_macro_only.  Marking macro_m folded restores the
+    // distinction and with it this test's point.
     const QUERY: &str = r#"func("func_a") unnest {}"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
@@ -178,8 +191,8 @@ fn unnest_downward_does_not_affect_child() {
         "data_d (direct child)"
     );
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(107)),
-        "data_macro_only should NOT appear (unnest on parent doesn't affect child derivation)"
+        nodes.contains(&SymbolInstanceId::new(107)),
+        "data_macro_only, reached through macro_m -- nothing is folded here"
     );
 }
 
@@ -267,11 +280,16 @@ fn upward_from_func_b() {
 }
 
 #[test]
-fn has_only_upward_innermost() {
+fn has_only_upward_reaches_chain() {
     // has { "data_macro_only" } — upward using only HAS (containment), no REFS.
     //
-    // Innermost has_parent of data_macro_only: macro_m.
-    // Root has DefaultTypeFilter([]) → macro_m (type 7) passes.
+    // Parents are UNFOLDED, so the containment chain comes back: macro_m and
+    // func_a above it.    //
+    // FOLDING ACCEPTANCE: `macro_m` is a macro, so once the indexer marks
+    // macro-generated instances folded, the original expectation here comes
+    // back -- `data_macro_only` sits behind a fold boundary and drops out of
+    // the unfolded default again.  Until then every fixture is unfolded and
+    // "unfolded" degenerates to plain transitive descent.
     const QUERY: &str = r#"has { "data_macro_only" }"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
@@ -284,11 +302,11 @@ fn has_only_upward_innermost() {
     );
     assert!(
         nodes.contains(&SymbolInstanceId::new(105)),
-        "macro_m should appear (innermost HAS parent, passes all-types filter)"
+        "macro_m (HAS parent, passes all-types filter)"
     );
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(103)),
-        "func_a should NOT appear (not innermost via HAS-only)"
+        nodes.contains(&SymbolInstanceId::new(103)),
+        "func_a, above macro_m in the chain -- nothing is folded here"
     );
 }
 
