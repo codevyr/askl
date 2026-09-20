@@ -1758,10 +1758,9 @@ impl FilterLeaf for OuterParentFilterMixin {
                 .bind(self.parent_ids.clone())
                 .sql(
                     ") \
-                          AND op.id != parent_decls.id \
                           AND op.object_id = parent_decls.object_id \
-                          AND op.offset_range @> parent_decls.offset_range \
-                          AND op.offset_range != parent_decls.offset_range \
+                          AND op.dfs_enter < parent_decls.dfs_enter \
+                          AND parent_decls.dfs_enter < op.dfs_exit \
                           AND ",
                 )
                 .eph_visibility("op.layer", vis)

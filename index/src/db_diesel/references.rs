@@ -3,7 +3,7 @@
 //!
 //! Semantics mirror the engine's edge discovery (`find_edges_between`): the
 //! same containment rule ties a reference to its enclosing source instance
-//! (`from_inst.offset_range @> sr.from_offset_range`), the row unit is the
+//! (the parent's DFS interval encloses the ref's `dfs_enter`), the row unit is the
 //! engine's own dedup key `(from_instance, ref)`, and the target instance is
 //! the lowest-id instance of the referenced symbol other than the source —
 //! resolved per PAGE row through a LATERAL, not per scanned row.
@@ -195,7 +195,7 @@ impl Index {
                SELECT sr.id AS ref_id, sr.to_symbol, sr.from_object, \
                       sr.from_offset_range, from_inst.id AS from_instance_id \
                FROM ( \
-                 SELECT si.id, si.object_id, si.offset_range \
+                 SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit \
                  FROM index.symbol_instances si \
                  WHERE si.symbol = $1 AND si.layer = ANY($2) AND si.id >= $3 \
                  ORDER BY si.id \
@@ -204,7 +204,8 @@ impl Index {
                  SELECT sr.id, sr.to_symbol, sr.from_object, sr.from_offset_range \
                  FROM index.symbol_refs sr \
                  WHERE sr.from_object = from_inst.object_id \
-                   AND from_inst.offset_range @> sr.from_offset_range \
+                   AND from_inst.dfs_enter < sr.dfs_enter \
+                   AND sr.dfs_enter < from_inst.dfs_exit \
                    AND sr.layer = ANY($2) \
                    AND (from_inst.id > $3 OR sr.id > $4) \
                  ORDER BY sr.id \
@@ -268,22 +269,18 @@ impl Index {
                SELECT from_inst.id AS parent_instance_id, ci.id AS child_instance_id, \
                       ci.symbol AS child_symbol, ci.object_id, ci.offset_range \
                FROM ( \
-                 SELECT si.id, si.object_id, si.offset_range, st.level \
+                 SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit \
                  FROM index.symbol_instances si \
-                 JOIN index.symbols s ON si.symbol = s.id \
-                 JOIN index.symbol_types st ON s.symbol_type = st.id \
                  WHERE si.symbol = $1 AND si.layer = ANY($2) AND si.id >= $3 \
                  ORDER BY si.id \
                ) from_inst \
                CROSS JOIN LATERAL ( \
-                 SELECT ci.id, ci.symbol, ci.object_id, ci.offset_range \
+                 SELECT ci.id, ci.symbol, ci.object_id, ci.offset_range, ci.dfs_enter \
                  FROM index.symbol_instances ci \
                  JOIN index.symbols cs ON ci.symbol = cs.id \
-                 JOIN index.symbol_types ct ON cs.symbol_type = ct.id \
                  WHERE ci.object_id = from_inst.object_id \
-                   AND from_inst.offset_range @> ci.offset_range \
-                   AND ci.id != from_inst.id \
-                   AND from_inst.level >= ct.level \
+                   AND from_inst.dfs_enter < ci.dfs_enter \
+                   AND ci.dfs_enter < from_inst.dfs_exit \
                    AND ci.layer = ANY($2) AND cs.layer = ANY($2) \
                    AND (from_inst.id > $3 OR ci.id > $4) \
                  ORDER BY ci.id \
@@ -332,7 +329,7 @@ impl Index {
             "SELECT count(*) AS n FROM ( \
                SELECT 1 \
                FROM ( \
-                 SELECT si.id, si.object_id, si.offset_range \
+                 SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit \
                  FROM index.symbol_instances si \
                  WHERE si.symbol = $1 AND si.layer = ANY($2) \
                  ORDER BY si.id \
@@ -340,7 +337,8 @@ impl Index {
                CROSS JOIN LATERAL ( \
                  SELECT sr.id FROM index.symbol_refs sr \
                  WHERE sr.from_object = from_inst.object_id \
-                   AND from_inst.offset_range @> sr.from_offset_range \
+                   AND from_inst.dfs_enter < sr.dfs_enter \
+                   AND sr.dfs_enter < from_inst.dfs_exit \
                    AND sr.layer = ANY($2) \
                  ORDER BY sr.id \
                ) sr \
@@ -444,8 +442,8 @@ impl Index {
                  SELECT 1 FROM index.symbol_instances pi \
                  WHERE pi.symbol = $3 AND pi.layer = ANY($2) \
                    AND pi.object_id = si.object_id \
-                   AND pi.offset_range @> si.offset_range \
-                   AND pi.id != si.id \
+                   AND pi.dfs_enter < si.dfs_enter \
+                   AND si.dfs_enter < pi.dfs_exit \
                ) \
              ORDER BY si.object_id, lower(si.offset_range), si.id \
              LIMIT $7",
@@ -494,7 +492,7 @@ impl Index {
                     sr.from_object, o.filesystem_path AS path, \
                     p.project_name AS project_id, sr.from_offset_range \
              FROM ( \
-               SELECT si.id, si.object_id, si.offset_range \
+               SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit \
                FROM index.symbol_instances si \
                WHERE si.symbol = $1 AND si.layer = ANY($2) \
              ) from_inst \
@@ -502,7 +500,8 @@ impl Index {
                SELECT sr.id, sr.from_object, sr.from_offset_range \
                FROM index.symbol_refs sr \
                WHERE sr.from_object = from_inst.object_id \
-                 AND from_inst.offset_range @> sr.from_offset_range \
+                 AND from_inst.dfs_enter < sr.dfs_enter \
+                 AND sr.dfs_enter < from_inst.dfs_exit \
                  AND sr.layer = ANY($2) \
                  AND sr.to_symbol = $3 \
              ) sr \
@@ -572,21 +571,17 @@ impl Index {
             "SELECT count(*) AS n FROM ( \
                SELECT 1 \
                FROM ( \
-                 SELECT si.id, si.object_id, si.offset_range, st.level \
+                 SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit \
                  FROM index.symbol_instances si \
-                 JOIN index.symbols s ON si.symbol = s.id \
-                 JOIN index.symbol_types st ON s.symbol_type = st.id \
                  WHERE si.symbol = $1 AND si.layer = ANY($2) \
                  ORDER BY si.id \
                ) from_inst \
                CROSS JOIN LATERAL ( \
                  SELECT ci.id FROM index.symbol_instances ci \
                  JOIN index.symbols cs ON ci.symbol = cs.id \
-                 JOIN index.symbol_types ct ON cs.symbol_type = ct.id \
                  WHERE ci.object_id = from_inst.object_id \
-                   AND from_inst.offset_range @> ci.offset_range \
-                   AND ci.id != from_inst.id \
-                   AND from_inst.level >= ct.level \
+                   AND from_inst.dfs_enter < ci.dfs_enter \
+                   AND ci.dfs_enter < from_inst.dfs_exit \
                    AND ci.layer = ANY($2) AND cs.layer = ANY($2) \
                  ORDER BY ci.id \
                ) ci \
