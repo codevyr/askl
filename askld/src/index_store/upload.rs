@@ -817,6 +817,8 @@ fn build_symbol_instances(
                 nesting_level: instance.nesting_level,
                 dfs_enter: instance.dfs_enter,
                 dfs_exit: instance.dfs_exit,
+                folded: instance.folded,
+                fold_depth: instance.fold_depth,
                 name_range: span_to_range(instance.name.as_ref(), "name")?,
                 signature_range: span_to_range(instance.signature.as_ref(), "signature")?,
                 content_range: span_to_range(instance.content.as_ref(), "content")?,
@@ -844,6 +846,8 @@ fn build_symbol_refs(
                 layer: root_layer_id,
                 nesting_level: reference.nesting_level,
                 dfs_enter: reference.dfs_enter,
+                folded: reference.folded,
+                fold_depth: reference.fold_depth,
                 from_full_range: span_to_range(reference.full.as_ref(), "ref full")?,
             });
         }

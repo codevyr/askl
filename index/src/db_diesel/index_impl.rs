@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use diesel::connection::SimpleConnection;
 use diesel::pg::{Pg, PgConnection};
@@ -585,11 +587,14 @@ fn build_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ParentsQuer
                 .field(symbols::dsl::id)
                 .eq(parent_decls.field(symbol_instances::dsl::symbol))),
         )
-        .filter(
-            parent_decls
-                .field(symbol_instances::dsl::offset_range)
-                .contains_range(symbol_refs::dsl::from_offset_range),
-        )
+        // Descendants by DFS interval rather than by range containment: the
+        // ranges cannot order what a macro generates, since it all shares one
+        // extent.  Both sides are already pinned to the same object above, and
+        // the numbering is per object.
+        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
+            "parent_decls.dfs_enter < symbol_refs.dfs_enter \
+             AND symbol_refs.dfs_enter < parent_decls.dfs_exit",
+        ))
         .filter(to_symbol_probe)
         // Ephemeral visibility — canonical and aliased tables, rendered by
         // the partition token (records columns for the eph-branch guard).
@@ -689,19 +694,14 @@ fn build_has_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> HasPare
                 .field(symbol_types::dsl::id)
                 .eq(container_symbol.field(symbols::dsl::symbol_type))),
         )
+        // Descendants by DFS interval.  The strict `<` on both sides excludes
+        // the instance itself, so the old id inequality is redundant, and the
+        // symbol_types.level comparison is gone entirely -- depth is carried
+        // per instance now, not inferred from what kind of symbol it is.
         .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
-            "container_instances.offset_range @> symbol_instances.offset_range",
+            "container_instances.dfs_enter < symbol_instances.dfs_enter \
+             AND symbol_instances.dfs_enter < container_instances.dfs_exit",
         ))
-        .filter(
-            container_type
-                .field(symbol_types::dsl::level)
-                .ge(symbol_types::dsl::level),
-        )
-        .filter(
-            container_instance
-                .field(symbol_instances::dsl::id)
-                .ne(symbol_instances::dsl::id),
-        )
         // Ephemeral visibility — source and aliased (container) tables,
         // rendered by the partition token.
         .filter(vis.pred("symbols.layer"))
@@ -756,19 +756,14 @@ fn has_role_cte_body(
                 .field(symbol_types::dsl::id)
                 .eq(container_symbol.field(symbols::dsl::symbol_type))),
         )
+        // Descendants by DFS interval.  The strict `<` on both sides excludes
+        // the instance itself, so the old id inequality is redundant, and the
+        // symbol_types.level comparison is gone entirely -- depth is carried
+        // per instance now, not inferred from what kind of symbol it is.
         .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
-            "container_instances.offset_range @> symbol_instances.offset_range",
+            "container_instances.dfs_enter < symbol_instances.dfs_enter \
+             AND symbol_instances.dfs_enter < container_instances.dfs_exit",
         ))
-        .filter(
-            container_type
-                .field(symbol_types::dsl::level)
-                .ge(symbol_types::dsl::level),
-        )
-        .filter(
-            container_instance
-                .field(symbol_instances::dsl::id)
-                .ne(symbol_instances::dsl::id),
-        )
         // Subquery position: candidate-set membership, not selected rows.
         .filter(vis.subquery_pred("symbol_instances.layer"))
         .filter(vis.subquery_pred("container_instances.layer"));
@@ -1737,6 +1732,43 @@ impl Index {
         connection
             .batch_execute(sql)
             .map_err(|e| anyhow::anyhow!("Failed to execute SQL file '{}': {}", input_path, e))
+            .unwrap();
+        Self::number_fixture_tree(connection);
+    }
+
+    /// Give fixture instances their DFS interval and depth.
+    ///
+    /// Production data gets these from the indexer, which walks the AST and so
+    /// can order symbols a macro generates even though they share one extent.
+    /// Fixtures have no such case -- their containment really is expressed by
+    /// the ranges -- so derive the numbering from those instead of writing
+    /// magic numbers into thirteen SQL files.
+    ///
+    /// A fixture that DOES need to express something ranges cannot (two
+    /// co-extensive siblings, one nested inside the other) can set dfs_exit
+    /// itself; anything already numbered is left alone.
+    fn number_fixture_tree(connection: &mut PgConnection) {
+        // Co-extensive instances are ordered broadest kind first, matching what
+        // the indexer does when it slots a file under its module and directory.
+        //
+        // Depth comes from walking the preorder PARENT chain, not from counting
+        // how many instances contain a node: in a co-extensive cluster every
+        // member "contains" anything nested under any of them, which inflates
+        // the count and breaks "a direct child is at depth + 1".
+        const SQL: &str = "WITH RECURSIVE ranked AS ( SELECT si.id, si.object_id, si.offset_range, CASE st.name WHEN 'directory' THEN 0 WHEN 'module' THEN 1 WHEN 'file' THEN 2 ELSE 3 END AS kind_rank, row_number() OVER (PARTITION BY si.object_id ORDER BY lower(si.offset_range) NULLS FIRST, upper(si.offset_range) DESC NULLS LAST, CASE st.name WHEN 'directory' THEN 0 WHEN 'module' THEN 1 WHEN 'file' THEN 2 ELSE 3 END, si.id) AS pos FROM index.symbol_instances si JOIN index.symbols s ON s.id = si.symbol JOIN index.symbol_types st ON st.id = s.symbol_type ), parented AS ( SELECT r.id, r.object_id, r.pos, (SELECT p.id FROM ranked p WHERE p.object_id = r.object_id AND p.pos < r.pos AND p.offset_range @> r.offset_range AND (p.offset_range <> r.offset_range OR p.kind_rank < r.kind_rank) ORDER BY p.pos DESC LIMIT 1) AS parent_id FROM ranked r ), walked AS ( SELECT id, object_id, pos, 0 AS depth FROM parented WHERE parent_id IS NULL UNION ALL SELECT c.id, c.object_id, c.pos, w.depth + 1 FROM parented c JOIN walked w ON c.parent_id = w.id ), bounds AS ( SELECT d.id, d.depth, d.pos, COALESCE(MIN(n.pos) FILTER (WHERE n.pos > d.pos AND n.depth <= d.depth), MAX(n.pos) + 1) AS subtree_end FROM walked d JOIN walked n ON n.object_id = d.object_id GROUP BY d.id, d.depth, d.pos ) UPDATE index.symbol_instances si SET nesting_level = b.depth, dfs_enter = b.pos * 1024, dfs_exit = b.subtree_end * 1024 - 1 FROM bounds b WHERE si.id = b.id AND si.dfs_exit = 0";
+        connection
+            .batch_execute(SQL)
+            .map_err(|e| anyhow::anyhow!("Failed to number fixture tree: {}", e))
+            .unwrap();
+
+        // Refs need numbering too, and by range rather than by walk: a fixture
+        // states them as offsets, with no notion of which scope emitted them.
+        // The owner is the innermost containing instance -- greatest dfs_enter
+        // among the containers -- and the ref sits just inside it.
+        const REFS_SQL: &str = "UPDATE index.symbol_refs sr SET dfs_enter = o.dfs_enter + 1, nesting_level = o.nesting_level + 1, fold_depth = o.fold_depth FROM (SELECT DISTINCT ON (r.id) r.id AS ref_id, si.dfs_enter, si.nesting_level, si.fold_depth FROM index.symbol_refs r JOIN index.symbol_instances si ON si.object_id = r.from_object AND si.offset_range @> r.from_offset_range ORDER BY r.id, si.dfs_enter DESC) o WHERE sr.id = o.ref_id AND sr.dfs_enter = 0";
+        connection
+            .batch_execute(REFS_SQL)
+            .map_err(|e| anyhow::anyhow!("Failed to number fixture refs: {}", e))
             .unwrap();
     }
 
@@ -4283,6 +4315,47 @@ impl<'a> EphTransaction<'a> {
         use diesel::sql_types::{Array, BigInt, Integer};
 
         let layer_id = self.layer_id;
+
+        // Rows in one batch can nest in each other -- `search("a") { search("b") }`
+        // produces an outer match and an inner one inside it.  The owner lookup
+        // below is a LATERAL over rows that already EXIST, so it cannot see the
+        // rest of its own INSERT: inserted as one statement, the inner match
+        // would take the same owner as the outer and land beside it instead of
+        // inside, and a query for "the inner match within the outer" returns
+        // nothing.
+        //
+        // So insert outermost-first, one statement per level of nesting WITHIN
+        // the batch.  Rows at the same level cannot contain one another, so a
+        // single statement is safe, and every deeper level then sees the level
+        // above it already in place.
+        let mut levels: BTreeMap<usize, Vec<&EphInstanceRow>> = BTreeMap::new();
+        for row in rows {
+            let depth = rows
+                .iter()
+                .filter(|o| {
+                    o.object_id == row.object_id
+                        && (o.start, o.end) != (row.start, row.end)
+                        && o.start <= row.start
+                        && o.end >= row.end
+                })
+                .count();
+            levels.entry(depth).or_default().push(row);
+        }
+
+        for (_, level) in levels {
+            self.insert_instance_level(&level, project_id, layer_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn insert_instance_level(
+        &mut self,
+        rows: &[&EphInstanceRow],
+        project_id: i32,
+        layer_id: i64,
+    ) -> Result<()> {
+        use diesel::sql_types::{Array, BigInt, Integer};
         let conn = &mut *self.conn;
 
         let sym_ids: Vec<i64> = rows.iter().map(|r| r.symbol_id).collect();
@@ -4292,12 +4365,39 @@ impl<'a> EphTransaction<'a> {
         let instance_types: Vec<i32> = rows.iter().map(|r| r.instance_type).collect();
 
         diesel::sql_query(
-            "INSERT INTO index.symbol_instances (id, symbol, object_id, offset_range, instance_type, layer) \
+            // An ephemeral instance has to take a place in the object's DFS
+            // order, or it falls outside every interval and the engine cannot
+            // see it at all.  This is what the sparse stride is for: slot it
+            // just inside its owner -- the innermost persistent instance whose
+            // extent contains it -- without renumbering anything.
+            //
+            // Offsets start at +2 because +1 is where a ref of the same owner
+            // sits, and an instance placed there would swallow the owner's own
+            // references.  Each row gets an 8-wide interval so it has room for
+            // children of its own, which fits ~127 ephemeral instances under
+            // one owner before the stride is exhausted.
+
+            "INSERT INTO index.symbol_instances \
+                 (id, symbol, object_id, offset_range, instance_type, layer, \
+                  nesting_level, dfs_enter, dfs_exit, folded, fold_depth) \
              SELECT nextval('index.eph_instance_id_seq'), \
-                    t.symbol_id, t.object_id, int4range(t.start_off, t.end_off), t.instance_type, $6 \
+                    t.symbol_id, t.object_id, int4range(t.start_off, t.end_off), t.instance_type, $6, \
+                    COALESCE(own.nesting_level, 0) + 1, \
+                    COALESCE(own.dfs_enter, 0) + 2 + (t.ord - 1) * 8, \
+                    COALESCE(own.dfs_enter, 0) + 9 + (t.ord - 1) * 8, \
+                    FALSE, \
+                    COALESCE(own.fold_depth, 0) \
              FROM UNNEST($1::int8[], $2::int4[], $3::int4[], $4::int4[], $5::int4[]) \
-             AS t(symbol_id, object_id, start_off, end_off, instance_type) \
+             WITH ORDINALITY \
+             AS t(symbol_id, object_id, start_off, end_off, instance_type, ord) \
              JOIN index.objects o ON o.id = t.object_id AND o.project_id = $7 \
+             LEFT JOIN LATERAL ( \
+                 SELECT si.nesting_level, si.dfs_enter, si.fold_depth \
+                 FROM index.symbol_instances si \
+                 WHERE si.object_id = t.object_id \
+                   AND si.offset_range @> int4range(t.start_off, t.end_off) \
+                 ORDER BY si.dfs_enter DESC LIMIT 1 \
+             ) own ON TRUE \
              ON CONFLICT DO NOTHING"
         )
             .bind::<Array<BigInt>,  _>(&sym_ids)
@@ -4328,12 +4428,27 @@ impl<'a> EphTransaction<'a> {
         let ends: Vec<i32> = try_offsets(rows.iter().map(|r| r.end), "end")?;
 
         diesel::sql_query(
-            "INSERT INTO index.symbol_refs (id, to_symbol, from_object, from_offset_range, layer) \
+            // Same placement as ephemeral instances, except a ref is a point:
+            // it sits one step inside its owner rather than taking an interval.
+            "INSERT INTO index.symbol_refs \
+                 (id, to_symbol, from_object, from_offset_range, layer, \
+                  nesting_level, dfs_enter, folded, fold_depth) \
              SELECT nextval('index.eph_ref_id_seq'), \
-                    t.to_symbol, t.from_object, int4range(t.start_off, t.end_off), $5 \
+                    t.to_symbol, t.from_object, int4range(t.start_off, t.end_off), $5, \
+                    COALESCE(own.nesting_level, 0) + 1, \
+                    COALESCE(own.dfs_enter, 0) + 1, \
+                    FALSE, \
+                    COALESCE(own.fold_depth, 0) \
              FROM UNNEST($1::int8[], $2::int4[], $3::int4[], $4::int4[]) \
              AS t(to_symbol, from_object, start_off, end_off) \
              JOIN index.objects o ON o.id = t.from_object AND o.project_id = $6 \
+             LEFT JOIN LATERAL ( \
+                 SELECT si.nesting_level, si.dfs_enter, si.fold_depth \
+                 FROM index.symbol_instances si \
+                 WHERE si.object_id = t.from_object \
+                   AND si.offset_range @> int4range(t.start_off, t.end_off) \
+                 ORDER BY si.dfs_enter DESC LIMIT 1 \
+             ) own ON TRUE \
              ON CONFLICT DO NOTHING",
         )
         .bind::<Array<BigInt>, _>(&to_symbols)

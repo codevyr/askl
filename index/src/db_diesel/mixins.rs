@@ -84,12 +84,14 @@ type SymbolInstanceColumnsSqlType = (
     Integer,
     BigInt,
     BigInt,
+    Bool,
+    Integer,
     Nullable<Int4range>,
     Nullable<Int4range>,
     Nullable<Int4range>,
 ); // (id, symbol, object_id, offset_range, instance_type, layer,
-   //  nesting_level, dfs_enter, dfs_exit, name_range, signature_range,
-   //  content_range)
+   //  nesting_level, dfs_enter, dfs_exit, folded, fold_depth, name_range,
+   //  signature_range, content_range)
 
 type SymbolColumnsSqlType = (
     BigInt,
@@ -1622,85 +1624,47 @@ impl Default for DirectOnlyMixin {
 }
 
 impl FilterLeaf for DirectOnlyMixin {
-    fn has_children_expr(&self, vis: &EphVisibility) -> Option<HasChildrenBoolExpr> {
+    fn has_children_expr(&self, _vis: &EphVisibility) -> Option<HasChildrenBoolExpr> {
+        // `X { Y }` means UNFOLDED: descendants with no fold boundary strictly
+        // between.  The base query already restricts to descendants via the DFS
+        // interval, so this is one equality on the fold depth.
+        //
+        // Strict depth+1 would be `nesting_level = parent + 1`, but that is not
+        // the default: with module -> directory -> file -> declarations a real
+        // chain, a module's children are FILES, and `mod { func }` would be
+        // empty.  Folding is what separates "where a symbol sits" from "which
+        // levels are interesting", so traversal passes through the structural
+        // levels and stops at macro expansions.
+        //
+        // The `+ CASE WHEN folded` term is what lets `mod { macro { func } }`
+        // step exactly one level past a fold on purpose.
         Some(Box::new(
             EphSqlFragment::<Bool>::builder()
                 .sql(
-                    "NOT EXISTS (\
-                        SELECT 1 FROM index.symbol_instances mid \
-                        JOIN index.symbols mid_sym ON mid.symbol = mid_sym.id \
-                        JOIN index.symbol_types mid_type ON mid_sym.symbol_type = mid_type.id \
-                        WHERE mid.object_id = symbol_instances.object_id \
-                          AND symbol_instances.offset_range @> mid.offset_range \
-                          AND mid.offset_range @> contained_instances.offset_range \
-                          AND mid.offset_range != symbol_instances.offset_range \
-                          AND mid.offset_range != contained_instances.offset_range \
-                          AND mid.id != symbol_instances.id \
-                          AND mid.id != contained_instances.id \
-                          AND symbol_types.level >= mid_type.level \
-                          AND ",
+                    "contained_instances.fold_depth = symbol_instances.fold_depth \
+                     + CASE WHEN symbol_instances.folded THEN 1 ELSE 0 END",
                 )
-                .eph_visibility("mid.layer", vis)
-                .sql(" AND ")
-                .eph_visibility("mid_sym.layer", vis)
-                .sql(")")
                 .build(),
         ))
     }
 
-    fn children_expr(&self, vis: &EphVisibility) -> Option<ChildrenBoolExpr> {
-        // `cont_type.level >= parent_type.level` — a container strictly inside
-        // the parent shadows the parent's refs only when it is at the SAME OR
-        // BROADER level.  The direction matters and is easy to get backwards:
-        // levels grow outwards (field=1, type/function=2, file=3, module=4,
-        // directory=5), so the narrower containers a parent encloses are
-        // exactly the ones that must NOT shadow it.  A function inside a
-        // module does not hide the module's refs; a field inside a struct does
-        // not hide the struct's refs.  Nesting at equal level — a closure in a
-        // function, a type in a type — does shadow, which is the whole point
-        // of the filter.
+    fn children_expr(&self, _vis: &EphVisibility) -> Option<ChildrenBoolExpr> {
+        // Same shape as has_children_expr, for references instead of
+        // instances.  This is what separates the two occurrences of `foo` in
+        // `printk(foo)`: the argument token sits at the caller's fold depth and
+        // is returned, each expanded use sits one deeper and is not.
         //
-        // This was inverted from the in-memory original when the filter moved
-        // to SQL, and no test caught it for five months: with `<=`, a `type`
-        // parent referenced nothing at all (every ref in a struct sits in a
-        // field), and containers saw only file-scope refs.  See
-        // `direct_only_refs_type_sees_refs_inside_its_fields` and its control.
-        //
-        // The `symbols.id = symbol_refs.to_symbol` conjunct near the end is a
-        // PLANNER FENCE, not a semantic condition: it restates the outer
-        // query's own join condition, so it is TRUE for every row that can
-        // reach this filter.  What it changes is the subplan's correlation
-        // set — referencing the child `symbols` pins the NOT EXISTS after
-        // that join, so a receiver predicate (M4's `compose_derive_child`,
-        // e.g. `symbol_type = 1`) always filters BEFORE the expensive
-        // subplan.  The planner cannot cost range `@>` joins (rows=1
-        // estimates), so nothing else guarantees that order: an ad-hoc plan
-        // over a symbol-driven source ran the subplan early — measured
-        // 11.6 s vs 2.7 s over amdgpu's 931 instances.  The deployed
-        // prepared-statement shape (id-array binds) happens to place the
-        // subplan late already, so there this line is measured-neutral
-        // (~5.1 s either way, the per-ref subplan floor); it is kept as a
-        // structural guarantee, not a production win.
+        // This replaces the engine's slowest construct -- a correlated
+        // NOT EXISTS over range containment, measured at 2.3-5.5s on
+        // mod("amdgpu") and uncostable by the planner, which estimates every
+        // range predicate at rows=1.
         Some(Box::new(
             EphSqlFragment::<Bool>::builder()
-                .sql("NOT EXISTS (\
-                        SELECT 1 FROM index.symbol_instances container \
-                        JOIN index.symbols cont_sym ON container.symbol = cont_sym.id \
-                        JOIN index.symbol_types cont_type ON cont_sym.symbol_type = cont_type.id \
-                        JOIN index.symbol_types parent_type ON parent_type.id = parent_symbols.symbol_type \
-                        WHERE container.object_id = parent_decls.object_id \
-                          AND parent_decls.offset_range @> container.offset_range \
-                          AND container.offset_range @> symbol_refs.from_offset_range \
-                          AND container.offset_range != parent_decls.offset_range \
-                          AND container.id != parent_decls.id \
-                          AND cont_type.level >= parent_type.level \
-                          AND symbols.id = symbol_refs.to_symbol \
-                          AND ")
-                .eph_visibility("container.layer", vis)
-                .sql(" AND ")
-                .eph_visibility("cont_sym.layer", vis)
-                .sql(")")
-                .build()
+                .sql(
+                    "symbol_refs.fold_depth = parent_decls.fold_depth \
+                     + CASE WHEN parent_decls.folded THEN 1 ELSE 0 END",
+                )
+                .build(),
         ))
     }
 
@@ -1739,26 +1703,18 @@ impl Default for InnermostOnlyMixin {
 }
 
 impl FilterLeaf for InnermostOnlyMixin {
-    fn has_parents_expr(&self, vis: &EphVisibility) -> Option<HasParentsBoolExpr> {
+    fn has_parents_expr(&self, _vis: &EphVisibility) -> Option<HasParentsBoolExpr> {
+        // Symmetric with the children side: containers with no fold boundary
+        // between them and the symbol.  NOT strictly one level up -- a bare
+        // `{"a"}` is expected to surface the whole chain (the enclosing
+        // function, its file, its directory), which is what the structural
+        // levels being transparent means on the parent side.
         Some(Box::new(
             EphSqlFragment::<Bool>::builder()
                 .sql(
-                    "NOT EXISTS (\
-                        SELECT 1 FROM index.symbol_instances mid \
-                        JOIN index.symbols mid_sym ON mid_sym.id = mid.symbol \
-                        WHERE mid.object_id = container_instances.object_id \
-                          AND container_instances.offset_range @> mid.offset_range \
-                          AND mid.offset_range @> symbol_instances.offset_range \
-                          AND mid.offset_range != container_instances.offset_range \
-                          AND mid.offset_range != symbol_instances.offset_range \
-                          AND mid.id != container_instances.id \
-                          AND mid.id != symbol_instances.id \
-                          AND ",
+                    "symbol_instances.fold_depth = container_instances.fold_depth \
+                     + CASE WHEN container_instances.folded THEN 1 ELSE 0 END",
                 )
-                .eph_visibility("mid.layer", vis)
-                .sql(" AND ")
-                .eph_visibility("mid_sym.layer", vis)
-                .sql(")")
                 .build(),
         ))
     }

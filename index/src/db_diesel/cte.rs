@@ -91,10 +91,12 @@ fn build_has_children_inner(
                 .eq(contained_symbol.field(symbols::dsl::symbol_type))),
         )
         .filter(source_filter)
+        // Descendants by DFS interval; see DirectOnlyMixin for why ranges
+        // cannot answer this.
         .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
-            "symbol_instances.offset_range @> contained_instances.offset_range",
+            "symbol_instances.dfs_enter < contained_instances.dfs_enter \
+             AND contained_instances.dfs_enter < symbol_instances.dfs_exit",
         ))
-        .filter(symbol_types::dsl::level.ge(contained_type.field(symbol_types::dsl::level)))
         .filter(symbol_instances::dsl::id.ne(contained_instance.field(symbol_instances::dsl::id)))
         // Ephemeral visibility — source and aliased (contained) tables,
         // rendered by the partition token.

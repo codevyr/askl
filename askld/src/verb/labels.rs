@@ -251,6 +251,10 @@ impl Selector for UserVerb {
                         // One step into the parent's DFS interval, matching the
                         // depth above.  In-memory only; never stored.
                         dfs_enter: parent_node.symbol_instance.dfs_enter + 1,
+                        // Synthetic, so it inherits the parent's fold state
+                        // verbatim: it is not itself a boundary.
+                        folded: false,
+                        fold_depth: parent_node.symbol_instance.fold_depth,
                         from_full_range: None,
                         // Synthetic in-memory ref: the layer follows the
                         // FROM side like real refs' does (from_object/

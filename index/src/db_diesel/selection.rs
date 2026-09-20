@@ -631,6 +631,8 @@ mod tests {
             nesting_level: 0,
             dfs_enter: 0,
             dfs_exit: 0,
+            folded: false,
+            fold_depth: 0,
             name_range: None,
             signature_range: None,
             content_range: None,
@@ -820,6 +822,8 @@ mod tests {
             layer: TEST_ROOT,
             nesting_level: 0,
             dfs_enter: 0,
+            folded: false,
+            fold_depth: 0,
             from_full_range: None,
         }
     }
