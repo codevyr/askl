@@ -1667,6 +1667,7 @@ impl Index {
     pub const TEST_INPUT_TREE_BROWSER: &'static str = "test_input_tree_browser.sql";
     pub const TEST_INPUT_NESTED_FUNC: &'static str = "test_input_nested_func.sql";
     pub const TEST_INPUT_TYPE_FILTER: &'static str = "test_input_type_filter.sql";
+    pub const TEST_INPUT_STRUCT_FIELDS: &'static str = "test_input_struct_fields.sql";
     pub const TEST_INPUT_ESCALATION: &'static str = "test_input_escalation.sql";
     pub const TEST_INPUT_RECURSIVE_MULTI_INSTANCE: &'static str =
         "test_input_recursive_multi_instance.sql";
@@ -1705,6 +1706,10 @@ impl Index {
         (
             "test_input_nested_func.sql",
             include_str!("../../../sql/test_input_nested_func.sql"),
+        ),
+        (
+            "test_input_struct_fields.sql",
+            include_str!("../../../sql/test_input_struct_fields.sql"),
         ),
         (
             "test_input_escalation.sql",
