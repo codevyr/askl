@@ -66,9 +66,12 @@ INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type
 INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
     (104, 4, 1, int4range(800, 900), 1);
 
--- macro_m [500, 600) — inside func_a
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
-    (105, 5, 1, int4range(500, 600), 1);
+-- macro_m [500, 600) — inside func_a.  Marked FOLDED: it is a macro, and what
+-- a macro generates should be out of reach of `X { Y }` by default, exactly as
+-- the clang indexer marks expansions.  fold_depth is derived from this by the
+-- fixture numbering pass, so data_macro_only inside it lands one level down.
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type, folded) VALUES
+    (105, 5, 1, int4range(500, 600), 1, TRUE);
 
 -- data_d [300, 400) — inside func_a
 INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
