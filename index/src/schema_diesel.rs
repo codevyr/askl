@@ -26,6 +26,12 @@ diesel::table! {
         offset_range -> Int4range,
         instance_type -> Integer,
         layer -> BigInt,
+        nesting_level -> Integer,
+        dfs_enter -> BigInt,
+        dfs_exit -> BigInt,
+        name_range -> Nullable<Int4range>,
+        signature_range -> Nullable<Int4range>,
+        content_range -> Nullable<Int4range>,
     }
 }
 
@@ -99,6 +105,9 @@ diesel::table! {
         from_object -> Integer,
         from_offset_range -> Int4range,
         layer -> BigInt,
+        nesting_level -> Integer,
+        dfs_enter -> BigInt,
+        from_full_range -> Nullable<Int4range>,
     }
 }
 

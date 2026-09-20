@@ -628,6 +628,12 @@ mod tests {
             offset_range: (Bound::Included(0), Bound::Excluded(1)),
             instance_type: 1,
             layer,
+            nesting_level: 0,
+            dfs_enter: 0,
+            dfs_exit: 0,
+            name_range: None,
+            signature_range: None,
+            content_range: None,
         }
     }
 
@@ -812,6 +818,9 @@ mod tests {
             from_object: 1,
             from_offset_range: (Bound::Included(lo), Bound::Excluded(lo + 1)),
             layer: TEST_ROOT,
+            nesting_level: 0,
+            dfs_enter: 0,
+            from_full_range: None,
         }
     }
 

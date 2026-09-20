@@ -213,6 +213,12 @@ struct NewSymbolInstance {
     offset_range: std::ops::Range<i32>,
     instance_type: i32,
     layer: i64, // the project's root layer
+    nesting_level: i32,
+    dfs_enter: i64,
+    dfs_exit: i64,
+    name_range: Option<std::ops::Range<i32>>,
+    signature_range: Option<std::ops::Range<i32>>,
+    content_range: Option<std::ops::Range<i32>>,
 }
 
 #[derive(Insertable, Clone)]
@@ -222,6 +228,9 @@ struct NewSymbolRef {
     from_object: i32,
     from_offset_range: std::ops::Range<i32>,
     layer: i64, // the project's root layer
+    nesting_level: i32,
+    dfs_enter: i64,
+    from_full_range: Option<std::ops::Range<i32>>,
 }
 
 #[derive(Debug, QueryableByName)]

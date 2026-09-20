@@ -4701,6 +4701,12 @@ fn canary_leak_detected_by_has_eph_leak() {
             offset_range: (Bound::Included(0), Bound::Excluded(1)),
             instance_type: 1,
             layer: CANARY_LAYER_ID,
+            nesting_level: 0,
+            dfs_enter: 0,
+            dfs_exit: 0,
+            name_range: None,
+            signature_range: None,
+            content_range: None,
         },
         object: Object {
             id: -999999,
@@ -4795,6 +4801,12 @@ fn canary_leak_in_each_relationship_field_detected() {
             offset_range: (Bound::Included(0), Bound::Excluded(1)),
             instance_type: 1,
             layer: CANARY_LAYER_ID,
+            nesting_level: 0,
+            dfs_enter: 0,
+            dfs_exit: 0,
+            name_range: None,
+            signature_range: None,
+            content_range: None,
         }
     }
     fn canary_object() -> Object {
@@ -4815,6 +4827,9 @@ fn canary_leak_in_each_relationship_field_detected() {
             from_object: -999999,
             from_offset_range: (Bound::Included(0), Bound::Excluded(1)),
             layer: CANARY_LAYER_ID,
+            nesting_level: 0,
+            dfs_enter: 0,
+            from_full_range: None,
         }
     }
 
