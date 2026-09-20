@@ -40,13 +40,13 @@ fn has_parent_innermost_only() {
         "data_macro_only should be in results"
     );
     assert!(
-        nodes.contains(&SymbolInstanceId::new(103)),
-        "func_a, reached through macro_m -- nothing is folded here"
+        !nodes.contains(&SymbolInstanceId::new(103)),
+        "func_a is behind macro_m's fold boundary"
     );
 }
 
 #[test]
-fn nested_macro_reaches_children_until_folded() {
+fn nested_macro_not_in_children() {
     // func("func_a") {} — downward derivation from func_a.
     //
     // `X { Y }` is UNFOLDED, so func_a reaches macro_m, data_d AND
@@ -72,8 +72,8 @@ fn nested_macro_reaches_children_until_folded() {
         "data_d (direct child)"
     );
     assert!(
-        nodes.contains(&SymbolInstanceId::new(107)),
-        "data_macro_only, reached through macro_m -- nothing is folded here"
+        !nodes.contains(&SymbolInstanceId::new(107)),
+        "data_macro_only is behind macro_m's fold boundary"
     );
 }
 
@@ -169,12 +169,12 @@ fn unnest_downward_does_not_affect_child() {
     // func("func_a") unnest {} — unnest is on the parent statement.
     //
     // unnest on the parent only affects upward (parent merge) derivation; the
-    // child {} reads its own flag for downward derivation.
-    //
-    // NOTE: this no longer DISCRIMINATES.  Unfolded and unnest differ only by a
-    // fold-depth term, and with every fixture unfolded the two are the same
-    // query, so both reach data_macro_only.  Marking macro_m folded restores the
-    // distinction and with it this test's point.
+    // child {} reads its own flag for downward derivation, so the fold boundary
+    // at macro_m still applies and data_macro_only stays out.    //
+    // This is FOLDING doing the work: macro_m is marked folded in the fixture,
+    // so what it generates sits one fold level down and `X { Y }` -- which
+    // reaches descendants at the SAME fold depth -- does not reach it.  The
+    // clang indexer marks real macro expansions the same way.
     const QUERY: &str = r#"func("func_a") unnest {}"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
@@ -191,8 +191,9 @@ fn unnest_downward_does_not_affect_child() {
         "data_d (direct child)"
     );
     assert!(
-        nodes.contains(&SymbolInstanceId::new(107)),
-        "data_macro_only, reached through macro_m -- nothing is folded here"
+        !nodes.contains(&SymbolInstanceId::new(107)),
+        "data_macro_only stays behind the fold — unnest on the PARENT does not \
+         change the child's downward derivation"
     );
 }
 
@@ -280,7 +281,7 @@ fn upward_from_func_b() {
 }
 
 #[test]
-fn has_only_upward_reaches_chain() {
+fn has_only_upward_innermost() {
     // has { "data_macro_only" } — upward using only HAS (containment), no REFS.
     //
     // Parents are UNFOLDED, so the containment chain comes back: macro_m and
@@ -305,8 +306,8 @@ fn has_only_upward_reaches_chain() {
         "macro_m (HAS parent, passes all-types filter)"
     );
     assert!(
-        nodes.contains(&SymbolInstanceId::new(103)),
-        "func_a, above macro_m in the chain -- nothing is folded here"
+        !nodes.contains(&SymbolInstanceId::new(103)),
+        "func_a is behind macro_m's fold boundary"
     );
 }
 
