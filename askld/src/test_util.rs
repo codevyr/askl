@@ -22,6 +22,8 @@ pub const TEST_INPUT_ESCALATION: &'static str = index::db_diesel::Index::TEST_IN
 pub const TEST_INPUT_TREE_BROWSER: &'static str = index::db_diesel::Index::TEST_INPUT_TREE_BROWSER;
 pub const TEST_INPUT_NESTED_FUNC: &'static str = index::db_diesel::Index::TEST_INPUT_NESTED_FUNC;
 pub const TEST_INPUT_TYPE_FILTER: &'static str = index::db_diesel::Index::TEST_INPUT_TYPE_FILTER;
+pub const TEST_INPUT_STRUCT_FIELDS: &'static str =
+    index::db_diesel::Index::TEST_INPUT_STRUCT_FIELDS;
 pub const VERB_TEST: &'static str = index::db_diesel::Index::VERB_TEST;
 pub const TEST_INPUT_SEARCH: &'static str = index::db_diesel::Index::TEST_INPUT_SEARCH;
 
@@ -90,6 +92,7 @@ const ALL_FIXTURES: &[&str] = &[
     TEST_INPUT_TREE_BROWSER,
     TEST_INPUT_NESTED_FUNC,
     TEST_INPUT_TYPE_FILTER,
+    TEST_INPUT_STRUCT_FIELDS,
     VERB_TEST,
     TEST_INPUT_SEARCH,
 ];

@@ -3,7 +3,7 @@ use crate::test_util::{
     run_query_probe_traced, run_query_traced, run_query_with_budget, run_query_with_edge_cap,
     run_query_with_read_cap, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT,
     TEST_INPUT_ESCALATION, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC, TEST_INPUT_SEARCH,
-    TEST_INPUT_TREE_BROWSER, VERB_TEST,
+    TEST_INPUT_STRUCT_FIELDS, TEST_INPUT_TREE_BROWSER, VERB_TEST,
 };
 use index::db_diesel::FamilyDemands;
 use index::symbols::{SymbolId, SymbolInstanceId};
@@ -3386,6 +3386,86 @@ fn direct_only_refs_module_shows_all_refs() {
     assert!(nodes.contains(&SymbolInstanceId::new(10)), "testmodule");
     assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar (via ref)");
     assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz (via ref)");
+}
+
+// ----------------------------------------------------------------------------
+// REFS direct-only: which containers shadow a parent.
+//
+// A container strictly inside the parent shadows the parent's refs only when it
+// is at the *same or broader* level.  Narrower containers do not: a function
+// (level 2) inside a module (level 4) must not hide the module's refs, and a
+// field (level 1) inside a type (level 2) must not hide the struct's refs.
+//
+// `direct_only_refs_module_shows_all_refs` above cannot see this, because its
+// fixture module spans the whole file and the HAS half of the default relation
+// supplies the same nodes.  These tests isolate the REFS half with
+// `derive(type="refs")`.
+// ----------------------------------------------------------------------------
+
+#[test]
+fn direct_only_refs_module_isolates_refs_half() {
+    // REFS only: every ref in the fixture sits inside a function, so if functions
+    // shadowed the module this returns the module and nothing else.
+    const QUERY: &str = r#"mod("testmodule") derive(type="refs") { }"#;
+    let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    println!("module refs-only: {:?}", nodes);
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(30)),
+        "bar — referenced from anon150, inside foo"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(40)),
+        "baz — referenced from inside bar"
+    );
+}
+
+#[test]
+fn direct_only_refs_type_sees_refs_inside_its_fields() {
+    // struct Outer { Inner a; Helper b; } — both refs live inside fields (level 1),
+    // which are narrower than the type (level 2) and so must not shadow it.
+    const QUERY: &str = r#"type("Outer") derive(type="refs") { }"#;
+    let res = run_query(TEST_INPUT_STRUCT_FIELDS, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    println!("Outer refs-only: {:?}", nodes);
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(40)),
+        "Inner — named by field Outer.a"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(45)),
+        "Helper — named by field Outer.b"
+    );
+}
+
+#[test]
+fn direct_only_refs_type_is_shadowed_by_nested_type() {
+    // Control for the above: Wrapper.Nested is a type inside a type — same level,
+    // so it *does* shadow, and the ref belongs to it rather than to Wrapper.
+    // Without this the rule could be satisfied by dropping the filter entirely.
+    let outer = run_query(
+        TEST_INPUT_STRUCT_FIELDS,
+        r#"type("Wrapper") derive(type="refs") { }"#,
+    );
+    let outer_nodes = outer.nodes.as_vec();
+    println!("Wrapper refs-only: {:?}", outer_nodes);
+    assert!(
+        !outer_nodes.contains(&SymbolInstanceId::new(40)),
+        "Inner must belong to Wrapper.Nested, not to Wrapper"
+    );
+
+    let inner = run_query(
+        TEST_INPUT_STRUCT_FIELDS,
+        r#"type("Wrapper.Nested") derive(type="refs") { }"#,
+    );
+    let inner_nodes = inner.nodes.as_vec();
+    println!("Wrapper.Nested refs-only: {:?}", inner_nodes);
+    assert!(
+        inner_nodes.contains(&SymbolInstanceId::new(40)),
+        "Inner — named directly by Wrapper.Nested"
+    );
 }
 
 // ============================================================================

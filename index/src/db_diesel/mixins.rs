@@ -1634,6 +1634,23 @@ impl FilterLeaf for DirectOnlyMixin {
     }
 
     fn children_expr(&self, vis: &EphVisibility) -> Option<ChildrenBoolExpr> {
+        // `cont_type.level >= parent_type.level` — a container strictly inside
+        // the parent shadows the parent's refs only when it is at the SAME OR
+        // BROADER level.  The direction matters and is easy to get backwards:
+        // levels grow outwards (field=1, type/function=2, file=3, module=4,
+        // directory=5), so the narrower containers a parent encloses are
+        // exactly the ones that must NOT shadow it.  A function inside a
+        // module does not hide the module's refs; a field inside a struct does
+        // not hide the struct's refs.  Nesting at equal level — a closure in a
+        // function, a type in a type — does shadow, which is the whole point
+        // of the filter.
+        //
+        // This was inverted from the in-memory original when the filter moved
+        // to SQL, and no test caught it for five months: with `<=`, a `type`
+        // parent referenced nothing at all (every ref in a struct sits in a
+        // field), and containers saw only file-scope refs.  See
+        // `direct_only_refs_type_sees_refs_inside_its_fields` and its control.
+        //
         // The `symbols.id = symbol_refs.to_symbol` conjunct near the end is a
         // PLANNER FENCE, not a semantic condition: it restates the outer
         // query's own join condition, so it is TRUE for every row that can
@@ -1661,7 +1678,7 @@ impl FilterLeaf for DirectOnlyMixin {
                           AND container.offset_range @> symbol_refs.from_offset_range \
                           AND container.offset_range != parent_decls.offset_range \
                           AND container.id != parent_decls.id \
-                          AND cont_type.level <= parent_type.level \
+                          AND cont_type.level >= parent_type.level \
                           AND symbols.id = symbol_refs.to_symbol \
                           AND ")
                 .eph_visibility("container.layer", vis)
