@@ -382,7 +382,9 @@ pub struct ParentReference {
     pub symbol_ref: SymbolRef,
 }
 
-/// Containment relationship: parent contains child (parent.offset_range @> child.offset_range)
+/// Containment relationship: the parent's DFS interval encloses the child's
+/// `dfs_enter`.  Ranges cannot answer this -- everything a macro generates
+/// shares one extent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HasChildReference {
     pub parent_symbol: Symbol,

@@ -186,7 +186,7 @@ fn refs_children_of_expr(
                 SELECT si.id FROM index.symbol_refs sr \
                 JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
                 JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                  AND pd.offset_range @> sr.from_offset_range \
+                  AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
                 WHERE ",
         )
         .eph_visibility("sr.layer", vis)
@@ -211,7 +211,7 @@ fn refs_parents_of_expr(
             "symbol_instances.id IN (\
                 SELECT pd.id FROM index.symbol_refs sr \
                 JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                  AND pd.offset_range @> sr.from_offset_range \
+                  AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
                 JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
                 WHERE ",
         )
@@ -239,7 +239,7 @@ fn refs_children_of_symbols_expr(
             "symbols.id IN (\
                 SELECT sr.to_symbol FROM index.symbol_refs sr \
                 JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                  AND pd.offset_range @> sr.from_offset_range \
+                  AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
                 WHERE ",
         )
         .eph_visibility("sr.layer", vis)
@@ -262,7 +262,7 @@ fn refs_parents_of_symbols_expr(
             "symbols.id IN (\
                 SELECT pd.symbol FROM index.symbol_refs sr \
                 JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                  AND pd.offset_range @> sr.from_offset_range \
+                  AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
                 JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
                 WHERE ",
         )
@@ -629,11 +629,12 @@ fn build_children_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ChildrenQu
                 .field(symbol_instances::dsl::object_id)
                 .eq(symbol_refs::dsl::from_object)),
         )
-        .filter(
-            parent_decls
-                .field(symbol_instances::dsl::offset_range)
-                .contains_range(symbol_refs::dsl::from_offset_range),
-        )
+        // Descendants by DFS interval; ranges cannot order what a macro
+        // generates, since it all shares one extent.
+        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
+            "parent_decls.dfs_enter < symbol_refs.dfs_enter \
+             AND symbol_refs.dfs_enter < parent_decls.dfs_exit",
+        ))
         .filter(
             parent_decls
                 .field(symbol_instances::dsl::id)

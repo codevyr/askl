@@ -9,7 +9,6 @@ use std::collections::Bound;
 pub struct SymbolType {
     pub id: i32,
     pub name: String,
-    pub level: i32,
     pub dot_is_separator: bool,
 }
 

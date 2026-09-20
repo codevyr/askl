@@ -214,7 +214,7 @@ pub(super) fn build_find_edges_cte_body(
     vis: &EphVisibility,
 ) -> diesel::query_builder::BoxedSelectStatement<
     'static,
-    (BigInt, BigInt, Integer, Int4range, BigInt),
+    (BigInt, BigInt, Integer, Int4range, BigInt, BigInt, BigInt),
     diesel::query_builder::FromClause<crate::schema_diesel::symbol_instances::table>,
     Pg,
 > {
@@ -232,6 +232,11 @@ pub(super) fn build_find_edges_cte_body(
             symbol_instances::object_id,
             symbol_instances::offset_range,
             symbol_instances::layer,
+            // The edges query joins refs by DFS interval, so `candidates` has
+            // to carry it.  Without these two the join could not resolve
+            // from_inst.dfs_enter and the query returned no edges at all.
+            symbol_instances::dfs_enter,
+            symbol_instances::dfs_exit,
         ))
         .into_boxed::<Pg>()
 }
@@ -345,7 +350,8 @@ where
               FROM candidates from_inst \
               JOIN index.symbol_refs sr \
                   ON sr.from_object = from_inst.object_id \
-                  AND from_inst.offset_range @> sr.from_offset_range \
+                  AND from_inst.dfs_enter < sr.dfs_enter \
+                  AND sr.dfs_enter < from_inst.dfs_exit \
               JOIN targets to_inst \
                   ON to_inst.symbol = sr.to_symbol \
               WHERE from_inst.id != to_inst.id \

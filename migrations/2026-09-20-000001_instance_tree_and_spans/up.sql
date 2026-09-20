@@ -76,3 +76,17 @@ CREATE INDEX symbol_instances_object_dfs_idx
 
 CREATE INDEX symbol_refs_object_dfs_idx
     ON index.symbol_refs (from_object, dfs_enter);
+
+-- 4. symbol_types.level is now unused.
+--
+-- It existed to decide containment: which of two instances was "broader", so
+-- the engine could tell a direct child from a grandchild.  Depth is carried
+-- per instance now, so a symbol type says only what a symbol IS, never how
+-- deeply it is nested -- and the number could never have expressed the thing
+-- it was asked to, since two symbols of the same type must be able to sit at
+-- different depths (a closure inside a function, a struct inside a function).
+--
+-- Its direction was never encoded either, which is how DirectOnlyMixin ran
+-- inverted for five months with a `type` parent referencing nothing at all.
+DROP INDEX IF EXISTS index.symbol_types_level_idx;
+ALTER TABLE index.symbol_types DROP COLUMN IF EXISTS level;
