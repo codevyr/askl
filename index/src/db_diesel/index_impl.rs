@@ -842,6 +842,21 @@ pub const DEFAULT_SQL_CACHE_BYTES: usize = 256 * 1024 * 1024;
 /// probe and read agree on what "too big" means; see `EphContext::read_cap`.
 pub const DEFAULT_READ_CAP: usize = 1000;
 
+/// Spacing between consecutive DFS numbers, and therefore the room every
+/// instance must leave between its own `dfs_enter` and `dfs_exit`.
+///
+/// This is free: each instance consumes a stride as it is numbered.  Query-time
+/// rows are numbered into that gap (see `insert_instance_level`), so an instance
+/// narrower than a stride cannot hold its own search matches — they land past
+/// its `dfs_exit` and silently stop being its descendants, because containment
+/// only ever reads the child's `dfs_enter`.
+///
+/// Stated as a producer law rather than as the ephemeral geometry's arithmetic:
+/// the previous constant was `2 + 127 * 8 = 1018`, a derived number that read
+/// like a bound and tied the upload contract to a runtime tuning choice.  The
+/// upload validator enforces this one so a new indexer cannot quietly lose it.
+pub const DFS_STRIDE: i64 = 1024;
+
 // ============================================================================
 // Ephemeral layer batch types
 // ============================================================================

@@ -17,7 +17,7 @@ pub use index_impl::{
     EphSymbolRow, EphTransaction, FamilyDemand, FamilyDemands, ImplicitEdge, Index, LayerBatch,
     LayerOutcome, MaterialisedLayer, NameSuggestionRow, ProbeOutcome, ProbeRole,
     ResolvedSourceFile, RootShardRef, ScopeContext, SearchMatchRow, ShardRole, DEFAULT_READ_CAP,
-    DEFAULT_SQL_CACHE_BYTES, EPH_POOL_IDLE_IN_TXN_TIMEOUT, EPH_POOL_RECYCLING_QUERY,
+    DEFAULT_SQL_CACHE_BYTES, DFS_STRIDE, EPH_POOL_IDLE_IN_TXN_TIMEOUT, EPH_POOL_RECYCLING_QUERY,
 };
 pub use mixins::{
     CompositeFilter, CompoundNameMixin, CurrentQuery, DefaultSymbolTypeMixin, DirectOnlyMixin,
