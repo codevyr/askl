@@ -58,6 +58,10 @@ INSERT INTO content_store (content_hash, content) VALUES
     -- extent every generated symbol shares.  Which of them owns an ephemeral
     -- row placed there is what the owner lookup has to decide.
     ('cs_coext',      E'COEXT_ATTR(wq9, cfg)\n'),
+    -- Object 14: `zk4` sits OUTSIDE every declaration, in the position a Go
+    -- import block or package clause occupies; `zk5` sits inside the function.
+    -- Both are inside the co-extensive module/directory/file chain.
+    ('cs_chain',      E'import zk4\nfunc h(){ zk5 }\n'),
     -- NESTED macros.  `k7z` sits inside MAC_IN, inside MAC_OUT, inside
     -- fn_host.  Its owner is MAC_IN (the narrowest container) at fold_depth 1,
     -- while the innermost NON-FOLDED container is fn_host at fold_depth 0 --
@@ -90,7 +94,8 @@ INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, con
     (10, 1, 'tail.c',    '/p1/tail.c',     'cc', 'cs_tail'),
     (11, 1, 'coext.c',   '/p1/coext.c',    'cc', 'cs_coext'),
     (12, 1, 'nestmac.c', '/p1/nestmac.c',  'cc', 'cs_nestmac'),
-    (13, 1, 'argown.c',  '/p1/argown.c',   'cc', 'cs_argown');
+    (13, 1, 'argown.c',  '/p1/argown.c',   'cc', 'cs_argown'),
+    (14, 1, 'chain.go',  '/p1/chain.go',   'go', 'cs_chain');
 
 -- Sentinel function symbols for objects 1-3 just so composite-filter tests
 -- have somewhere to attach.  Object 5 is intentionally left symbol-less to
@@ -113,7 +118,13 @@ INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope) VALUES
     -- Argument-ownership cluster.
     (23, 'h13',          1, 1, 2),
     (24, 'M13',          1, 7, 2),
-    (25, 'g13',          1, 1, 2);
+    (25, 'g13',          1, 1, 2),
+    -- Object 14's container chain: a module, a directory and a file, all
+    -- covering the whole object, plus one ordinary function inside.
+    (26, 'chain_mod',    1, 3, 2),
+    (27, '/p1',          1, 4, 2),
+    (28, '/p1/chain.go', 1, 2, 2),
+    (29, 'h14',          1, 1, 2);
 
 INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
     (110, 10, 1, int4range(0, 16),  1),
@@ -164,6 +175,28 @@ INSERT INTO symbol_instances
     (123, 23, 13, int4range(0, 27),  1, FALSE),  -- h13, the caller
     (124, 24, 13, int4range(15, 25), 3, TRUE),   -- M13 expansion, whole invocation
     (125, 25, 13, int4range(15, 25), 1, TRUE);   -- g13, generated, same extent
+
+-- Object 14: the CO-EXTENSIVE CONTAINER CHAIN every real file object carries --
+-- its module, its directory and the file itself, all covering [0, len).  Stated
+-- rather than derived, because `number_fixture_tree` ranks directories outermost
+-- while the clang and Go producers rank modules outermost; what matters here is
+-- only that the three are nested and share an extent.
+--
+--    enter  exit  lvl  type  range       symbol
+--     1024 10240   0    mod  [0,27)   chain_mod
+--     2048  9216   1    dir  [0,27)     /p1
+--     3072  8192   2   file  [0,27)       /p1/chain.go
+--     4096  5120   3   func  [11,26)        h14
+--
+-- `zk4` at [7,10) is inside the file but outside h14, so its owner is decided
+-- entirely by the chain -- which is the case this object exists for.
+INSERT INTO symbol_instances
+    (id, symbol, object_id, offset_range, instance_type,
+     dfs_enter, dfs_exit, nesting_level, folded, fold_depth) VALUES
+    (126, 26, 14, int4range(0, 27),  5, 1024, 10240, 0, FALSE, 0),
+    (127, 27, 14, int4range(0, 27),  5, 2048,  9216, 1, FALSE, 0),
+    (128, 28, 14, int4range(0, 27),  9, 3072,  8192, 2, FALSE, 0),
+    (129, 29, 14, int4range(11, 26), 1, 4096,  5120, 3, FALSE, 0);
 
 -- Project 2 section: switch the layer DEFAULT to project 2's root layer.
 ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000002;
