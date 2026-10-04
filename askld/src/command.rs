@@ -1104,7 +1104,19 @@ impl Command {
                     .await
                     .map_err(to_pest)?;
                 if instance_ids.is_empty() {
-                    None
+                    // RESOLVED TO NOTHING, which is not the same as having no
+                    // opinion.  `None` means transparent -- "derive me from a
+                    // neighbour, I have nothing to say" -- and a search that ran
+                    // and matched nothing has plenty to say: its parent cannot
+                    // contain a match either, so the parent must empty too.
+                    //
+                    // Every other selector already draws this distinction: a
+                    // name selector's `select_from_all_impl` returns
+                    // `Some(selection)` unconditionally, and `ForcedVerb` /
+                    // `UserVerb` return `Some(Selection::new())` explicitly.
+                    // This branch was the only one collapsing the two, which is
+                    // why `macro(X) { search("nosuchtext") }` still returned X.
+                    Some(Selection::new())
                 } else {
                     let ids: Vec<_> = instance_ids
                         .into_iter()

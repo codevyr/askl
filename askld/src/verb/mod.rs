@@ -1161,6 +1161,25 @@ pub trait Selector: std::fmt::Debug + Verb {
         children_scope: ScopeContext,
         demands: FamilyDemands,
     ) -> Result<Option<Selection>> {
+        // A layer-materialising command's selection comes from ITS OWN LAYER,
+        // never from a neighbour.  Its predicate is not expressible as SQL --
+        // `search` contributes no composite filter -- so the read below cannot
+        // honour it and returns the parent's children verbatim, presented as
+        // matches.  `macro("M") { search("x") }` came back as M's children.
+        //
+        // The command has already had its chance: Phase R runs
+        // `Command::compute_selection` for every statement under tree-complete
+        // visibility, and a scoped search is answered from its scope's byte
+        // ranges (`SearchSelector::fusion_scope`).  So no selection here means
+        // the search genuinely matched nothing in that scope, and NOTHING is
+        // the right answer -- fabricating one makes it a wrong answer whose
+        // wrongness depends on which side the planner resolved first.
+        //
+        // `Command::has_layer_spec` already gates the own-read path in
+        // `command.rs`; it belongs here too.
+        if self.has_layer_spec() {
+            return Ok(None);
+        }
         let parent_sel = match parent.get_selection(&ctx) {
             Some(selection) => selection,
             None => return Ok(None),
