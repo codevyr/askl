@@ -3909,6 +3909,54 @@ fn ephemeral_verb_outside_layer_block_fails() {
 }
 
 #[test]
+fn ephemeral_zero_width_span_is_rejected() {
+    // `int4range(n, n)` is EMPTY, and in Postgres `anyrange @> emptyrange` is
+    // TRUE — an empty range is contained by every range.  So a zero-width row's
+    // owner lookup matches every instance in the object and its `ORDER BY`
+    // hands it an arbitrary one, wherever in the file that sits; the row is
+    // then numbered into a stranger's gap.
+    //
+    // A row spanning no bytes has nothing to point at, so it is refused at the
+    // verb rather than placed somewhere meaningless.
+    for (what, q) in [
+        (
+            "instance",
+            concat!(
+                r#"layer { ephemeral_instance(symbol_id=1, object_id=1, "#,
+                r#"start=50000, end=50000, instance_type=1) }; "foo""#,
+            ),
+        ),
+        (
+            "ref",
+            concat!(
+                r#"layer { ephemeral_ref(to_symbol=1, from_object=1, "#,
+                r#"start=50000, end=50000) }; "foo""#,
+            ),
+        ),
+    ] {
+        let msg = match run_query_err(VERB_TEST, q) {
+            Err(e) => format!("{e:?}"),
+            Ok(_) => panic!("a zero-width {what} span must be refused"),
+        };
+        assert!(
+            msg.contains("end > start"),
+            "the {what} error should say what is wrong, got: {msg}"
+        );
+    }
+
+    // And a one-byte span is fine — the bound is `end > start`, not some
+    // minimum width.
+    const OK: &str = concat!(
+        r#"layer { ephemeral_instance(symbol_id=1, object_id=1, "#,
+        r#"start=50000, end=50001, instance_type=1) }; "foo""#,
+    );
+    assert!(
+        run_query_err(VERB_TEST, OK).is_ok(),
+        "a one-byte ephemeral instance is legitimate"
+    );
+}
+
+#[test]
 fn ephemeral_instance_is_queryable() {
     // Create an ephemeral instance for an existing symbol and verify
     // it appears when querying that symbol.
@@ -5386,6 +5434,88 @@ fn nested_search_in_search_does_not_compose() {
         ids.is_empty(),
         "the inner search constrains the outer away, got {:?}",
         ids,
+    );
+}
+
+#[test]
+fn every_match_in_a_crowded_object_stays_inside_its_owner() {
+    // 131 matches, all inside the single function instance covering
+    // /p1/many.c: scoping by that function must drop none of them.
+    //
+    // This began as a regression test for a slot-overflow bug -- the ordinal
+    // came from `UNNEST ... WITH ORDINALITY`, which numbers the whole BATCH,
+    // so with 8-wide slots the 128th row ran past `base + 1024` and landed
+    // inside a declaration it had nothing to do with.  Ephemeral instances are
+    // width-1 leaves now, which gives 1022 slots per owner and puts every slot
+    // inside the owner whatever picks the ordinal, so that overflow is
+    // unreachable and this no longer discriminates the ordinal choice.  It
+    // still pins the property that matters: no match is lost.
+    const ALL: &str = r#"search("zqx")"#;
+    const SCOPED: &str = r#"func("fn_many") { search("zqx") }"#;
+
+    let all = run_query(TEST_INPUT_SEARCH, ALL);
+    let scoped = run_query(TEST_INPUT_SEARCH, SCOPED);
+
+    let eph = |res: &crate::statement::ExecutionResult| -> usize {
+        res.nodes
+            .as_vec()
+            .iter()
+            .map(|id| <SymbolInstanceId as Into<i64>>::into(*id))
+            .filter(|id| *id < 0)
+            .count()
+    };
+
+    let all_matches = eph(&all);
+    assert!(
+        all_matches > 127,
+        "fixture must exceed the 127-slot grid to exercise the overflow, got {}",
+        all_matches,
+    );
+    assert_eq!(
+        eph(&scoped),
+        131,
+        "every one of many.c's 131 matches sits inside fn_many, so scoping by \
+         it must drop none",
+    );
+}
+
+#[test]
+fn a_lone_match_in_its_own_object_reaches_its_owner() {
+    // /p1/tail.c contributes a single match to the same `search("zqx")` batch
+    // that /p1/many.c fills with 131 -- a row that is not crowded by anything,
+    // merely late in the batch.
+    //
+    // Under the old 8-wide grid a batch-global ordinal gave it slot 132 and
+    // `base + 2 + 131*8` put it past the end of its own owner, in a file with
+    // nothing to do with the other matches.  Width-1 leaves removed that whole
+    // failure mode; what stays asserted is that upward derivation finds this
+    // row's owner, which is the half the crowded-object test cannot show.
+    // It has to be asked of the WIDE batch.  `func("fn_tail") { search("zqx") }`
+    // looks fine either way, because the scoped search materialises its own,
+    // much smaller batch in which tail.c's match is first again.  Deriving
+    // upward from the unscoped search is what consumes the 132-row batch.
+    const QUERY: &str = r#"{ search("zqx") }"#;
+    let res = run_query(TEST_INPUT_SEARCH, QUERY);
+
+    let persistent: Vec<i64> = res
+        .nodes
+        .as_vec()
+        .iter()
+        .map(|id| <SymbolInstanceId as Into<i64>>::into(*id))
+        .filter(|id| *id > 0)
+        .collect();
+
+    assert!(
+        persistent.contains(&114),
+        "fn_many contains many.c's matches, got {:?}",
+        persistent
+    );
+    assert!(
+        persistent.contains(&115),
+        "fn_tail contains tail.c's one match -- with a batch-global ordinal \
+         that row is numbered as if 131 rows preceded it under ITS owner and \
+         lands outside fn_tail entirely, got {:?}",
+        persistent
     );
 }
 
@@ -9910,5 +10040,66 @@ fn a_capped_provider_is_flagged_through_the_label_path() {
             .iter()
             .any(|w| w.message.contains("incomplete")),
         "an uncapped provider must not warn through the label"
+    );
+}
+
+#[test]
+fn a_macro_expansion_owns_no_text() {
+    // Every byte at the call site of `M13(zq8, c)` was typed by whoever wrote
+    // `h13` — the name, the parens, the argument.  The expansion owns the
+    // symbols it GENERATES, through the DFS interval, and no text at all.
+    //
+    // Object 13 is the realistic shape: the expansion's extent is the whole
+    // invocation `[15,25)` and the symbol it generates shares that extent, both
+    // `folded`.  So the narrowest extent containing `zq8` belongs to a macro,
+    // and ownership has to come from `NOT folded` instead — otherwise the
+    // argument text is attributed to compiler-generated code and drops out of
+    // the caller.
+    const UP: &str = r#"{ search("zq8") }"#;
+    let ids: Vec<i64> = run_query(TEST_INPUT_SEARCH, UP)
+        .nodes
+        .as_vec()
+        .iter()
+        .map(|id| <SymbolInstanceId as Into<i64>>::into(*id))
+        .collect();
+
+    assert!(
+        ids.contains(&123),
+        "the argument's owner is h13, the function whose author typed it, \
+         got {:?}",
+        ids
+    );
+    assert!(
+        !ids.contains(&124),
+        "not the expansion — it owns no text, got {:?}",
+        ids
+    );
+    assert!(
+        !ids.contains(&125),
+        "and certainly not the symbol the expansion generated, got {:?}",
+        ids
+    );
+}
+
+#[test]
+fn eph_match_in_nested_macros_still_belongs_to_the_caller() {
+    // Object 12: `k7z` sits in MAC_IN inside MAC_OUT inside fn_host, both macros
+    // folded.  Nesting macros changes nothing — the text is still the caller's,
+    // because neither expansion owns any.  This is the depth-2 case of
+    // `a_macro_expansion_owns_no_text`, and the one where an owner rule that
+    // merely copied the innermost container would diverge.
+    const UP: &str = r#"{ search("k7z") }"#;
+    let ids: Vec<i64> = run_query(TEST_INPUT_SEARCH, UP)
+        .nodes
+        .as_vec()
+        .iter()
+        .map(|id| <SymbolInstanceId as Into<i64>>::into(*id))
+        .collect();
+
+    assert!(ids.contains(&120), "fn_host owns the text, got {:?}", ids);
+    assert!(
+        !ids.contains(&121) && !ids.contains(&122),
+        "neither macro owns it, got {:?}",
+        ids
     );
 }

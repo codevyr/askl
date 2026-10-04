@@ -266,6 +266,30 @@ impl SymbolRef {
 /// Only available inside `layer { }` blocks.  Emits one row per
 /// resolved symbol — see [`SymbolRef`] for the multi-row semantic.
 ///
+/// Reject a degenerate byte range before it reaches the insert.
+///
+/// `int4range(n, n)` is **empty**, and in Postgres `anyrange @> emptyrange` is
+/// TRUE — so an empty range is "contained by" every instance in the object.
+/// The owner lookup then matches all of them and its `ORDER BY` hands the row
+/// an arbitrary owner, wherever in the file it happens to sit, and the row is
+/// numbered into that stranger's gap.
+///
+/// An instance or reference spanning no bytes has nothing to point at anyway,
+/// so refuse it here rather than place it somewhere meaningless.
+fn check_span(start: i64, end: i64, verb: &str) -> Result<()> {
+    if end <= start {
+        bail!(
+            "{} needs end > start (got start={}, end={}); a zero-width range is \
+             empty, and an empty range is contained by every instance in the \
+             object, so the row would be placed under an arbitrary owner",
+            verb,
+            start,
+            end
+        );
+    }
+    Ok(())
+}
+
 /// Usage: `ephemeral_instance(symbol_id=<id>, object_id=1,
 ///        start=0, end=10, instance_type=1)` for a literal
 ///        (single-row) input, or `symbol_id="@label"` for a
@@ -291,6 +315,7 @@ impl EphemeralInstanceVerb {
         let object_id = args.req_i32("object_id")?;
         let start = args.req_i64("start")?;
         let end = args.req_i64("end")?;
+        check_span(start, end, Self::NAME)?;
         let instance_type = args.req_i32("instance_type")?;
         if !(INSTANCE_TYPE_DEFINITION..=INSTANCE_TYPE_DOCUMENTATION).contains(&instance_type) {
             bail!(
@@ -380,6 +405,7 @@ impl EphemeralRefVerb {
         let from_object = args.req_i32("from_object")?;
         let start = args.req_i64("start")?;
         let end = args.req_i64("end")?;
+        check_span(start, end, Self::NAME)?;
 
         Ok(Self {
             to_symbol,

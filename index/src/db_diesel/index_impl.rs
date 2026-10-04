@@ -1,10 +1,7 @@
-use std::collections::BTreeMap;
-
 use anyhow::Result;
 use diesel::connection::SimpleConnection;
 use diesel::pg::{Pg, PgConnection};
 use diesel::prelude::*;
-use diesel::PgRangeExpressionMethods;
 use diesel_async::pooled_connection::bb8;
 use diesel_async::pooled_connection::{
     AsyncDieselConnectionManager, ManagerConfig, RecyclingMethod,
@@ -1775,7 +1772,7 @@ impl Index {
         // how many instances contain a node: in a co-extensive cluster every
         // member "contains" anything nested under any of them, which inflates
         // the count and breaks "a direct child is at depth + 1".
-        const SQL: &str = "WITH RECURSIVE ranked AS ( SELECT si.id, si.object_id, si.offset_range, si.folded, CASE st.name WHEN 'directory' THEN 0 WHEN 'module' THEN 1 WHEN 'file' THEN 2 ELSE 3 END AS kind_rank, row_number() OVER (PARTITION BY si.object_id ORDER BY lower(si.offset_range) NULLS FIRST, upper(si.offset_range) DESC NULLS LAST, CASE st.name WHEN 'directory' THEN 0 WHEN 'module' THEN 1 WHEN 'file' THEN 2 ELSE 3 END, si.id) AS pos FROM index.symbol_instances si JOIN index.symbols s ON s.id = si.symbol JOIN index.symbol_types st ON st.id = s.symbol_type ), parented AS ( SELECT r.id, r.object_id, r.pos, r.folded, (SELECT p.id FROM ranked p WHERE p.object_id = r.object_id AND p.pos < r.pos AND p.offset_range @> r.offset_range AND (p.offset_range <> r.offset_range OR p.kind_rank < r.kind_rank) ORDER BY p.pos DESC LIMIT 1) AS parent_id FROM ranked r ), walked AS ( SELECT id, object_id, pos, folded, 0 AS depth, 0 AS fold_depth FROM parented WHERE parent_id IS NULL UNION ALL SELECT c.id, c.object_id, c.pos, c.folded, w.depth + 1, w.fold_depth + CASE WHEN w.folded THEN 1 ELSE 0 END FROM parented c JOIN walked w ON c.parent_id = w.id ), bounds AS ( SELECT d.id, d.depth, d.fold_depth, d.pos, COALESCE(MIN(n.pos) FILTER (WHERE n.pos > d.pos AND n.depth <= d.depth), MAX(n.pos) + 1) AS subtree_end FROM walked d JOIN walked n ON n.object_id = d.object_id GROUP BY d.id, d.depth, d.fold_depth, d.pos ) UPDATE index.symbol_instances si SET nesting_level = b.depth, fold_depth = b.fold_depth, dfs_enter = b.pos * 1024, dfs_exit = b.subtree_end * 1024 - 1 FROM bounds b WHERE si.id = b.id AND si.dfs_exit = 0";
+        const SQL: &str = "WITH RECURSIVE ranked AS ( SELECT si.id, si.object_id, si.offset_range, si.folded, CASE st.name WHEN 'directory' THEN 0 WHEN 'module' THEN 1 WHEN 'file' THEN 2 ELSE 3 END AS kind_rank, row_number() OVER (PARTITION BY si.object_id ORDER BY lower(si.offset_range) NULLS FIRST, upper(si.offset_range) DESC NULLS LAST, CASE st.name WHEN 'directory' THEN 0 WHEN 'module' THEN 1 WHEN 'file' THEN 2 ELSE 3 END, si.id) AS pos FROM index.symbol_instances si JOIN index.symbols s ON s.id = si.symbol JOIN index.symbol_types st ON st.id = s.symbol_type ), parented AS ( SELECT r.id, r.object_id, r.pos, r.folded, (SELECT p.id FROM ranked p WHERE p.object_id = r.object_id AND p.pos < r.pos AND p.offset_range @> r.offset_range AND (p.offset_range <> r.offset_range OR p.kind_rank < r.kind_rank) ORDER BY p.pos DESC LIMIT 1) AS parent_id FROM ranked r ), walked AS ( SELECT id, object_id, pos, folded, 0 AS depth, 0 AS fold_depth FROM parented WHERE parent_id IS NULL UNION ALL SELECT c.id, c.object_id, c.pos, c.folded, w.depth + 1, w.fold_depth + CASE WHEN w.folded THEN 1 ELSE 0 END FROM parented c JOIN walked w ON c.parent_id = w.id ), bounds AS ( SELECT d.id, d.depth, d.fold_depth, d.pos, COALESCE(MIN(n.pos) FILTER (WHERE n.pos > d.pos AND n.depth <= d.depth), MAX(n.pos) + 1) AS subtree_end FROM walked d JOIN walked n ON n.object_id = d.object_id GROUP BY d.id, d.depth, d.fold_depth, d.pos ) UPDATE index.symbol_instances si SET nesting_level = b.depth, fold_depth = b.fold_depth, dfs_enter = b.pos * 1024, dfs_exit = b.subtree_end * 1024 FROM bounds b WHERE si.id = b.id AND si.dfs_exit = 0";
         connection
             .batch_execute(SQL)
             .map_err(|e| anyhow::anyhow!("Failed to number fixture tree: {}", e))
@@ -4332,41 +4329,25 @@ impl<'a> EphTransaction<'a> {
         if rows.is_empty() {
             return Ok(());
         }
-        use diesel::sql_types::{Array, BigInt, Integer};
-
         let layer_id = self.layer_id;
 
-        // Rows in one batch can nest in each other -- `search("a") { search("b") }`
-        // produces an outer match and an inner one inside it.  The owner lookup
-        // below is a LATERAL over rows that already EXIST, so it cannot see the
-        // rest of its own INSERT: inserted as one statement, the inner match
-        // would take the same owner as the outer and land beside it instead of
-        // inside, and a query for "the inner match within the outer" returns
-        // nothing.
+        // One statement for the whole batch.  An ephemeral instance is placed
+        // inside the innermost PERSISTENT instance containing it, so no row in
+        // the batch depends on another row in the batch and the insert order
+        // carries no meaning.
         //
-        // So insert outermost-first, one statement per level of nesting WITHIN
-        // the batch.  Rows at the same level cannot contain one another, so a
-        // single statement is safe, and every deeper level then sees the level
-        // above it already in place.
-        let mut levels: BTreeMap<usize, Vec<&EphInstanceRow>> = BTreeMap::new();
-        for row in rows {
-            let depth = rows
-                .iter()
-                .filter(|o| {
-                    o.object_id == row.object_id
-                        && (o.start, o.end) != (row.start, row.end)
-                        && o.start <= row.start
-                        && o.end >= row.end
-                })
-                .count();
-            levels.entry(depth).or_default().push(row);
-        }
-
-        for (_, level) in levels {
-            self.insert_instance_level(&level, project_id, layer_id)
-                .await?;
-        }
-        Ok(())
+        // This used to run outermost-first, one statement per level of nesting
+        // within the batch, so a `search("a") { search("b") }` inner match
+        // could be numbered inside the outer one.  That premise was wrong in
+        // two ways.  The two searches materialise into SEPARATE layers, so
+        // they were never in one batch to begin with; and letting one layer's
+        // row site another layer's row makes a CACHED layer's numbering depend
+        // on whichever query happened to populate it first.  Placement has to
+        // be a function of persistent data alone, which is what `si.layer > 0`
+        // in the owner lookup now enforces.
+        let refs: Vec<&EphInstanceRow> = rows.iter().collect();
+        self.insert_instance_level(&refs, project_id, layer_id)
+            .await
     }
 
     async fn insert_instance_level(
@@ -4393,31 +4374,114 @@ impl<'a> EphTransaction<'a> {
             //
             // Offsets start at +2 because +1 is where a ref of the same owner
             // sits, and an instance placed there would swallow the owner's own
-            // references.  Each row gets an 8-wide interval so it has room for
-            // children of its own, which fits ~127 ephemeral instances under
-            // one owner before the stride is exhausted.
+            // references.  The whole batch must fit in the gap between the
+            // owner and its first real child, which is one stride wide.
+            //
+            // The slot ordinal is therefore taken PER OWNER, not per batch.
+            // `WITH ORDINALITY` numbers 1..N across the entire UNNEST, so a
+            // fixed-width slot keyed on it overflows once the batch -- not the
+            // owner -- exceeds the stride: 200 matches in 200 DIFFERENT files
+            // was enough, and the late ones landed inside whichever real
+            // declaration happened to occupy that number.  Nothing detects it;
+            // the row simply reports as a descendant of a symbol it has no
+            // relation to.
+            //
+            // So partition by owner and clamp to what the gap holds:
+            //
+            //     slot  = min(row_number within owner, 1022)
+            //     enter = base + 1 + slot
+            //     exit  = base + 2 + slot
+            //
+            // AN EPHEMERAL INSTANCE IS A LEAF -- width 1, containing nothing.
+            // That is not a new limitation, it is already the case: a ref sits
+            // at `base + 1`, below every slot, and the `si.layer > 0` /
+            // `NOT si.folded` owner rules stop an ephemeral row owning another.
+            // `references.rs` requires `sr.dfs_enter < from_inst.dfs_exit`,
+            // which the old 8-wide slot already failed for its own refs.  So
+            // those 7 interior numbers were dead space.
+            //
+            // Making them leaves buys three things.  Capacity goes 127 -> 1022
+            // per owner, above DEFAULT_READ_CAP, so the clamp is unreachable in
+            // practice rather than a documented caveat.  `dfs_enter` stays
+            // unique per object for ephemeral rows too.  And LAMINARITY BECOMES
+            // AUTOMATIC: width-1 integer intervals cannot partially overlap,
+            // whatever picks the ordinal, so two rows under one owner from
+            // different batches are always siblings -- a property the old fixed
+            // grid provided only by construction, and which a batch-sized slot
+            // width destroyed when that was tried.
+            //
+            // Slot 1022 ends at `base + 1024`, exactly where the owner's first
+            // real child begins; strict containment excludes it, so nothing real
+            // is ever swallowed.  That also makes DFS_STRIDE the exact width an
+            // owner needs, rather than a derived 1018.  Past 1022 rows the slots
+            // repeat and those rows become siblings with equal intervals --
+            // already the rule for rows materialised independently.
+            //
+            // Nesting ephemeral rows is NOT what the spare width was for.  It
+            // needs sequenced materialisation -- an inner search scoped to an
+            // outer one, so the byte ranges genuinely nest and the layer chain
+            // keeps placement deterministic.  Inventing an order here would
+            // claim containment the bytes do not support.
+            //
+            // OWNERSHIP OF TEXT.  A byte belongs to the innermost instance
+            // containing it, with one exclusion: `NOT si.folded`.
+            //
+            // *A macro expansion owns no text.*  Every byte at the call site of
+            // `foo(a)` -- the name, the parens, the argument -- was typed by the
+            // CALLER.  The expansion owns the symbols it generates, through the
+            // DFS interval, and nothing else.  So the owner of a match anywhere
+            // inside `foo(a)` is the enclosing function, which is what makes
+            // `func("bar") { search("a") }` find it.
+            //
+            // That is also why the macro extent can be the whole invocation:
+            // extents describe which bytes an instance OCCUPIES and are only
+            // descriptive -- some instances (a ##-pasted name, a synthesised
+            // assert) have no natural byte range at all.  Ownership is the DFS
+            // interval, which no extent ever decides.
+            //
+            // Consequence, accepted: `macro("foo") { search(...) }` finds
+            // nothing, because none of that text is the macro's.
+            //
+            // Given the exclusion, the owner is always unfolded, so the
+            // `+ CASE WHEN own.folded` term below is provably zero.  It stays so
+            // the SQL states the rule -- a match is a child of its owner on
+            // every axis -- rather than leaning on an invariant enforced in the
+            // WHERE clause.
 
             "INSERT INTO index.symbol_instances \
                  (id, symbol, object_id, offset_range, instance_type, layer, \
                   nesting_level, dfs_enter, dfs_exit, folded, fold_depth) \
              SELECT nextval('index.eph_instance_id_seq'), \
-                    t.symbol_id, t.object_id, int4range(t.start_off, t.end_off), t.instance_type, $6, \
-                    COALESCE(own.nesting_level, 0) + 1, \
-                    COALESCE(own.dfs_enter, 0) + 2 + (t.ord - 1) * 8, \
-                    COALESCE(own.dfs_enter, 0) + 9 + (t.ord - 1) * 8, \
+                    s.symbol_id, s.object_id, int4range(s.start_off, s.end_off), s.instance_type, $6, \
+                    s.own_level + 1, \
+                    s.base + 1 + s.slot, \
+                    s.base + 2 + s.slot, \
                     FALSE, \
-                    COALESCE(own.fold_depth, 0) \
-             FROM UNNEST($1::int8[], $2::int4[], $3::int4[], $4::int4[], $5::int4[]) \
-             WITH ORDINALITY \
-             AS t(symbol_id, object_id, start_off, end_off, instance_type, ord) \
-             JOIN index.objects o ON o.id = t.object_id AND o.project_id = $7 \
-             LEFT JOIN LATERAL ( \
-                 SELECT si.nesting_level, si.dfs_enter, si.fold_depth \
-                 FROM index.symbol_instances si \
-                 WHERE si.object_id = t.object_id \
-                   AND si.offset_range @> int4range(t.start_off, t.end_off) \
-                 ORDER BY si.dfs_enter DESC LIMIT 1 \
-             ) own ON TRUE \
+                    s.own_fold \
+             FROM ( \
+                 SELECT t.symbol_id, t.object_id, t.start_off, t.end_off, t.instance_type, \
+                        COALESCE(own.nesting_level, 0) AS own_level, \
+                        COALESCE(own.dfs_enter, 0)     AS base, \
+                        COALESCE(own.fold_depth, 0) \
+                          + CASE WHEN own.folded THEN 1 ELSE 0 END AS own_fold, \
+                        LEAST(ROW_NUMBER() OVER w, 1022) AS slot \
+                 FROM UNNEST($1::int8[], $2::int4[], $3::int4[], $4::int4[], $5::int4[]) \
+                 WITH ORDINALITY \
+                 AS t(symbol_id, object_id, start_off, end_off, instance_type, ord) \
+                 JOIN index.objects o ON o.id = t.object_id AND o.project_id = $7 \
+                 LEFT JOIN LATERAL ( \
+                     SELECT si.nesting_level, si.dfs_enter, si.fold_depth, si.folded \
+                     FROM index.symbol_instances si \
+                     WHERE si.object_id = t.object_id \
+                       AND si.layer > 0 \
+                       AND NOT si.folded \
+                       AND si.offset_range @> int4range(t.start_off, t.end_off) \
+                     ORDER BY upper(si.offset_range) - lower(si.offset_range) ASC, \
+                              si.dfs_enter ASC LIMIT 1 \
+                 ) own ON TRUE \
+                 WINDOW w AS (PARTITION BY t.object_id, COALESCE(own.dfs_enter, 0) \
+                              ORDER BY t.start_off, t.end_off, t.ord) \
+             ) s \
              ON CONFLICT DO NOTHING"
         )
             .bind::<Array<BigInt>,  _>(&sym_ids)
@@ -4450,6 +4514,12 @@ impl<'a> EphTransaction<'a> {
         diesel::sql_query(
             // Same placement as ephemeral instances, except a ref is a point:
             // it sits one step inside its owner rather than taking an interval.
+            //
+            // Fold depth follows the same rule as an ephemeral instance's --
+            // `own.fold_depth + folded`, a child of its owner -- which is also
+            // how the indexer numbers persistent refs (`Stage1::insertRef` via
+            // `currentFoldDepth`).  See `insert_instance_level` for why a byte
+            // belongs to its visible span and nothing wider.
             "INSERT INTO index.symbol_refs \
                  (id, to_symbol, from_object, from_offset_range, layer, \
                   nesting_level, dfs_enter, folded, fold_depth) \
@@ -4459,15 +4529,19 @@ impl<'a> EphTransaction<'a> {
                     COALESCE(own.dfs_enter, 0) + 1, \
                     FALSE, \
                     COALESCE(own.fold_depth, 0) \
+                      + CASE WHEN own.folded THEN 1 ELSE 0 END \
              FROM UNNEST($1::int8[], $2::int4[], $3::int4[], $4::int4[]) \
              AS t(to_symbol, from_object, start_off, end_off) \
              JOIN index.objects o ON o.id = t.from_object AND o.project_id = $6 \
              LEFT JOIN LATERAL ( \
-                 SELECT si.nesting_level, si.dfs_enter, si.fold_depth \
+                 SELECT si.nesting_level, si.dfs_enter, si.fold_depth, si.folded \
                  FROM index.symbol_instances si \
                  WHERE si.object_id = t.from_object \
+                   AND si.layer > 0 \
+                   AND NOT si.folded \
                    AND si.offset_range @> int4range(t.start_off, t.end_off) \
-                 ORDER BY si.dfs_enter DESC LIMIT 1 \
+                 ORDER BY upper(si.offset_range) - lower(si.offset_range) ASC, \
+                          si.dfs_enter ASC LIMIT 1 \
              ) own ON TRUE \
              ON CONFLICT DO NOTHING",
         )
