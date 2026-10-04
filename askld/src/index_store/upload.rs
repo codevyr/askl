@@ -792,6 +792,181 @@ fn span_to_range(
     }
 }
 
+/// Check that one object's instances really form a tree under the DFS
+/// interval encoding, and that its refs sit inside it.
+///
+/// Containment is `parent.dfs_enter < child.dfs_enter < parent.dfs_exit`, and
+/// the engine reads only the CHILD's `dfs_enter`.  That makes a malformed tree
+/// invisible: a subtree that escapes its parent, a zero-width interval that
+/// can hold nothing, or a whole project left at the column defaults all give
+/// plausible-looking wrong answers rather than errors.  Both bugs found while
+/// converting the engine had exactly that shape, which is why this runs at
+/// upload instead of being assumed.
+///
+/// An index produced before the tree existed fails the very first check --
+/// every interval is [0, 0) -- so this doubles as the guard against an
+/// unnumbered project being served as an empty graph.
+fn validate_object_tree(object: &UploadObject) -> Result<(), UploadError> {
+    let bad = |msg: String| UploadError::Invalid(format!("object {}: {}", object.local_id, msg));
+
+    // (enter, exit, nesting_level, folded, fold_depth), outermost first.
+    // Sorting by exit DESC breaks ties so a parent precedes a child starting
+    // at the same number -- which the duplicate check then rejects anyway,
+    // but with the message that names the real problem.
+    let mut nodes: Vec<(i64, i64, i32, bool, i32)> = object
+        .symbol_instances
+        .iter()
+        .map(|i| {
+            (
+                i.dfs_enter,
+                i.dfs_exit,
+                i.nesting_level,
+                i.folded,
+                i.fold_depth,
+            )
+        })
+        .collect();
+    nodes.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+
+    let mut stack: Vec<(i64, i64, bool, i32)> = Vec::new(); // enter, exit, folded, fold_depth
+    let mut roots: Vec<(i64, i64)> = Vec::new(); // top-level intervals, disjoint and sorted
+    let mut prev_enter: Option<i64> = None;
+    for &(enter, exit, level, folded, fold_depth) in &nodes {
+        if exit <= enter {
+            return Err(bad(format!(
+                "instance interval [{}, {}) is empty, so it can never contain anything \
+                 (an index built before the containment tree leaves every interval at [0, 0))",
+                enter, exit
+            )));
+        }
+        // Non-empty is not enough.  Query-time rows are numbered into the gap
+        // above an owner's `dfs_enter`, so an owner narrower than one stride
+        // cannot hold its own search matches -- they land past its `dfs_exit`
+        // and silently stop being its descendants.  Numbering by stride gives
+        // this for free; a new producer must not lose it.
+        if exit - enter < index::db_diesel::DFS_STRIDE {
+            return Err(bad(format!(
+                "instance interval [{}, {}) is only {} wide; it must be at least {}, \
+                 or query-time rows placed inside it are numbered outside it",
+                enter,
+                exit,
+                exit - enter,
+                index::db_diesel::DFS_STRIDE,
+            )));
+        }
+        if prev_enter == Some(enter) {
+            return Err(bad(format!(
+                "two instances share dfs_enter {}; the DFS order must be total",
+                enter
+            )));
+        }
+        prev_enter = Some(enter);
+
+        while stack.last().is_some_and(|t| t.1 <= enter) {
+            stack.pop();
+        }
+        match stack.last() {
+            Some(&(p_enter, p_exit, p_folded, p_fold)) => {
+                if exit > p_exit {
+                    return Err(bad(format!(
+                        "instance [{}, {}) escapes its parent [{}, {}); \
+                         intervals must nest, never straddle",
+                        enter, exit, p_enter, p_exit
+                    )));
+                }
+                let want_fold = p_fold + i32::from(p_folded);
+                if fold_depth != want_fold {
+                    return Err(bad(format!(
+                        "instance [{}, {}) has fold_depth {}, expected {} from its parent \
+                         [{}, {}) (fold_depth {}, folded {})",
+                        enter, exit, fold_depth, want_fold, p_enter, p_exit, p_fold, p_folded
+                    )));
+                }
+            }
+            None => {
+                if fold_depth != 0 {
+                    return Err(bad(format!(
+                        "root instance [{}, {}) has fold_depth {}, expected 0",
+                        enter, exit, fold_depth
+                    )));
+                }
+            }
+        }
+        if level != stack.len() as i32 {
+            return Err(bad(format!(
+                "instance [{}, {}) has nesting_level {}, but sits {} levels deep",
+                enter,
+                exit,
+                level,
+                stack.len()
+            )));
+        }
+        if stack.is_empty() {
+            roots.push((enter, exit));
+        }
+        stack.push((enter, exit, folded, fold_depth));
+    }
+    // `nodes` is laminar and sorted now, so it can answer "which instance does
+    // this point sit innermost inside" for the ref checks below.
+    let owner_of = |p: i64| -> Option<(i64, i64, i32, bool, i32)> {
+        let mut best: Option<(i64, i64, i32, bool, i32)> = None;
+        for &n in &nodes {
+            if n.0 >= p {
+                break; // sorted by enter; nothing further can start below p
+            }
+            if p < n.1 && best.is_none_or(|b| n.0 > b.0) {
+                best = Some(n);
+            }
+        }
+        best
+    };
+
+    // A ref is a point in the same order, and it has to fall inside SOME
+    // instance.  Test it against the top-level intervals rather than against
+    // the nearest instance below it: the nearest one may have closed before
+    // the ref while an ancestor is still open, and a ref legitimately sits
+    // there (`A[0,5120) > B[1024,2048)`, ref at 3000 -- inside A, after B).
+    //
+    // Checking the roots is exact, because the family is laminar by now: a ref
+    // inside any instance is inside that instance's root, and a ref inside a
+    // root is inside at least that root.  Roots are disjoint and sorted, so
+    // the one candidate is the last root starting below the ref.
+    for r in &object.refs {
+        let idx = roots.partition_point(|(enter, _)| *enter < r.dfs_enter);
+        let inside = idx > 0 && r.dfs_enter < roots[idx - 1].1;
+        if !inside {
+            return Err(bad(format!(
+                "ref at dfs_enter {} lies outside every instance interval",
+                r.dfs_enter
+            )));
+        }
+        // Its depth has to agree with the instance its NUMBER puts it in.
+        // These come from different places in a producer -- the clang indexer
+        // takes an expansion-site ref's position from the macro it landed in
+        // but its level from whatever scope was open -- so they can silently
+        // disagree, and `nested` reads the level.
+        let (o_enter, o_exit, o_level, o_folded, o_fold) =
+            owner_of(r.dfs_enter).expect("a ref that passed the interval test has an owner");
+        if r.nesting_level != o_level + 1 {
+            return Err(bad(format!(
+                "ref at dfs_enter {} says nesting_level {}, but its interval puts it \
+                 inside [{}, {}) at level {}",
+                r.dfs_enter, r.nesting_level, o_enter, o_exit, o_level
+            )));
+        }
+        let want_fold = o_fold + i32::from(o_folded);
+        if r.fold_depth != want_fold {
+            return Err(bad(format!(
+                "ref at dfs_enter {} says fold_depth {}, expected {} from its owner \
+                 [{}, {}) (fold_depth {}, folded {})",
+                r.dfs_enter, r.fold_depth, want_fold, o_enter, o_exit, o_fold, o_folded
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn build_symbol_instances(
     project_id: i32,
     root_layer_id: i64,
@@ -801,6 +976,7 @@ fn build_symbol_instances(
     let mut rows = Vec::new();
     for object in objects {
         let object_id = resolve_object_id(object_map, object.local_id)?;
+        validate_object_tree(object)?;
         for instance in &object.symbol_instances {
             let symbol_id = compute_symbol_id(project_id, instance.symbol_local_id)?;
             let instance_type = if instance.instance_type != 0 {
@@ -905,7 +1081,8 @@ mod tests {
 
     use super::{
         build_objects, build_symbol_instances, build_symbol_refs, build_symbols, compute_symbol_id,
-        resolve_object_id, validate_instance_type, validate_symbol_type, validate_type,
+        resolve_object_id, validate_instance_type, validate_object_tree, validate_symbol_type,
+        validate_type,
     };
 
     // --- validate_type ---
@@ -1139,12 +1316,17 @@ mod tests {
 
     // --- build_symbol_instances ---
 
+    /// A lone instance, numbered as its object's root.  `validate_object_tree`
+    /// rejects the column defaults, so even a one-instance fixture has to be a
+    /// well-formed tree.
     fn inst(symbol_local_id: i64, instance_type: i32, start: i32, end: i32) -> SymbolInstance {
         SymbolInstance {
             symbol_local_id,
             instance_type,
             start_offset: start,
             end_offset: end,
+            dfs_enter: 0,
+            dfs_exit: 1024,
             ..Default::default()
         }
     }
@@ -1253,9 +1435,26 @@ mod tests {
             start: 115,
             end: 400,
         });
+        // `i` sits two levels down, so it needs the two ancestors that put it
+        // there -- `validate_object_tree` rejects a depth the tree cannot
+        // justify.  It stays first so the assertions below still read rows[0].
         let object = UploadObject {
             local_id: 1,
-            symbol_instances: vec![i],
+            symbol_instances: vec![
+                i,
+                {
+                    let mut root = inst(11, 1, 0, 500);
+                    root.dfs_exit = 8192;
+                    root
+                },
+                {
+                    let mut mid = inst(12, 1, 50, 450);
+                    mid.nesting_level = 1;
+                    mid.dfs_enter = 1024;
+                    mid.dfs_exit = 6144;
+                    mid
+                },
+            ],
             ..Default::default()
         };
         let obj_map = HashMap::from([(1i64, 100i32)]);
@@ -1407,6 +1606,199 @@ mod tests {
         };
         let obj_map = HashMap::from([(1i64, 1i32)]);
         assert!(build_symbol_refs(1, 1000001, &[object], &obj_map).is_err());
+    }
+
+    // --- validate_object_tree ---
+
+    /// One node of a containment tree: (enter, exit, nesting_level, folded,
+    /// fold_depth).  Offsets are irrelevant here -- containment is the DFS
+    /// interval now, not the source range.
+    fn node(enter: i64, exit: i64, level: i32, folded: bool, fold_depth: i32) -> SymbolInstance {
+        SymbolInstance {
+            symbol_local_id: 1,
+            dfs_enter: enter,
+            dfs_exit: exit,
+            nesting_level: level,
+            folded,
+            fold_depth,
+            ..Default::default()
+        }
+    }
+
+    fn tree(instances: Vec<SymbolInstance>) -> UploadObject {
+        UploadObject {
+            local_id: 1,
+            symbol_instances: instances,
+            ..Default::default()
+        }
+    }
+
+    /// file [0,5120) > func [1024,4096) > nested [2048,3072).
+    ///
+    /// Widths are multiples of the persistent stride, as a real producer's
+    /// are: every instance has to leave `DFS_STRIDE` of room for the
+    /// query-time rows that may be slotted inside it.
+    fn good_tree() -> UploadObject {
+        tree(vec![
+            node(0, 5120, 0, false, 0),
+            node(1024, 4096, 1, false, 0),
+            node(2048, 3072, 2, false, 0),
+        ])
+    }
+
+    #[test]
+    fn validate_object_tree_accepts_a_well_formed_tree() {
+        assert!(validate_object_tree(&good_tree()).is_ok());
+    }
+
+    #[test]
+    fn validate_object_tree_accepts_siblings() {
+        let object = tree(vec![
+            node(0, 4096, 0, false, 0),
+            node(1024, 2048, 1, false, 0),
+            node(2048, 3072, 1, false, 0),
+        ]);
+        assert!(validate_object_tree(&object).is_ok());
+    }
+
+    #[test]
+    fn validate_object_tree_rejects_an_unnumbered_index() {
+        // Every column at its default: what an index built before the
+        // containment tree looks like.  Served as-is it is an empty graph
+        // with no error anywhere, which is what this check exists for.
+        let object = tree(vec![node(0, 0, 0, false, 0), node(0, 0, 0, false, 0)]);
+        let err = validate_object_tree(&object).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("can never contain anything"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_object_tree_rejects_an_escaping_subtree() {
+        // The engine tests only the CHILD's dfs_enter, so a subtree that
+        // starts inside its parent and ends outside is accepted at query time
+        // and quietly wrong.
+        let object = tree(vec![
+            node(0, 4096, 0, false, 0),
+            node(1024, 3072, 1, false, 0),
+            node(2048, 3500, 2, false, 0),
+        ]);
+        let err = validate_object_tree(&object).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("escapes its parent"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_object_tree_rejects_a_wrong_nesting_level() {
+        let mut object = good_tree();
+        object.symbol_instances[2].nesting_level = 1;
+        let err = validate_object_tree(&object).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("nesting_level"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_object_tree_rejects_a_wrong_fold_depth() {
+        // Marking the parent as macro-generated puts its child one fold
+        // deeper.  Getting this wrong is what put __compiletime_assert_1121
+        // into `mod("amdgpu") { func }`.
+        let mut object = good_tree();
+        object.symbol_instances[1].folded = true;
+        let err = validate_object_tree(&object).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("fold_depth"),
+            "unexpected error: {err:?}"
+        );
+
+        object.symbol_instances[2].fold_depth = 1;
+        assert!(validate_object_tree(&object).is_ok());
+    }
+
+    #[test]
+    fn validate_object_tree_rejects_duplicate_dfs_enter() {
+        let object = tree(vec![
+            node(0, 5120, 0, false, 0),
+            node(1024, 3072, 1, false, 0),
+            node(1024, 2048, 1, false, 0),
+        ]);
+        let err = validate_object_tree(&object).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("share dfs_enter"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_object_tree_rejects_an_interval_too_narrow_for_query_time_rows() {
+        // Non-empty but narrower than the ephemeral slot grid.  A search match
+        // inside this instance would be numbered past its dfs_exit and stop
+        // being its descendant -- the same silent wrongness as an empty
+        // interval, which is why it is the same kind of rejection.
+        let object = tree(vec![
+            node(0, 5120, 0, false, 0),
+            node(1024, 1500, 1, false, 0),
+        ]);
+        let err = validate_object_tree(&object).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("is only 476 wide"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_object_tree_rejects_a_ref_outside_every_interval() {
+        let mut object = good_tree();
+        object.refs = vec![SymbolRef {
+            to_symbol_local_id: 1,
+            dfs_enter: 0, // never numbered
+            ..Default::default()
+        }];
+        let err = validate_object_tree(&object).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("outside every instance interval"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_object_tree_accepts_a_ref_after_a_closed_sibling() {
+        // good_tree is [0,5120) > [1024,4096) > [2048,3072).  A ref at 4000
+        // comes after [2048,3072) has closed, but is still inside [1024,4096),
+        // so it is valid.  Testing it against the NEAREST instance below it
+        // rejects it; testing it against the top-level intervals does not.
+        //
+        // The clang indexer never emits this shape -- its refs sit at
+        // `scope.dfs_enter + 1`, always in the scope that just opened -- so
+        // only a different producer would hit it.  That is exactly why it is
+        // checked here rather than assumed.
+        let mut object = good_tree();
+        object.refs = vec![SymbolRef {
+            to_symbol_local_id: 1,
+            dfs_enter: 4000,
+            nesting_level: 2, // one past its owner, the level-1 instance
+            ..Default::default()
+        }];
+        assert!(
+            validate_object_tree(&object).is_ok(),
+            "a ref inside an ancestor, after a closed sibling, is valid"
+        );
+    }
+
+    #[test]
+    fn validate_object_tree_accepts_a_ref_inside_its_scope() {
+        let mut object = good_tree();
+        object.refs = vec![SymbolRef {
+            to_symbol_local_id: 1,
+            dfs_enter: 1025,  // one past the func's dfs_enter, where Stage1 puts it
+            nesting_level: 2, // and therefore one level below it
+            ..Default::default()
+        }];
+        assert!(validate_object_tree(&object).is_ok());
     }
 }
 
