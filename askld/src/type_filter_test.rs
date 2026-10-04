@@ -459,3 +459,99 @@ fn bare_any_propagates_the_absence_of_a_type() {
         "a grandchild under `any` must not inherit the function filter, got {nodes:?}"
     );
 }
+
+// --- nested: exactly one structural level ---------------------------------
+//
+// The third traversal mode, and the only reader of `nesting_level`.  Where
+// the default reaches every descendant at the same FOLD depth -- through the
+// structural levels, so `mod { func }` works -- `nested` reaches every
+// descendant at the next NESTING level, which is the one question the other
+// two modes cannot ask.
+//
+// The mode belongs to the statement whose reach it bounds: for downward
+// derivation that is the statement INSIDE the braces, which is why these read
+// `file("file_x") { nested }` rather than `file("file_x") nested { }`.
+
+#[test]
+fn nested_reaches_exactly_one_structural_level() {
+    // file_x sits at nesting_level 1, so `nested` admits level 2 and nothing
+    // deeper: the two functions, but not what they contain.
+    const QUERY: &str = r#"file("file_x") { nested }"#;
+    let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
+    let nodes = res.nodes.as_vec();
+
+    assert!(nodes.contains(&SymbolInstanceId::new(103)), "func_a");
+    assert!(nodes.contains(&SymbolInstanceId::new(104)), "func_b");
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(106)),
+        "data_d is two levels down, so `nested` stops short of it"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(105)),
+        "macro_m is two levels down"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(107)),
+        "data_macro_only is three levels down"
+    );
+}
+
+#[test]
+fn nested_is_narrower_than_the_default_and_the_default_narrower_than_unnest() {
+    // The same scope in all three modes, so the widening is visible in one
+    // place.  data_d is the discriminator between `nested` and the default:
+    // it is two levels below file_x but at the SAME fold depth, so the
+    // default reaches it and `nested` does not.  data_macro_only is the
+    // discriminator between the default and `unnest`: it sits behind
+    // macro_m's fold boundary.
+    let ids = |q: &str| {
+        run_query(TEST_INPUT_TYPE_FILTER, q)
+            .nodes
+            .as_vec()
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+    };
+
+    let nested = ids(r#"file("file_x") { nested }"#);
+    let default = ids(r#"file("file_x") { }"#);
+    let unnest = ids(r#"file("file_x") { unnest }"#);
+
+    assert!(
+        nested.is_subset(&default) && default.is_subset(&unnest),
+        "the three modes must widen monotonically\nnested: {:?}\ndefault: {:?}\nunnest: {:?}",
+        nested,
+        default,
+        unnest
+    );
+    assert!(
+        default.contains(&SymbolInstanceId::new(106))
+            && !nested.contains(&SymbolInstanceId::new(106)),
+        "data_d separates `nested` from the default"
+    );
+    assert!(
+        unnest.contains(&SymbolInstanceId::new(107))
+            && !default.contains(&SymbolInstanceId::new(107)),
+        "data_macro_only separates the default from `unnest`"
+    );
+}
+
+#[test]
+fn nested_upward_returns_only_the_immediate_container() {
+    // Upward, the default surfaces the whole ancestor chain (see
+    // has_parent_innermost_only).  `nested` asks for just the one container
+    // data_d literally sits in.
+    const QUERY: &str = r#"nested { "data_d" }"#;
+    let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
+    let nodes = res.nodes.as_vec();
+
+    assert!(nodes.contains(&SymbolInstanceId::new(103)), "func_a");
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(102)),
+        "file_x is two levels up, and `nested` is one"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(101)),
+        "dir_root is three levels up"
+    );
+}

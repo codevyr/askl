@@ -15,7 +15,7 @@ use core::fmt::Debug;
 use index::db_diesel::FamilyDemands;
 use index::db_diesel::{
     CompositeFilter, EphContext, Index, InnermostOnlyMixin, ScopeContext, Selection,
-    SymbolInstanceIdMixin,
+    SymbolInstanceIdMixin, TraversalMode,
 };
 use index::symbols::SymbolInstanceId;
 use sha2::{Digest, Sha256};
@@ -141,7 +141,8 @@ pub(crate) fn fuse_predicate(
 pub struct Command {
     /// Filters and anchors — the truth-valued aspect.
     predicate: Vec<Arc<dyn Verb>>,
-    /// `unnest` marker (`has`/`refs`/`derive` are consumed at parse time).
+    /// `unnest` / `nested` markers (`has`/`refs`/`derive` are consumed at
+    /// parse time).
     relationship: Vec<Arc<dyn Verb>>,
     /// Label plumbing: `label`/`@x` definitions, `use`/`#x` references.
     bindings: Vec<Arc<dyn Verb>>,
@@ -358,9 +359,17 @@ impl Command {
         self.selectors().any(|s| s.has_layer_spec())
     }
 
-    /// Whether the `unnest` marker is present.
-    pub fn has_unnest(&self) -> bool {
-        self.relationship.iter().any(|v| v.is_unnest())
+    /// How far this command's scope reaches into the containment tree.
+    ///
+    /// Unfolded unless a traversal marker says otherwise.  Markers do not
+    /// combine: the last one written wins, which is what makes
+    /// `unnest nested` a typo rather than a puzzle.
+    pub fn traversal_mode(&self) -> TraversalMode {
+        self.relationship
+            .iter()
+            .filter_map(|v| v.traversal_mode())
+            .next_back()
+            .unwrap_or(TraversalMode::Unfolded)
     }
 
     pub fn is_unit(&self) -> bool {
@@ -621,7 +630,7 @@ impl Command {
         notifier_weak: bool,
         role: DependencyRole,
         rel_type: RelationshipType,
-        unnest: bool,
+        mode: TraversalMode,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
         demands: FamilyDemands,
@@ -663,8 +672,8 @@ impl Command {
             if derivation_ids.is_none() {
                 let child_ids = dependency.get_instance_ids();
                 let mut find_parts: Vec<CompositeFilter> = vec![];
-                if !unnest {
-                    find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new()));
+                if mode != TraversalMode::Unnest {
+                    find_parts.push(CompositeFilter::leaf(InnermostOnlyMixin::new(mode)));
                 }
                 // M4: carry the receiver's predicate into the derive read; it
                 // is extracted through the dedicated `compose_derive_*` channel.

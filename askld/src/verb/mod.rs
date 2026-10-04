@@ -12,7 +12,7 @@ use index::db_diesel::FamilyDemands;
 use index::db_diesel::{
     CompositeFilter, DirectOnlyMixin, EphContext, EphScopedFut, EphTransaction, Index,
     OuterParentFilterMixin, RootLayer, RootShardRef, ScopeContext, Selection,
-    SymbolInstanceIdMixin,
+    SymbolInstanceIdMixin, TraversalMode,
 };
 
 /// Root-shard populate callback used by [`LayerSpec`].  Called by the
@@ -327,7 +327,7 @@ pub fn build_verb(
         // construct a preamble is FOR.  Anchoring alone would reject
         // `filter("compound_name", "test")`, a name filter that legitimately
         // scopes every statement in the query.  Being a selector alone would
-        // reject `scope(...)` and `unnest`, modifiers that are selectors but
+        // reject `scope(...)`, `unnest` and `nested`, modifiers that are selectors but
         // never originate a row.  A verb that is both — `"foo"`, `func("foo")`,
         // `search(...)`, `loc(...)`, a layer literal, `select` — is a
         // statement's reason to exist, and a preamble is not a statement.
@@ -421,7 +421,8 @@ pub enum VerbClass {
     /// slated for removal with the filter-expressions work).
     Predicate,
     /// Relationship-mode modifiers: `has`, `refs`, `derive` (consumed at
-    /// parse time) and `unnest` (a marker read via [`Verb::is_unnest`]).
+    /// parse time) and the traversal markers `unnest` / `nested` (read via
+    /// [`Verb::traversal_mode`]).
     Relationship,
     /// Label plumbing: `label`/`@x` define, `use`/`#x` consume.  `use` is
     /// operationally a selector (it holds execution state), which is why
@@ -464,7 +465,7 @@ pub enum Dimension {
 
 /// Bundles the notification parameters that always travel together through
 /// the notification chain: dependency role, resolved relationship type, and
-/// whether the receiver uses unnest mode.
+/// how far into the containment tree the receiver's scope reaches.
 ///
 /// `Copy` dropped along with `DependencyRole::PreSeedLabel(Rc<str>)` —
 /// the label string can't be a static type.  Most call sites passed
@@ -474,7 +475,7 @@ pub enum Dimension {
 pub struct NotificationContext {
     pub role: DependencyRole,
     pub rel_type: RelationshipType,
-    pub unnest: bool,
+    pub mode: TraversalMode,
 }
 
 /// What kind of anchor a verb contributes (see [`Verb::anchor_kind`]).
@@ -567,9 +568,11 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
         Ok(false)
     }
 
-    /// Whether this verb is the `unnest` marker (transitive traversal).
-    fn is_unnest(&self) -> bool {
-        false
+    /// The traversal mode this verb marks, if it is one of the markers.
+    /// `unnest` reaches every descendant, `nested` exactly one structural
+    /// level; everything else leaves the scope at its default (unfolded).
+    fn traversal_mode(&self) -> Option<TraversalMode> {
+        None
     }
 
     fn is_unit(&self) -> bool {
@@ -1165,8 +1168,8 @@ pub trait Selector: std::fmt::Debug + Verb {
         let parent_ids = parent_sel.get_instance_ids();
         let eph = &ctx.eph;
         let mut find_parts: Vec<CompositeFilter> = vec![];
-        if !notif_ctx.unnest {
-            find_parts.push(CompositeFilter::leaf(DirectOnlyMixin::new()));
+        if notif_ctx.mode != TraversalMode::Unnest {
+            find_parts.push(CompositeFilter::leaf(DirectOnlyMixin::new(notif_ctx.mode)));
             find_parts.push(CompositeFilter::leaf(OuterParentFilterMixin::new(
                 &parent_ids,
             )));

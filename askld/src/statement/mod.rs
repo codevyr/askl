@@ -13,7 +13,7 @@ use crate::scope::{Scope, StatementIter};
 use crate::verb::{name_filter, weak_notifier_blocks, LabelResolutions, NotificationContext};
 use anyhow::Result;
 use core::fmt::Debug;
-use index::db_diesel::{CompositeFilter, EphContext, ScopeContext, Selection};
+use index::db_diesel::{CompositeFilter, EphContext, ScopeContext, Selection, TraversalMode};
 use index::symbols::{FileId, Occurrence, SymbolId, SymbolInstanceId};
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
@@ -288,16 +288,21 @@ pub struct Statement {
     /// - Refs (default): Reference-based traversal (calls)
     /// - Has: Containment-based traversal (composition)
     pub relationship_type: RelationshipType,
-    /// Whether this statement uses unnest mode for scope derivation.
-    /// When false (default), derive_from_parent filters to direct children only
-    /// and upward HAS derivation returns only innermost parents.
-    /// When true (unnest verb), all transitive levels are included.
-    pub unnest: bool,
+    /// How far this statement's scope reaches into the containment tree.
+    /// Unfolded by default: descendants with no fold boundary between.
+    /// `nested` narrows it to one structural level, `unnest` widens it to
+    /// every level.  The same knob drives upward HAS derivation.
+    pub mode: TraversalMode,
 }
 
 impl Statement {
     pub fn new(command: Command, scope: Rc<dyn Scope>) -> Rc<Statement> {
-        Statement::new_full(command, scope, RelationshipType::REFS, false)
+        Statement::new_full(
+            command,
+            scope,
+            RelationshipType::REFS,
+            TraversalMode::Unfolded,
+        )
     }
 
     pub fn new_with_relationship(
@@ -305,14 +310,14 @@ impl Statement {
         scope: Rc<dyn Scope>,
         relationship_type: RelationshipType,
     ) -> Rc<Statement> {
-        Statement::new_full(command, scope, relationship_type, false)
+        Statement::new_full(command, scope, relationship_type, TraversalMode::Unfolded)
     }
 
     pub fn new_full(
         command: Command,
         scope: Rc<dyn Scope>,
         relationship_type: RelationshipType,
-        unnest: bool,
+        mode: TraversalMode,
     ) -> Rc<Statement> {
         Rc::new(Statement {
             command,
@@ -320,12 +325,12 @@ impl Statement {
             parent: RefCell::new(None),
             execution_state: RefCell::new(ExecutionState::new()),
             relationship_type,
-            unnest,
+            mode,
         })
     }
 
-    pub fn is_unnest(&self) -> bool {
-        self.unnest
+    pub fn traversal_mode(&self) -> TraversalMode {
+        self.mode
     }
 
     pub fn get_relationship_type(&self) -> RelationshipType {
@@ -1772,7 +1777,7 @@ impl Statement {
             // Use the notifying child's relationship type (all siblings share it).
             let rel_type = self.get_relationship_type();
 
-            let unnest = dependent.statement.is_unnest();
+            let mode = dependent.statement.traversal_mode();
             let parent_scope = build_parent_scope(&dependent.statement, ctx, &ctx.eph);
             let demands = build_family_demands(&dependent.statement);
             // The children scope stays the UNION of the participants' ids.
@@ -1807,7 +1812,7 @@ impl Statement {
                         *child_weak,
                         DependencyRole::Parent,
                         rel_type,
-                        unnest,
+                        mode,
                         parent_scope.clone(),
                         children_scope.clone(),
                         demands,
@@ -1840,7 +1845,7 @@ impl Statement {
         let notif_ctx = NotificationContext {
             role: dependent.dependency_role.clone(),
             rel_type,
-            unnest: dependent.statement.is_unnest(),
+            mode: dependent.statement.traversal_mode(),
         };
         let parent_scope = build_parent_scope(&dependent.statement, ctx, &ctx.eph);
         let children_scope = build_children_scope(&dependent.statement, ctx, &ctx.eph);

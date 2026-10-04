@@ -3,6 +3,7 @@ use crate::parser_context::ParserContext;
 use crate::span::Span;
 use crate::verb::Args;
 use anyhow::{anyhow, bail, Result};
+use index::db_diesel::TraversalMode;
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -178,8 +179,9 @@ impl Display for DeriveModifier {
 }
 
 /// UnnestModifier - opts in to full transitive traversal for scope derivation.
-/// Without unnest, `{ }` shows only direct children and top-level references.
-/// With `unnest`, all levels are included (original behavior).
+/// Without it, `{ }` reaches descendants at the same fold depth: through the
+/// structural levels (module, directory, file) but not into what a macro
+/// generated.  With `unnest`, every level is included.
 #[derive(Debug)]
 pub(in crate::verb) struct UnnestModifier {
     span: Span,
@@ -211,14 +213,63 @@ impl Verb for UnnestModifier {
         DeriveMethod::Skip
     }
 
-    fn is_unnest(&self) -> bool {
-        true
+    fn traversal_mode(&self) -> Option<TraversalMode> {
+        Some(TraversalMode::Unnest)
     }
 }
 
 impl Display for UnnestModifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "UnnestModifier")
+    }
+}
+
+/// NestedModifier - narrows a scope to exactly one structural level.
+///
+/// `foo { printk nested { } }` shows what sits one level inside the `printk`
+/// expansion: one level, unlike `unnest`, and through the fold, unlike the
+/// default. It is the only reader of `nesting_level`, and the only way to ask
+/// a question the other two modes cannot express — "what does this macro
+/// expand to, immediately".
+#[derive(Debug)]
+pub(in crate::verb) struct NestedModifier {
+    span: Span,
+}
+
+impl NestedModifier {
+    pub(in crate::verb) const NAME: &'static str = "nested";
+
+    pub fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+        args.accepts(0, &[])?;
+        Ok(Arc::new(Self { span }))
+    }
+}
+
+impl Verb for NestedModifier {
+    fn name(&self) -> &str {
+        NestedModifier::NAME
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn class(&self) -> VerbClass {
+        VerbClass::Relationship
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Skip
+    }
+
+    fn traversal_mode(&self) -> Option<TraversalMode> {
+        Some(TraversalMode::Nested)
+    }
+}
+
+impl Display for NestedModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NestedModifier")
     }
 }
 
