@@ -44,6 +44,33 @@ INSERT INTO content_store (content_hash, content) VALUES
     ('cs_boundary',   E'foobar foo foo_bar foo.bar\n'),
     ('cs_mixedcase',  E'Foo FOO foo\n'),
     ('cs_docless',    E'doc-only content with foo here\n'),
+    -- 131 matches inside ONE owner: more than the 127 slots the ephemeral
+    -- grid fits in the stride between an owner and its first real child.
+    -- Exercises the per-owner slot ordinal; with a batch-global ordinal the
+    -- rows past 127 were numbered outside their own container.
+    ('cs_many',       convert_to(repeat(E'zqx\n', 131), 'UTF8')),
+    -- ONE match, in a DIFFERENT object, in the same search batch.  Its owner
+    -- holds a single ephemeral row, so any per-owner numbering places it in
+    -- the first slot; a batch-global ordinal gives it the 132nd.
+    ('cs_tail',       E'tail zqx here\n'),
+    -- A co-extensive cluster, the PMU_FORMAT_ATTR shape.  `wq9` sits in the
+    -- macro ARGUMENTS, outside the macro's clamped name range but inside the
+    -- extent every generated symbol shares.  Which of them owns an ephemeral
+    -- row placed there is what the owner lookup has to decide.
+    ('cs_coext',      E'COEXT_ATTR(wq9, cfg)\n'),
+    -- NESTED macros.  `k7z` sits inside MAC_IN, inside MAC_OUT, inside
+    -- fn_host.  Its owner is MAC_IN (the narrowest container) at fold_depth 1,
+    -- while the innermost NON-FOLDED container is fn_host at fold_depth 0 --
+    -- the only shape where those two differ, and so the only shape that can
+    -- tell the two fold-depth rules apart.
+    --   offsets: OUT(IN(k7z)) = [15,27), IN(k7z) = [19,26), k7z = [22,25)
+    ('cs_nestmac',    E'int host(void){OUT(IN(k7z));}\n'),
+    -- The realistic macro shape, with the generated symbol marked FOLDED as the
+    -- indexer marks it.  `zq8` is a macro ARGUMENT -- text the author of h13
+    -- typed -- so its owner must be h13, not the expansion and not the symbol
+    -- the expansion generated.  A macro expansion owns no text.
+    --   offsets: M13(zq8,c) = [15,25), zq8 = [19,22)
+    ('cs_argown',     E'void h13(void){M13(zq8,c);}\n'),
     ('cs_binary',     E'\\xfffefa666f6f0bff'::bytea),
     -- Cross-project shared content: hash referenced by an object in each
     -- project.  Exercises the (content_hash, project_id) constraint that
@@ -58,7 +85,12 @@ INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, con
     (3, 1, 'boundary.c', '/p1/boundary.c', 'cc', 'cs_boundary'),
     -- Same cs_shared content_hash in both projects; the per-project search
     -- must return only the project's object.
-    (7, 1, 'shared.h',   '/p1/shared.h',   'cc', 'cs_shared');
+    (7, 1, 'shared.h',   '/p1/shared.h',   'cc', 'cs_shared'),
+    (9, 1, 'many.c',     '/p1/many.c',     'cc', 'cs_many'),
+    (10, 1, 'tail.c',    '/p1/tail.c',     'cc', 'cs_tail'),
+    (11, 1, 'coext.c',   '/p1/coext.c',    'cc', 'cs_coext'),
+    (12, 1, 'nestmac.c', '/p1/nestmac.c',  'cc', 'cs_nestmac'),
+    (13, 1, 'argown.c',  '/p1/argown.c',   'cc', 'cs_argown');
 
 -- Sentinel function symbols for objects 1-3 just so composite-filter tests
 -- have somewhere to attach.  Object 5 is intentionally left symbol-less to
@@ -66,12 +98,72 @@ INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, con
 INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope) VALUES
     (10, 'fn_basic',    1, 1, 1),
     (11, 'fn_multi',    1, 1, 1),
-    (12, 'fn_boundary', 1, 1, 1);
+    (12, 'fn_boundary', 1, 1, 1),
+    (14, 'fn_many',     1, 1, 1),
+    (15, 'fn_tail',     1, 1, 1),
+    -- Co-extensive cluster: a macro plus the three symbols it generates.
+    (16, 'COEXT_ATTR',   1, 7, 2),
+    (17, 'coext_show',   1, 1, 2),
+    (18, 'coext_assert', 1, 1, 2),
+    (19, 'coext_attr',   1, 6, 2),
+    -- Nested-macro cluster.
+    (20, 'fn_host',      1, 1, 2),
+    (21, 'MAC_OUT',      1, 7, 2),
+    (22, 'MAC_IN',       1, 7, 2),
+    -- Argument-ownership cluster.
+    (23, 'h13',          1, 1, 2),
+    (24, 'M13',          1, 7, 2),
+    (25, 'g13',          1, 1, 2);
 
 INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
     (110, 10, 1, int4range(0, 16),  1),
     (111, 11, 2, int4range(0, 12),  1),
-    (112, 12, 3, int4range(0, 27),  1);
+    (112, 12, 3, int4range(0, 27),  1),
+    (114, 14, 9, int4range(0, 524), 1),
+    (115, 15, 10, int4range(0, 14), 1);
+
+-- Object 11: the co-extensive cluster, numbered BY HAND because this is exactly
+-- the shape ranges cannot express.  The macro is clamped to its own name, so its
+-- extent is NARROWER than the symbols it owns -- the deliberate inversion the
+-- DFS interval exists for.  `number_fixture_tree` leaves already-numbered rows
+-- alone, so every instance of this object carries explicit numbers.
+--
+--   enter  exit depth fold  extent      symbol
+--    1024 10240   0     0   [0,21)      COEXT_ATTR   (folded: the boundary)
+-- The macro's extent is the WHOLE INVOCATION, as the un-clamped indexer emits
+-- it.  That is load-bearing for scoped search: `macro(...) { search(...) }`
+-- fuses the macro's byte ranges into the scan's corpus, so a name-only extent
+-- would exclude the argument text and the search would correctly find nothing.
+--    2048  5120   1     1   [0,21)        coext_show
+--    3072  4096   2     1   [0,21)          coext_assert
+--    6144  7168   1     1   [0,21)        coext_attr
+INSERT INTO symbol_instances
+    (id, symbol, object_id, offset_range, instance_type,
+     dfs_enter, dfs_exit, nesting_level, folded, fold_depth) VALUES
+    (116, 16, 11, int4range(0, 21), 3, 1024, 10240, 0, TRUE,  0),
+    (117, 17, 11, int4range(0, 21), 1, 2048,  5120, 1, FALSE, 1),
+    (118, 18, 11, int4range(0, 21), 2, 3072,  4096, 2, FALSE, 1),
+    (119, 19, 11, int4range(0, 21), 1, 6144,  7168, 1, FALSE, 1);
+
+-- Object 12: nested macros.  Ranges nest properly here, so
+-- `number_fixture_tree` derives the whole tree -- including fold_depth, which
+-- it accumulates from the `folded` flags below.  Leaving dfs_exit at 0 is what
+-- opts these rows into that pass.
+INSERT INTO symbol_instances
+    (id, symbol, object_id, offset_range, instance_type, folded) VALUES
+    (120, 20, 12, int4range(0, 29),  1, FALSE),  -- fn_host, fold_depth 0
+    (121, 21, 12, int4range(15, 27), 3, TRUE),   -- MAC_OUT, folded, fold_depth 0
+    (122, 22, 12, int4range(19, 26), 3, TRUE);   -- MAC_IN,  folded, fold_depth 1
+
+-- Object 13: a macro invocation inside a function, with the expansion and the
+-- symbol it generates both FOLDED -- what the indexer really produces.  The
+-- expansion's extent is the whole invocation (un-clamped), which is exactly why
+-- ownership must come from `NOT folded` rather than from the narrowest extent.
+INSERT INTO symbol_instances
+    (id, symbol, object_id, offset_range, instance_type, folded) VALUES
+    (123, 23, 13, int4range(0, 27),  1, FALSE),  -- h13, the caller
+    (124, 24, 13, int4range(15, 25), 3, TRUE),   -- M13 expansion, whole invocation
+    (125, 25, 13, int4range(15, 25), 1, TRUE);   -- g13, generated, same extent
 
 -- Project 2 section: switch the layer DEFAULT to project 2's root layer.
 ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000002;
