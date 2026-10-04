@@ -58,7 +58,7 @@ WITH eph AS ( \
           AND NOT si.folded \
           AND si.offset_range @> e.offset_range \
         ORDER BY upper(si.offset_range) - lower(si.offset_range) ASC, \
-                 si.dfs_enter ASC LIMIT 1 \
+                 si.nesting_level DESC, si.dfs_enter ASC LIMIT 1 \
     ) o ON TRUE \
 ) \
 SELECT id, object_id, offset_range::text AS rng, \

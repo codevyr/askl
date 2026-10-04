@@ -10044,6 +10044,60 @@ fn a_capped_provider_is_flagged_through_the_label_path() {
 }
 
 #[test]
+fn eph_owner_is_the_innermost_instance_in_the_tree() {
+    // Which persistent instance owns a query-time row, when several share one
+    // extent.  ONE law, the same one both indexers use to place a persistent
+    // ref: the innermost unfolded instance containing it -- narrowest extent,
+    // then deepest in the tree.  The same bytes get the same owner whether the
+    // row is a stored reference or a query-time match.
+    //
+    // "Deepest" and not "outermost", which is what this ordering used to say.
+    // Outermost was chosen when the only co-extensive clusters in sight were
+    // macro-generated -- picking the deepest there meant picking a compiler
+    // helper.  But every real file object also carries a co-extensive CHAIN,
+    // its module and directory and itself, and there outermost is the module:
+    // it numbers a match in a file's import block below its own file's
+    // interval, out of reach of `file { ... }` in every traversal mode (see
+    // `a_search_match_outside_every_declaration_is_reachable_from_its_file`).
+    //
+    // Keeping compiler helpers from owning user text is the FOLD axis's job --
+    // `AND NOT si.folded`, pinned by `a_macro_expansion_owns_no_text` -- not the
+    // tie-break's.  Fixture object 11 predates that rule and still models the
+    // generated cluster as unfolded, which is why it exercises this tie at all.
+    const SHOW: &str = r#"func("coext_show") { search("wq9") }"#;
+    const ASSERT: &str = r#"func("coext_assert") { search("wq9") }"#;
+    const ATTR: &str = r#"data("coext_attr") { search("wq9") }"#;
+
+    let eph = |q: &str| -> Vec<i64> {
+        run_query(TEST_INPUT_SEARCH, q)
+            .nodes
+            .as_vec()
+            .iter()
+            .map(|id| <SymbolInstanceId as Into<i64>>::into(*id))
+            .filter(|id| *id < 0)
+            .collect()
+    };
+
+    // Object 11: coext_show [0,21) level 1 contains coext_assert [0,21) level 2;
+    // coext_attr [0,21) level 1 is their sibling.  The owner is coext_assert.
+    assert_eq!(
+        eph(ASSERT).len(),
+        1,
+        "the innermost of the co-extensive tie owns the match"
+    );
+    assert_eq!(
+        eph(SHOW).len(),
+        1,
+        "and it stays reachable from the owner's ancestors -- containment is \
+         transitive, so a deeper owner widens reach rather than narrowing it"
+    );
+    assert!(
+        eph(ATTR).is_empty(),
+        "but not from a SIBLING of the owner, which contains nothing of it"
+    );
+}
+
+#[test]
 fn a_macro_expansion_owns_no_text() {
     // Every byte at the call site of `M13(zq8, c)` was typed by whoever wrote
     // `h13` — the name, the parens, the argument.  The expansion owns the
@@ -10101,6 +10155,65 @@ fn eph_match_in_nested_macros_still_belongs_to_the_caller() {
         !ids.contains(&121) && !ids.contains(&122),
         "neither macro owns it, got {:?}",
         ids
+    );
+}
+
+#[test]
+fn a_search_match_outside_every_declaration_is_reachable_from_its_file() {
+    // Every real file object carries a CO-EXTENSIVE container chain -- its
+    // module, its directory and the file itself, all covering [0, len).  A
+    // search match outside every declaration (a Go import block, a package
+    // clause, a comment between functions) has all three as candidate owners,
+    // and the eph owner lookup breaks that tie with `si.dfs_enter ASC`: the
+    // OUTERMOST one.
+    //
+    // So the row is numbered at `module.dfs_enter + 1`, which is not merely at
+    // the wrong depth -- it is BELOW the file's interval entirely.  No traversal
+    // mode can recover it, because every mode starts from the interval range and
+    // only adds an equality: `unnest` drops the depth predicate and still asks
+    // `file.dfs_enter < row.dfs_enter < file.dfs_exit`.
+    //
+    // Object 14: mod [1024,10240) > dir [2048,9216) > file [3072,8192) > h14
+    // [4096,5120).  `zk4` is outside h14, `zk5` inside it.
+    let eph = |q: &str| -> usize {
+        run_query(TEST_INPUT_SEARCH, q)
+            .nodes
+            .as_vec()
+            .iter()
+            .map(|id| <SymbolInstanceId as Into<i64>>::into(*id))
+            .filter(|id| *id < 0)
+            .count()
+    };
+
+    // The control: a match inside a function is owned by that function, which
+    // is genuinely inside the file, so every form works.
+    assert_eq!(eph(r#"search("zk5")"#), 1, "the match exists at all");
+    assert_eq!(
+        eph(r#"func("h14") { search("zk5") }"#),
+        1,
+        "a match inside a declaration is owned by it"
+    );
+    assert_eq!(
+        eph(r#"file("/p1/chain.go") { search("zk5") }"#),
+        1,
+        "and reachable from the file, through the function"
+    );
+
+    // The case under test.  All three of these ask the same interval question
+    // of the same row, so they agree -- which is the point: `unnest` is not a
+    // way out.
+    assert_eq!(eph(r#"search("zk4")"#), 1, "the match exists at all");
+    let scoped = eph(r#"file("/p1/chain.go") { search("zk4") }"#);
+    let unnested = eph(r#"file("/p1/chain.go") { unnest search("zk4") }"#);
+    let nested = eph(r#"file("/p1/chain.go") { nested search("zk4") }"#);
+    assert_eq!(
+        (scoped, unnested, nested),
+        (1, 1, 1),
+        "a match in its own file must be reachable from that file in every \
+         traversal mode; got scoped={scoped} unnest={unnested} nested={nested}. \
+         Equal-but-zero means the row was numbered outside the file's interval, \
+         which is a PLACEMENT bug -- the owner tie-break took the outermost of \
+         the co-extensive chain -- and no mode can work around it."
     );
 }
 

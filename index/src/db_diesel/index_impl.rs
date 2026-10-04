@@ -4477,7 +4477,7 @@ impl<'a> EphTransaction<'a> {
                        AND NOT si.folded \
                        AND si.offset_range @> int4range(t.start_off, t.end_off) \
                      ORDER BY upper(si.offset_range) - lower(si.offset_range) ASC, \
-                              si.dfs_enter ASC LIMIT 1 \
+                              si.nesting_level DESC, si.dfs_enter ASC LIMIT 1 \
                  ) own ON TRUE \
                  WINDOW w AS (PARTITION BY t.object_id, COALESCE(own.dfs_enter, 0) \
                               ORDER BY t.start_off, t.end_off, t.ord) \
@@ -4541,7 +4541,7 @@ impl<'a> EphTransaction<'a> {
                    AND NOT si.folded \
                    AND si.offset_range @> int4range(t.start_off, t.end_off) \
                  ORDER BY upper(si.offset_range) - lower(si.offset_range) ASC, \
-                          si.dfs_enter ASC LIMIT 1 \
+                          si.nesting_level DESC, si.dfs_enter ASC LIMIT 1 \
              ) own ON TRUE \
              ON CONFLICT DO NOTHING",
         )
