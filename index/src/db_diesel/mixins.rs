@@ -1607,19 +1607,55 @@ impl FilterLeaf for ProjectFilterMixin {
     }
 }
 
-/// DirectOnlyMixin — filters children/has_children to "direct" only.
+/// How far a scope reaches into the containment tree.
+///
+/// All three are the same DFS-interval range scan with one extra equality;
+/// none of them recurses and none of them needs an anti-join.  The interval
+/// itself (`parent.dfs_enter < child.dfs_enter < parent.dfs_exit`) comes from
+/// the base query, so these only say WHICH descendants count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraversalMode {
+    /// `nested` — exactly one structural level down, folding ignored.
+    /// The only reader of `nesting_level`.
+    Nested,
+    /// The default — descendants with no fold boundary strictly between.
+    /// Structural levels (module, directory, file) are transparent; a macro
+    /// expansion is not.
+    Unfolded,
+    /// `unnest` — every descendant, at any depth.
+    Unnest,
+}
+
+impl TraversalMode {
+    /// One byte per mode, for cache keys.  Two modes that render different
+    /// SQL must never share a layer hash.
+    fn tag(self) -> u8 {
+        match self {
+            TraversalMode::Nested => b'N',
+            TraversalMode::Unfolded => b'U',
+            TraversalMode::Unnest => b'*',
+        }
+    }
+}
+
+/// DirectOnlyMixin — bounds children/has_children to one scope's reach.
+///
+/// Only constructed for [`TraversalMode::Nested`] and
+/// [`TraversalMode::Unfolded`]; `unnest` is the absence of this filter.
 #[derive(Debug, Clone)]
-pub struct DirectOnlyMixin;
+pub struct DirectOnlyMixin {
+    mode: TraversalMode,
+}
 
 impl DirectOnlyMixin {
-    pub fn new() -> Self {
-        Self
+    pub fn new(mode: TraversalMode) -> Self {
+        Self { mode }
     }
 }
 
 impl Default for DirectOnlyMixin {
     fn default() -> Self {
-        Self::new()
+        Self::new(TraversalMode::Unfolded)
     }
 }
 
@@ -1629,23 +1665,25 @@ impl FilterLeaf for DirectOnlyMixin {
         // between.  The base query already restricts to descendants via the DFS
         // interval, so this is one equality on the fold depth.
         //
-        // Strict depth+1 would be `nesting_level = parent + 1`, but that is not
-        // the default: with module -> directory -> file -> declarations a real
-        // chain, a module's children are FILES, and `mod { func }` would be
-        // empty.  Folding is what separates "where a symbol sits" from "which
-        // levels are interesting", so traversal passes through the structural
-        // levels and stops at macro expansions.
+        // Strict depth+1 is what `nested` asks for, and it is NOT the default:
+        // with module -> directory -> file -> declarations a real chain, a
+        // module's children are FILES, and `mod { func }` would be empty.
+        // Folding is what separates "where a symbol sits" from "which levels
+        // are interesting", so traversal passes through the structural levels
+        // and stops at macro expansions.
         //
         // The `+ CASE WHEN folded` term is what lets `mod { macro { func } }`
         // step exactly one level past a fold on purpose.
-        Some(Box::new(
-            EphSqlFragment::<Bool>::builder()
-                .sql(
-                    "contained_instances.fold_depth = symbol_instances.fold_depth \
-                     + CASE WHEN symbol_instances.folded THEN 1 ELSE 0 END",
-                )
-                .build(),
-        ))
+        let sql = match self.mode {
+            TraversalMode::Nested => {
+                "contained_instances.nesting_level = symbol_instances.nesting_level + 1"
+            }
+            TraversalMode::Unfolded | TraversalMode::Unnest => {
+                "contained_instances.fold_depth = symbol_instances.fold_depth \
+                 + CASE WHEN symbol_instances.folded THEN 1 ELSE 0 END"
+            }
+        };
+        Some(Box::new(EphSqlFragment::<Bool>::builder().sql(sql).build()))
     }
 
     fn children_expr(&self, _vis: &EphVisibility) -> Option<ChildrenBoolExpr> {
@@ -1658,19 +1696,23 @@ impl FilterLeaf for DirectOnlyMixin {
         // NOT EXISTS over range containment, measured at 2.3-5.5s on
         // mod("amdgpu") and uncostable by the planner, which estimates every
         // range predicate at rows=1.
-        Some(Box::new(
-            EphSqlFragment::<Bool>::builder()
-                .sql(
-                    "symbol_refs.fold_depth = parent_decls.fold_depth \
-                     + CASE WHEN parent_decls.folded THEN 1 ELSE 0 END",
-                )
-                .build(),
-        ))
+        let sql = match self.mode {
+            TraversalMode::Nested => "symbol_refs.nesting_level = parent_decls.nesting_level + 1",
+            TraversalMode::Unfolded | TraversalMode::Unnest => {
+                "symbol_refs.fold_depth = parent_decls.fold_depth \
+                 + CASE WHEN parent_decls.folded THEN 1 ELSE 0 END"
+            }
+        };
+        Some(Box::new(EphSqlFragment::<Bool>::builder().sql(sql).build()))
     }
 
     fn hash_into(&self, h: &mut Sha256) {
-        // EphContext is ephemeral state, excluded by contract.
+        // EphContext is ephemeral state, excluded by contract.  The mode is
+        // NOT: `nested` and the default render different SQL, so sharing a
+        // cache entry between them would return one mode's answer for the
+        // other.
         h.update(b"DirectOnly");
+        h.update([self.mode.tag()]);
     }
 
     fn is_chain_dependent(&self) -> bool {
@@ -1686,19 +1728,21 @@ impl FilterLeaf for DirectOnlyMixin {
     }
 }
 
-/// InnermostOnlyMixin — filters has_parents to innermost container only.
+/// InnermostOnlyMixin — the parent-side counterpart of [`DirectOnlyMixin`].
 #[derive(Debug, Clone)]
-pub struct InnermostOnlyMixin;
+pub struct InnermostOnlyMixin {
+    mode: TraversalMode,
+}
 
 impl InnermostOnlyMixin {
-    pub fn new() -> Self {
-        Self
+    pub fn new(mode: TraversalMode) -> Self {
+        Self { mode }
     }
 }
 
 impl Default for InnermostOnlyMixin {
     fn default() -> Self {
-        Self::new()
+        Self::new(TraversalMode::Unfolded)
     }
 }
 
@@ -1708,20 +1752,46 @@ impl FilterLeaf for InnermostOnlyMixin {
         // between them and the symbol.  NOT strictly one level up -- a bare
         // `{"a"}` is expected to surface the whole chain (the enclosing
         // function, its file, its directory), which is what the structural
-        // levels being transparent means on the parent side.
-        Some(Box::new(
-            EphSqlFragment::<Bool>::builder()
-                .sql(
-                    "symbol_instances.fold_depth = container_instances.fold_depth \
-                     + CASE WHEN container_instances.folded THEN 1 ELSE 0 END",
-                )
-                .build(),
-        ))
+        // levels being transparent means on the parent side.  `nested` is the
+        // way to ask for exactly the one level up.
+        let sql = match self.mode {
+            TraversalMode::Nested => {
+                "symbol_instances.nesting_level = container_instances.nesting_level + 1"
+            }
+            TraversalMode::Unfolded | TraversalMode::Unnest => {
+                "symbol_instances.fold_depth = container_instances.fold_depth \
+                 + CASE WHEN container_instances.folded THEN 1 ELSE 0 END"
+            }
+        };
+        Some(Box::new(EphSqlFragment::<Bool>::builder().sql(sql).build()))
+    }
+
+    fn parents_expr(&self, _vis: &EphVisibility) -> Option<ParentsBoolExpr> {
+        // The reference side of the same question, and the exact mirror of
+        // DirectOnlyMixin::children_expr: which of the instances enclosing
+        // this reference count as its container.
+        //
+        // Without it the upward refs read is unbounded, so `{ "data_d" }`
+        // returns every instance the reference sits inside -- the function,
+        // its file, its directory -- no matter what mode was asked for.  That
+        // was invisible while both modes keyed on fold depth, since a
+        // reference and every structural level above it share one; `nested`
+        // is the first mode for which the levels differ.
+        let sql = match self.mode {
+            TraversalMode::Nested => "symbol_refs.nesting_level = parent_decls.nesting_level + 1",
+            TraversalMode::Unfolded | TraversalMode::Unnest => {
+                "symbol_refs.fold_depth = parent_decls.fold_depth \
+                 + CASE WHEN parent_decls.folded THEN 1 ELSE 0 END"
+            }
+        };
+        Some(Box::new(EphSqlFragment::<Bool>::builder().sql(sql).build()))
     }
 
     fn hash_into(&self, h: &mut Sha256) {
-        // EphContext is ephemeral state, excluded by contract.
+        // EphContext is ephemeral state, excluded by contract; the mode is not
+        // (see DirectOnlyMixin::hash_into).
         h.update(b"InnermostOnly");
+        h.update([self.mode.tag()]);
     }
 
     fn is_chain_dependent(&self) -> bool {

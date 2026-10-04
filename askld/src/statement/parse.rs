@@ -102,8 +102,8 @@ pub fn build_statement<'a>(
         }
     }
     let relationship_type = sub_ctx.get_relationship_type();
-    let unnest = command.has_unnest();
-    let statement = Statement::new_full(command, scope.clone(), relationship_type, unnest);
+    let mode = command.traversal_mode();
+    let statement = Statement::new_full(command, scope.clone(), relationship_type, mode);
     scope.set_parent(Rc::downgrade(&statement));
 
     Ok(statement)
