@@ -10103,3 +10103,128 @@ fn eph_match_in_nested_macros_still_belongs_to_the_caller() {
         ids
     );
 }
+
+#[test]
+fn a_scoped_search_is_restricted_to_its_scope_byte_ranges() {
+    // `macro(X) { search(Y) }` fuses X's byte ranges into the scan's CORPUS
+    // (`SearchSelector`'s `fusion_scope` -> `resolve_scope_object_ranges`), so a
+    // scoped search is answered from the scope's text and nothing else.
+    //
+    // That makes an instance's EXTENT load-bearing for search, not merely
+    // descriptive.  Object 11's `COEXT_ATTR` covers the whole invocation
+    // `[0,21)`, as the un-clamped indexer emits it, so `wq9` at `[11,14)` is in
+    // its corpus and the match comes back.  While the extent was clamped to the
+    // name `[0,11)` this returned nothing -- correctly, since the text was
+    // outside the scope -- and that empty result was then overwritten by the
+    // derive path with the macro's children, which is the actual bug (W10).
+    let eph = |q: &str| -> usize {
+        run_query(TEST_INPUT_SEARCH, q)
+            .nodes
+            .as_vec()
+            .iter()
+            .map(|id| <SymbolInstanceId as Into<i64>>::into(*id))
+            .filter(|id| *id < 0)
+            .count()
+    };
+
+    assert_eq!(
+        eph(r#"macro("COEXT_ATTR") { search("wq9") }"#),
+        1,
+        "the argument text is inside the macro's extent, so it is in its corpus"
+    );
+    assert_eq!(
+        eph(r#"func("coext_show") { search("wq9") }"#),
+        1,
+        "and inside the generated symbol's extent too"
+    );
+    assert_eq!(
+        eph(r#"func("fn_tail") { search("wq9") }"#),
+        0,
+        "but not in an unrelated object's -- the scope really does bound the corpus"
+    );
+}
+
+#[test]
+fn a_layer_materialising_command_never_derives_its_selection() {
+    // The fabrication bug: when a `search` had no selection,
+    // `Command::derive_from_parent` ran a read that cannot express the search
+    // predicate (`search` contributes no composite filter) and handed back the
+    // PARENT'S CHILDREN as if they were matches.
+    //
+    // `macro("COEXT_ATTR") { search("nosuchtext") }` is the shape: the macro
+    // resolves, the search correctly matches nothing in its scope, and the
+    // result must not then contain the macro's children 117/118/119.
+    //
+    // It was order-dependent, which is what made it serious: whichever side the
+    // planner resolved first decided whether you got matches or fabrications.
+    const QUERY: &str = r#"macro("COEXT_ATTR") { search("nosuchtext") }"#;
+    let ids: Vec<i64> = run_query(TEST_INPUT_SEARCH, QUERY)
+        .nodes
+        .as_vec()
+        .iter()
+        .map(|id| <SymbolInstanceId as Into<i64>>::into(*id))
+        .collect();
+
+    for fabricated in [117i64, 118, 119] {
+        assert!(
+            !ids.contains(&fabricated),
+            "instance {} is a child of the macro, not a text match, got {:?}",
+            fabricated,
+            ids
+        );
+    }
+    assert!(
+        !ids.iter().any(|id| *id < 0),
+        "and no ephemeral row either -- nothing matched, got {:?}",
+        ids
+    );
+}
+
+#[test]
+fn an_empty_search_empties_its_parent_like_any_other_empty_child() {
+    // "Resolved to nothing" and "no opinion" are different things, and the
+    // layer-read path used to collapse them.  `None` from a selector means
+    // transparent -- derive me from a neighbour, I have nothing to say -- so an
+    // empty search left its parent unconstrained:
+    //
+    //   macro("COEXT_ATTR") { func("nonexistent_zzz") }  ->  []     correct
+    //   macro("COEXT_ATTR") { search("nosuchtext") }     ->  [116]  wrong
+    //
+    // A search that ran and matched nothing has plenty to say: its parent
+    // cannot contain a match either.  Both forms must agree, and the parallel
+    // persistent queries are in here so the test states the symmetry rather
+    // than just the fixed value.
+    let ids = |q: &str| -> Vec<i64> {
+        run_query(TEST_INPUT_SEARCH, q)
+            .nodes
+            .as_vec()
+            .iter()
+            .map(|id| <SymbolInstanceId as Into<i64>>::into(*id))
+            .collect()
+    };
+
+    for (persistent, layer) in [
+        (
+            r#"macro("COEXT_ATTR") { func("nonexistent_zzz") }"#,
+            r#"macro("COEXT_ATTR") { search("nosuchtext") }"#,
+        ),
+        (
+            r#"func("coext_show") { func("nonexistent_zzz") }"#,
+            r#"func("coext_show") { search("nosuchtext") }"#,
+        ),
+    ] {
+        assert!(
+            ids(persistent).is_empty(),
+            "an empty persistent child empties its parent: {} -> {:?}",
+            persistent,
+            ids(persistent)
+        );
+        assert_eq!(
+            ids(layer),
+            ids(persistent),
+            "and an empty layer child must do the same: {} -> {:?}",
+            layer,
+            ids(layer)
+        );
+    }
+}
