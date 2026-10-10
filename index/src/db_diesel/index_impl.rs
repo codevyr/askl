@@ -4413,9 +4413,26 @@ impl<'a> EphTransaction<'a> {
             // Slot 1022 ends at `base + 1024`, exactly where the owner's first
             // real child begins; strict containment excludes it, so nothing real
             // is ever swallowed.  That also makes DFS_STRIDE the exact width an
-            // owner needs, rather than a derived 1018.  Past 1022 rows the slots
-            // repeat and those rows become siblings with equal intervals --
-            // already the rule for rows materialised independently.
+            // owner needs, rather than a derived 1018.
+            //
+            // PAST 1022 ROWS the slots repeat, and what that means changed when
+            // the DFS position became an instance's identity: colliding rows
+            // used to coexist as siblings with equal intervals, and now the
+            // second one hits `symbol_instances_layer_uq (object_id, dfs_enter,
+            // layer)` and is DROPPED by the `ON CONFLICT DO NOTHING` below.
+            // Unreachable through `search()` and `loc()`, whose match sets are
+            // bounded by DEFAULT_READ_CAP = 1000 < 1022 in a single statement,
+            // and each populate issues exactly one instance insert.  Reachable
+            // only from a hand-written `layer { … }` op naming more than 1022
+            // instances under one owner, which would silently lose the excess.
+            //
+            // The same change removed the dedup this statement used to get for
+            // free: the old index was (symbol, object_id, offset_range, layer),
+            // so two identical instance rows in one batch collapsed to one.
+            // They no longer do -- they take different slots.  No caller
+            // produces them (a content scan yields distinct ranges; `loc()`
+            // gives every match its own symbol), so this is a `layer { … }`
+            // nicety that was never a stated rule.
             //
             // Nesting ephemeral rows is NOT what the spare width was for.  It
             // needs sequenced materialisation -- an inner search scoped to an

@@ -81,6 +81,74 @@ fn test_package_matcher_with_multiple_patterns() {
     }
 }
 
+/// An instance is identified by its DFS position, not by its symbol and byte
+/// range.
+///
+/// Two expansions of one macro at ONE extent are a real thing -- a header with
+/// no include guard, included twice under different macro definitions, expands
+/// one source line into two different functions.  Under the old key
+/// (symbol, object_id, offset_range, layer) that pair was UNSTORABLE, so the
+/// clang indexer deleted one of them to fit, after its references had already
+/// been numbered against it.
+///
+/// The replacement still has to reject a genuine collision: two rows claiming
+/// one position would make "descendant of" ambiguous, which is the whole reason
+/// `validate_object_tree` requires dfs_enter to be unique within an object.
+#[tokio::test(flavor = "current_thread")]
+async fn instance_identity_is_the_dfs_position() -> anyhow::Result<()> {
+    use crate::db_diesel::Index;
+    use diesel::RunQueryDsl;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let _index = Index::connect_with_test_input(&url, Index::TEST_INPUT_SEARCH).await?;
+
+    let conn = &mut PgConnection::establish(&url)?;
+    const COLS: &str = "INSERT INTO index.symbol_instances \
+        (id, symbol, object_id, offset_range, instance_type, layer, \
+         nesting_level, dfs_enter, dfs_exit, folded, fold_depth) VALUES ";
+
+    // Same symbol, same object, same extent, two positions.  Numbers well past
+    // anything the fixture derivation assigns, so this tests the constraint
+    // rather than colliding with existing rows.
+    let both = diesel::sql_query(format!(
+        "{COLS} (9001, 10, 1, int4range(0, 16), 1, 1000001, 1, 90112, 91136, TRUE, 0), \
+                (9002, 10, 1, int4range(0, 16), 1, 1000001, 1, 92160, 93184, TRUE, 0)"
+    ))
+    .execute(conn);
+    assert!(
+        both.is_ok(),
+        "two expansions of one macro at one extent must both be storable: {both:?}"
+    );
+
+    // A second row at an occupied position is still a violation.
+    let collision = diesel::sql_query(format!(
+        "{COLS} (9003, 11, 1, int4range(0, 99), 1, 1000001, 1, 90112, 91136, FALSE, 0)"
+    ))
+    .execute(conn);
+    assert!(
+        collision.is_err(),
+        "two instances at one DFS position must be rejected"
+    );
+
+    // And the exemption is only for rows that were never numbered.  dfs_exit = 0
+    // is the marker the 2026-09-20 migration left on every pre-containment row,
+    // and the index is partial on it so it could be built at all.
+    let unnumbered = diesel::sql_query(format!(
+        "{COLS} (9004, 11, 1, int4range(0, 99), 1, 1000001, 0, 0, 0, FALSE, 0), \
+                (9005, 12, 1, int4range(0, 99), 1, 1000001, 0, 0, 0, FALSE, 0)"
+    ))
+    .execute(conn);
+    assert!(
+        unnumbered.is_ok(),
+        "never-numbered rows are exempt, or the index could not have been \
+         created on existing data: {unnumbered:?}"
+    );
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn test_find_symbol_by_name() -> anyhow::Result<()> {
     use crate::db_diesel::Index;

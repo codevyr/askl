@@ -8698,6 +8698,136 @@ fn sql_cache_warm_arrow_query_hits_traversal_families() {
     });
 }
 
+/// Uploading INSTANCES goes through `upload_object_chunk`, and that path has
+/// its own `ON CONFLICT` target naming `symbol_instances_layer_uq`.  When the
+/// index behind it changed to `(object_id, dfs_enter, layer) WHERE dfs_exit <> 0`
+/// and the target did not, every insert failed with "there is no unique or
+/// exclusion constraint matching the ON CONFLICT specification" -- a 500 on a
+/// real upload, with the whole suite green, because the only DB-backed upload
+/// test uploads a project with NO objects and so never inserts an instance.
+///
+/// Two expansions of one macro at one extent is the shape the index exists to
+/// permit: a header with no include guard, included twice under different macro
+/// definitions, expands one source line into two different functions.  They
+/// share `(symbol, offset_range)` and differ only in DFS position.
+#[test]
+fn uploading_two_instances_at_one_extent_keeps_both() {
+    use crate::proto::askl::index::{
+        Object as UploadObject, Project as UploadProject, Symbol as UploadSymbol,
+        SymbolInstance as UploadInstance,
+    };
+    use crate::test_util::{create_isolated_fixture, store_and_index_with_shared_cache};
+    use diesel_async::AsyncConnection;
+    let fx = create_isolated_fixture(VERB_TEST);
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let (store, _index) = store_and_index_with_shared_cache(fx.url()).await;
+
+        // Re-upload the fixture's own project rather than inventing a new one:
+        // the fixture SQL inserts layer rows with explicit ids and does not
+        // advance the sequence, so creating a project from scratch collides.
+        // Marking it failed makes `upload_index` delete the zombie and its
+        // root layer, which frees an id for the replacement.
+        let mut conn = diesel_async::AsyncPgConnection::establish(fx.url())
+            .await
+            .unwrap();
+        diesel_async::RunQueryDsl::execute(
+            diesel::sql_query("UPDATE index.projects SET upload_status = 'failed'"),
+            &mut conn,
+        )
+        .await
+        .unwrap();
+
+        let (pid, _) = store
+            .upload_index(
+                UploadProject {
+                    project_name: "test_project".to_string(),
+                    root_path: "/test_project".to_string(),
+                    ..Default::default()
+                },
+                Some(1),
+                Some(1),
+            )
+            .await
+            .unwrap();
+
+        store
+            .upload_symbol_chunk(
+                pid,
+                0,
+                vec![UploadSymbol {
+                    local_id: 1,
+                    name: "DECL".to_string(),
+                    r#type: 7, // MACRO
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap();
+
+        // A root plus two expansions sharing [100, 120) -- a valid tree, so
+        // `validate_object_tree` passes and the insert is what is under test.
+        let mk = |enter: i64, exit: i64, level: i32, start: i32, end: i32| UploadInstance {
+            symbol_local_id: 1,
+            instance_type: 1,
+            start_offset: start,
+            end_offset: end,
+            dfs_enter: enter,
+            dfs_exit: exit,
+            nesting_level: level,
+            ..Default::default()
+        };
+        let payload = UploadProject {
+            objects: vec![UploadObject {
+                local_id: 1,
+                module_path: "mod".to_string(),
+                filesystem_path: "/test_project/multi.h".to_string(),
+                filetype: "c".to_string(),
+                content: b"x".to_vec(),
+                symbol_instances: vec![
+                    mk(0, 8192, 0, 0, 200),
+                    mk(1024, 2048, 1, 100, 120),
+                    mk(3072, 4096, 1, 100, 120),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        store
+            .upload_object_chunk(pid, 0, payload.clone())
+            .await
+            .unwrap();
+        // Re-sending a chunk is what resumption does; it must stay idempotent.
+        store.upload_object_chunk(pid, 0, payload).await.unwrap();
+        store.finalize_project(pid).await.unwrap();
+
+        use diesel_async::RunQueryDsl;
+        let rows: Vec<DfsIntervalRow> = diesel::sql_query(
+            "SELECT si.dfs_enter, si.dfs_exit FROM index.symbol_instances si \
+             JOIN index.objects o ON o.id = si.object_id \
+             WHERE o.filesystem_path = '/test_project/multi.h' \
+             ORDER BY si.dfs_enter",
+        )
+        .load(&mut conn)
+        .await
+        .unwrap();
+        let rows: Vec<(i64, i64)> = rows
+            .into_iter()
+            .map(|r| (r.dfs_enter, r.dfs_exit))
+            .collect();
+
+        assert_eq!(
+            rows,
+            vec![(0, 8192), (1024, 2048), (3072, 4096)],
+            "both expansions at [100,120) must survive, and a re-sent chunk \
+             must not duplicate them"
+        );
+    });
+}
+
 #[test]
 fn zombie_project_reupload_purges_caches() {
     // upload_index deleting a Failed/Deleting zombie project cascades its
@@ -9550,6 +9680,15 @@ async fn poison_stats(conn: &mut diesel_async::AsyncPgConnection, table: &str, r
     .execute(conn)
     .await
     .unwrap();
+}
+
+#[cfg(test)]
+#[derive(diesel::QueryableByName)]
+struct DfsIntervalRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    dfs_enter: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    dfs_exit: i64,
 }
 
 #[cfg(test)]
