@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use diesel::prelude::*;
+use diesel::query_builder::DecoratableTarget;
 use diesel::result::{DatabaseErrorKind, Error as DieselError};
 use diesel::OptionalExtension;
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
@@ -1036,14 +1037,32 @@ async fn insert_symbol_instances(
     rows: &[NewSymbolInstance],
 ) -> Result<(), UploadError> {
     for chunk in rows.chunks(MAX_INSERT_ROWS) {
+        // The conflict target must name `symbol_instances_layer_uq` exactly,
+        // including its WHERE clause: Postgres infers a PARTIAL unique index
+        // only from a conflict target that carries the same predicate, and
+        // reports "no unique or exclusion constraint matching the ON CONFLICT
+        // specification" otherwise.
+        //
+        // Chunk-level idempotency comes from `project_object_chunks`, not from
+        // here -- `upload_object_chunk` returns early when the chunk row is
+        // already present.  This target collapses duplicates WITHIN a chunk,
+        // which the producer can no longer emit (two instances of one symbol
+        // at one extent now differ in `dfs_enter`), so it is a backstop.  It
+        // still has to name the index exactly: a mismatched target is not a
+        // weaker guarantee, it is a hard error on every insert.
+        //
+        // It used to name (symbol, object_id, offset_range, layer), which is
+        // what identified an instance before the DFS position did.  Two
+        // expansions of one macro at one extent are distinct instances now,
+        // so that tuple no longer identifies anything.
         diesel::insert_into(index_schema::symbol_instances::table)
             .values(chunk)
             .on_conflict((
-                index_schema::symbol_instances::symbol,
                 index_schema::symbol_instances::object_id,
-                index_schema::symbol_instances::offset_range,
+                index_schema::symbol_instances::dfs_enter,
                 index_schema::symbol_instances::layer,
             ))
+            .filter_target(index_schema::symbol_instances::dfs_exit.ne(0))
             .do_nothing()
             .execute(conn)
             .await?;
