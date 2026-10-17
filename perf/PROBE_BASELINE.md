@@ -168,3 +168,76 @@ before askld serves, which is what keeps them together.
 and non-compound names should land in the same order of magnitude. Cold
 numbers need a page-cache drop between runs — the harness clears askld's
 caches, not the OS's, so a warm 390 ms and a cold 17 s are the same defect.
+
+## 2026-10-17 — the 11-second empty probe, and two gaps this baseline had
+
+`mod("amdgpu") { macro { func } }` on the kernel index (5.3M symbols) took
+11.4 s, and askld's own log put all of it in ONE probe:
+
+```
+probe completed elapsed_ms=21     rows=0     capped=false
+probe completed elapsed_ms=87     rows=1001  capped=true
+probe completed elapsed_ms=146    rows=1001  capped=true
+probe completed elapsed_ms=11153  rows=0     capped=false     <- the whole query
+```
+
+Four roles in one concurrent wave; three fast, one eleven seconds, and the slow
+one returned nothing. Captured mid-flight from `pg_stat_activity`, it was the
+REFS-parents semi-join: `symbols.id IN (SELECT pd.symbol … WHERE si.id =
+ANY($7))`.
+
+**Two causes, each harmless alone.** A parameterised array hides its length —
+measured on this DB, `id = ANY(ARRAY[…15 literals…])` estimates `rows=15` but
+`id = ANY($1)` estimates `rows=10`, a hardcoded default. A role holds up to
+~1000 ids (roles come from *resolved* neighbours, and Resolved means
+`rows <= cap`), so the inner side looked 100x smaller than it was and the
+planner drove the semi-join from the OUTER side: every symbol in the project,
+since the only other predicates are `layer` and `project_name`. And `LIMIT
+cap + 1` only rescues that plan when rows exist — the capped probes stopped at
+once, which is why they were the fast ones; the empty one had to exhaust 9M
+rows to prove there was nothing.
+
+**Fixed in askl `0d2b713`** by emitting REFS roles as `MATERIALIZED` CTEs, as
+the HAS roles already were (S6c/S7c above record that conversion). Note what
+the CTE actually does, because it is not what I first wrote: S21's plan still
+estimates the CTE body at 2,260,095 rows against 45,766 actual — 49x over. The
+win is not a better estimate. `MATERIALIZED` is an optimisation fence: the role
+is computed as its own node and the outer query hash-joins the real rows,
+instead of the planner inlining the subquery and choosing to drive 9M rows
+against it.
+
+### Why this baseline did not catch it
+
+S4/S5 measured REFS roles with the callers/callees of ONE function — a handful
+of ids — and nothing here ever measured an empty answer. Both gaps are closed
+by S14–S21, which are also the first shapes written against the engine's
+*current* SQL: S1–S13 use the pre-containment `offset_range @>` model and a
+`symbol_types.level` test, both gone since 211c12c. They stay as the record.
+
+| # | role | form | cold |
+|---|---|---|--:|
+| S14 | EMPTY role (931 module ids — nothing refs a module), outer = all linux | IN-subquery | **16,226 ms** |
+| S15 | same | MATERIALIZED CTE | 169 ms |
+| S20 | NON-EMPTY cap-sized role (1000 amdgpu macro instances) | IN-subquery | **7,656 ms** |
+| S21 | same | MATERIALIZED CTE | 303 ms |
+| S14e/S16e | "forced empty" via `leaf_name = 'zzz'` | IN-subquery | <0.1 ms |
+
+That last row is a caution, measured: `leaf_name = 'zzz'` is a selective indexed
+predicate and short-circuits before the role matters. It does **not** exercise
+the no-early-exit case. The pathological empty is an UNSELECTIVE outer side
+disjoint from the role — S14 — and it costs more than the non-empty S20, which
+is the whole point.
+
+### Regression watch
+
+`perf/probe_guard.py` asserts this from askld's own `probe completed` lines, per
+probe, against the deployed server: no probe over 2000 ms, and the slowest
+`rows=0` probe no more than 5x the slowest non-empty one. It refuses a false
+green — a warm SQL cache serves every probe in ~0 ms, so if everything it sees
+is under 5 ms it exits 2 and tells you to `docker compose restart askld`. On a
+cold askld after `0d2b713`: 27 probes, worst 272 ms, the probe that was 11,153 ms
+now 157 ms. `queries.txt` carries the two amdgpu queries for `run.py`.
+
+The guard is end-to-end on purpose. S4 was correct SQL measured with the wrong
+input size; a hand-copied shape can drift (S1–S13 did). The engine's own log
+line cannot.

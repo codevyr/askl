@@ -49,3 +49,14 @@ field "qaic_bo.dbc"
 func "qaic_data.c"
 # controls: same shape, no dot -> btree path, must stay fast
 type "drm_gem_object"
+
+# --- probe roles at cap size, and the EMPTY answer (the 11-second probe, askl 0d2b713) ---
+# mod("amdgpu") resolves to 931 instances: a CAP-SIZED role, which the baseline
+# never measured (S4/S5 bound callers of ONE function). A REFS role bound as
+# `= ANY($ids)` is estimated at a fixed 10 rows, so the planner drove the
+# semi-join from all 9M project rows -- and `LIMIT cap+1` only stops that when
+# rows exist. The EMPTY answer has no early exit: 11,153 ms for rows=0 while
+# the capped probes beside it took 87-146 ms. perf/probe_guard.py asserts this
+# per probe from askld's own log; keep the forced-empty query here too.
+project("linux") { mod("amdgpu") { macro { func } } }
+project("linux") { mod("amdgpu") { func { "zzz_no_such_symbol_zzz" } } }

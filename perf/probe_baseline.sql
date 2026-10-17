@@ -53,6 +53,17 @@ SELECT string_agg(si.id::text, ',') AS color_adjust_ids
   FROM index.symbols s JOIN index.symbol_instances si ON si.symbol = s.id
  WHERE s.leaf_name = 'color_adjust';
 \gset
+-- A cap-sized role that is NOT empty: 1000 of amdgpu's macro instances, the
+-- shape `mod("amdgpu") { macro { func } }` binds. (The module instances in
+-- :amdgpu_ids seed an EMPTY REFS role -- nothing references a module symbol.)
+SELECT string_agg(id::text, ',') AS amdgpu_macro_ids FROM (
+  SELECT si.id FROM index.symbol_instances si JOIN index.symbols s ON s.id = si.symbol
+   WHERE s.symbol_type = 7
+     AND si.object_id IN (SELECT si3.object_id FROM index.symbol_instances si3
+                          JOIN index.symbols s3 ON s3.id = si3.symbol
+                          WHERE s3.leaf_name = 'amdgpu' AND s3.symbol_type = 3)
+   LIMIT 1000) t;
+\gset
 SELECT string_agg(si.id::text, ',') AS drm_mm_c_ids
   FROM index.symbols s JOIN index.symbol_instances si ON si.symbol = s.id
  WHERE s.leaf_name = 'drm_mm_c' AND s.symbol_type = 2;
@@ -318,4 +329,221 @@ SELECT si.id
    AND s.symbol_type = 8
    AND string_to_array(s.symbol_path::text, '.') @> ARRAY['qaic_bo','dbc']::text[]
    AND (s.symbol_path::text)::ltree ~ '*.qaic_bo.*.dbc.*'::lquery
+ LIMIT :cap + 1;
+
+-- ============================================================================
+-- Added 2026-10-17, after the 11-second empty probe (askl 0d2b713).
+--
+-- NOTE ON DRIFT: shapes S1-S13 above were written against the pre-containment
+-- model -- `offset_range @>` byte-range containment and a symbol_types.level
+-- comparison. The engine has used DFS intervals since 211c12c
+-- (`pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit`, no level
+-- test). They are kept as the historical record; everything below is the
+-- engine's CURRENT SQL, copied from refs_role_cte_body / has_role_cte_body in
+-- index/src/db_diesel/index_impl.rs.
+--
+-- Two gaps let the bug ship: REFS roles were only ever measured with a handful
+-- of ids (S4/S5: callers/callees of ONE function), and no role was ever
+-- measured on an EMPTY answer. Both are closed here. `:amdgpu_ids` is the
+-- module's 931 instances -- a CAP-SIZED role, the real refinement shape.
+--
+-- S14/S16 are the IN-subquery form the engine emitted BEFORE 0d2b713; S15/S17
+-- the MATERIALIZED CTE form it emits now. The `_e` variants force an empty
+-- answer with a name nothing matches. CAUTION, measured: `leaf_name = 'zzz'` is
+-- a SELECTIVE indexed predicate, so these short-circuit in <0.1 ms and do NOT
+-- exercise the no-early-exit case. The pathological empty is an UNSELECTIVE
+-- outer side whose intersection with the role is empty -- that is S14 (empty
+-- role, outer = every linux symbol), 16.2 s. Kept as controls.
+-- ============================================================================
+
+\echo '=== S14: RefsParentsOf, EMPTY role (931 module ids: nothing refs a module), IN-subquery form (pre-0d2b713) ==='
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT si0.id
+  FROM index.symbols s
+  JOIN index.symbol_instances si0 ON s.id = si0.symbol
+  JOIN index.projects p ON s.project_id = p.id
+  JOIN index.objects o ON o.id = si0.object_id
+ WHERE s.layer = ANY(:'roots') AND si0.layer = ANY(:'roots')
+   AND s.id IN (
+        SELECT pd.symbol FROM index.symbol_refs sr
+        JOIN index.symbol_instances pd ON pd.object_id = sr.from_object
+         AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit
+        JOIN index.symbol_instances si ON si.symbol = sr.to_symbol
+        WHERE sr.layer = ANY(:'roots') AND si.layer = ANY(:'roots')
+          AND pd.layer = ANY(:'roots')
+          AND si.id = ANY(ARRAY[:amdgpu_ids]::int8[]))
+ LIMIT :cap + 1;
+
+\echo '=== S14e: same, answer forced EMPTY (no early exit for the LIMIT) ==='
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT si0.id
+  FROM index.symbols s
+  JOIN index.symbol_instances si0 ON s.id = si0.symbol
+  JOIN index.projects p ON s.project_id = p.id
+  JOIN index.objects o ON o.id = si0.object_id
+ WHERE s.layer = ANY(:'roots') AND si0.layer = ANY(:'roots')
+   AND s.leaf_name = 'zzz_no_such_symbol_zzz'
+   AND s.id IN (
+        SELECT pd.symbol FROM index.symbol_refs sr
+        JOIN index.symbol_instances pd ON pd.object_id = sr.from_object
+         AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit
+        JOIN index.symbol_instances si ON si.symbol = sr.to_symbol
+        WHERE sr.layer = ANY(:'roots') AND si.layer = ANY(:'roots')
+          AND pd.layer = ANY(:'roots')
+          AND si.id = ANY(ARRAY[:amdgpu_ids]::int8[]))
+ LIMIT :cap + 1;
+
+\echo '=== S15: RefsParentsOf, EMPTY role, MATERIALIZED CTE form (0d2b713, current) ==='
+EXPLAIN (ANALYZE, BUFFERS)
+WITH probe_role_0 AS MATERIALIZED (
+    SELECT pd.symbol AS symbol FROM index.symbol_refs sr
+    JOIN index.symbol_instances pd ON pd.object_id = sr.from_object
+     AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit
+    JOIN index.symbol_instances si ON si.symbol = sr.to_symbol
+    WHERE sr.layer = ANY(:'roots') AND si.layer = ANY(:'roots')
+      AND pd.layer = ANY(:'roots')
+      AND si.id = ANY(ARRAY[:amdgpu_ids]::int8[]))
+SELECT si0.id
+  FROM index.symbols s
+  JOIN index.symbol_instances si0 ON s.id = si0.symbol
+  JOIN index.projects p ON s.project_id = p.id
+  JOIN index.objects o ON o.id = si0.object_id
+ WHERE s.layer = ANY(:'roots') AND si0.layer = ANY(:'roots')
+   AND s.id IN (SELECT symbol FROM probe_role_0)
+ LIMIT :cap + 1;
+
+\echo '=== S15e: same, answer forced EMPTY ==='
+EXPLAIN (ANALYZE, BUFFERS)
+WITH probe_role_0 AS MATERIALIZED (
+    SELECT pd.symbol AS symbol FROM index.symbol_refs sr
+    JOIN index.symbol_instances pd ON pd.object_id = sr.from_object
+     AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit
+    JOIN index.symbol_instances si ON si.symbol = sr.to_symbol
+    WHERE sr.layer = ANY(:'roots') AND si.layer = ANY(:'roots')
+      AND pd.layer = ANY(:'roots')
+      AND si.id = ANY(ARRAY[:amdgpu_ids]::int8[]))
+SELECT si0.id
+  FROM index.symbols s
+  JOIN index.symbol_instances si0 ON s.id = si0.symbol
+  JOIN index.projects p ON s.project_id = p.id
+  JOIN index.objects o ON o.id = si0.object_id
+ WHERE s.layer = ANY(:'roots') AND si0.layer = ANY(:'roots')
+   AND s.leaf_name = 'zzz_no_such_symbol_zzz'
+   AND s.id IN (SELECT symbol FROM probe_role_0)
+ LIMIT :cap + 1;
+
+\echo '=== S16e: RefsChildrenOf, CAP-SIZED, IN-subquery form, EMPTY ==='
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT si0.id
+  FROM index.symbols s
+  JOIN index.symbol_instances si0 ON s.id = si0.symbol
+  JOIN index.projects p ON s.project_id = p.id
+  JOIN index.objects o ON o.id = si0.object_id
+ WHERE s.layer = ANY(:'roots') AND si0.layer = ANY(:'roots')
+   AND s.leaf_name = 'zzz_no_such_symbol_zzz'
+   AND s.id IN (
+        SELECT sr.to_symbol FROM index.symbol_refs sr
+        JOIN index.symbol_instances pd ON pd.object_id = sr.from_object
+         AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit
+        WHERE sr.layer = ANY(:'roots') AND pd.layer = ANY(:'roots')
+          AND pd.id = ANY(ARRAY[:amdgpu_ids]::int8[]))
+ LIMIT :cap + 1;
+
+\echo '=== S17e: RefsChildrenOf, CAP-SIZED, MATERIALIZED CTE form, EMPTY ==='
+EXPLAIN (ANALYZE, BUFFERS)
+WITH probe_role_0 AS MATERIALIZED (
+    SELECT sr.to_symbol AS symbol FROM index.symbol_refs sr
+    JOIN index.symbol_instances pd ON pd.object_id = sr.from_object
+     AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit
+    WHERE sr.layer = ANY(:'roots') AND pd.layer = ANY(:'roots')
+      AND pd.id = ANY(ARRAY[:amdgpu_ids]::int8[]))
+SELECT si0.id
+  FROM index.symbols s
+  JOIN index.symbol_instances si0 ON s.id = si0.symbol
+  JOIN index.projects p ON s.project_id = p.id
+  JOIN index.objects o ON o.id = si0.object_id
+ WHERE s.layer = ANY(:'roots') AND si0.layer = ANY(:'roots')
+   AND s.leaf_name = 'zzz_no_such_symbol_zzz'
+   AND s.id IN (SELECT symbol FROM probe_role_0)
+ LIMIT :cap + 1;
+
+\echo '=== S18e: HasChildrenOf, CAP-SIZED containers (931 module instances), CTE form (DFS), EMPTY ==='
+EXPLAIN (ANALYZE, BUFFERS)
+WITH probe_role_0 AS MATERIALIZED (
+    SELECT symbol_instances.symbol AS symbol
+      FROM index.symbol_instances
+      JOIN index.symbol_instances container_instances
+        ON container_instances.object_id = symbol_instances.object_id
+     WHERE container_instances.dfs_enter < symbol_instances.dfs_enter
+       AND symbol_instances.dfs_enter < container_instances.dfs_exit
+       AND symbol_instances.layer = ANY(:'roots')
+       AND container_instances.layer = ANY(:'roots')
+       AND container_instances.id = ANY(ARRAY[:amdgpu_ids]::int8[]))
+SELECT si0.id
+  FROM index.symbols s
+  JOIN index.symbol_instances si0 ON s.id = si0.symbol
+  JOIN index.projects p ON s.project_id = p.id
+  JOIN index.objects o ON o.id = si0.object_id
+ WHERE s.layer = ANY(:'roots') AND si0.layer = ANY(:'roots')
+   AND s.leaf_name = 'zzz_no_such_symbol_zzz'
+   AND s.id IN (SELECT symbol FROM probe_role_0)
+ LIMIT :cap + 1;
+
+\echo '=== S19e: HasParentsOf, CAP-SIZED contained set, CTE form (DFS), EMPTY ==='
+EXPLAIN (ANALYZE, BUFFERS)
+WITH probe_role_0 AS MATERIALIZED (
+    SELECT container_instances.symbol AS symbol
+      FROM index.symbol_instances
+      JOIN index.symbol_instances container_instances
+        ON container_instances.object_id = symbol_instances.object_id
+     WHERE container_instances.dfs_enter < symbol_instances.dfs_enter
+       AND symbol_instances.dfs_enter < container_instances.dfs_exit
+       AND symbol_instances.layer = ANY(:'roots')
+       AND container_instances.layer = ANY(:'roots')
+       AND symbol_instances.id = ANY(ARRAY[:amdgpu_ids]::int8[]))
+SELECT si0.id
+  FROM index.symbols s
+  JOIN index.symbol_instances si0 ON s.id = si0.symbol
+  JOIN index.projects p ON s.project_id = p.id
+  JOIN index.objects o ON o.id = si0.object_id
+ WHERE s.layer = ANY(:'roots') AND si0.layer = ANY(:'roots')
+   AND s.leaf_name = 'zzz_no_such_symbol_zzz'
+   AND s.id IN (SELECT symbol FROM probe_role_0)
+ LIMIT :cap + 1;
+
+\echo '=== S20: RefsParentsOf, NON-EMPTY cap-sized role (1000 amdgpu macro instances), IN-subquery form ==='
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT si0.id
+  FROM index.symbols s
+  JOIN index.symbol_instances si0 ON s.id = si0.symbol
+  JOIN index.projects p ON s.project_id = p.id
+  JOIN index.objects o ON o.id = si0.object_id
+ WHERE s.layer = ANY(:'roots') AND si0.layer = ANY(:'roots')
+   AND s.id IN (
+        SELECT pd.symbol FROM index.symbol_refs sr
+        JOIN index.symbol_instances pd ON pd.object_id = sr.from_object
+         AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit
+        JOIN index.symbol_instances si ON si.symbol = sr.to_symbol
+        WHERE sr.layer = ANY(:'roots') AND si.layer = ANY(:'roots')
+          AND pd.layer = ANY(:'roots')
+          AND si.id = ANY(ARRAY[:amdgpu_macro_ids]::int8[]))
+ LIMIT :cap + 1;
+
+\echo '=== S21: same role, MATERIALIZED CTE form (current) ==='
+EXPLAIN (ANALYZE, BUFFERS)
+WITH probe_role_0 AS MATERIALIZED (
+    SELECT pd.symbol AS symbol FROM index.symbol_refs sr
+    JOIN index.symbol_instances pd ON pd.object_id = sr.from_object
+     AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit
+    JOIN index.symbol_instances si ON si.symbol = sr.to_symbol
+    WHERE sr.layer = ANY(:'roots') AND si.layer = ANY(:'roots')
+      AND pd.layer = ANY(:'roots')
+      AND si.id = ANY(ARRAY[:amdgpu_macro_ids]::int8[]))
+SELECT si0.id
+  FROM index.symbols s
+  JOIN index.symbol_instances si0 ON s.id = si0.symbol
+  JOIN index.projects p ON s.project_id = p.id
+  JOIN index.objects o ON o.id = si0.object_id
+ WHERE s.layer = ANY(:'roots') AND si0.layer = ANY(:'roots')
+   AND s.id IN (SELECT symbol FROM probe_role_0)
  LIMIT :cap + 1;
