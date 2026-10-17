@@ -223,55 +223,62 @@ fn refs_parents_of_expr(
         .build()
 }
 
-/// SYMBOL-level REFS semi-join for probes: rows whose SYMBOL is called
-/// from within any of the given parent instances.  Symbol-level because the
-/// worklist's constrain accepts evidence per symbol — every instance of an
-/// evidenced symbol survives, so probe roles must not drop co-instances.
-fn refs_children_of_symbols_expr(
-    parent_ids: Vec<i64>,
+/// The REFS probe roles as CTE BODIES, selecting the symbol ids the role
+/// admits.  `probe_instance_ids` wraps each in `WITH … AS MATERIALIZED` and
+/// references it as `symbols.id IN (SELECT symbol FROM probe_role_N)`.
+///
+/// `parents = true` -> symbols that ENCLOSE a call site of any of the given
+/// child instances' symbols; `false` -> symbols CALLED from within any of the
+/// given parent instances.  Symbol-level, because the worklist's constrain
+/// accepts evidence per symbol: every instance of an evidenced symbol
+/// survives, so a probe role must not drop co-instances.
+///
+/// MATERIALIZED for the same reason the containment roles are, and after the
+/// same failure.  `si.id = ANY($ids)` tells the planner nothing about how long
+/// the array is, so on a large bound set it picks a plan that proves emptiness
+/// the slow way.  Measured on the kernel: one such probe inside
+/// `mod("amdgpu") { macro { func } }` took **11,153 ms to return 0 rows**,
+/// while the other three roles in the same concurrent wave finished in 21, 87
+/// and 146 ms -- so that single probe was the whole query.  `perf/
+/// PROBE_BASELINE.md` records the identical collapse for the HAS roles, 10,559
+/// ms as an IN-subquery against 0.5 ms as a CTE; it only ever measured REFS
+/// roles with a handful of ids (S4, callers-of one function, 0.9 ms), which is
+/// why this shape looked safe.
+fn refs_role_cte_body(
+    ids: Vec<i64>,
+    parents: bool,
     vis: &EphVisibility,
-) -> EphSqlFragment<diesel::sql_types::Bool> {
-    EphSqlFragment::<diesel::sql_types::Bool>::builder()
-        .sql(
-            "symbols.id IN (\
-                SELECT sr.to_symbol FROM index.symbol_refs sr \
-                JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                  AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
-                WHERE ",
-        )
-        .eph_visibility("sr.layer", vis)
-        .sql(" AND ")
-        .eph_visibility("pd.layer", vis)
-        .sql(" AND pd.id = ANY(")
-        .bind(parent_ids)
-        .sql("))")
-        .build()
-}
-
-/// SYMBOL-level REFS semi-join for probes: rows whose SYMBOL encloses a
-/// call site of any of the given child instances' symbols.
-fn refs_parents_of_symbols_expr(
-    child_ids: Vec<i64>,
-    vis: &EphVisibility,
-) -> EphSqlFragment<diesel::sql_types::Bool> {
-    EphSqlFragment::<diesel::sql_types::Bool>::builder()
-        .sql(
-            "symbols.id IN (\
-                SELECT pd.symbol FROM index.symbol_refs sr \
-                JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                  AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
-                JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
-                WHERE ",
-        )
-        .eph_visibility("sr.layer", vis)
-        .sql(" AND ")
-        .eph_visibility("si.layer", vis)
-        .sql(" AND ")
-        .eph_visibility("pd.layer", vis)
-        .sql(" AND si.id = ANY(")
-        .bind(child_ids)
-        .sql("))")
-        .build()
+) -> Box<dyn diesel::query_builder::QueryFragment<Pg> + Send> {
+    let builder = EphSqlFragment::<diesel::sql_types::BigInt>::builder();
+    let builder = if parents {
+        builder
+            .sql(
+                "SELECT pd.symbol AS symbol FROM index.symbol_refs sr \
+                 JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
+                   AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
+                 JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
+                 WHERE ",
+            )
+            .eph_visibility("sr.layer", vis)
+            .sql(" AND ")
+            .eph_visibility("si.layer", vis)
+            .sql(" AND ")
+            .eph_visibility("pd.layer", vis)
+            .sql(" AND si.id = ANY(")
+    } else {
+        builder
+            .sql(
+                "SELECT sr.to_symbol AS symbol FROM index.symbol_refs sr \
+                 JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
+                   AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
+                 WHERE ",
+            )
+            .eph_visibility("sr.layer", vis)
+            .sql(" AND ")
+            .eph_visibility("pd.layer", vis)
+            .sql(" AND pd.id = ANY(")
+    };
+    Box::new(builder.bind(ids).sql(")").build())
 }
 
 /// Resolve a CompositeFilter to instance IDs by running a CurrentQuery.
@@ -388,15 +395,33 @@ impl Index {
         for role in roles {
             match role {
                 ProbeRole::RefsChildrenOf(ids) => {
-                    query = query.filter(refs_children_of_symbols_expr(ids, &vis));
+                    anyhow::ensure!(
+                        cte_bodies.len() < PROBE_ROLE_CTE_NAMES.len(),
+                        "probe supports at most {} roles",
+                        PROBE_ROLE_CTE_NAMES.len(),
+                    );
+                    let name = PROBE_ROLE_CTE_NAMES[cte_bodies.len()];
+                    query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&format!(
+                        "symbols.id IN (SELECT symbol FROM {name})"
+                    )));
+                    cte_bodies.push(refs_role_cte_body(ids, false, &vis));
                 }
                 ProbeRole::RefsParentsOf(ids) => {
-                    query = query.filter(refs_parents_of_symbols_expr(ids, &vis));
+                    anyhow::ensure!(
+                        cte_bodies.len() < PROBE_ROLE_CTE_NAMES.len(),
+                        "probe supports at most {} roles",
+                        PROBE_ROLE_CTE_NAMES.len(),
+                    );
+                    let name = PROBE_ROLE_CTE_NAMES[cte_bodies.len()];
+                    query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&format!(
+                        "symbols.id IN (SELECT symbol FROM {name})"
+                    )));
+                    cte_bodies.push(refs_role_cte_body(ids, true, &vis));
                 }
                 ProbeRole::HasChildrenOf(ids) => {
                     anyhow::ensure!(
                         cte_bodies.len() < PROBE_ROLE_CTE_NAMES.len(),
-                        "probe supports at most {} containment roles",
+                        "probe supports at most {} roles",
                         PROBE_ROLE_CTE_NAMES.len(),
                     );
                     let name = PROBE_ROLE_CTE_NAMES[cte_bodies.len()];
@@ -408,7 +433,7 @@ impl Index {
                 ProbeRole::HasParentsOf(ids) => {
                     anyhow::ensure!(
                         cte_bodies.len() < PROBE_ROLE_CTE_NAMES.len(),
-                        "probe supports at most {} containment roles",
+                        "probe supports at most {} roles",
                         PROBE_ROLE_CTE_NAMES.len(),
                     );
                     let name = PROBE_ROLE_CTE_NAMES[cte_bodies.len()];
