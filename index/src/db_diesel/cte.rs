@@ -399,11 +399,20 @@ where
 
 /// CTE names for probe roles, in declaration order.  Bounded so the outer
 /// query's membership filters can reference them as static SQL.
-pub(super) const PROBE_ROLE_CTE_NAMES: [&str; 4] = [
+/// Every probe role becomes one MATERIALIZED CTE -- containment AND
+/// reference roles alike, since both degrade the same way as IN-subqueries on
+/// a large bound id array (see `refs_role_cte_body`).  Eight slots because the
+/// REFS roles joined the pool and a statement can carry one role per
+/// relationship branch; the `ensure!` in `probe_instance_ids` is the backstop.
+pub(super) const PROBE_ROLE_CTE_NAMES: [&str; 8] = [
     "probe_role_0",
     "probe_role_1",
     "probe_role_2",
     "probe_role_3",
+    "probe_role_4",
+    "probe_role_5",
+    "probe_role_6",
+    "probe_role_7",
 ];
 
 /// `WITH probe_role_0 AS MATERIALIZED (…), … <outer>` — the containment
