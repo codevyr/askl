@@ -25,6 +25,7 @@ use std::rc::{Rc, Weak};
 mod anchor;
 mod parse;
 mod scope_helpers;
+mod weakness;
 
 pub use self::parse::{build_dependency_graph, build_empty_statement, build_statement};
 
@@ -1074,47 +1075,61 @@ impl Statement {
 
     /// Mark weak statements.
     ///
-    /// A statement is weak if it contains only unit verbs AND one of:
-    /// - Has no parent
-    /// - Has no children
-    /// - All its children are weak
-    /// - Its parent is weak
+    /// One strong component per top-level statement: a constraining
+    /// statement is strong, and a non-constraining one is strong iff it
+    /// reaches two different constraining statements along two routes that
+    /// share no statement but itself (see [`weakness`]).  The graph is the
+    /// statement's scope nesting plus its label uses whose provider is in
+    /// the same top-level statement; a provider in an earlier statement is
+    /// an evaluated input, not a neighbour.  Everything else is weak.
     fn mark_weak_statements(&self, statements: &Vec<Rc<Statement>>) {
         let _span = tracing::debug_span!("mark_weak_statements").entered();
-        // This iterative algorithm is inefficient but the dependency
-        // graph is expected to be small.
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for statement in statements.iter() {
-                let mut state = statement.get_state_mut();
-                if state.weak {
-                    continue;
+        let index: HashMap<*const Statement, usize> = statements
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (Rc::as_ptr(s), i))
+            .collect();
+        // The top-level statement a statement belongs to.  The walk stops at
+        // the first parent outside `statements`: the query's own root wraps
+        // every top-level statement and must not join them into one graph.
+        let root_of = |s: &Rc<Statement>| -> *const Statement {
+            let mut cur = s.clone();
+            while let Some(p) = cur.parent().and_then(|p| p.upgrade()) {
+                if !index.contains_key(&Rc::as_ptr(&p)) {
+                    break;
                 }
+                cur = p;
+            }
+            Rc::as_ptr(&cur)
+        };
+        let roots: Vec<*const Statement> = statements.iter().map(root_of).collect();
 
-                let is_non_constraining = statement.command().is_non_constraining();
-
-                if !is_non_constraining {
-                    continue;
-                }
-
-                let parent_weak = if let Some(parent_weak) = statement
-                    .parent()
-                    .and_then(|p| p.upgrade())
-                    .map(|p| p.get_state().weak)
-                {
-                    parent_weak
-                } else {
-                    true
-                };
-
-                let all_children_weak = statement.children().all(|child| child.get_state().weak);
-
-                if parent_weak || all_children_weak {
-                    state.weak = true;
-                    changed = true;
+        let terminal: Vec<bool> = statements
+            .iter()
+            .map(|s| !s.command().is_non_constraining())
+            .collect();
+        let mut edges = Vec::new();
+        for (i, s) in statements.iter().enumerate() {
+            if let Some(p) = s.parent().and_then(|p| p.upgrade()) {
+                if let Some(&j) = index.get(&Rc::as_ptr(&p)) {
+                    edges.push((i, j));
                 }
             }
+            for dep in s.get_state().dependencies.iter() {
+                if dep.dependency_role != DependencyRole::User {
+                    continue;
+                }
+                if let Some(&j) = index.get(&Rc::as_ptr(&dep.dependency)) {
+                    if roots[i] == roots[j] {
+                        edges.push((i, j));
+                    }
+                }
+            }
+        }
+
+        let strong = weakness::strong_vertices(&terminal, &edges);
+        for (s, strong) in statements.iter().zip(strong) {
+            s.get_state_mut().weak = !strong;
         }
     }
 
@@ -1173,6 +1188,31 @@ impl Statement {
         }
 
         Ok(())
+    }
+
+    /// Test hook: build the dependency graph and mark weakness, without a
+    /// database, and report each statement's command text with its flag.
+    #[cfg(test)]
+    pub(crate) fn weakness_for_test(&self) -> Vec<(String, bool)> {
+        let mut labeled_statements = LabeledStatements::new();
+        let mut statements = vec![];
+        crate::scope::visit(self.scope(), &mut |statement| {
+            statements.push(statement.clone());
+            labeled_statements.remember(statement);
+            Ok::<bool, pest::error::Error<Rule>>(true)
+        })
+        .unwrap();
+        self.build_dependency_graph(&labeled_statements).unwrap();
+        self.mark_weak_statements(&statements);
+        statements
+            .iter()
+            .map(|s| {
+                (
+                    s.command().span().as_str().trim().to_string(),
+                    s.get_state().weak,
+                )
+            })
+            .collect()
     }
 
     async fn compute_nodes(
