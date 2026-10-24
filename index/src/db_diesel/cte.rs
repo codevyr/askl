@@ -415,8 +415,8 @@ pub(super) const PROBE_ROLE_CTE_NAMES: [&str; 8] = [
     "probe_role_7",
 ];
 
-/// `WITH probe_role_0 AS MATERIALIZED (…), … <outer>` — the containment
-/// (HAS) probe roles.  Same planner-hint rationale as [`CteHasChildren`]:
+/// `WITH probe_role_0 AS MATERIALIZED (…), … <outer>` — the probe roles,
+/// containment and reference alike.  Same planner-hint rationale as [`CteHasChildren`]:
 /// as a plain IN-subquery the planner refuses to drive the probe side from
 /// the tiny role set (measured 1.8–10.6 s against a full 14.8M-row scan);
 /// materialised first, the outer query runs id-driven through the pkey

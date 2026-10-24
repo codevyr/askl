@@ -364,10 +364,11 @@ impl Index {
     /// Runs in Combined visibility through the SQL cache, mirroring
     /// [`Index::resolve_filter_to_ids`]: role subqueries consult
     /// chain-visible rows, so the persistent/eph partition union would not
-    /// equal the legacy result.  REFS roles are IN-subquery fragments
-    /// (shared with scope resolution); HAS roles are emitted as
-    /// MATERIALIZED CTEs — the planner mis-drives them as IN-subqueries
-    /// (see `has_role_cte_body` and perf/PROBE_BASELINE.md).
+    /// equal the legacy result.  Every role, REFS and HAS alike, is emitted
+    /// as a MATERIALIZED CTE: as an IN-subquery the planner drives the probe
+    /// from the outer side, and an EMPTY answer then has no early exit —
+    /// 11 s to return nothing on linux (see `has_role_cte_body` and
+    /// perf/PROBE_BASELINE.md, S14 vs S15).
     ///
     /// The Resolved id set is complete, so despite the `LIMIT` the outcome
     /// is deterministic: the LIMIT only ever bites in the Capped case,

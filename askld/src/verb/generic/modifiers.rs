@@ -226,8 +226,9 @@ impl Display for UnnestModifier {
 
 /// NestedModifier - narrows a scope to exactly one structural level.
 ///
-/// `foo { printk nested { } }` shows what sits one level inside the `printk`
-/// expansion: one level, unlike `unnest`, and through the fold, unlike the
+/// `foo { printk { nested } }` shows what sits one level inside `printk` —
+/// the mode sits inside the braces, on the statement whose reach it bounds:
+/// one level, unlike `unnest`, and through the fold, unlike the
 /// default. It is the only reader of `nesting_level`, and the only way to ask
 /// a question the other two modes cannot express — "what does this macro
 /// expand to, immediately".

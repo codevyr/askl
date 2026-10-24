@@ -269,8 +269,8 @@ pub async fn build_result_graph(
     // truncated" (read ≤ cap) name the same threshold.
     ctx.eph.set_read_cap(data.probe_cap);
     // Result limits. `symbols` bounds distinct nodes per command; `listing`
-    // bounds every per-node listing (instances, out-edges, call-sites per
-    // pair). Both have a server default here, are overridable per request,
+    // bounds every per-node listing (instances, out-edges). Both have a
+    // server default here, are overridable per request,
     // and are overridden per command by the `limits()` verb (carried on each
     // node's query_statements provenance, applied below). 0 = unlimited.
     let symbols_default = limit.unwrap_or(data.max_result_symbols);
@@ -611,7 +611,7 @@ pub struct QueryOpts {
     /// fetched per node/edge) or `full` (everything inlined, the default —
     /// for one-shot consumers like MCP).
     detail: Option<String>,
-    /// Per-node listing cap (instances, out-edges, call-sites per pair);
+    /// Per-node listing cap (instances, out-edges);
     /// `0` = uncapped for this request. Defaults to the server's
     /// `listing_cap`, and is overridden per command by the `limits()` verb.
     /// Truncated listings are surfaced via `edges_truncated` /

@@ -29,10 +29,11 @@ separate statements; a `{` must be on the same line as its verb to attach.
   `X { A B }` disjoins, `X { A ; B }` conjoins. See Scopes.
 
 ## Scopes — relationships
-- `"x" { }`  callees: what `x` calls/references (references are the default).
+- `"x" { }`  callees: what `x` calls/references (a bare scope accepts references
+  or containment; two functions can only reference each other).
 - `{ "x" }`  callers: what calls `x`.
 - `"a" { "b" { "c" } }`  a calls b, b calls c.
-- `has { }`  containment (by source byte-range) instead of references.
+- `has { }`  containment (the indexer's tree, not byte ranges) instead of references.
 - **`;` inside a scope conjoins — `A B` disjoins.** `X { A ; B }` are two
   *statements* in one scope and keep `X` only where it relates to *both*:
   `dir("/proj") has { mod ; file }` lists directories holding a module **and**
