@@ -11,8 +11,8 @@ pub struct AsklData {
     pub max_result_symbols: usize,
     /// Cardinality-probe cap (see `ExecutionContext::probe_cap`).
     pub probe_cap: usize,
-    /// Default per-node listing cap: instances per node, distinct out-edges
-    /// per node, and call-sites per pair (0 = disabled). Overridable per
+    /// Default per-node listing cap: instances per node and distinct
+    /// out-edges per node (0 = disabled). Overridable per
     /// request (`?listing=`) and per command (`limits(listing=N)`).
     pub listing_cap: usize,
 }

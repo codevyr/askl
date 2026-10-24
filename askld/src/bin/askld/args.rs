@@ -41,8 +41,9 @@ pub struct ServeArgs {
     #[clap(long, default_value = "268435456", env = "ASKL_SQL_CACHE_BYTES")]
     pub sql_cache_bytes: usize,
 
-    /// Max distinct symbols PER STATEMENT (each selector gets its own
-    /// budget; 0 = unlimited); per-request `?limit=` overrides
+    /// Max distinct symbols PER COMMAND (each selecting command gets its
+    /// own budget; 0 = unlimited); per-request `?limit=` overrides the
+    /// default, the `limits(symbols=N)` verb overrides per command
     #[clap(long, default_value = "100", env = "ASKL_MAX_RESULT_SYMBOLS")]
     pub max_result_symbols: usize,
 
@@ -52,9 +53,10 @@ pub struct ServeArgs {
     pub probe_cap: usize,
 
     /// Per-node listing cap (assembly capping): the most rows any single
-    /// per-node listing ships — instances per node, distinct out-edges per
-    /// node, and call-sites per (from, to) pair — all bounded by this one
-    /// number. Truncated listings are surfaced via `edges_truncated` /
+    /// per-node listing ships — instances per node and distinct out-edges
+    /// per node (an edge's call sites are never capped: /query ships one
+    /// edge per (from, to) pair and the edge endpoint pages the sites).
+    /// Truncated listings are surfaced via `edges_truncated` /
     /// `instances_truncated` so a client can page the rest. 0 disables;
     /// per-request `?listing=` overrides; the `limits(listing=N)` verb
     /// overrides per command. Without a cap a single hub node's instance or

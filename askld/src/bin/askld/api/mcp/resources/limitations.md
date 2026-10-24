@@ -14,6 +14,9 @@
 - **Boolean operators cover predicate verbs only.** `search`/`loc`/layer
   literals cannot appear inside `or`/`and`/`not`; union searches by
   juxtaposition (`search("a") search("b")`).
-- **Result caps.** Results are capped (default 100 distinct symbols; override with
-  the `limit` argument). When a result is truncated the report says so — narrow
-  the query rather than raising the cap blindly.
+- **Result caps.** Results are capped per command (default 100 distinct
+  symbols). The `limit` argument raises the default for the whole request;
+  `limits(symbols=N, listing=M)` written on a command raises it for that
+  command and its scope, `listing` bounding the instances and out-edges a node
+  lists. When a result is truncated the report says so — narrow the query
+  rather than raising the cap blindly.
