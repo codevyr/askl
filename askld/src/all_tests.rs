@@ -9640,20 +9640,186 @@ fn func_scope_conjoins_siblings_but_disjoins_selectors() {
     // callers of b are {a, main} and the only caller of e is d.  Nothing
     // calls both, which is what makes the two spellings diverge sharply:
     //
-    //   func { "b" ; "e" }   the parent is the empty conjunction, and only
-    //                        the two children remain
+    //   func { "b" ; "e" }   the parent is the empty conjunction.  `func`
+    //                        bridges its two constraining children, so it is
+    //                        strong (one strong component per statement),
+    //                        and an empty strong parent empties both
+    //                        children: nothing.  (It used to be weak — a
+    //                        top-level bare type — and the two children
+    //                        survived as two independent graphs.)
     //   func { "b"   "e" }   one command, two selectors — a disjunction, so
     //                        every caller of either survives
     for cap in [0, 5, 1000] {
         let (conj, _) = run_query_probe_traced(TEST_INPUT_A, r#"func { "b" ; "e" }"#, cap);
         let mut nodes: Vec<i64> = conj.nodes.as_vec().iter().map(|id| (*id).into()).collect();
         nodes.sort_unstable();
-        assert_eq!(nodes, vec![92, 95], "cap {cap}: conjunction");
+        assert_eq!(nodes, Vec::<i64>::new(), "cap {cap}: conjunction");
 
         let (disj, _) = run_query_probe_traced(TEST_INPUT_A, r#"func { "b" "e" }"#, cap);
         let mut nodes: Vec<i64> = disj.nodes.as_vec().iter().map(|id| (*id).into()).collect();
         nodes.sort_unstable();
         assert_eq!(nodes, vec![91, 92, 94, 95, 942], "cap {cap}: disjunction");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One strong component per top-level statement
+//
+// A non-constraining statement is strong iff it reaches two different
+// constraining statements along two routes sharing nothing but itself
+// (statement/weakness.rs).  TEST_INPUT_A: main(942) -> {a(91), b(92)},
+// a -> b, d(94) -> {e(95), f(96)}, f -> g(97).  Every result test runs at
+// probe caps 0 / 5 / 1000, so the worklist and the refinement planner must
+// agree.
+
+fn weak_marks(query: &str) -> std::collections::HashMap<String, bool> {
+    crate::parser::parse(query)
+        .unwrap()
+        .weakness_for_test()
+        .into_iter()
+        // A statement's span runs through its scope; key on the command
+        // text before the first `{`.
+        .map(|(text, weak)| (text.split('{').next().unwrap().trim().to_string(), weak))
+        .collect()
+}
+
+fn sorted_nodes_at(query: &str, cap: usize) -> Vec<i64> {
+    let (res, _) = run_query_probe_traced(TEST_INPUT_A, query, cap);
+    let mut nodes: Vec<i64> = res.nodes.as_vec().iter().map(|id| (*id).into()).collect();
+    nodes.sort_unstable();
+    nodes
+}
+
+#[test]
+fn a_bridge_with_an_unmatched_sibling_is_empty() {
+    // The query asks for b's callers that also call "nonexistent"; there are
+    // none, so nothing may be returned — not b's callers on their own.
+    let marks = weak_marks(r#"func { "nonexistent" ; "b" }"#);
+    assert_eq!(
+        marks["func"], false,
+        "func bridges two constraining children"
+    );
+    for cap in [0, 5, 1000] {
+        assert_eq!(
+            sorted_nodes_at(r#"func { "nonexistent" ; "b" }"#, cap),
+            Vec::<i64>::new(),
+            "cap {cap}"
+        );
+    }
+    let res = run_query(TEST_INPUT_A, r#"func { "nonexistent" ; "b" }"#);
+    assert!(
+        res.warnings
+            .iter()
+            .any(|w| w.to_string().contains("matched no symbols")),
+        "the unmatched name still says so"
+    );
+}
+
+#[test]
+fn a_bridge_narrows_both_siblings() {
+    // Only main calls both a and b.
+    for cap in [0, 5, 1000] {
+        assert_eq!(
+            sorted_nodes_at(r#"func { "a" ; "b" }"#, cap),
+            vec![91, 92, 942],
+            "cap {cap}"
+        );
+    }
+}
+
+#[test]
+fn a_wrapper_with_one_direction_stays_weak() {
+    // `{ }` and `field` each reach both constraining children only through
+    // `func`: one route, so they are display echoes.  `func` stays strong.
+    for query in [
+        r#"{ func { "a" ; "b" } }"#,
+        r#"field { func { "a" ; "b" } }"#,
+    ] {
+        let marks = weak_marks(query);
+        let outer = if query.starts_with("field") {
+            "field"
+        } else {
+            ""
+        };
+        assert_eq!(marks[outer], true, "{query}: outer wrapper");
+        assert_eq!(marks["func"], false, "{query}: func");
+        for cap in [0, 5, 1000] {
+            let nodes = sorted_nodes_at(query, cap);
+            for id in [91, 92, 942] {
+                assert!(nodes.contains(&id), "{query} cap {cap}: {nodes:?}");
+            }
+            assert!(!nodes.contains(&94), "{query} cap {cap}: {nodes:?}");
+        }
+    }
+}
+
+#[test]
+fn a_child_hanging_off_a_constraining_parent_stays_weak() {
+    // Both routes from `func` leave through "main": it bridges nothing.
+    let marks = weak_marks(r#""main" { func ; "b" }"#);
+    assert_eq!(marks["func"], true);
+    assert_eq!(marks[r#""main""#], false);
+    for cap in [0, 5, 1000] {
+        let nodes = sorted_nodes_at(r#""main" { func ; "b" }"#, cap);
+        assert!(
+            nodes.contains(&942) && nodes.contains(&92),
+            "cap {cap}: {nodes:?}"
+        );
+    }
+}
+
+#[test]
+fn a_label_from_an_earlier_statement_is_an_input_not_an_edge() {
+    // In the second statement `#c` is a constraining child of `func`, so
+    // `func` bridges it and "a".  Nobody calls both a and e, so the second
+    // statement is empty; the first still shows e.  (A weak `func` used to
+    // leave a and #c standing as two independent graphs.)
+    let query = r#"@c "e"; func { "a" ; #c }"#;
+    assert_eq!(weak_marks(query)["func"], false);
+    for cap in [0, 5, 1000] {
+        assert_eq!(sorted_nodes_at(query, cap), vec![95], "cap {cap}");
+    }
+    // ...and with a shared callee the bridge keeps it.
+    let query = r#"@c "b"; func { "a" ; #c }"#;
+    for cap in [0, 5, 1000] {
+        assert_eq!(sorted_nodes_at(query, cap), vec![91, 92, 942], "cap {cap}");
+    }
+}
+
+#[test]
+fn a_label_cycle_inside_one_statement_makes_every_vertex_on_it_strong() {
+    // func -- "a" -- @c func -- #c -- func: one cycle.  `@c func` is a bare
+    // type (non-constraining) yet strong: one route to "a", one through the
+    // label edge to #c.
+    let marks = weak_marks(r#"func { "a" { @c func } ; #c }"#);
+    assert_eq!(marks["func"], false);
+    assert_eq!(marks["@c func"], false);
+    assert_eq!(marks["#c"], false);
+
+    // `func { "a" { @c } ; "b" { #c } }`: an `a` and a `b` that call the
+    // same callee.  The bare `@c` is non-constraining but strong, as are
+    // `#c` and `func`.
+    let marks = weak_marks(r#"func { "a" { @c } ; "b" { #c } }"#);
+    assert_eq!(marks["@c"], false, "bare label on the cycle");
+    assert_eq!(marks["#c"], false);
+    assert_eq!(marks["func"], false);
+}
+
+#[test]
+fn a_label_cycle_inside_one_statement_is_not_executable_yet() {
+    // Pre-existing, independent of weakness: a use whose provider is in the
+    // same statement is notified by its parent before the label has a
+    // selection, and refuses.  The same error came from the engine before
+    // the strong-component rule; pinned so lifting it is a deliberate change.
+    for query in [
+        r#"func { "a" { @c func } ; #c }"#,
+        r#"func { "a" { @c } ; "b" { #c } }"#,
+    ] {
+        let Err(err) = run_query_err(TEST_INPUT_A, query) else {
+            panic!("{query}: expected the circular-dependency error");
+        };
+        let err = err.to_string();
+        assert!(err.contains("circular dependency"), "{query}: {err}");
     }
 }
 
