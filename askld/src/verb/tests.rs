@@ -242,6 +242,27 @@ fn test_glob_contains_match_mode() {
 }
 
 #[test]
+fn test_typed_leaf_glob_is_anchored() {
+    // A leaf glob on a typed selector anchors to the whole leaf name, exactly
+    // like a bare glob: `func(g"oo*")` must not match foo or foobar, which
+    // merely contain "oo".  The compound-name default for code symbols
+    // (ordered subset at any depth) is a rule about exact names and must not
+    // leak into globs; `match="contains"` is the only way to wrap the pattern.
+    let res = run_query("verb_test.sql", r#"func(g"oo*")"#);
+    assert_eq!(res.nodes.as_vec(), vec![]);
+
+    // Anchored at both ends: foo(91) and foobar(93) start with "foo"...
+    let res = run_query("verb_test.sql", r#"func(g"foo*")"#);
+    assert_eq!(
+        res.nodes.as_vec(),
+        vec![SymbolInstanceId::new(91), SymbolInstanceId::new(93)]
+    );
+    // ...and only foo ends with "oo".
+    let res = run_query("verb_test.sql", r#"func(g"*oo")"#);
+    assert_eq!(res.nodes.as_vec(), vec![SymbolInstanceId::new(91)]);
+}
+
+#[test]
 fn test_glob_ignore_filter() {
     // ignore() shares glob semantics with selectors.
     let query = r#"preamble { ignore(g"foob*") }

@@ -408,9 +408,11 @@ pub(in crate::verb) struct TypeSelector {
     /// so it constrains every descendant: `mod("test", inherit=true) { ... }`.
     /// Bare type verbs inherit by default; named ones do not.
     inherit: bool,
-    /// If true, the last query token is anchored to the last path component.
-    /// Default for dir and file; can be overridden with `match="contains"`.
-    leaf_anchored: bool,
+    /// `match="contains"` was written: the name pattern may match anywhere
+    /// in the leaf.  Without it a glob anchors to the whole leaf name for
+    /// every type, and an exact compound name anchors its last token to the
+    /// leaf for files and directories only — see `name_filter_leaf`.
+    contains: bool,
 }
 
 impl TypeSelector {
@@ -444,48 +446,45 @@ impl TypeSelector {
 
         // Bare type selectors (no name) inherit by default so they propagate
         // the type filter into child scopes. Named type selectors don't inherit.
-        // Bare type selectors (no name) inherit by default so they propagate
-        // the type filter into child scopes. Named type selectors don't inherit.
         let inherit = args
             .named_bool("inherit")?
             .unwrap_or_else(|| name_pattern.is_none());
 
-        let leaf_anchored = match args.named_str("match")? {
-            Some("contains") => false,
-            // Files and directories anchor to the leaf by default; code
-            // symbols (where '.' separates labels) do not.  `any` follows the
-            // type-agnostic convention of `name_filter`, which anchors — that
-            // is what makes `any("foo")` and `any "foo"` the same query.
-            _ => match symbol_type_id {
-                Some(id) => !index::symbols::dot_is_separator(id),
-                None => true,
-            },
-        };
+        let contains = matches!(args.named_str("match")?, Some("contains"));
 
         Ok(Arc::new(Self {
             span,
             symbol_type_id,
             name_pattern,
             inherit,
-            leaf_anchored,
+            contains,
         }))
     }
 
     /// Returns the appropriate name filter for the given pattern and symbol type.
+    ///
+    /// Two anchoring rules live here, and they are different rules.  A GLOB
+    /// anchors to the whole leaf name for every type — the same contract as a
+    /// bare `g"…"`, `any(g"…")` or `ignore(g"…")` — so `func(g"oo*")` does not
+    /// match `foo`.  An EXACT compound name on a code symbol (where '.'
+    /// separates labels) is an ordered subset at any depth, so `"cli.Run"`
+    /// finds `pkg.cli.Run` and `cli.Run.inner`; files and directories anchor
+    /// the last token to the leaf instead.  `match="contains"` relaxes both.
+    /// `any` follows the type-agnostic `name_filter`, which anchors — that is
+    /// what makes `any("foo")` and `any "foo"` the same query.
     fn name_filter_leaf(
         pattern: &NamePattern,
         symbol_type_id: i32,
-        leaf_anchored: bool,
+        contains: bool,
     ) -> CompositeFilter {
+        let dot_is_separator = index::symbols::dot_is_separator(symbol_type_id);
         let name = match pattern {
             NamePattern::Exact(name) => name,
             NamePattern::Glob(glob) => {
-                return glob.filter(
-                    index::symbols::dot_is_separator(symbol_type_id),
-                    leaf_anchored,
-                );
+                return glob.filter(dot_is_separator, !contains);
             }
         };
+        let leaf_anchored = !contains && !dot_is_separator;
         match symbol_type_id {
             SYMBOL_TYPE_DIRECTORY | SYMBOL_TYPE_FILE if name.starts_with('/') => {
                 CompositeFilter::leaf(ExactNameMixin::new(name))
@@ -530,7 +529,7 @@ impl TypeSelector {
         }
         if let Some(ref name) = self.name_pattern {
             parts.push(match self.symbol_type_id {
-                Some(id) => Self::name_filter_leaf(name, id, self.leaf_anchored),
+                Some(id) => Self::name_filter_leaf(name, id, self.contains),
                 None => super::name_filter(name),
             });
         }
@@ -611,7 +610,7 @@ impl Verb for TypeSelector {
             symbol_type_id: self.symbol_type_id,
             name_pattern: self.name_pattern.clone(),
             inherit: self.inherit,
-            leaf_anchored: self.leaf_anchored,
+            contains: self.contains,
         }))
     }
 
