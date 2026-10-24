@@ -1221,7 +1221,10 @@ fn non_existent_symbol_warning() {
     let res = run_query(TEST_INPUT_A, QUERY);
 
     assert_eq!(res.nodes.as_vec(), vec![]);
-    assert_eq!(res.warnings.len(), 2);
+    // Only the cause: "main" is emptied by an empty child, an emptiness
+    // the no-match already reports.
+    let warnings: Vec<String> = res.warnings.iter().map(|w| w.to_string()).collect();
+    assert_eq!(warnings, vec![r#"`"asdfasdf"` matched no symbols"#]);
 }
 
 #[test]
@@ -1230,8 +1233,13 @@ fn non_existent_child_warning() {
     let res = run_query(TEST_INPUT_A, QUERY);
 
     assert_eq!(res.nodes.as_vec(), vec![]);
-    println!("{:#?}", res.warnings);
-    assert_eq!(res.warnings.len(), 2);
+    // a's callees (b) do not call a.  The middle statement is where the
+    // query goes empty; the outer "a" only inherits it.
+    let warnings: Vec<String> = res.warnings.iter().map(|w| w.to_string()).collect();
+    assert_eq!(
+        warnings,
+        vec![r#"`{"a"}` matched symbols, but none of them also relate to `"a"`"#]
+    );
 }
 
 // ============================================================================
@@ -9713,6 +9721,70 @@ fn a_bridge_with_an_unmatched_sibling_is_empty() {
             .any(|w| w.to_string().contains("matched no symbols")),
         "the unmatched name still says so"
     );
+}
+
+/// The advisory notes (not no-matches, not truncations) a query raises at
+/// each probe cap.
+fn notes_at(query: &str, cap: usize) -> Vec<String> {
+    let (res, _) = run_query_probe_traced(TEST_INPUT_A, query, cap);
+    res.warnings
+        .iter()
+        .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::Note)
+        .map(|w| w.to_string())
+        .collect()
+}
+
+#[test]
+fn an_inherited_emptiness_is_not_reported_again() {
+    // `func` is empty only because "nonexistent" is, and "b" is emptied by
+    // that empty `func`.  The cause is the no-match; nothing else may speak.
+    for cap in [0, 5, 1000] {
+        assert_eq!(
+            notes_at(r#"func { "nonexistent" ; "b" }"#, cap),
+            Vec::<String>::new(),
+            "cap {cap}"
+        );
+    }
+}
+
+#[test]
+fn siblings_with_no_common_caller_are_reported_once_by_name() {
+    // b's callers are main and a; e's caller is d.  `func` resolves from one
+    // child and the other empties it.
+    for cap in [0, 5, 1000] {
+        let notes = notes_at(r#"func { "b" ; "e" }"#, cap);
+        assert_eq!(notes.len(), 1, "cap {cap}: {notes:?}");
+        let note = &notes[0];
+        assert!(
+            note.starts_with("`func` matched symbols, but none of them also relate to "),
+            "{note}"
+        );
+        assert!(
+            note.contains(r#"`"b"`"#) || note.contains(r#"`"e"`"#),
+            "{note}"
+        );
+        assert!(
+            !note.contains("Line 1:") && !note.contains("children"),
+            "{note}"
+        );
+    }
+}
+
+#[test]
+fn a_parent_that_empties_its_child_is_reported_once_by_name() {
+    // a calls b, not e: the two resolve independently and empty each other.
+    // Whichever notifies first is the origin; the echo back is inherited.
+    for cap in [0, 5, 1000] {
+        let notes = notes_at(r#""a" { "e" }"#, cap);
+        assert_eq!(notes.len(), 1, "cap {cap}: {notes:?}");
+        let note = &notes[0];
+        assert!(
+            note.contains(r#"`"a"`"#) && note.contains(r#"`"e"`"#),
+            "{note}"
+        );
+        assert!(note.contains("matched symbols, but none of them"), "{note}");
+        assert!(!note.contains("Line 1:"), "{note}");
+    }
 }
 
 #[test]

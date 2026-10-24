@@ -895,25 +895,40 @@ impl SelectorState {
     /// Constrain selection and produce a warning if the result is empty.
     /// Returns `(constrained, changed, warnings)` where `constrained` means a selection
     /// existed to constrain, `changed` means it was actually narrowed.
+    ///
+    /// The warning is raised once, where the emptiness starts: a neighbour
+    /// with matches emptied a selection that had them.  An empty `dependency`
+    /// only passes on an emptiness that was reported upstream, so it stays
+    /// silent.  `span` locates this selector; `own` and `neighbour` name the
+    /// two statements by their command text (a bare `func` has an implicit
+    /// selector spanning its whole scope), and `conjoined` marks the
+    /// child→parent edge, where siblings narrow the parent together.
     pub fn constrain_with_warning(
         &mut self,
         dependency: &Selection,
         role: &DependencyRole,
         rel_type: RelationshipType,
         span: Span,
-        context: &str,
+        own: &Span,
+        neighbour: &Span,
+        conjoined: bool,
     ) -> (bool, bool, Vec<Diagnostic>) {
         if self.selection.is_none() {
             return (false, false, vec![]);
         }
         let changed = self.constrain_selection(dependency, role, rel_type);
         let mut warnings = vec![];
-        if changed && self.selection.as_ref().unwrap().nodes.is_empty() {
+        if changed
+            && !dependency.nodes.is_empty()
+            && self.selection.as_ref().unwrap().nodes.is_empty()
+        {
             warnings.push(Diagnostic::note(
                 span,
                 format!(
-                    "Statement did not match any symbols after applying constraints from {}.",
-                    context,
+                    "`{}` matched symbols, but none of them {}relate to `{}`",
+                    own.as_str().trim(),
+                    if conjoined { "also " } else { "" },
+                    neighbour.as_str().trim(),
                 ),
             ));
         }
@@ -1030,6 +1045,7 @@ pub trait Selector: std::fmt::Debug + Verb {
 
     /// Per-selector constraint logic for `accept_notification`.
     /// Returns whether to skip, constrain, or derive for this notification.
+    /// `own` is the receiving command's text, which names it in a warning.
     /// Override to customize constraint behavior (e.g. UserVerb's forced/circular logic).
     fn try_constrain_notification(
         &self,
@@ -1037,6 +1053,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         dependency: &Selection,
         notif_ctx: &NotificationContext,
         notifier: &Statement,
+        own: &Span,
     ) -> Result<ConstraintAction, pest::error::Error<Rule>> {
         // A weak notifier may seed an empty selector below, never narrow a
         // resolved one — see [`weak_notifier_blocks`].
@@ -1046,14 +1063,16 @@ pub trait Selector: std::fmt::Debug + Verb {
         }
 
         let span = Span::from_pest(self.span(), notifier.command().span().input());
-        let context = format!("{}", notifier.command().span());
+        let neighbour = notifier.command().query_statement_span();
         let (constrained, changed, warnings) = selector_state_with(registry, self, |state| {
             state.constrain_with_warning(
                 dependency,
                 &notif_ctx.role,
                 notif_ctx.rel_type,
                 span,
-                &context,
+                own,
+                neighbour,
+                false,
             )
         });
 

@@ -617,6 +617,9 @@ impl Command {
     /// rest constraining what it produced.  Deriving per child and unioning
     /// would re-introduce the disjunction.
     ///
+    /// `notifier` is the notifying child's command text, which names it in
+    /// the warning when its conjunct empties this selection.
+    ///
     /// `notifier_weak` is the notifying child's weakness, which gates the
     /// constrain half exactly as it does on the parent→child edge — see
     /// [`weak_notifier_blocks`].  The derivation half below is deliberately
@@ -627,6 +630,7 @@ impl Command {
         ctx: &mut ExecutionContext,
         index: &Index,
         dependency: &Selection,
+        notifier: &Span,
         notifier_weak: bool,
         role: DependencyRole,
         rel_type: RelationshipType,
@@ -655,7 +659,15 @@ impl Command {
             let span = Span::from_pest(selector.span(), self.span().input());
             let (constrained, sel_changed, sel_warnings) =
                 selector_state_with(&mut ctx.registry, selector, |state| {
-                    state.constrain_with_warning(dependency, &role, rel_type, span, "children")
+                    state.constrain_with_warning(
+                        dependency,
+                        &role,
+                        rel_type,
+                        span,
+                        self.query_statement_span(),
+                        notifier,
+                        true,
+                    )
                 });
             changed |= sel_changed;
             warnings.extend(sel_warnings);
@@ -796,6 +808,7 @@ impl Command {
                 &dependency,
                 &notif_ctx,
                 notifier,
+                self.query_statement_span(),
             )? {
                 ConstraintAction::Skip => continue,
                 ConstraintAction::Constrained(sel_changed, sel_warnings) => {

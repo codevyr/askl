@@ -1797,13 +1797,14 @@ impl Statement {
             // fixpoint here.  Each carries its own weakness, because a weak
             // participant may seed the parent but may not narrow it
             // (`weak_notifier_blocks`).
-            let selections: Vec<(bool, Rc<Selection>)> = dependent
+            let selections: Vec<(crate::span::Span, bool, Rc<Selection>)> = dependent
                 .statement
                 .children()
                 .filter(|child| child.command().has_selectors() && !is_echo(child))
                 .filter_map(|child| {
+                    let text = child.command().query_statement_span().clone();
                     let weak = child.get_state().weak;
-                    child.get_selection(ctx).map(|sel| (weak, sel))
+                    child.get_selection(ctx).map(|sel| (text, weak, sel))
                 })
                 .collect();
 
@@ -1826,7 +1827,7 @@ impl Statement {
             // drop the edges to the siblings the parent is displayed with.
             let mut scope_ids: Vec<i64> = selections
                 .iter()
-                .flat_map(|(_, sel)| sel.get_instance_ids())
+                .flat_map(|(_, _, sel)| sel.get_instance_ids())
                 .collect();
             scope_ids.sort_unstable();
             scope_ids.dedup();
@@ -1841,7 +1842,7 @@ impl Statement {
             // the fixpoint is the intersection — and derivation runs at most
             // once, with no extra SQL for the conjunction.
             let mut changed = false;
-            for (child_weak, selection) in &selections {
+            for (child_text, child_weak, selection) in &selections {
                 let res = dependent
                     .statement
                     .command()
@@ -1849,6 +1850,7 @@ impl Statement {
                         ctx,
                         &cfg.index,
                         selection,
+                        child_text,
                         *child_weak,
                         DependencyRole::Parent,
                         rel_type,
