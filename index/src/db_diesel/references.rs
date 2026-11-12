@@ -190,7 +190,7 @@ impl Index {
             "SELECT page.ref_id, page.from_instance_id, page.to_symbol, \
                     ts.name AS to_symbol_name, ti.id AS to_instance_id, \
                     page.from_object, o.filesystem_path AS path, \
-                    p.project_name AS project_id, page.from_offset_range \
+                    o.project_id::text AS project_id, page.from_offset_range \
              FROM ( \
                SELECT sr.id AS ref_id, sr.to_symbol, sr.from_object, \
                       sr.from_offset_range, from_inst.id AS from_instance_id \
@@ -221,7 +221,6 @@ impl Index {
              ) ti ON true \
              JOIN index.symbols ts ON ts.id = page.to_symbol AND ts.layer = ANY($2) \
              JOIN index.objects o ON o.id = page.from_object \
-             LEFT JOIN index.projects p ON p.id = o.project_id \
              ORDER BY page.from_instance_id, page.ref_id",
         )
         .bind::<BigInt, _>(symbol_id)
@@ -264,7 +263,7 @@ impl Index {
             "SELECT page.parent_instance_id, page.child_instance_id, \
                     page.child_symbol, cs.name AS child_symbol_name, \
                     page.object_id, o.filesystem_path AS path, \
-                    p.project_name AS project_id, page.offset_range \
+                    o.project_id::text AS project_id, page.offset_range \
              FROM ( \
                SELECT from_inst.id AS parent_instance_id, ci.id AS child_instance_id, \
                       ci.symbol AS child_symbol, ci.object_id, ci.offset_range \
@@ -290,7 +289,6 @@ impl Index {
              ) page \
              JOIN index.symbols cs ON cs.id = page.child_symbol AND cs.layer = ANY($2) \
              JOIN index.objects o ON o.id = page.object_id \
-             LEFT JOIN index.projects p ON p.id = o.project_id \
              ORDER BY page.parent_instance_id, page.child_instance_id",
         )
         .bind::<BigInt, _>(symbol_id)
@@ -381,11 +379,10 @@ impl Index {
 
         let mut rows: Vec<SymbolInstancePageRow> = diesel::sql_query(
             "SELECT si.id AS instance_id, si.instance_type, si.object_id, \
-                    o.filesystem_path AS path, p.project_name AS project_id, \
+                    o.filesystem_path AS path, o.project_id::text AS project_id, \
                     si.offset_range \
              FROM index.symbol_instances si \
              JOIN index.objects o ON o.id = si.object_id \
-             LEFT JOIN index.projects p ON p.id = o.project_id \
              WHERE si.symbol = $1 AND si.layer = ANY($2) \
                AND (si.object_id, lower(si.offset_range), si.id) > ($3, $4, $5) \
              ORDER BY si.object_id, lower(si.offset_range), si.id \
@@ -431,11 +428,10 @@ impl Index {
 
         let mut rows: Vec<SymbolInstancePageRow> = diesel::sql_query(
             "SELECT si.id AS instance_id, si.instance_type, si.object_id, \
-                    o.filesystem_path AS path, p.project_name AS project_id, \
+                    o.filesystem_path AS path, o.project_id::text AS project_id, \
                     si.offset_range \
              FROM index.symbol_instances si \
              JOIN index.objects o ON o.id = si.object_id \
-             LEFT JOIN index.projects p ON p.id = o.project_id \
              WHERE si.symbol = $1 AND si.layer = ANY($2) \
                AND (si.object_id, lower(si.offset_range), si.id) > ($4, $5, $6) \
                AND EXISTS ( \
@@ -490,7 +486,7 @@ impl Index {
         let mut rows: Vec<EdgeOccurrenceRow> = diesel::sql_query(
             "SELECT sr.id AS ref_id, from_inst.id AS from_instance_id, \
                     sr.from_object, o.filesystem_path AS path, \
-                    p.project_name AS project_id, sr.from_offset_range \
+                    o.project_id::text AS project_id, sr.from_offset_range \
              FROM ( \
                SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit \
                FROM index.symbol_instances si \
@@ -506,7 +502,6 @@ impl Index {
                  AND sr.to_symbol = $3 \
              ) sr \
              JOIN index.objects o ON o.id = sr.from_object \
-             LEFT JOIN index.projects p ON p.id = o.project_id \
              WHERE (sr.from_object, lower(sr.from_offset_range), sr.id) > ($4, $5, $6) \
              ORDER BY sr.from_object, lower(sr.from_offset_range), sr.id \
              LIMIT $7",

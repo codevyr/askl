@@ -1264,6 +1264,11 @@ async fn symbol_instances_page_with_a_cursor_and_count_exactly() -> anyhow::Resu
     assert_eq!(p1[0].start_offset(), 0);
     assert!(more1, "the expansion instance is still ahead");
     assert_eq!(p1[0].path, "/mac.c", "rows carry the path for rendering");
+    assert_eq!(
+        p1[0].project_id.as_deref(),
+        Some("1"),
+        "project_id is the project's id (what the file tree is keyed by), not its name"
+    );
 
     let cursor = Some((p1[0].object_id, p1[0].start_offset(), p1[0].instance_id));
     let (p2, more2) = index.list_symbol_instances(8, cursor, 1, &eph).await?;
