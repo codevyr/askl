@@ -15,10 +15,10 @@ Call graph
 - Indirect calls (fn pointer):`func { method "color_adjust" { func } }`  (calls that dispatch through a struct fn-pointer field to its implementations; `method` = `field`, a type filter)
 - Implementations of an ops field: `"reg_mr" { func }`  (a struct field's children are the functions assigned to it in initializers — ONE query lists every `.reg_mr = xxx_reg_mr` implementation across providers; no grep needed)
 - Two levels of callees:      `"vfs_read" { { } }`
-- Transitive callees:         `"vfs_read" unnest { func }`
 
 Containment
-- Functions inside a macro:   `macro("LOG") { func }`
+- Functions a macro's body calls: `macro("LOG") { func }`
+- Everything in a module, incl. what macros generated: `mod("amdgpu") { unnest func }`  (the default leaves out symbols nobody wrote down, e.g. `__compiletime_assert_N`)
 - Fields of a struct:         `type("file_operations") has { field }`
 - Dispatch through a field:   `{ field("file_operations.read") }`
 

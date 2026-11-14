@@ -45,7 +45,14 @@ separate statements; a `{` must be on the same line as its verb to attach.
   unioned into one answer — it only conjoins inside `{ }`.)
 - Container selectors `mod`/`file`/`dir` imply refs+has for children, so
   `file("/proj/x.c") { func }` lists functions in the file — no explicit `has`.
-- `unnest { }`  transitive (all levels), not just direct. Does not inherit.
+- `X { }` lists what is inside `X` at **any depth**, except **folded** symbols:
+  ones nobody wrote down in normal code, i.e. what macros generated for
+  themselves (`__compiletime_assert_N`, an unused `name##_show`).  Folding only
+  hides — `X { }` still lists what sits *inside* a folded declaration.
+- `X { unnest }` lists the folded symbols too.  `X { nested }` lists exactly
+  one level down.  The mode goes **inside** the braces, on the statement whose
+  reach it bounds (upward: `unnest { "x" }`), and does not inherit.
+- Naming a symbol always finds it, folded or not: `X { "__compiletime_assert_7" }`.
 
 ## Filters — constrain, add nothing
 - A **bare** type verb is a filter that **inherits** to all descendants:
@@ -116,7 +123,7 @@ separate statements; a `{` must be on the same line as its verb to attach.
 - Implementations of an ops field: `"reg_mr" { func }`  — a struct field's
   children are the functions assigned to it in initializers, so this one query
   lists every `.reg_mr = xxx_reg_mr` implementation; don't grep for `.field =`.
-- Transitive callees:            `"vfs_read" unnest { func }`
+- Everything inside X, generated symbols too: `mod("amdgpu") { unnest func }`
 - Full-text (non-symbol text):   `project("linux") search("EXPORT_SYMBOL", whole_word=true)`
 
 To read a listed symbol's **body**, re-run the query with `projection="body"`
