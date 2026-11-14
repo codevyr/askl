@@ -107,14 +107,14 @@ async fn instance_identity_is_the_dfs_position() -> anyhow::Result<()> {
     let conn = &mut PgConnection::establish(&url)?;
     const COLS: &str = "INSERT INTO index.symbol_instances \
         (id, symbol, object_id, offset_range, instance_type, layer, \
-         nesting_level, dfs_enter, dfs_exit, folded, fold_depth) VALUES ";
+         nesting_level, dfs_enter, dfs_exit) VALUES ";
 
     // Same symbol, same object, same extent, two positions.  Numbers well past
     // anything the fixture derivation assigns, so this tests the constraint
     // rather than colliding with existing rows.
     let both = diesel::sql_query(format!(
-        "{COLS} (9001, 10, 1, int4range(0, 16), 1, 1000001, 1, 90112, 91136, TRUE, 0), \
-                (9002, 10, 1, int4range(0, 16), 1, 1000001, 1, 92160, 93184, TRUE, 0)"
+        "{COLS} (9001, 10, 1, int4range(0, 16), 1, 1000001, 1, 90112, 91136), \
+                (9002, 10, 1, int4range(0, 16), 1, 1000001, 1, 92160, 93184)"
     ))
     .execute(conn);
     assert!(
@@ -124,7 +124,7 @@ async fn instance_identity_is_the_dfs_position() -> anyhow::Result<()> {
 
     // A second row at an occupied position is still a violation.
     let collision = diesel::sql_query(format!(
-        "{COLS} (9003, 11, 1, int4range(0, 99), 1, 1000001, 1, 90112, 91136, FALSE, 0)"
+        "{COLS} (9003, 11, 1, int4range(0, 99), 1, 1000001, 1, 90112, 91136)"
     ))
     .execute(conn);
     assert!(
@@ -136,8 +136,8 @@ async fn instance_identity_is_the_dfs_position() -> anyhow::Result<()> {
     // is the marker the 2026-09-20 migration left on every pre-containment row,
     // and the index is partial on it so it could be built at all.
     let unnumbered = diesel::sql_query(format!(
-        "{COLS} (9004, 11, 1, int4range(0, 99), 1, 1000001, 0, 0, 0, FALSE, 0), \
-                (9005, 12, 1, int4range(0, 99), 1, 1000001, 0, 0, 0, FALSE, 0)"
+        "{COLS} (9004, 11, 1, int4range(0, 99), 1, 1000001, 0, 0, 0), \
+                (9005, 12, 1, int4range(0, 99), 1, 1000001, 0, 0, 0)"
     ))
     .execute(conn);
     assert!(

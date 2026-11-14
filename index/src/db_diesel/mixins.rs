@@ -84,14 +84,12 @@ type SymbolInstanceColumnsSqlType = (
     Integer,
     BigInt,
     BigInt,
-    Bool,
-    Integer,
     Nullable<Int4range>,
     Nullable<Int4range>,
     Nullable<Int4range>,
 ); // (id, symbol, object_id, offset_range, instance_type, layer,
-   //  nesting_level, dfs_enter, dfs_exit, folded, fold_depth, name_range,
-   //  signature_range, content_range)
+   //  nesting_level, dfs_enter, dfs_exit, name_range, signature_range,
+   //  content_range)
 
 type SymbolColumnsSqlType = (
     BigInt,

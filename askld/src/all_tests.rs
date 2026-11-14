@@ -4776,8 +4776,6 @@ fn canary_leak_detected_by_has_eph_leak() {
             nesting_level: 0,
             dfs_enter: 0,
             dfs_exit: 0,
-            folded: false,
-            fold_depth: 0,
             name_range: None,
             signature_range: None,
             content_range: None,
@@ -4879,8 +4877,6 @@ fn canary_leak_in_each_relationship_field_detected() {
             nesting_level: 0,
             dfs_enter: 0,
             dfs_exit: 0,
-            folded: false,
-            fold_depth: 0,
             name_range: None,
             signature_range: None,
             content_range: None,
@@ -4906,8 +4902,6 @@ fn canary_leak_in_each_relationship_field_detected() {
             layer: CANARY_LAYER_ID,
             nesting_level: 0,
             dfs_enter: 0,
-            folded: false,
-            fold_depth: 0,
             from_full_range: None,
         }
     }

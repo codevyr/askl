@@ -815,10 +815,6 @@ fn validate_object_tree(object: &UploadObject) -> Result<(), UploadError> {
     // Sorting by exit DESC breaks ties so a parent precedes a child starting
     // at the same number -- which the duplicate check then rejects anyway,
     // but with the message that names the real problem.
-    //
-    // The per-instance `folded` / `fold_depth` are NOT checked, and not read
-    // by anything: folding is the symbol's now.  An index that still carries
-    // the old arithmetic and one that leaves both at zero are equally valid.
     let mut nodes: Vec<(i64, i64, i32)> = object
         .symbol_instances
         .iter()
@@ -965,8 +961,6 @@ fn build_symbol_instances(
                 nesting_level: instance.nesting_level,
                 dfs_enter: instance.dfs_enter,
                 dfs_exit: instance.dfs_exit,
-                folded: instance.folded,
-                fold_depth: instance.fold_depth,
                 name_range: span_to_range(instance.name.as_ref(), "name")?,
                 signature_range: span_to_range(instance.signature.as_ref(), "signature")?,
                 content_range: span_to_range(instance.content.as_ref(), "content")?,
@@ -994,8 +988,6 @@ fn build_symbol_refs(
                 layer: root_layer_id,
                 nesting_level: reference.nesting_level,
                 dfs_enter: reference.dfs_enter,
-                folded: reference.folded,
-                fold_depth: reference.fold_depth,
                 from_full_range: span_to_range(reference.full.as_ref(), "ref full")?,
             });
         }
@@ -1612,17 +1604,15 @@ mod tests {
 
     // --- validate_object_tree ---
 
-    /// One node of a containment tree: (enter, exit, nesting_level, folded,
-    /// fold_depth).  Offsets are irrelevant here -- containment is the DFS
-    /// interval now, not the source range.
-    fn node(enter: i64, exit: i64, level: i32, folded: bool, fold_depth: i32) -> SymbolInstance {
+    /// One node of a containment tree: (enter, exit, nesting_level).
+    /// Offsets are irrelevant here -- containment is the DFS interval now,
+    /// not the source range.
+    fn node(enter: i64, exit: i64, level: i32) -> SymbolInstance {
         SymbolInstance {
             symbol_local_id: 1,
             dfs_enter: enter,
             dfs_exit: exit,
             nesting_level: level,
-            folded,
-            fold_depth,
             ..Default::default()
         }
     }
@@ -1642,9 +1632,9 @@ mod tests {
     /// query-time rows that may be slotted inside it.
     fn good_tree() -> UploadObject {
         tree(vec![
-            node(0, 5120, 0, false, 0),
-            node(1024, 4096, 1, false, 0),
-            node(2048, 3072, 2, false, 0),
+            node(0, 5120, 0),
+            node(1024, 4096, 1),
+            node(2048, 3072, 2),
         ])
     }
 
@@ -1656,9 +1646,9 @@ mod tests {
     #[test]
     fn validate_object_tree_accepts_siblings() {
         let object = tree(vec![
-            node(0, 4096, 0, false, 0),
-            node(1024, 2048, 1, false, 0),
-            node(2048, 3072, 1, false, 0),
+            node(0, 4096, 0),
+            node(1024, 2048, 1),
+            node(2048, 3072, 1),
         ]);
         assert!(validate_object_tree(&object).is_ok());
     }
@@ -1668,7 +1658,7 @@ mod tests {
         // Every column at its default: what an index built before the
         // containment tree looks like.  Served as-is it is an empty graph
         // with no error anywhere, which is what this check exists for.
-        let object = tree(vec![node(0, 0, 0, false, 0), node(0, 0, 0, false, 0)]);
+        let object = tree(vec![node(0, 0, 0), node(0, 0, 0)]);
         let err = validate_object_tree(&object).unwrap_err();
         assert!(
             format!("{err:?}").contains("can never contain anything"),
@@ -1682,9 +1672,9 @@ mod tests {
         // starts inside its parent and ends outside is accepted at query time
         // and quietly wrong.
         let object = tree(vec![
-            node(0, 4096, 0, false, 0),
-            node(1024, 3072, 1, false, 0),
-            node(2048, 3500, 2, false, 0),
+            node(0, 4096, 0),
+            node(1024, 3072, 1),
+            node(2048, 3500, 2),
         ]);
         let err = validate_object_tree(&object).unwrap_err();
         assert!(
@@ -1705,24 +1695,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_object_tree_does_not_read_the_per_instance_fold_fields() {
-        // Folding is the symbol's.  The instance fields are still in the
-        // proto for indices produced before that, and whatever they hold --
-        // the old "one deeper under a folded parent" arithmetic, a violation
-        // of it, or zeros -- is not the tree's business.
-        let mut object = good_tree();
-        object.symbol_instances[1].folded = true;
-        assert!(validate_object_tree(&object).is_ok());
-        object.symbol_instances[2].fold_depth = 1;
-        assert!(validate_object_tree(&object).is_ok());
-    }
-
-    #[test]
     fn validate_object_tree_rejects_duplicate_dfs_enter() {
         let object = tree(vec![
-            node(0, 5120, 0, false, 0),
-            node(1024, 3072, 1, false, 0),
-            node(1024, 2048, 1, false, 0),
+            node(0, 5120, 0),
+            node(1024, 3072, 1),
+            node(1024, 2048, 1),
         ]);
         let err = validate_object_tree(&object).unwrap_err();
         assert!(
@@ -1737,10 +1714,7 @@ mod tests {
         // inside this instance would be numbered past its dfs_exit and stop
         // being its descendant -- the same silent wrongness as an empty
         // interval, which is why it is the same kind of rejection.
-        let object = tree(vec![
-            node(0, 5120, 0, false, 0),
-            node(1024, 1500, 1, false, 0),
-        ]);
+        let object = tree(vec![node(0, 5120, 0), node(1024, 1500, 1)]);
         let err = validate_object_tree(&object).unwrap_err();
         assert!(
             format!("{err:?}").contains("is only 476 wide"),
