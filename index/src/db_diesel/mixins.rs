@@ -102,7 +102,8 @@ type SymbolColumnsSqlType = (
     Nullable<Integer>,
     Text,
     BigInt,
-); // (id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name, layer)
+    Bool,
+); // (id, name, symbol_path, project_id, symbol_type, symbol_scope, leaf_name, layer, folded)
 
 /// The parents query returns one row per *(reference site, enclosing
 /// declaration)* and nothing about the referenced symbol beyond
@@ -1618,21 +1619,27 @@ pub enum TraversalMode {
     /// `nested` — exactly one structural level down, folding ignored.
     /// The only reader of `nesting_level`.
     Nested,
-    /// The default — descendants with no fold boundary strictly between.
-    /// Structural levels (module, directory, file) are transparent; a macro
-    /// expansion is not.
+    /// The default — every descendant whose SYMBOL is not folded.  Depth
+    /// plays no part: module, directory, file, function and whatever a macro
+    /// generated inside it are all reached through, and what is left out is
+    /// left out for what it is, not for where it sits.
     Unfolded,
-    /// `unnest` — every descendant, at any depth.
+    /// `unnest` — every descendant, folded or not.
     Unnest,
 }
 
 impl TraversalMode {
     /// One byte per mode, for cache keys.  Two modes that render different
     /// SQL must never share a layer hash.
+    ///
+    /// The default mode's byte changed from `U` when its SQL did: it used to
+    /// compare fold DEPTHS on the instance rows and now reads the symbol's
+    /// `folded`.  A layer cached under the old meaning must not answer for
+    /// the new one.
     fn tag(self) -> u8 {
         match self {
             TraversalMode::Nested => b'N',
-            TraversalMode::Unfolded => b'U',
+            TraversalMode::Unfolded => b'S',
             TraversalMode::Unnest => b'*',
         }
     }
@@ -1661,47 +1668,40 @@ impl Default for DirectOnlyMixin {
 
 impl FilterLeaf for DirectOnlyMixin {
     fn has_children_expr(&self, _vis: &EphVisibility) -> Option<HasChildrenBoolExpr> {
-        // `X { Y }` means UNFOLDED: descendants with no fold boundary strictly
-        // between.  The base query already restricts to descendants via the DFS
-        // interval, so this is one equality on the fold depth.
+        // `X { Y }` LISTS X'S DESCENDANTS WHOSE SYMBOL IS NOT FOLDED.  The base
+        // query already restricts to descendants via the DFS interval, so the
+        // default mode adds one predicate, on the symbol row the query joins
+        // anyway.
+        //
+        // Folding is the symbol's and says only "not listed by default"; it
+        // is not a level in the tree.  It used to be: this compared fold
+        // DEPTHS, so a generated symbol was hidden when it sat inside another
+        // generated symbol and listed when it sat directly in a function --
+        // and containment had to keep references out of generated
+        // declarations so the depths came out right.  Now a reference inside
+        // `CHECK(sizeof(struct x))` sits in the declaration `CHECK` generated,
+        // `f { }` reaches `x` through it, and the generated declaration is
+        // absent because nobody wrote its name, wherever it sits.
         //
         // Strict depth+1 is what `nested` asks for, and it is NOT the default:
         // with module -> directory -> file -> declarations a real chain, a
         // module's children are FILES, and `mod { func }` would be empty.
-        // Folding is what separates "where a symbol sits" from "which levels
-        // are interesting", so traversal passes through the structural levels
-        // and stops at macro expansions.
-        //
-        // The `+ CASE WHEN folded` term is what lets `mod { macro { func } }`
-        // step exactly one level past a fold on purpose.
         let sql = match self.mode {
             TraversalMode::Nested => {
                 "contained_instances.nesting_level = symbol_instances.nesting_level + 1"
             }
-            TraversalMode::Unfolded | TraversalMode::Unnest => {
-                "contained_instances.fold_depth = symbol_instances.fold_depth \
-                 + CASE WHEN symbol_instances.folded THEN 1 ELSE 0 END"
-            }
+            TraversalMode::Unfolded | TraversalMode::Unnest => "NOT contained_symbols.folded",
         };
         Some(Box::new(EphSqlFragment::<Bool>::builder().sql(sql).build()))
     }
 
     fn children_expr(&self, _vis: &EphVisibility) -> Option<ChildrenBoolExpr> {
-        // Same shape as has_children_expr, for references instead of
-        // instances.  This is what separates the two occurrences of `foo` in
-        // `printk(foo)`: the argument token sits at the caller's fold depth and
-        // is returned, each expanded use sits one deeper and is not.
-        //
-        // This replaces the engine's slowest construct -- a correlated
-        // NOT EXISTS over range containment, measured at 2.3-5.5s on
-        // mod("amdgpu") and uncostable by the planner, which estimates every
-        // range predicate at rows=1.
+        // Same rule as has_children_expr, for references instead of
+        // instances: a reference is listed when the symbol it names is not
+        // folded.  `symbols` is the referenced symbol in this query.
         let sql = match self.mode {
             TraversalMode::Nested => "symbol_refs.nesting_level = parent_decls.nesting_level + 1",
-            TraversalMode::Unfolded | TraversalMode::Unnest => {
-                "symbol_refs.fold_depth = parent_decls.fold_depth \
-                 + CASE WHEN parent_decls.folded THEN 1 ELSE 0 END"
-            }
+            TraversalMode::Unfolded | TraversalMode::Unnest => "NOT symbols.folded",
         };
         Some(Box::new(EphSqlFragment::<Bool>::builder().sql(sql).build()))
     }
@@ -1716,10 +1716,11 @@ impl FilterLeaf for DirectOnlyMixin {
     }
 
     fn is_chain_dependent(&self) -> bool {
-        // The NOT EXISTS subqueries consult chain-visible mid/container
-        // rows: an eph instance can change a persistent row's membership,
-        // so the persistent/eph partition union would not equal the legacy
-        // result.  Forces the Combined fallback.
+        // Kept as it was when this filter consulted other rows of the chain
+        // (a correlated NOT EXISTS, then fold depths on two instance rows).
+        // The default mode is now a predicate on one joined symbol row and
+        // could be partitioned; that is a caching change of its own and is
+        // not made here.
         true
     }
 
@@ -1748,20 +1749,17 @@ impl Default for InnermostOnlyMixin {
 
 impl FilterLeaf for InnermostOnlyMixin {
     fn has_parents_expr(&self, _vis: &EphVisibility) -> Option<HasParentsBoolExpr> {
-        // Symmetric with the children side: containers with no fold boundary
-        // between them and the symbol.  NOT strictly one level up -- a bare
-        // `{"a"}` is expected to surface the whole chain (the enclosing
-        // function, its file, its directory), which is what the structural
-        // levels being transparent means on the parent side.  `nested` is the
-        // way to ask for exactly the one level up.
+        // Symmetric with the children side: the containers whose symbol is
+        // not folded.  NOT strictly one level up -- a bare `{"a"}` is expected
+        // to surface the whole chain (the enclosing function, its file, its
+        // directory).  A generated declaration in that chain is passed over
+        // like any other folded symbol; the function around it is still
+        // there.  `nested` is the way to ask for exactly the one level up.
         let sql = match self.mode {
             TraversalMode::Nested => {
                 "symbol_instances.nesting_level = container_instances.nesting_level + 1"
             }
-            TraversalMode::Unfolded | TraversalMode::Unnest => {
-                "symbol_instances.fold_depth = container_instances.fold_depth \
-                 + CASE WHEN container_instances.folded THEN 1 ELSE 0 END"
-            }
+            TraversalMode::Unfolded | TraversalMode::Unnest => "NOT container_symbols.folded",
         };
         Some(Box::new(EphSqlFragment::<Bool>::builder().sql(sql).build()))
     }
@@ -1772,17 +1770,13 @@ impl FilterLeaf for InnermostOnlyMixin {
         // this reference count as its container.
         //
         // Without it the upward refs read is unbounded, so `{ "data_d" }`
-        // returns every instance the reference sits inside -- the function,
-        // its file, its directory -- no matter what mode was asked for.  That
-        // was invisible while both modes keyed on fold depth, since a
-        // reference and every structural level above it share one; `nested`
-        // is the first mode for which the levels differ.
+        // returns every instance the reference sits inside no matter what
+        // mode was asked for.  The default lists the enclosing declarations
+        // whose symbol is not folded -- the function, its file, its directory
+        // -- and `nested` only the one the reference sits in directly.
         let sql = match self.mode {
             TraversalMode::Nested => "symbol_refs.nesting_level = parent_decls.nesting_level + 1",
-            TraversalMode::Unfolded | TraversalMode::Unnest => {
-                "symbol_refs.fold_depth = parent_decls.fold_depth \
-                 + CASE WHEN parent_decls.folded THEN 1 ELSE 0 END"
-            }
+            TraversalMode::Unfolded | TraversalMode::Unnest => "NOT parent_symbols.folded",
         };
         Some(Box::new(EphSqlFragment::<Bool>::builder().sql(sql).build()))
     }

@@ -43,7 +43,18 @@ INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope) VALUES
 -- Data (type=6)
 INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope) VALUES
     (6, 'data_d', 1, 6, NULL),
-    (7, 'data_macro_only', 1, 6, NULL);
+    (7, 'data_macro_only', 1, 6, NULL),
+    (9, 'data_g', 1, 6, NULL);
+
+-- A generated function (type=1): what `CHECK(...)` leaves behind inside func_b.
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope) VALUES
+    (8, 'gen_g', 1, 1, NULL);
+
+-- FOLDED SYMBOLS: nobody wrote these down in normal code, so they are not
+-- listed by default.  Folding is the symbol's and says nothing about where it
+-- sits: `data_macro_only` is a leaf, `gen_g` is a container with an unfolded
+-- symbol inside it.
+UPDATE symbols SET folded = TRUE WHERE id IN (7, 8);
 
 -- Symbol instances
 -- dir_root: sentinel instance on directory object
@@ -66,20 +77,26 @@ INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type
 INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
     (104, 4, 1, int4range(800, 900), 1);
 
--- macro_m [500, 600) — inside func_a.  Marked FOLDED: it is a macro, and what
--- a macro generates should be out of reach of `X { Y }` by default, exactly as
--- the clang indexer marks expansions.  fold_depth is derived from this by the
--- fixture numbering pass, so data_macro_only inside it lands one level down.
-INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type, folded) VALUES
-    (105, 5, 1, int4range(500, 600), 1, TRUE);
+-- macro_m [500, 600) — inside func_a
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (105, 5, 1, int4range(500, 600), 1);
 
 -- data_d [300, 400) — inside func_a
 INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
     (106, 6, 1, int4range(300, 400), 1);
 
--- data_macro_only [510, 550) — inside macro_m, inside func_a
+-- data_macro_only [510, 550) — inside macro_m, inside func_a.  Its SYMBOL is
+-- folded.
 INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
     (107, 7, 1, int4range(510, 550), 1);
+
+-- gen_g [820, 880) — inside func_b.  Its SYMBOL is folded.
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (108, 8, 1, int4range(820, 880), 1);
+
+-- data_g [830, 840) — inside gen_g, inside func_b.  Not folded.
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
+    (109, 9, 1, int4range(830, 840), 1);
 
 -- References
 -- func_a refs data_d (from inside func_a's range)

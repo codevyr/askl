@@ -290,9 +290,9 @@ pub struct Statement {
     /// - Has: Containment-based traversal (composition)
     pub relationship_type: RelationshipType,
     /// How far this statement's scope reaches into the containment tree.
-    /// Unfolded by default: descendants with no fold boundary between.
+    /// By default every descendant whose symbol is not folded, at any depth.
     /// `nested` narrows it to one structural level, `unnest` widens it to
-    /// every level.  The same knob drives upward HAS derivation.
+    /// folded symbols too.  The same knob drives upward HAS derivation.
     pub mode: TraversalMode,
 }
 

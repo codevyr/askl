@@ -203,6 +203,7 @@ struct NewSymbol {
     symbol_scope: Option<i32>,
     leaf_name: String, // pre-computed in Rust; trigger only fires on UPDATE OF name
     layer: i64,        // the project's root layer — every row belongs to a layer
+    folded: bool,      // not listed by default; decided by the indexer
 }
 
 #[derive(Insertable, Clone)]

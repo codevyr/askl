@@ -8,72 +8,148 @@ use index::symbols::SymbolInstanceId;
 //         ├── func_a (Function, [100-700])  inst=103
 //         │   ├── data_d (Data, [300-400])  inst=106
 //         │   └── macro_m (Macro, [500-600])  inst=105
-//         │       └── data_macro_only (Data, [510-550])  inst=107
+//         │       └── data_macro_only (Data, [510-550])  inst=107   FOLDED
 //         └── func_b (Function, [800-900])  inst=104
+//             └── gen_g (Function, [820-880])  inst=108             FOLDED
+//                 └── data_g (Data, [830-840])  inst=109
 //
 // Containment (HAS) is determined by offset range nesting.
 // data_macro_only's has_parents: macro_m, func_a, file_x, dir_root
 //
+// FOLDED is a property of the SYMBOL: not listed by default.  The two folded
+// symbols are the two shapes there are -- a leaf nothing is inside, and a
+// container with an unfolded symbol inside it.  Folding never decides what is
+// reached, only what is listed on the way.
+//
 // Root-level default: all types (no filtering).
 
 #[test]
-fn has_parent_innermost_only() {
+fn upward_lists_every_container_that_is_not_folded() {
     // { "data_macro_only" } — upward derivation from data_macro_only.
     //
-    // data_macro_only's has_parents: macro_m, func_a, file_x, dir_root.
-    // Parents are UNFOLDED, so the whole ancestor chain comes back, not just
-    // the innermost -- a bare `{"x"}` is expected to surface every container.
-    // Root has DefaultTypeFilter([]) → all types pass.    //
-    // FOLDING ACCEPTANCE: `macro_m` is a macro, so once the indexer marks
-    // macro-generated instances folded, the original expectation here comes
-    // back -- `data_macro_only` sits behind a fold boundary and drops out of
-    // the unfolded default again.  Until then every fixture is unfolded and
-    // "unfolded" degenerates to plain transitive descent.
+    // A bare `{"x"}` surfaces every container of x whose symbol is not folded:
+    // macro_m, func_a, file_x, dir_root.  x itself is folded, and is there
+    // because it was NAMED.
     const QUERY: &str = r#"{ "data_macro_only" }"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
     let nodes = res.nodes.as_vec();
-    println!("has_parent_innermost_only nodes: {:?}", nodes);
+    println!(
+        "upward_lists_every_container_that_is_not_folded nodes: {:?}",
+        nodes
+    );
 
     assert!(
         nodes.contains(&SymbolInstanceId::new(107)),
         "data_macro_only should be in results"
     );
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(103)),
-        "func_a is behind macro_m's fold boundary"
+        nodes.contains(&SymbolInstanceId::new(105)),
+        "macro_m contains it"
+    );
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(103)),
+        "and so does func_a: there is no boundary at macro_m to stop at"
     );
 }
 
 #[test]
-fn nested_macro_not_in_children() {
+fn upward_passes_over_a_folded_container() {
+    // { "data_g" } — data_g sits in gen_g, which sits in func_b.
+    //
+    // gen_g is folded: the shape of `f() { CHECK(sizeof(struct x)); }`, where
+    // the reference to `x` sits in the declaration `CHECK` generated.  Asking
+    // who contains `x` should answer `f`, not the generated declaration --
+    // and `f` must not be lost because something folded stands in between.
+    let ids = |q: &str| {
+        run_query(TEST_INPUT_TYPE_FILTER, q)
+            .nodes
+            .as_vec()
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+    };
+
+    let default = ids(r#"{ "data_g" }"#);
+    assert!(default.contains(&SymbolInstanceId::new(109)), "data_g");
+    assert!(
+        default.contains(&SymbolInstanceId::new(104)),
+        "func_b contains it, through gen_g: {:?}",
+        default
+    );
+    assert!(
+        !default.contains(&SymbolInstanceId::new(108)),
+        "gen_g is folded, so it is not listed: {:?}",
+        default
+    );
+
+    let unnest = ids(r#"unnest { "data_g" }"#);
+    assert!(
+        unnest.contains(&SymbolInstanceId::new(108)),
+        "`unnest` lists it: {:?}",
+        unnest
+    );
+
+    let named = ids(r#""gen_g" { "data_g" }"#);
+    assert!(
+        named.contains(&SymbolInstanceId::new(108)) && named.contains(&SymbolInstanceId::new(109)),
+        "and so does naming it: {:?}",
+        named
+    );
+}
+
+#[test]
+fn a_folded_symbol_is_not_listed_among_children() {
     // func("func_a") {} — downward derivation from func_a.
     //
-    // `X { Y }` is UNFOLDED, so func_a reaches macro_m, data_d AND
-    // data_macro_only, which sits inside macro_m.    //
-    // FOLDING ACCEPTANCE: `macro_m` is a macro, so once the indexer marks
-    // macro-generated instances folded, the original expectation here comes
-    // back -- `data_macro_only` sits behind a fold boundary and drops out of
-    // the unfolded default again.  Until then every fixture is unfolded and
-    // "unfolded" degenerates to plain transitive descent.
+    // `X { }` lists X's descendants whose symbol is not folded: macro_m and
+    // data_d.  data_macro_only is folded and is left out -- because of what it
+    // is, not because it sits inside macro_m.
     const QUERY: &str = r#"func("func_a") {}"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
     let nodes = res.nodes.as_vec();
-    println!("nested_macro_not_in_children nodes: {:?}", nodes);
+    println!(
+        "a_folded_symbol_is_not_listed_among_children nodes: {:?}",
+        nodes
+    );
 
     assert!(nodes.contains(&SymbolInstanceId::new(103)), "func_a");
-    assert!(
-        nodes.contains(&SymbolInstanceId::new(105)),
-        "macro_m (direct child)"
-    );
-    assert!(
-        nodes.contains(&SymbolInstanceId::new(106)),
-        "data_d (direct child)"
-    );
+    assert!(nodes.contains(&SymbolInstanceId::new(105)), "macro_m");
+    assert!(nodes.contains(&SymbolInstanceId::new(106)), "data_d");
     assert!(
         !nodes.contains(&SymbolInstanceId::new(107)),
-        "data_macro_only is behind macro_m's fold boundary"
+        "data_macro_only is folded"
+    );
+}
+
+#[test]
+fn children_are_reached_through_a_folded_container() {
+    // func("func_b") {} — func_b contains gen_g (folded), which contains
+    // data_g (not folded).
+    //
+    // Folding hides gen_g and nothing else.  It used to be a BOUNDARY: what
+    // sat inside a folded instance was one fold level down and out of reach,
+    // so a reference typed in a generating macro's arguments had to be kept
+    // out of the generated declaration or its function lost it.  Now the
+    // declaration can simply contain it.
+    const QUERY: &str = r#"func("func_b") {}"#;
+    let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
+
+    let nodes = res.nodes.as_vec();
+    println!(
+        "children_are_reached_through_a_folded_container nodes: {:?}",
+        nodes
+    );
+
+    assert!(nodes.contains(&SymbolInstanceId::new(104)), "func_b");
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(109)),
+        "data_g is reached through gen_g"
+    );
+    assert!(
+        !nodes.contains(&SymbolInstanceId::new(108)),
+        "gen_g itself is folded"
     );
 }
 
@@ -169,12 +245,8 @@ fn unnest_downward_does_not_affect_child() {
     // func("func_a") unnest {} — unnest is on the parent statement.
     //
     // unnest on the parent only affects upward (parent merge) derivation; the
-    // child {} reads its own flag for downward derivation, so the fold boundary
-    // at macro_m still applies and data_macro_only stays out.    //
-    // This is FOLDING doing the work: macro_m is marked folded in the fixture,
-    // so what it generates sits one fold level down and `X { Y }` -- which
-    // reaches descendants at the SAME fold depth -- does not reach it.  The
-    // clang indexer marks real macro expansions the same way.
+    // child {} reads its own flag for downward derivation, so the default
+    // still applies there and the folded data_macro_only stays out.
     const QUERY: &str = r#"func("func_a") unnest {}"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
@@ -192,7 +264,7 @@ fn unnest_downward_does_not_affect_child() {
     );
     assert!(
         !nodes.contains(&SymbolInstanceId::new(107)),
-        "data_macro_only stays behind the fold — unnest on the PARENT does not \
+        "data_macro_only stays unlisted — unnest on the PARENT does not \
          change the child's downward derivation"
     );
 }
@@ -284,13 +356,8 @@ fn upward_from_func_b() {
 fn has_only_upward_innermost() {
     // has { "data_macro_only" } — upward using only HAS (containment), no REFS.
     //
-    // Parents are UNFOLDED, so the containment chain comes back: macro_m and
-    // func_a above it.    //
-    // FOLDING ACCEPTANCE: `macro_m` is a macro, so once the indexer marks
-    // macro-generated instances folded, the original expectation here comes
-    // back -- `data_macro_only` sits behind a fold boundary and drops out of
-    // the unfolded default again.  Until then every fixture is unfolded and
-    // "unfolded" degenerates to plain transitive descent.
+    // The containment chain comes back, every container whose symbol is not
+    // folded: macro_m and func_a above it.
     const QUERY: &str = r#"has { "data_macro_only" }"#;
     let res = run_query(TEST_INPUT_TYPE_FILTER, QUERY);
 
@@ -306,8 +373,8 @@ fn has_only_upward_innermost() {
         "macro_m (HAS parent, passes all-types filter)"
     );
     assert!(
-        !nodes.contains(&SymbolInstanceId::new(103)),
-        "func_a is behind macro_m's fold boundary"
+        nodes.contains(&SymbolInstanceId::new(103)),
+        "func_a (HAS parent, two levels up)"
     );
 }
 
@@ -463,10 +530,10 @@ fn bare_any_propagates_the_absence_of_a_type() {
 // --- nested: exactly one structural level ---------------------------------
 //
 // The third traversal mode, and the only reader of `nesting_level`.  Where
-// the default reaches every descendant at the same FOLD depth -- through the
-// structural levels, so `mod { func }` works -- `nested` reaches every
-// descendant at the next NESTING level, which is the one question the other
-// two modes cannot ask.
+// the default lists every descendant whose symbol is not folded -- at any
+// depth, so `mod { func }` works -- `nested` lists every descendant at the
+// next NESTING level, folded or not, which is the one question the other two
+// modes cannot ask.
 //
 // The mode belongs to the statement whose reach it bounds: for downward
 // derivation that is the statement INSIDE the braces, which is why these read
@@ -500,10 +567,9 @@ fn nested_reaches_exactly_one_structural_level() {
 fn nested_is_narrower_than_the_default_and_the_default_narrower_than_unnest() {
     // The same scope in all three modes, so the widening is visible in one
     // place.  data_d is the discriminator between `nested` and the default:
-    // it is two levels below file_x but at the SAME fold depth, so the
-    // default reaches it and `nested` does not.  data_macro_only is the
-    // discriminator between the default and `unnest`: it sits behind
-    // macro_m's fold boundary.
+    // it is two levels below file_x, so the default lists it and `nested`
+    // does not.  data_macro_only is the discriminator between the default and
+    // `unnest`: its symbol is folded.
     let ids = |q: &str| {
         run_query(TEST_INPUT_TYPE_FILTER, q)
             .nodes
@@ -537,19 +603,18 @@ fn nested_is_narrower_than_the_default_and_the_default_narrower_than_unnest() {
 }
 
 #[test]
-fn a_named_child_is_found_behind_a_fold() {
+fn a_named_child_is_found_though_folded() {
     // FOLDING DECIDES WHAT IS LISTED, NOT WHAT CAN BE ASKED FOR.
     //
-    // `func("func_a") { }` enumerates func_a's contents and stops at macro_m's
-    // fold boundary, so data_macro_only is not listed (the test above).  A
-    // statement that NAMES the symbol is not an enumeration: the user asked
-    // for that symbol, and whether it is shown by default is beside the point.
-    // The same holds for a glob, which is still a name.
+    // `func("func_a") { }` enumerates func_a's contents and leaves out
+    // data_macro_only, whose symbol is folded (the test above).  A statement
+    // that NAMES the symbol is not an enumeration: the user asked for that
+    // symbol, and whether it is shown by default is beside the point.  The
+    // same holds for a glob, which is still a name.
     //
     // Nothing implements this specially.  A named child selects by name and is
     // then constrained by its parent's interval; the fold filter exists only
-    // on the path that derives an unnamed child from its parent.  This pins
-    // that, because the filter on the derive path is about to change shape.
+    // on the path that derives an unnamed child from its parent.
     let ids = |q: &str| {
         run_query(TEST_INPUT_TYPE_FILTER, q)
             .nodes
@@ -562,13 +627,13 @@ fn a_named_child_is_found_behind_a_fold() {
     let enumerated = ids(r#"func("func_a") { }"#);
     assert!(
         !enumerated.contains(&SymbolInstanceId::new(107)),
-        "precondition: enumeration does not reach behind the fold"
+        "precondition: enumeration does not list a folded symbol"
     );
 
     let named = ids(r#"func("func_a") { "data_macro_only" }"#);
     assert!(
         named.contains(&SymbolInstanceId::new(103)) && named.contains(&SymbolInstanceId::new(107)),
-        "a child named exactly is returned from behind the fold: {:?}",
+        "a child named exactly is returned though folded: {:?}",
         named
     );
 
@@ -576,8 +641,50 @@ fn a_named_child_is_found_behind_a_fold() {
     assert!(
         globbed.contains(&SymbolInstanceId::new(103))
             && globbed.contains(&SymbolInstanceId::new(107)),
-        "a child named by a glob is returned from behind the fold: {:?}",
+        "a child named by a glob is returned though folded: {:?}",
         globbed
+    );
+}
+
+#[test]
+fn a_typed_statement_lists_by_folding_too() {
+    // `file { func }` is still an enumeration -- every function in the file --
+    // so the folded gen_g is left out, exactly like `mod { func }` leaving out
+    // `__compiletime_assert_N`.  `unnest` lists it, and so does its name.
+    let ids = |q: &str| {
+        run_query(TEST_INPUT_TYPE_FILTER, q)
+            .nodes
+            .as_vec()
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+    };
+
+    let default = ids(r#"file("file_x") { func }"#);
+    assert!(
+        default.contains(&SymbolInstanceId::new(103))
+            && default.contains(&SymbolInstanceId::new(104)),
+        "func_a and func_b: {:?}",
+        default
+    );
+    assert!(
+        !default.contains(&SymbolInstanceId::new(108)),
+        "gen_g is folded: {:?}",
+        default
+    );
+
+    let unnest = ids(r#"file("file_x") { unnest func }"#);
+    assert!(
+        unnest.contains(&SymbolInstanceId::new(108)),
+        "`unnest` lists it: {:?}",
+        unnest
+    );
+
+    let named = ids(r#"file("file_x") { func("gen_g") }"#);
+    assert!(
+        named.contains(&SymbolInstanceId::new(108)),
+        "and so does naming it: {:?}",
+        named
     );
 }
 

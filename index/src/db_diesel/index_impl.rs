@@ -4420,8 +4420,8 @@ impl<'a> EphTransaction<'a> {
             //
             // AN EPHEMERAL INSTANCE IS A LEAF -- width 1, containing nothing.
             // That is not a new limitation, it is already the case: a ref sits
-            // at `base + 1`, below every slot, and the `si.layer > 0` /
-            // `NOT si.folded` owner rules stop an ephemeral row owning another.
+            // at `base + 1`, below every slot, and the `si.layer > 0` owner
+            // rule stops an ephemeral row owning another.
             // `references.rs` requires `sr.dfs_enter < from_inst.dfs_exit`,
             // which the old 8-wide slot already failed for its own refs.  So
             // those 7 interior numbers were dead space.
@@ -4466,58 +4466,48 @@ impl<'a> EphTransaction<'a> {
             // keeps placement deterministic.  Inventing an order here would
             // claim containment the bytes do not support.
             //
-            // OWNERSHIP OF TEXT.  A byte belongs to the innermost instance
-            // containing it, with one exclusion: `NOT si.folded`.
+            // WHERE A MATCH SITS.  In the innermost persistent instance whose
+            // extent contains it: narrowest, then deepest in the tree, then
+            // earliest.  The same rule the indexers use to place a stored
+            // reference, so the same bytes get the same container whether the
+            // row is a reference or a query-time match.
             //
-            // *A macro expansion owns no text.*  Every byte at the call site of
-            // `foo(a)` -- the name, the parens, the argument -- was typed by the
-            // CALLER.  The expansion owns the symbols it generates, through the
-            // DFS interval, and nothing else.  So the owner of a match anywhere
-            // inside `foo(a)` is the enclosing function, which is what makes
-            // `func("bar") { search("a") }` find it.
+            // FOLDING PLAYS NO PART.  There used to be an exclusion here,
+            // `NOT si.folded`, on the argument that a macro's expansion "owns
+            // no text": every byte of `CHECK(sizeof(struct x))` was typed by
+            // the caller, so a match there had to be the calling function's.
+            // It still is.  The declaration `CHECK` generates lies inside the
+            // function's interval, so a match placed in it is inside the
+            // function too, and `func("f") { search("x") }` finds it by the
+            // interval alone.  Whether the generated declaration is LISTED is
+            // its symbol's `folded`, read by the traversal filter and by
+            // nothing here.
             //
-            // That is also why the macro extent can be the whole invocation:
-            // extents describe which bytes an instance OCCUPIES and are only
-            // descriptive -- some instances (a ##-pasted name, a synthesised
-            // assert) have no natural byte range at all.  Ownership is the DFS
-            // interval, which no extent ever decides.
-            //
-            // Consequence, accepted: `macro("foo") { search(...) }` finds
-            // nothing, because none of that text is the macro's.
-            //
-            // Given the exclusion, the owner is always unfolded, so the
-            // `+ CASE WHEN own.folded` term below is provably zero.  It stays so
-            // the SQL states the rule -- a match is a child of its owner on
-            // every axis -- rather than leaning on an invariant enforced in the
-            // WHERE clause.
+            // The per-row `folded` / `fold_depth` columns are not written:
+            // they keep their defaults until they are dropped.
 
             "INSERT INTO index.symbol_instances \
                  (id, symbol, object_id, offset_range, instance_type, layer, \
-                  nesting_level, dfs_enter, dfs_exit, folded, fold_depth) \
+                  nesting_level, dfs_enter, dfs_exit) \
              SELECT nextval('index.eph_instance_id_seq'), \
                     s.symbol_id, s.object_id, int4range(s.start_off, s.end_off), s.instance_type, $6, \
                     s.own_level + 1, \
                     s.base + 1 + s.slot, \
-                    s.base + 2 + s.slot, \
-                    FALSE, \
-                    s.own_fold \
+                    s.base + 2 + s.slot \
              FROM ( \
                  SELECT t.symbol_id, t.object_id, t.start_off, t.end_off, t.instance_type, \
                         COALESCE(own.nesting_level, 0) AS own_level, \
                         COALESCE(own.dfs_enter, 0)     AS base, \
-                        COALESCE(own.fold_depth, 0) \
-                          + CASE WHEN own.folded THEN 1 ELSE 0 END AS own_fold, \
                         LEAST(ROW_NUMBER() OVER w, 1022) AS slot \
                  FROM UNNEST($1::int8[], $2::int4[], $3::int4[], $4::int4[], $5::int4[]) \
                  WITH ORDINALITY \
                  AS t(symbol_id, object_id, start_off, end_off, instance_type, ord) \
                  JOIN index.objects o ON o.id = t.object_id AND o.project_id = $7 \
                  LEFT JOIN LATERAL ( \
-                     SELECT si.nesting_level, si.dfs_enter, si.fold_depth, si.folded \
+                     SELECT si.nesting_level, si.dfs_enter \
                      FROM index.symbol_instances si \
                      WHERE si.object_id = t.object_id \
                        AND si.layer > 0 \
-                       AND NOT si.folded \
                        AND si.offset_range @> int4range(t.start_off, t.end_off) \
                      ORDER BY upper(si.offset_range) - lower(si.offset_range) ASC, \
                               si.nesting_level DESC, si.dfs_enter ASC LIMIT 1 \
@@ -4556,32 +4546,24 @@ impl<'a> EphTransaction<'a> {
 
         diesel::sql_query(
             // Same placement as ephemeral instances, except a ref is a point:
-            // it sits one step inside its owner rather than taking an interval.
-            //
-            // Fold depth follows the same rule as an ephemeral instance's --
-            // `own.fold_depth + folded`, a child of its owner -- which is also
-            // how the indexer numbers persistent refs (`Stage1::insertRef` via
-            // `currentFoldDepth`).  See `insert_instance_level` for why a byte
-            // belongs to its visible span and nothing wider.
+            // it sits one step inside the instance it is placed in rather
+            // than taking an interval.  See `insert_instance_level` for the
+            // rule, which is also how both indexers place a stored reference.
             "INSERT INTO index.symbol_refs \
                  (id, to_symbol, from_object, from_offset_range, layer, \
-                  nesting_level, dfs_enter, folded, fold_depth) \
+                  nesting_level, dfs_enter) \
              SELECT nextval('index.eph_ref_id_seq'), \
                     t.to_symbol, t.from_object, int4range(t.start_off, t.end_off), $5, \
                     COALESCE(own.nesting_level, 0) + 1, \
-                    COALESCE(own.dfs_enter, 0) + 1, \
-                    FALSE, \
-                    COALESCE(own.fold_depth, 0) \
-                      + CASE WHEN own.folded THEN 1 ELSE 0 END \
+                    COALESCE(own.dfs_enter, 0) + 1 \
              FROM UNNEST($1::int8[], $2::int4[], $3::int4[], $4::int4[]) \
              AS t(to_symbol, from_object, start_off, end_off) \
              JOIN index.objects o ON o.id = t.from_object AND o.project_id = $6 \
              LEFT JOIN LATERAL ( \
-                 SELECT si.nesting_level, si.dfs_enter, si.fold_depth, si.folded \
+                 SELECT si.nesting_level, si.dfs_enter \
                  FROM index.symbol_instances si \
                  WHERE si.object_id = t.from_object \
                    AND si.layer > 0 \
-                   AND NOT si.folded \
                    AND si.offset_range @> int4range(t.start_off, t.end_off) \
                  ORDER BY upper(si.offset_range) - lower(si.offset_range) ASC, \
                           si.nesting_level DESC, si.dfs_enter ASC LIMIT 1 \

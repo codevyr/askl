@@ -3255,14 +3255,14 @@ fn data_inherit_weak_parent_derives_full_chain() {
 
 #[test]
 fn unfolded_has_file_reaches_nested_funcs() {
-    // `X { Y }` is UNFOLDED: descendants with no fold boundary between.  Nothing
-    // in this fixture is folded, so a file reaches every function it contains,
-    // including the ones nested inside foo.
+    // `X { Y }` lists every descendant whose symbol is not folded, at any
+    // depth.  Nothing in this fixture is folded, so a file reaches every
+    // function it contains, including the ones nested inside foo.
     //
     // This used to assert the opposite, under the strict depth+1 rule.  That
     // rule cannot survive module -> directory -> file -> declarations being a
-    // real chain: it would make `mod { func }` empty.  Hiding is now folding's
-    // job, and is pinned separately once the indexer marks macro expansions.
+    // real chain: it would make `mod { func }` empty.  Hiding is folding's
+    // job, a property of the symbol, pinned in `type_filter_test.rs`.
     const QUERY: &str = r#"file("/main.go") has { func }"#;
     let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
 
@@ -3301,9 +3301,8 @@ fn unnest_has_file_shows_all_children() {
 #[test]
 fn unfolded_refs_reach_through_nested_scopes() {
     // foo { } — default REFS.  The ref to bar sits inside anon150, which is
-    // inside foo and is not a fold boundary, so it is foo's reference.  A
-    // closure's calls count as its enclosing function's, which is what unfolded
-    // traversal means; a macro expansion is where that stops.
+    // inside foo, so it is foo's reference too.  A closure's calls count as
+    // its enclosing function's: the default reaches through every level.
     const QUERY: &str = r#""foo" { }"#;
     let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
 
@@ -3348,8 +3347,8 @@ fn direct_only_has_foo_shows_nested_funcs() {
 #[test]
 fn unfolded_nested_scope_chains_through_levels() {
     // "foo" refs { refs { } } — REFS at both levels.  The ref at [160,170) sits
-    // inside anon150, which is inside foo and is not a fold boundary, so bar is
-    // foo's reference; bar -> baz then follows at the second level.
+    // inside anon150, which is inside foo, so bar is foo's reference; bar ->
+    // baz then follows at the second level.
     //
     // Previously bar was hidden here and baz could not be discovered through
     // it.  That was the strict depth+1 rule; see the comment on
@@ -3466,10 +3465,9 @@ fn unfolded_refs_type_reaches_through_nested_type() {
     //
     // NOTE: with the strict depth+1 rule this was the control proving that
     // shadowing happened at all, so that the rule could not be satisfied by
-    // dropping the filter entirely.  Nothing plays that role right now: with
-    // every fixture unfolded, "unfolded" degenerates to plain transitive
-    // descent.  A fixture that marks a macro expansion folded has to restore
-    // the guarantee, and is the acceptance test for the indexer work.
+    // dropping the filter entirely.  With nothing folded here the default is
+    // plain transitive descent; that the filter exists at all is pinned where
+    // a fixture does fold a symbol (`type_filter_test.rs`).
     let outer = run_query(
         TEST_INPUT_STRUCT_FIELDS,
         r#"type("Wrapper") derive(type="refs") { }"#,
@@ -4766,6 +4764,7 @@ fn canary_leak_detected_by_has_eph_leak() {
             symbol_scope: None,
             leaf_name: "__canary__".into(),
             layer: CANARY_LAYER_ID,
+            folded: false,
         },
         symbol_instance: SymbolInstance {
             id: -999999,
@@ -4866,6 +4865,7 @@ fn canary_leak_in_each_relationship_field_detected() {
             symbol_scope: None,
             leaf_name: "__canary__".into(),
             layer: CANARY_LAYER_ID,
+            folded: false,
         }
     }
     fn canary_instance() -> SymbolInstance {
@@ -8989,8 +8989,7 @@ fn combined_fallback_consults_eph_rows() {
         // mid DEMOTING foo from the module's direct children.  That is no
         // longer possible: containment is a position in the object's precomputed
         // DFS order, so an ephemeral row cannot re-parent a persistent one, and
-        // under the unfolded default nothing demotes unless it is a fold
-        // boundary.
+        // under the default nothing is left out unless its symbol is folded.
         //
         // Shown instead by what the eph row ADDS.  If the layered query were
         // served from a chain-free entry it would return exactly the bare
@@ -10422,11 +10421,11 @@ fn a_capped_provider_is_flagged_through_the_label_path() {
 
 #[test]
 fn eph_owner_is_the_innermost_instance_in_the_tree() {
-    // Which persistent instance owns a query-time row, when several share one
-    // extent.  ONE law, the same one both indexers use to place a persistent
-    // ref: the innermost unfolded instance containing it -- narrowest extent,
-    // then deepest in the tree.  The same bytes get the same owner whether the
-    // row is a stored reference or a query-time match.
+    // Which persistent instance a query-time row sits in, when several share
+    // one extent.  ONE law, the same one both indexers use to place a
+    // persistent ref: the innermost instance containing it -- narrowest
+    // extent, then deepest in the tree.  The same bytes get the same container
+    // whether the row is a stored reference or a query-time match.
     //
     // "Deepest" and not "outermost", which is what this ordering used to say.
     // Outermost was chosen when the only co-extensive clusters in sight were
@@ -10437,10 +10436,9 @@ fn eph_owner_is_the_innermost_instance_in_the_tree() {
     // interval, out of reach of `file { ... }` in every traversal mode (see
     // `a_search_match_outside_every_declaration_is_reachable_from_its_file`).
     //
-    // Keeping compiler helpers from owning user text is the FOLD axis's job --
-    // `AND NOT si.folded`, pinned by `a_macro_expansion_owns_no_text` -- not the
-    // tie-break's.  Fixture object 11 predates that rule and still models the
-    // generated cluster as unfolded, which is why it exercises this tie at all.
+    // Whether a compiler helper is LISTED is its symbol's folding, a separate
+    // question (`a_match_in_a_generated_declaration_is_still_the_callers`).
+    // Placement does not ask.
     const SHOW: &str = r#"func("coext_show") { search("wq9") }"#;
     const ASSERT: &str = r#"func("coext_assert") { search("wq9") }"#;
     const ATTR: &str = r#"data("coext_attr") { search("wq9") }"#;
@@ -10475,50 +10473,57 @@ fn eph_owner_is_the_innermost_instance_in_the_tree() {
 }
 
 #[test]
-fn a_macro_expansion_owns_no_text() {
+fn a_match_in_a_generated_declaration_is_still_the_callers() {
     // Every byte at the call site of `M13(zq8, c)` was typed by whoever wrote
-    // `h13` — the name, the parens, the argument.  The expansion owns the
-    // symbols it GENERATES, through the DFS interval, and no text at all.
+    // `h13`.  The declaration `M13` generates has the whole invocation
+    // `[15,25)` as its extent, so `zq8` sits IN it -- containment is by
+    // extent and nothing else.
     //
-    // Object 13 is the realistic shape: the expansion's extent is the whole
-    // invocation `[15,25)` and the symbol it generates shares that extent, both
-    // `folded`.  So the narrowest extent containing `zq8` belongs to a macro,
-    // and ownership has to come from `NOT folded` instead — otherwise the
-    // argument text is attributed to compiler-generated code and drops out of
-    // the caller.
-    const UP: &str = r#"{ search("zq8") }"#;
-    let ids: Vec<i64> = run_query(TEST_INPUT_SEARCH, UP)
-        .nodes
-        .as_vec()
-        .iter()
-        .map(|id| <SymbolInstanceId as Into<i64>>::into(*id))
-        .collect();
+    // It is still h13's, twice over.  h13's interval contains the generated
+    // declaration's, so the match is inside h13.  And the generated symbol is
+    // folded, so it is the one container that is not listed.
+    //
+    // This used to be arranged in the placement rule itself (`AND NOT
+    // si.folded`: "a macro expansion owns no text"), which bought the same
+    // answer by making where a match sits depend on what is shown.
+    let ids = |q: &str| -> Vec<i64> {
+        run_query(TEST_INPUT_SEARCH, q)
+            .nodes
+            .as_vec()
+            .iter()
+            .map(|id| <SymbolInstanceId as Into<i64>>::into(*id))
+            .collect()
+    };
 
+    let up = ids(r#"{ search("zq8") }"#);
+    assert!(up.contains(&123), "h13 contains the match, got {:?}", up);
     assert!(
-        ids.contains(&123),
-        "the argument's owner is h13, the function whose author typed it, \
-         got {:?}",
-        ids
+        !up.contains(&125),
+        "the generated declaration is folded, so it is not listed, got {:?}",
+        up
     );
+
+    let all = ids(r#"unnest { search("zq8") }"#);
     assert!(
-        !ids.contains(&124),
-        "not the expansion — it owns no text, got {:?}",
-        ids
+        all.contains(&125) && all.contains(&123),
+        "`unnest` lists the declaration the match sits in as well, got {:?}",
+        all
     );
+
+    let down = ids(r#"func("h13") { search("zq8") }"#);
     assert!(
-        !ids.contains(&125),
-        "and certainly not the symbol the expansion generated, got {:?}",
-        ids
+        down.iter().any(|id| *id < 0),
+        "and from h13 the match is found by the interval alone, got {:?}",
+        down
     );
 }
 
 #[test]
-fn eph_match_in_nested_macros_still_belongs_to_the_caller() {
-    // Object 12: `k7z` sits in MAC_IN inside MAC_OUT inside fn_host, both macros
-    // folded.  Nesting macros changes nothing — the text is still the caller's,
-    // because neither expansion owns any.  This is the depth-2 case of
-    // `a_macro_expansion_owns_no_text`, and the one where an owner rule that
-    // merely copied the innermost container would diverge.
+fn a_match_nested_in_generated_declarations_still_belongs_to_the_caller() {
+    // Object 12: `k7z` sits in gen_in inside gen_out inside fn_host, both
+    // generated symbols folded.  Depth changes nothing: fn_host contains the
+    // match however many folded declarations stand between, and those are
+    // the ones not listed.
     const UP: &str = r#"{ search("k7z") }"#;
     let ids: Vec<i64> = run_query(TEST_INPUT_SEARCH, UP)
         .nodes
@@ -10527,10 +10532,14 @@ fn eph_match_in_nested_macros_still_belongs_to_the_caller() {
         .map(|id| <SymbolInstanceId as Into<i64>>::into(*id))
         .collect();
 
-    assert!(ids.contains(&120), "fn_host owns the text, got {:?}", ids);
+    assert!(
+        ids.contains(&120),
+        "fn_host contains the match, got {:?}",
+        ids
+    );
     assert!(
         !ids.contains(&121) && !ids.contains(&122),
-        "neither macro owns it, got {:?}",
+        "neither generated declaration is listed, got {:?}",
         ids
     );
 }

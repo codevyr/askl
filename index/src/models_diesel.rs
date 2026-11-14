@@ -100,6 +100,10 @@ pub struct Symbol {
     pub symbol_scope: Option<i32>,
     pub leaf_name: String,
     pub layer: i64,
+    /// Not listed by default: nobody wrote this symbol down in normal code.
+    /// The default traversal filters on it; `unnest` and naming the symbol do
+    /// not.  It says nothing about where the symbol sits.
+    pub folded: bool,
 }
 
 #[derive(Debug, QueryableByName)]

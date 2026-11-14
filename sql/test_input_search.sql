@@ -62,17 +62,16 @@ INSERT INTO content_store (content_hash, content) VALUES
     -- import block or package clause occupies; `zk5` sits inside the function.
     -- Both are inside the co-extensive module/directory/file chain.
     ('cs_chain',      E'import zk4\nfunc h(){ zk5 }\n'),
-    -- NESTED macros.  `k7z` sits inside MAC_IN, inside MAC_OUT, inside
-    -- fn_host.  Its owner is MAC_IN (the narrowest container) at fold_depth 1,
-    -- while the innermost NON-FOLDED container is fn_host at fold_depth 0 --
-    -- the only shape where those two differ, and so the only shape that can
-    -- tell the two fold-depth rules apart.
+    -- NESTED generated declarations.  `k7z` sits inside gen_in, inside
+    -- gen_out, inside fn_host: a match two folded containers deep.  It sits in
+    -- gen_in, the innermost; fn_host still contains it, and is the only one of
+    -- the three that is listed.
     --   offsets: OUT(IN(k7z)) = [15,27), IN(k7z) = [19,26), k7z = [22,25)
     ('cs_nestmac',    E'int host(void){OUT(IN(k7z));}\n'),
-    -- The realistic macro shape, with the generated symbol marked FOLDED as the
-    -- indexer marks it.  `zq8` is a macro ARGUMENT -- text the author of h13
-    -- typed -- so its owner must be h13, not the expansion and not the symbol
-    -- the expansion generated.  A macro expansion owns no text.
+    -- The realistic macro shape: `M13(zq8, c)` generates a declaration whose
+    -- extent is the whole invocation and whose symbol is FOLDED.  `zq8` is a
+    -- macro ARGUMENT -- text the author of h13 typed.  It sits in what the
+    -- macro generated, which is inside h13, so it is still h13's.
     --   offsets: M13(zq8,c) = [15,25), zq8 = [19,22)
     ('cs_argown',     E'void h13(void){M13(zq8,c);}\n'),
     ('cs_binary',     E'\\xfffefa666f6f0bff'::bytea),
@@ -111,11 +110,11 @@ INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope) VALUES
     (17, 'coext_show',   1, 1, 2),
     (18, 'coext_assert', 1, 1, 2),
     (19, 'coext_attr',   1, 6, 2),
-    -- Nested-macro cluster.
+    -- Nested generated declarations (both FOLDED, below).
     (20, 'fn_host',      1, 1, 2),
-    (21, 'MAC_OUT',      1, 7, 2),
-    (22, 'MAC_IN',       1, 7, 2),
-    -- Argument-ownership cluster.
+    (21, 'gen_out',      1, 1, 2),
+    (22, 'gen_in',       1, 1, 2),
+    -- A macro argument inside a generated declaration (g13 FOLDED, below).
     (23, 'h13',          1, 1, 2),
     (24, 'M13',          1, 7, 2),
     (25, 'g13',          1, 1, 2),
@@ -156,25 +155,28 @@ INSERT INTO symbol_instances
     (118, 18, 11, int4range(0, 21), 2, 3072,  4096, 2, FALSE, 1),
     (119, 19, 11, int4range(0, 21), 1, 6144,  7168, 1, FALSE, 1);
 
--- Object 12: nested macros.  Ranges nest properly here, so
--- `number_fixture_tree` derives the whole tree -- including fold_depth, which
--- it accumulates from the `folded` flags below.  Leaving dfs_exit at 0 is what
+-- FOLDED SYMBOLS: what a macro generated and nobody wrote down.  Folding is
+-- the symbol's -- "not listed by default" -- and decides nothing about where a
+-- match sits or what contains it.
+UPDATE symbols SET folded = TRUE WHERE id IN (21, 22, 25);
+
+-- Object 12: nested generated declarations.  Ranges nest properly here, so
+-- `number_fixture_tree` derives the whole tree.  Leaving dfs_exit at 0 is what
 -- opts these rows into that pass.
 INSERT INTO symbol_instances
-    (id, symbol, object_id, offset_range, instance_type, folded) VALUES
-    (120, 20, 12, int4range(0, 29),  1, FALSE),  -- fn_host, fold_depth 0
-    (121, 21, 12, int4range(15, 27), 3, TRUE),   -- MAC_OUT, folded, fold_depth 0
-    (122, 22, 12, int4range(19, 26), 3, TRUE);   -- MAC_IN,  folded, fold_depth 1
+    (id, symbol, object_id, offset_range, instance_type) VALUES
+    (120, 20, 12, int4range(0, 29),  1),  -- fn_host
+    (121, 21, 12, int4range(15, 27), 1),  -- gen_out, symbol folded
+    (122, 22, 12, int4range(19, 26), 1);  -- gen_in,  symbol folded
 
--- Object 13: a macro invocation inside a function, with the expansion and the
--- symbol it generates both FOLDED -- what the indexer really produces.  The
--- expansion's extent is the whole invocation (un-clamped), which is exactly why
--- ownership must come from `NOT folded` rather than from the narrowest extent.
+-- Object 13: a macro invocation inside a function, and the declaration it
+-- generates -- extent the whole invocation, symbol folded, which is what the
+-- indexer produces.  The invocation itself is a reference to `M13`, not an
+-- instance, so there is no row for it.
 INSERT INTO symbol_instances
-    (id, symbol, object_id, offset_range, instance_type, folded) VALUES
-    (123, 23, 13, int4range(0, 27),  1, FALSE),  -- h13, the caller
-    (124, 24, 13, int4range(15, 25), 3, TRUE),   -- M13 expansion, whole invocation
-    (125, 25, 13, int4range(15, 25), 1, TRUE);   -- g13, generated, same extent
+    (id, symbol, object_id, offset_range, instance_type) VALUES
+    (123, 23, 13, int4range(0, 27),  1),  -- h13, the caller
+    (125, 25, 13, int4range(15, 25), 1);  -- g13, generated, symbol folded
 
 -- Object 14: the CO-EXTENSIVE CONTAINER CHAIN every real file object carries --
 -- its module, its directory and the file itself, all covering [0, len).  Stated
