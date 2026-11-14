@@ -138,22 +138,22 @@ INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type
 -- DFS interval exists for.  `number_fixture_tree` leaves already-numbered rows
 -- alone, so every instance of this object carries explicit numbers.
 --
---   enter  exit depth fold  extent      symbol
---    1024 10240   0     0   [0,21)      COEXT_ATTR   (folded: the boundary)
+--   enter  exit depth  extent      symbol
+--    1024 10240   0    [0,21)      COEXT_ATTR
 -- The macro's extent is the WHOLE INVOCATION, as the un-clamped indexer emits
 -- it.  That is load-bearing for scoped search: `macro(...) { search(...) }`
 -- fuses the macro's byte ranges into the scan's corpus, so a name-only extent
 -- would exclude the argument text and the search would correctly find nothing.
---    2048  5120   1     1   [0,21)        coext_show
---    3072  4096   2     1   [0,21)          coext_assert
---    6144  7168   1     1   [0,21)        coext_attr
+--    2048  5120   1    [0,21)        coext_show
+--    3072  4096   2    [0,21)          coext_assert
+--    6144  7168   1    [0,21)        coext_attr
 INSERT INTO symbol_instances
     (id, symbol, object_id, offset_range, instance_type,
-     dfs_enter, dfs_exit, nesting_level, folded, fold_depth) VALUES
-    (116, 16, 11, int4range(0, 21), 3, 1024, 10240, 0, TRUE,  0),
-    (117, 17, 11, int4range(0, 21), 1, 2048,  5120, 1, FALSE, 1),
-    (118, 18, 11, int4range(0, 21), 2, 3072,  4096, 2, FALSE, 1),
-    (119, 19, 11, int4range(0, 21), 1, 6144,  7168, 1, FALSE, 1);
+     dfs_enter, dfs_exit, nesting_level) VALUES
+    (116, 16, 11, int4range(0, 21), 3, 1024, 10240, 0),
+    (117, 17, 11, int4range(0, 21), 1, 2048,  5120, 1),
+    (118, 18, 11, int4range(0, 21), 2, 3072,  4096, 2),
+    (119, 19, 11, int4range(0, 21), 1, 6144,  7168, 1);
 
 -- FOLDED SYMBOLS: what a macro generated and nobody wrote down.  Folding is
 -- the symbol's -- "not listed by default" -- and decides nothing about where a
@@ -194,11 +194,11 @@ INSERT INTO symbol_instances
 -- entirely by the chain -- which is the case this object exists for.
 INSERT INTO symbol_instances
     (id, symbol, object_id, offset_range, instance_type,
-     dfs_enter, dfs_exit, nesting_level, folded, fold_depth) VALUES
-    (126, 26, 14, int4range(0, 27),  5, 1024, 10240, 0, FALSE, 0),
-    (127, 27, 14, int4range(0, 27),  5, 2048,  9216, 1, FALSE, 0),
-    (128, 28, 14, int4range(0, 27),  9, 3072,  8192, 2, FALSE, 0),
-    (129, 29, 14, int4range(11, 26), 1, 4096,  5120, 3, FALSE, 0);
+     dfs_enter, dfs_exit, nesting_level) VALUES
+    (126, 26, 14, int4range(0, 27),  5, 1024, 10240, 0),
+    (127, 27, 14, int4range(0, 27),  5, 2048,  9216, 1),
+    (128, 28, 14, int4range(0, 27),  9, 3072,  8192, 2),
+    (129, 29, 14, int4range(11, 26), 1, 4096,  5120, 3);
 
 -- Project 2 section: switch the layer DEFAULT to project 2's root layer.
 ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000002;

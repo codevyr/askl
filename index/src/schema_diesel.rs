@@ -28,8 +28,6 @@ diesel::table! {
         nesting_level -> Integer,
         dfs_enter -> BigInt,
         dfs_exit -> BigInt,
-        folded -> Bool,
-        fold_depth -> Integer,
         name_range -> Nullable<Int4range>,
         signature_range -> Nullable<Int4range>,
         content_range -> Nullable<Int4range>,
@@ -108,8 +106,6 @@ diesel::table! {
         layer -> BigInt,
         nesting_level -> Integer,
         dfs_enter -> BigInt,
-        folded -> Bool,
-        fold_depth -> Integer,
         from_full_range -> Nullable<Int4range>,
     }
 }

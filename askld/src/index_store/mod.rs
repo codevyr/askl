@@ -217,8 +217,6 @@ struct NewSymbolInstance {
     nesting_level: i32,
     dfs_enter: i64,
     dfs_exit: i64,
-    folded: bool,
-    fold_depth: i32,
     name_range: Option<std::ops::Range<i32>>,
     signature_range: Option<std::ops::Range<i32>>,
     content_range: Option<std::ops::Range<i32>>,
@@ -233,8 +231,6 @@ struct NewSymbolRef {
     layer: i64, // the project's root layer
     nesting_level: i32,
     dfs_enter: i64,
-    folded: bool,
-    fold_depth: i32,
     from_full_range: Option<std::ops::Range<i32>>,
 }
 
