@@ -537,6 +537,51 @@ fn nested_is_narrower_than_the_default_and_the_default_narrower_than_unnest() {
 }
 
 #[test]
+fn a_named_child_is_found_behind_a_fold() {
+    // FOLDING DECIDES WHAT IS LISTED, NOT WHAT CAN BE ASKED FOR.
+    //
+    // `func("func_a") { }` enumerates func_a's contents and stops at macro_m's
+    // fold boundary, so data_macro_only is not listed (the test above).  A
+    // statement that NAMES the symbol is not an enumeration: the user asked
+    // for that symbol, and whether it is shown by default is beside the point.
+    // The same holds for a glob, which is still a name.
+    //
+    // Nothing implements this specially.  A named child selects by name and is
+    // then constrained by its parent's interval; the fold filter exists only
+    // on the path that derives an unnamed child from its parent.  This pins
+    // that, because the filter on the derive path is about to change shape.
+    let ids = |q: &str| {
+        run_query(TEST_INPUT_TYPE_FILTER, q)
+            .nodes
+            .as_vec()
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+    };
+
+    let enumerated = ids(r#"func("func_a") { }"#);
+    assert!(
+        !enumerated.contains(&SymbolInstanceId::new(107)),
+        "precondition: enumeration does not reach behind the fold"
+    );
+
+    let named = ids(r#"func("func_a") { "data_macro_only" }"#);
+    assert!(
+        named.contains(&SymbolInstanceId::new(103)) && named.contains(&SymbolInstanceId::new(107)),
+        "a child named exactly is returned from behind the fold: {:?}",
+        named
+    );
+
+    let globbed = ids(r#"func("func_a") { g"data_macro_*" }"#);
+    assert!(
+        globbed.contains(&SymbolInstanceId::new(103))
+            && globbed.contains(&SymbolInstanceId::new(107)),
+        "a child named by a glob is returned from behind the fold: {:?}",
+        globbed
+    );
+}
+
+#[test]
 fn nested_upward_returns_only_the_immediate_container() {
     // Upward, the default surfaces the whole ancestor chain (see
     // has_parent_innermost_only).  `nested` asks for just the one container
