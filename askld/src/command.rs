@@ -361,7 +361,8 @@ impl Command {
 
     /// How far this command's scope reaches into the containment tree.
     ///
-    /// Unfolded unless a traversal marker says otherwise.  Markers do not
+    /// The default (unfolded symbols, any depth) unless a traversal marker
+    /// says otherwise.  Markers do not
     /// combine: the last one written wins, which is what makes
     /// `unnest nested` a typo rather than a puzzle.
     pub fn traversal_mode(&self) -> TraversalMode {

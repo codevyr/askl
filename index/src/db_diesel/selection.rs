@@ -619,6 +619,7 @@ mod tests {
             symbol_scope: None,
             leaf_name: "test".into(),
             layer,
+            folded: false,
         }
     }
 

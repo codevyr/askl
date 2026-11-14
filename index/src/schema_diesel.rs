@@ -127,6 +127,7 @@ diesel::table! {
         symbol_scope -> Nullable<Integer>,
         leaf_name -> Text,
         layer -> BigInt,
+        folded -> Bool,
     }
 }
 

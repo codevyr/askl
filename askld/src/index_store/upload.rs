@@ -764,6 +764,7 @@ fn build_symbols(
             symbol_scope,
             leaf_name,
             layer: root_layer_id,
+            folded: symbol.folded,
         });
     }
     Ok(rows)
@@ -810,29 +811,25 @@ fn span_to_range(
 fn validate_object_tree(object: &UploadObject) -> Result<(), UploadError> {
     let bad = |msg: String| UploadError::Invalid(format!("object {}: {}", object.local_id, msg));
 
-    // (enter, exit, nesting_level, folded, fold_depth), outermost first.
+    // (enter, exit, nesting_level), outermost first.
     // Sorting by exit DESC breaks ties so a parent precedes a child starting
     // at the same number -- which the duplicate check then rejects anyway,
     // but with the message that names the real problem.
-    let mut nodes: Vec<(i64, i64, i32, bool, i32)> = object
+    //
+    // The per-instance `folded` / `fold_depth` are NOT checked, and not read
+    // by anything: folding is the symbol's now.  An index that still carries
+    // the old arithmetic and one that leaves both at zero are equally valid.
+    let mut nodes: Vec<(i64, i64, i32)> = object
         .symbol_instances
         .iter()
-        .map(|i| {
-            (
-                i.dfs_enter,
-                i.dfs_exit,
-                i.nesting_level,
-                i.folded,
-                i.fold_depth,
-            )
-        })
+        .map(|i| (i.dfs_enter, i.dfs_exit, i.nesting_level))
         .collect();
     nodes.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
 
-    let mut stack: Vec<(i64, i64, bool, i32)> = Vec::new(); // enter, exit, folded, fold_depth
+    let mut stack: Vec<(i64, i64)> = Vec::new(); // enter, exit
     let mut roots: Vec<(i64, i64)> = Vec::new(); // top-level intervals, disjoint and sorted
     let mut prev_enter: Option<i64> = None;
-    for &(enter, exit, level, folded, fold_depth) in &nodes {
+    for &(enter, exit, level) in &nodes {
         if exit <= enter {
             return Err(bad(format!(
                 "instance interval [{}, {}) is empty, so it can never contain anything \
@@ -866,31 +863,13 @@ fn validate_object_tree(object: &UploadObject) -> Result<(), UploadError> {
         while stack.last().is_some_and(|t| t.1 <= enter) {
             stack.pop();
         }
-        match stack.last() {
-            Some(&(p_enter, p_exit, p_folded, p_fold)) => {
-                if exit > p_exit {
-                    return Err(bad(format!(
-                        "instance [{}, {}) escapes its parent [{}, {}); \
-                         intervals must nest, never straddle",
-                        enter, exit, p_enter, p_exit
-                    )));
-                }
-                let want_fold = p_fold + i32::from(p_folded);
-                if fold_depth != want_fold {
-                    return Err(bad(format!(
-                        "instance [{}, {}) has fold_depth {}, expected {} from its parent \
-                         [{}, {}) (fold_depth {}, folded {})",
-                        enter, exit, fold_depth, want_fold, p_enter, p_exit, p_fold, p_folded
-                    )));
-                }
-            }
-            None => {
-                if fold_depth != 0 {
-                    return Err(bad(format!(
-                        "root instance [{}, {}) has fold_depth {}, expected 0",
-                        enter, exit, fold_depth
-                    )));
-                }
+        if let Some(&(p_enter, p_exit)) = stack.last() {
+            if exit > p_exit {
+                return Err(bad(format!(
+                    "instance [{}, {}) escapes its parent [{}, {}); \
+                     intervals must nest, never straddle",
+                    enter, exit, p_enter, p_exit
+                )));
             }
         }
         if level != stack.len() as i32 {
@@ -905,12 +884,12 @@ fn validate_object_tree(object: &UploadObject) -> Result<(), UploadError> {
         if stack.is_empty() {
             roots.push((enter, exit));
         }
-        stack.push((enter, exit, folded, fold_depth));
+        stack.push((enter, exit));
     }
     // `nodes` is laminar and sorted now, so it can answer "which instance does
     // this point sit innermost inside" for the ref checks below.
-    let owner_of = |p: i64| -> Option<(i64, i64, i32, bool, i32)> {
-        let mut best: Option<(i64, i64, i32, bool, i32)> = None;
+    let owner_of = |p: i64| -> Option<(i64, i64, i32)> {
+        let mut best: Option<(i64, i64, i32)> = None;
         for &n in &nodes {
             if n.0 >= p {
                 break; // sorted by enter; nothing further can start below p
@@ -946,21 +925,13 @@ fn validate_object_tree(object: &UploadObject) -> Result<(), UploadError> {
         // takes an expansion-site ref's position from the macro it landed in
         // but its level from whatever scope was open -- so they can silently
         // disagree, and `nested` reads the level.
-        let (o_enter, o_exit, o_level, o_folded, o_fold) =
+        let (o_enter, o_exit, o_level) =
             owner_of(r.dfs_enter).expect("a ref that passed the interval test has an owner");
         if r.nesting_level != o_level + 1 {
             return Err(bad(format!(
                 "ref at dfs_enter {} says nesting_level {}, but its interval puts it \
                  inside [{}, {}) at level {}",
                 r.dfs_enter, r.nesting_level, o_enter, o_exit, o_level
-            )));
-        }
-        let want_fold = o_fold + i32::from(o_folded);
-        if r.fold_depth != want_fold {
-            return Err(bad(format!(
-                "ref at dfs_enter {} says fold_depth {}, expected {} from its owner \
-                 [{}, {}) (fold_depth {}, folded {})",
-                r.dfs_enter, r.fold_depth, want_fold, o_enter, o_exit, o_fold, o_folded
             )));
         }
     }
@@ -1207,7 +1178,19 @@ mod tests {
             name: name.to_string(),
             r#type,
             scope,
+            folded: false,
         }
+    }
+
+    #[test]
+    fn build_symbols_carries_the_symbols_folding() {
+        // Decided by the indexer, stored as given.  An indexer that never
+        // sets it (proto3 default) lists everything.
+        let mut generated = sym(2, "__compiletime_assert_7", 1, 0);
+        generated.folded = true;
+        let rows = build_symbols(100, 1000001, &[sym(1, "plain", 1, 0), generated]).unwrap();
+        assert!(!rows[0].folded);
+        assert!(rows[1].folded);
     }
 
     #[test]
@@ -1722,18 +1705,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_object_tree_rejects_a_wrong_fold_depth() {
-        // Marking the parent as macro-generated puts its child one fold
-        // deeper.  Getting this wrong is what put __compiletime_assert_1121
-        // into `mod("amdgpu") { func }`.
+    fn validate_object_tree_does_not_read_the_per_instance_fold_fields() {
+        // Folding is the symbol's.  The instance fields are still in the
+        // proto for indices produced before that, and whatever they hold --
+        // the old "one deeper under a folded parent" arithmetic, a violation
+        // of it, or zeros -- is not the tree's business.
         let mut object = good_tree();
         object.symbol_instances[1].folded = true;
-        let err = validate_object_tree(&object).unwrap_err();
-        assert!(
-            format!("{err:?}").contains("fold_depth"),
-            "unexpected error: {err:?}"
-        );
-
+        assert!(validate_object_tree(&object).is_ok());
         object.symbol_instances[2].fold_depth = 1;
         assert!(validate_object_tree(&object).is_ok());
     }

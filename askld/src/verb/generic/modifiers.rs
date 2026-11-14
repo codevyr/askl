@@ -178,10 +178,11 @@ impl Display for DeriveModifier {
     }
 }
 
-/// UnnestModifier - opts in to full transitive traversal for scope derivation.
-/// Without it, `{ }` reaches descendants at the same fold depth: through the
-/// structural levels (module, directory, file) but not into what a macro
-/// generated.  With `unnest`, every level is included.
+/// UnnestModifier - lists everything a scope contains, folded symbols too.
+/// Without it, `{ }` lists the descendants whose symbol is not folded: it
+/// reaches through every level, generated declarations included, and leaves
+/// out only the symbols nobody wrote down.  With `unnest`, nothing is left
+/// out.
 #[derive(Debug)]
 pub(in crate::verb) struct UnnestModifier {
     span: Span,
@@ -228,10 +229,10 @@ impl Display for UnnestModifier {
 ///
 /// `foo { printk { nested } }` shows what sits one level inside `printk` —
 /// the mode sits inside the braces, on the statement whose reach it bounds:
-/// one level, unlike `unnest`, and through the fold, unlike the
+/// one level, unlike `unnest`, and folded symbols included, unlike the
 /// default. It is the only reader of `nesting_level`, and the only way to ask
-/// a question the other two modes cannot express — "what does this macro
-/// expand to, immediately".
+/// a question the other two modes cannot express — "what sits immediately
+/// inside this".
 #[derive(Debug)]
 pub(in crate::verb) struct NestedModifier {
     span: Span,
