@@ -565,6 +565,79 @@ impl Index {
     }
 }
 
+/// WHERE A ROW THE ENGINE INSERTS SITS: in the innermost persistent declaration
+/// whose TEXT holds it -- narrowest, then deepest in the tree, then earliest.
+///
+/// An extent is not always text.  The clang indexer has one extent to give a
+/// declaration a macro generated: its invocation's.  When the invocation is
+/// followed by a typed body,
+///
+/// ```c
+/// #define PF(type, name, p) int blah; type blah_##name(int p)
+/// PF(int, send, x) { return helper(x); }
+/// ```
+///
+/// the function `blah_send` runs from the invocation through the body, the
+/// invocation lies in its text, and `blah` -- whose extent is the invocation
+/// -- lies in its bytes.  The indexer puts `blah` beside the function, where
+/// the compiler read it.  So here bytes and tree disagree, and that is the one
+/// thing this lookup can see about what a declaration is made of: A DECLARATION
+/// WHOSE BYTES LIE IN A WIDER EXTENT THAT DOES NOT CONTAIN IT HAS NO TEXT OF
+/// ITS OWN THERE, and a match passes it over.  `x` above is text of
+/// `blah_send`.
+///
+/// "Does not contain it" is asked of the EXTENT, not of one instance: several
+/// declarations can share an extent (a family one invocation generated, a file
+/// compiled twice under two names), a tree gives what lies in them one parent,
+/// and being inside any of them is agreement.
+///
+/// Without this the match sat in `blah`, outside the function it was typed in,
+/// and `func("blah_send") { search("x") }` -- which reads the function's bytes
+/// and so finds the text -- placed it in the sibling and reported nothing.
+///
+/// WHAT IT STILL CANNOT SEE.  The indexer's law is wider: a generated
+/// declaration contains only what the compiler read inside it, whether or not
+/// its bytes agree with the tree.  An instance row does not say it was
+/// generated, so a match in `KHASH_INIT(x, int, my_hash)` at file level still
+/// lands in one of the functions that invocation generated, where the indexer
+/// would put a reference in the file.  That one is inside everything that
+/// contains the invocation, so no scoped search loses it.
+///
+/// Expects the row as `t(object_id, start_off, end_off)` and yields
+/// `own(nesting_level, dfs_enter)`, NULL when no declaration holds it.  One
+/// index scan per row, as before: the candidates are the handful of extents
+/// around the match, and the test is among those alone.
+const PLACED_IN_LATERAL: &str = "\
+    LEFT JOIN LATERAL ( \
+        WITH around AS MATERIALIZED ( \
+            SELECT si.nesting_level, si.dfs_enter, si.dfs_exit, si.offset_range \
+            FROM index.symbol_instances si \
+            WHERE si.object_id = t.object_id \
+              AND si.layer > 0 \
+              AND si.offset_range @> int4range(t.start_off, t.end_off) \
+        ) \
+        SELECT c.nesting_level, c.dfs_enter \
+        FROM around c \
+        WHERE NOT EXISTS ( \
+            SELECT 1 FROM around wider \
+            WHERE wider.offset_range @> c.offset_range \
+              AND wider.offset_range <> c.offset_range \
+              AND NOT EXISTS ( \
+                  SELECT 1 FROM around holds \
+                  WHERE holds.offset_range = wider.offset_range \
+                    AND holds.dfs_enter < c.dfs_enter \
+                    AND c.dfs_enter < holds.dfs_exit)) \
+        ORDER BY upper(c.offset_range) - lower(c.offset_range) ASC, \
+                 c.nesting_level DESC, c.dfs_enter ASC LIMIT 1 \
+    ) own ON TRUE";
+
+/// WHICH RULE PLACED A CACHED LAYER'S ROWS.  A layer is cached with its rows
+/// already placed, so the rule is part of what the layer holds, and this is
+/// folded into every layer cache key.  Change `PLACED_IN_LATERAL`, change
+/// this: layers placed by the old rule then never hit again and age out,
+/// where they would otherwise keep answering by it until the next upload.
+const PLACEMENT_RULE: &[u8] = b"placed-in:text-agrees-with-tree";
+
 /// Cap on how many container instances scope-fusion will inline into the
 /// content-scan SQL.  Above this, fusion degrades to the unscoped scan (see
 /// [`Index::resolve_scope_object_ranges`]) — correct either way, and a broad
@@ -1230,6 +1303,7 @@ pub fn selection_shard_hash(parent_id: i64, input_hash: &[u8; 32], extra: &[u8])
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(b"selection-shard-v1");
+    h.update(PLACEMENT_RULE);
     h.update(parent_id.to_le_bytes());
     h.update(input_hash);
     h.update((extra.len() as u64).to_le_bytes());
@@ -1257,6 +1331,7 @@ pub fn layer_shard_hash(layer_id: i64, input_hash: &[u8; 32]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(b"layer-shard-v1");
+    h.update(PLACEMENT_RULE);
     h.update(layer_id.to_le_bytes());
     h.update(input_hash);
     h.finalize().into()
@@ -1277,6 +1352,7 @@ pub fn root_shard_hash(root: &super::selection::RootLayer, input_hash: &[u8; 32]
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(b"root-shard-v1");
+    h.update(PLACEMENT_RULE);
     h.update((root.hash.len() as u64).to_le_bytes());
     h.update(&root.hash);
     h.update(input_hash);
@@ -4467,21 +4543,8 @@ impl<'a> EphTransaction<'a> {
             // keeps placement deterministic.  Inventing an order here would
             // claim containment the bytes do not support.
             //
-            // WHERE A MATCH SITS.  In the innermost persistent instance whose
-            // extent contains it: narrowest, then deepest in the tree, then
-            // earliest.
-            //
-            // For text that lies in a declaration somebody typed, that is
-            // where the clang indexer puts a stored reference too.  It differs
-            // for text inside a macro invocation that GENERATED a declaration:
-            // the indexer gives a generated declaration only what the
-            // compiler read inside it, and puts the rest in the typed
-            // declaration around the invocation.  This statement cannot tell
-            // the two apart -- an instance row does not say whether it was
-            // generated -- so a match in `KHASH_INIT(x, int, my_hash)` lands
-            // in one of the functions that invocation generated.  It is still
-            // inside every instance that contains the invocation, so a scoped
-            // search finds it either way.
+            // WHERE A MATCH SITS is `PLACED_IN_LATERAL`, shared with
+            // `insert_refs_scoped`.
             //
             // FOLDING PLAYS NO PART.  There used to be an exclusion here,
             // `NOT si.folded`, on the argument that a macro's expansion "owns
@@ -4493,7 +4556,7 @@ impl<'a> EphTransaction<'a> {
             // interval alone.  Whether the generated declaration is LISTED is
             // its symbol's `folded`, read by the traversal filter and by
             // nothing here.
-
+            format!(
             "INSERT INTO index.symbol_instances \
                  (id, symbol, object_id, offset_range, instance_type, layer, \
                   nesting_level, dfs_enter, dfs_exit) \
@@ -4511,20 +4574,12 @@ impl<'a> EphTransaction<'a> {
                  WITH ORDINALITY \
                  AS t(symbol_id, object_id, start_off, end_off, instance_type, ord) \
                  JOIN index.objects o ON o.id = t.object_id AND o.project_id = $7 \
-                 LEFT JOIN LATERAL ( \
-                     SELECT si.nesting_level, si.dfs_enter \
-                     FROM index.symbol_instances si \
-                     WHERE si.object_id = t.object_id \
-                       AND si.layer > 0 \
-                       AND si.offset_range @> int4range(t.start_off, t.end_off) \
-                     ORDER BY upper(si.offset_range) - lower(si.offset_range) ASC, \
-                              si.nesting_level DESC, si.dfs_enter ASC LIMIT 1 \
-                 ) own ON TRUE \
+                 {PLACED_IN_LATERAL} \
                  WINDOW w AS (PARTITION BY t.object_id, COALESCE(own.dfs_enter, 0) \
                               ORDER BY t.start_off, t.end_off, t.ord) \
              ) s \
              ON CONFLICT DO NOTHING"
-        )
+        ))
             .bind::<Array<BigInt>,  _>(&sym_ids)
             .bind::<Array<Integer>, _>(&object_ids)
             .bind::<Array<Integer>, _>(&starts)
@@ -4555,28 +4610,21 @@ impl<'a> EphTransaction<'a> {
         diesel::sql_query(
             // Same placement as ephemeral instances, except a ref is a point:
             // it sits one step inside the instance it is placed in rather
-            // than taking an interval.  See `insert_instance_level` for the
-            // rule and for where it differs from the clang indexer's.
-            "INSERT INTO index.symbol_refs \
+            // than taking an interval.  `PLACED_IN_LATERAL` is the rule.
+            format!(
+                "INSERT INTO index.symbol_refs \
                  (id, to_symbol, from_object, from_offset_range, layer, \
                   nesting_level, dfs_enter) \
              SELECT nextval('index.eph_ref_id_seq'), \
-                    t.to_symbol, t.from_object, int4range(t.start_off, t.end_off), $5, \
+                    t.to_symbol, t.object_id, int4range(t.start_off, t.end_off), $5, \
                     COALESCE(own.nesting_level, 0) + 1, \
                     COALESCE(own.dfs_enter, 0) + 1 \
              FROM UNNEST($1::int8[], $2::int4[], $3::int4[], $4::int4[]) \
-             AS t(to_symbol, from_object, start_off, end_off) \
-             JOIN index.objects o ON o.id = t.from_object AND o.project_id = $6 \
-             LEFT JOIN LATERAL ( \
-                 SELECT si.nesting_level, si.dfs_enter \
-                 FROM index.symbol_instances si \
-                 WHERE si.object_id = t.from_object \
-                   AND si.layer > 0 \
-                   AND si.offset_range @> int4range(t.start_off, t.end_off) \
-                 ORDER BY upper(si.offset_range) - lower(si.offset_range) ASC, \
-                          si.nesting_level DESC, si.dfs_enter ASC LIMIT 1 \
-             ) own ON TRUE \
-             ON CONFLICT DO NOTHING",
+             AS t(to_symbol, object_id, start_off, end_off) \
+             JOIN index.objects o ON o.id = t.object_id AND o.project_id = $6 \
+             {PLACED_IN_LATERAL} \
+             ON CONFLICT DO NOTHING"
+            ),
         )
         .bind::<Array<BigInt>, _>(&to_symbols)
         .bind::<Array<Integer>, _>(&from_objects)

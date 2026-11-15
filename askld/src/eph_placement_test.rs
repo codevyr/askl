@@ -12,8 +12,10 @@
 //!
 //!   * every ephemeral interval is non-empty;
 //!   * it has an owner whenever one *exists* — the innermost **persistent**
-//!     instance whose extent contains it, folded or not: placement is
-//!     containment and never asks about folding.  Having none is
+//!     instance whose text holds it, folded or not: placement is
+//!     containment and never asks about folding.  An instance whose bytes
+//!     lie in a wider extent that does not contain it has no text there and
+//!     is passed over (`PLACED_IN_LATERAL` says why).  Having none is
 //!     legitimate and common: a symbol-less file still has searchable content,
 //!     and a hand-written `ephemeral_instance` may name a range no declaration
 //!     covers.  The check is therefore "a container exists but no owner was
@@ -50,13 +52,26 @@ WITH eph AS ( \
            o.dfs_exit AS o_exit \
     FROM eph e \
     LEFT JOIN LATERAL ( \
-        SELECT si.nesting_level, si.dfs_enter, si.dfs_exit \
-        FROM index.symbol_instances si \
-        WHERE si.object_id = e.object_id \
-          AND si.layer > 0 \
-          AND si.offset_range @> e.offset_range \
-        ORDER BY upper(si.offset_range) - lower(si.offset_range) ASC, \
-                 si.nesting_level DESC, si.dfs_enter ASC LIMIT 1 \
+        WITH around AS MATERIALIZED ( \
+            SELECT si.nesting_level, si.dfs_enter, si.dfs_exit, si.offset_range \
+            FROM index.symbol_instances si \
+            WHERE si.object_id = e.object_id \
+              AND si.layer > 0 \
+              AND si.offset_range @> e.offset_range \
+        ) \
+        SELECT c.nesting_level, c.dfs_enter, c.dfs_exit \
+        FROM around c \
+        WHERE NOT EXISTS ( \
+            SELECT 1 FROM around wider \
+            WHERE wider.offset_range @> c.offset_range \
+              AND wider.offset_range <> c.offset_range \
+              AND NOT EXISTS ( \
+                  SELECT 1 FROM around holds \
+                  WHERE holds.offset_range = wider.offset_range \
+                    AND holds.dfs_enter < c.dfs_enter \
+                    AND c.dfs_enter < holds.dfs_exit)) \
+        ORDER BY upper(c.offset_range) - lower(c.offset_range) ASC, \
+                 c.nesting_level DESC, c.dfs_enter ASC LIMIT 1 \
     ) o ON TRUE \
 ) \
 SELECT id, object_id, offset_range::text AS rng, \
@@ -94,6 +109,10 @@ fn ephemeral_rows_sit_inside_their_owners() {
         r#"search("shared_token")"#,
         r#"func("fn_many") { search("zqx") }"#,
         r#"{ search("zq8") }"#,
+        // a declaration whose bytes lie in a sibling's text, and a family on
+        // one extent with a declaration inside one of them
+        r#"search("yq7")"#,
+        r#"search("zr2")"#,
     ] {
         let _ = run_query(TEST_INPUT_SEARCH, q);
     }
