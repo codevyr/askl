@@ -11,6 +11,9 @@
   calls (function pointers, virtual dispatch) may be missing; `field`/`method`
   and `!forced` help model dispatch, but coverage is not guaranteed.
 - **`search()` is literal.** No regex — the query matches an exact byte sequence.
+- **A `search()` match has one place.** Text inside a macro invocation that
+  generated several declarations is reported under one of them. Scope by the
+  function or file that contains the invocation, not by a generated symbol.
 - **Boolean operators cover predicate verbs only.** `search`/`loc`/layer
   literals cannot appear inside `or`/`and`/`not`; union searches by
   juxtaposition (`search("a") search("b")`).
