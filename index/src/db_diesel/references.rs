@@ -170,6 +170,16 @@ impl Index {
     /// `has_more = false` with 1000+ rows remaining.  Rows keep their scan
     /// position here; the caller filters `None` targets out of the RESPONSE
     /// while taking the cursor from the last RAW row.
+    ///
+    /// ONE ROW PER OCCURRENCE, not per stored reference.  One token read
+    /// inside several declarations is several references that differ only in
+    /// where they sit (`symbol_refs_layer_uq`).  From a declaration that holds
+    /// all of them -- the file, the module -- they are one place in the text
+    /// naming one symbol, and listing the same line once per generated
+    /// function would be noise.  The earliest of them stands for the
+    /// occurrence, and the cursor is compared against THAT id: compared
+    /// against the raw rows, the second reference of an occurrence would
+    /// reappear on the page after the one its first reference ended.
     pub async fn find_symbol_references(
         &self,
         symbol_id: i64,
@@ -201,14 +211,15 @@ impl Index {
                  ORDER BY si.id \
                ) from_inst \
                CROSS JOIN LATERAL ( \
-                 SELECT sr.id, sr.to_symbol, sr.from_object, sr.from_offset_range \
+                 SELECT min(sr.id) AS id, sr.to_symbol, sr.from_object, sr.from_offset_range \
                  FROM index.symbol_refs sr \
                  WHERE sr.from_object = from_inst.object_id \
                    AND from_inst.dfs_enter < sr.dfs_enter \
                    AND sr.dfs_enter < from_inst.dfs_exit \
                    AND sr.layer = ANY($2) \
-                   AND (from_inst.id > $3 OR sr.id > $4) \
-                 ORDER BY sr.id \
+                 GROUP BY sr.to_symbol, sr.from_object, sr.from_offset_range \
+                 HAVING from_inst.id > $3 OR min(sr.id) > $4 \
+                 ORDER BY min(sr.id) \
                ) sr \
                ORDER BY from_inst.id, sr.id \
                LIMIT $5 \
@@ -310,6 +321,9 @@ impl Index {
     /// exact count over a hub node's references is the unbounded scan the
     /// bounded-reads work eliminated, so this counts through the same
     /// streaming shape and stops at `cap + 1` rows.
+    ///
+    /// Counts OCCURRENCES, like the listing it sits above: one token read in
+    /// several declarations is counted once per instance that holds it.
     pub async fn count_symbol_references(
         &self,
         symbol_id: i64,
@@ -333,12 +347,12 @@ impl Index {
                  ORDER BY si.id \
                ) from_inst \
                CROSS JOIN LATERAL ( \
-                 SELECT sr.id FROM index.symbol_refs sr \
+                 SELECT DISTINCT sr.to_symbol, sr.from_offset_range \
+                 FROM index.symbol_refs sr \
                  WHERE sr.from_object = from_inst.object_id \
                    AND from_inst.dfs_enter < sr.dfs_enter \
                    AND sr.dfs_enter < from_inst.dfs_exit \
                    AND sr.layer = ANY($2) \
-                 ORDER BY sr.id \
                ) sr \
                LIMIT $3 \
              ) c",
@@ -466,6 +480,10 @@ impl Index {
     /// Same containment rule as edge discovery (a reference belongs to the
     /// source instance whose range covers it). Paged in DISPLAY order
     /// `(from_object, from_offset, ref_id)` so pages append contiguously.
+    ///
+    /// One row per place in the text, as in [`Self::find_symbol_references`]:
+    /// several references on one token are one call site, represented by the
+    /// earliest, and the cursor is compared after they are collapsed.
     pub async fn find_edge_occurrences(
         &self,
         from_symbol: i64,
@@ -484,26 +502,32 @@ impl Index {
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
         let mut rows: Vec<EdgeOccurrenceRow> = diesel::sql_query(
-            "SELECT sr.id AS ref_id, from_inst.id AS from_instance_id, \
-                    sr.from_object, o.filesystem_path AS path, \
-                    o.project_id::text AS project_id, sr.from_offset_range \
+            "SELECT occ.ref_id, occ.from_instance_id, \
+                    occ.from_object, o.filesystem_path AS path, \
+                    o.project_id::text AS project_id, occ.from_offset_range \
              FROM ( \
-               SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit \
-               FROM index.symbol_instances si \
-               WHERE si.symbol = $1 AND si.layer = ANY($2) \
-             ) from_inst \
-             CROSS JOIN LATERAL ( \
-               SELECT sr.id, sr.from_object, sr.from_offset_range \
-               FROM index.symbol_refs sr \
-               WHERE sr.from_object = from_inst.object_id \
-                 AND from_inst.dfs_enter < sr.dfs_enter \
-                 AND sr.dfs_enter < from_inst.dfs_exit \
-                 AND sr.layer = ANY($2) \
-                 AND sr.to_symbol = $3 \
-             ) sr \
-             JOIN index.objects o ON o.id = sr.from_object \
-             WHERE (sr.from_object, lower(sr.from_offset_range), sr.id) > ($4, $5, $6) \
-             ORDER BY sr.from_object, lower(sr.from_offset_range), sr.id \
+               SELECT DISTINCT ON (sr.from_object, sr.from_offset_range) \
+                      sr.id AS ref_id, from_inst.id AS from_instance_id, \
+                      sr.from_object, sr.from_offset_range \
+               FROM ( \
+                 SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit \
+                 FROM index.symbol_instances si \
+                 WHERE si.symbol = $1 AND si.layer = ANY($2) \
+               ) from_inst \
+               CROSS JOIN LATERAL ( \
+                 SELECT sr.id, sr.from_object, sr.from_offset_range \
+                 FROM index.symbol_refs sr \
+                 WHERE sr.from_object = from_inst.object_id \
+                   AND from_inst.dfs_enter < sr.dfs_enter \
+                   AND sr.dfs_enter < from_inst.dfs_exit \
+                   AND sr.layer = ANY($2) \
+                   AND sr.to_symbol = $3 \
+               ) sr \
+               ORDER BY sr.from_object, sr.from_offset_range, sr.id \
+             ) occ \
+             JOIN index.objects o ON o.id = occ.from_object \
+             WHERE (occ.from_object, lower(occ.from_offset_range), occ.ref_id) > ($4, $5, $6) \
+             ORDER BY occ.from_object, lower(occ.from_offset_range), occ.ref_id \
              LIMIT $7",
         )
         .bind::<BigInt, _>(from_symbol)

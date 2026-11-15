@@ -1149,6 +1149,84 @@ async fn symbol_references_page_with_a_cursor_and_cover_expansions() -> anyhow::
     Ok(())
 }
 
+/// A REFERENCE IS WHAT IT NAMES, THE TOKEN THAT NAMES IT, AND WHERE IT SITS.
+///
+/// `FAMILY(gen, target)` generates `gen_a` and `gen_b` on one extent, and
+/// each calls `target` on the one token the caller typed: two reference rows
+/// with the same target, object and range, differing only in `dfs_enter`.
+/// The fixture cannot even be loaded unless the unique index admits them.
+///
+/// Each function has its edge.  From the container that holds both, the token
+/// is ONE place in the text: listed once, counted once, one call site of the
+/// edge -- and a page boundary does not bring its second reference back.
+#[tokio::test(flavor = "current_thread")]
+async fn one_token_read_in_two_declarations_is_an_edge_from_each_and_one_occurrence(
+) -> anyhow::Result<()> {
+    use crate::db_diesel::Index;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_REF_IDENTITY)
+        .await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+    const FAM: i64 = 1;
+    const GEN_A: i64 = 2;
+    const GEN_B: i64 = 3;
+    const TARGET: i64 = 4;
+    const OTHER: i64 = 5;
+
+    // Each generated function calls `target`.
+    for (from, expect) in [(GEN_A, vec![TARGET]), (GEN_B, vec![TARGET, OTHER])] {
+        let (rows, more) = index.find_symbol_references(from, None, 10, &eph).await?;
+        assert!(!more);
+        let mut to: Vec<i64> = rows.iter().map(|r| r.to_symbol).collect();
+        to.sort_unstable();
+        assert_eq!(to, expect, "references out of symbol {}", from);
+        let (occ, _) = index
+            .find_edge_occurrences(from, TARGET, None, 10, &eph)
+            .await?;
+        assert_eq!(occ.len(), 1, "symbol {} calls target at one place", from);
+    }
+
+    // From the container: two places in the text, not three rows.
+    let (rows, more) = index.find_symbol_references(FAM, None, 10, &eph).await?;
+    assert!(!more);
+    let mut to: Vec<i64> = rows.iter().map(|r| r.to_symbol).collect();
+    to.sort_unstable();
+    assert_eq!(to, vec![TARGET, OTHER], "one row per occurrence");
+    assert_eq!(
+        index.count_symbol_references(FAM, 10, &eph).await?,
+        (2, false),
+        "two occurrences, counted once each"
+    );
+    let (occ, more) = index
+        .find_edge_occurrences(FAM, TARGET, None, 10, &eph)
+        .await?;
+    assert!(!more);
+    assert_eq!(occ.len(), 1, "fam names target at one place in the text");
+
+    // Paging one row at a time walks the two occurrences and stops: the
+    // second reference on the `target` token must not come back as a third.
+    let (p1, more1) = index.find_symbol_references(FAM, None, 1, &eph).await?;
+    assert_eq!(p1.len(), 1);
+    assert!(more1);
+    let cursor = Some((p1[0].from_instance_id, p1[0].ref_id));
+    let (p2, more2) = index.find_symbol_references(FAM, cursor, 1, &eph).await?;
+    assert_eq!(p2.len(), 1);
+    assert!(!more2, "two occurrences, two pages, nothing after");
+    assert_ne!(p1[0].to_symbol, p2[0].to_symbol, "the pages are disjoint");
+
+    let (o1, omore) = index
+        .find_edge_occurrences(FAM, TARGET, None, 1, &eph)
+        .await?;
+    assert_eq!(o1.len(), 1);
+    assert!(!omore, "one call site: the first page is the last");
+    Ok(())
+}
+
 /// F2 has-kind: the contained-instances listing pages the same way.  `modx`
 /// (symbol 1) contains the ten in_* function instances.
 #[tokio::test(flavor = "current_thread")]

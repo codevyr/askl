@@ -8830,6 +8830,142 @@ fn uploading_two_instances_at_one_extent_keeps_both() {
     });
 }
 
+/// A REFERENCE IS STORED BY WHAT IT NAMES, ITS TOKEN, AND WHERE IT SITS.
+///
+/// `KHASH_INIT(x, int, my_hash)` generates functions that each call `my_hash`
+/// on the one token the caller typed.  The indexer sends one reference per
+/// function, identical except for `dfs_enter`.  The upload's conflict target
+/// used to be (to_symbol, from_object, from_offset_range, layer), under which
+/// the second was a duplicate of the first and was dropped without a word --
+/// one of the two functions called nothing.
+#[test]
+fn uploading_one_token_read_in_two_places_keeps_both_references() {
+    use crate::proto::askl::index::{
+        Object as UploadObject, Project as UploadProject, Symbol as UploadSymbol,
+        SymbolInstance as UploadInstance, SymbolRef as UploadRef,
+    };
+    use crate::test_util::{create_isolated_fixture, store_and_index_with_shared_cache};
+    use diesel_async::AsyncConnection;
+    let fx = create_isolated_fixture(VERB_TEST);
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let (store, _index) = store_and_index_with_shared_cache(fx.url()).await;
+
+        // Re-upload the fixture's own project; see
+        // `uploading_two_instances_at_one_extent_keeps_both`.
+        let mut conn = diesel_async::AsyncPgConnection::establish(fx.url())
+            .await
+            .unwrap();
+        diesel_async::RunQueryDsl::execute(
+            diesel::sql_query("UPDATE index.projects SET upload_status = 'failed'"),
+            &mut conn,
+        )
+        .await
+        .unwrap();
+
+        let (pid, _) = store
+            .upload_index(
+                UploadProject {
+                    project_name: "test_project".to_string(),
+                    root_path: "/test_project".to_string(),
+                    ..Default::default()
+                },
+                Some(1),
+                Some(1),
+            )
+            .await
+            .unwrap();
+
+        let sym = |local_id: i64, name: &str| UploadSymbol {
+            local_id,
+            name: name.to_string(),
+            r#type: 1, // FUNCTION
+            ..Default::default()
+        };
+        store
+            .upload_symbol_chunk(
+                pid,
+                0,
+                vec![
+                    sym(1, "holder"),
+                    sym(2, "kh_get_x"),
+                    sym(3, "kh_put_x"),
+                    sym(4, "my_hash"),
+                ],
+            )
+            .await
+            .unwrap();
+
+        // `holder` contains two functions generated on ONE extent, and each
+        // of them calls `my_hash` on the token at [150, 157).
+        let inst =
+            |symbol: i64, enter: i64, exit: i64, level: i32, start: i32, end: i32| UploadInstance {
+                symbol_local_id: symbol,
+                instance_type: 1,
+                start_offset: start,
+                end_offset: end,
+                dfs_enter: enter,
+                dfs_exit: exit,
+                nesting_level: level,
+                ..Default::default()
+            };
+        let call = |enter: i64| UploadRef {
+            to_symbol_local_id: 4,
+            from_offset_start: 150,
+            from_offset_end: 157,
+            nesting_level: 2,
+            dfs_enter: enter,
+            ..Default::default()
+        };
+        let payload = UploadProject {
+            objects: vec![UploadObject {
+                local_id: 1,
+                module_path: "mod".to_string(),
+                filesystem_path: "/test_project/khash.c".to_string(),
+                filetype: "c".to_string(),
+                content: b"x".to_vec(),
+                symbol_instances: vec![
+                    inst(1, 0, 8192, 0, 0, 200),
+                    inst(2, 1024, 2048, 1, 100, 160),
+                    inst(3, 3072, 4096, 1, 100, 160),
+                ],
+                refs: vec![call(1025), call(3073)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        store
+            .upload_object_chunk(pid, 0, payload.clone())
+            .await
+            .unwrap();
+        // Re-sending a chunk is what resumption does; it must stay idempotent.
+        store.upload_object_chunk(pid, 0, payload).await.unwrap();
+        store.finalize_project(pid).await.unwrap();
+
+        use diesel_async::RunQueryDsl;
+        let rows: Vec<DfsIntervalRow> = diesel::sql_query(
+            "SELECT sr.dfs_enter, 0::bigint AS dfs_exit FROM index.symbol_refs sr \
+             JOIN index.objects o ON o.id = sr.from_object \
+             WHERE o.filesystem_path = '/test_project/khash.c' \
+             ORDER BY sr.dfs_enter",
+        )
+        .load(&mut conn)
+        .await
+        .unwrap();
+        let places: Vec<i64> = rows.into_iter().map(|r| r.dfs_enter).collect();
+
+        assert_eq!(
+            places,
+            vec![1025, 3073],
+            "the call in each generated function must survive, and a re-sent \
+             chunk must not duplicate them"
+        );
+    });
+}
+
 #[test]
 fn zombie_project_reupload_purges_caches() {
     // upload_index deleting a Failed/Deleting zombie project cascades its

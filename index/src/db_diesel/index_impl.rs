@@ -1703,6 +1703,7 @@ impl Index {
     pub const TEST_INPUT_TYPE_FILTER: &'static str = "test_input_type_filter.sql";
     pub const TEST_INPUT_STRUCT_FIELDS: &'static str = "test_input_struct_fields.sql";
     pub const TEST_INPUT_ESCALATION: &'static str = "test_input_escalation.sql";
+    pub const TEST_INPUT_REF_IDENTITY: &'static str = "test_input_ref_identity.sql";
     pub const TEST_INPUT_RECURSIVE_MULTI_INSTANCE: &'static str =
         "test_input_recursive_multi_instance.sql";
     pub const VERB_TEST: &'static str = "verb_test.sql";
@@ -1748,6 +1749,10 @@ impl Index {
         (
             "test_input_escalation.sql",
             include_str!("../../../sql/test_input_escalation.sql"),
+        ),
+        (
+            "test_input_ref_identity.sql",
+            include_str!("../../../sql/test_input_ref_identity.sql"),
         ),
         (
             "test_input_recursive_multi_instance.sql",
@@ -4464,9 +4469,19 @@ impl<'a> EphTransaction<'a> {
             //
             // WHERE A MATCH SITS.  In the innermost persistent instance whose
             // extent contains it: narrowest, then deepest in the tree, then
-            // earliest.  The same rule the indexers use to place a stored
-            // reference, so the same bytes get the same container whether the
-            // row is a reference or a query-time match.
+            // earliest.
+            //
+            // For text that lies in a declaration somebody typed, that is
+            // where the clang indexer puts a stored reference too.  It differs
+            // for text inside a macro invocation that GENERATED a declaration:
+            // the indexer gives a generated declaration only what the
+            // compiler read inside it, and puts the rest in the typed
+            // declaration around the invocation.  This statement cannot tell
+            // the two apart -- an instance row does not say whether it was
+            // generated -- so a match in `KHASH_INIT(x, int, my_hash)` lands
+            // in one of the functions that invocation generated.  It is still
+            // inside every instance that contains the invocation, so a scoped
+            // search finds it either way.
             //
             // FOLDING PLAYS NO PART.  There used to be an exclusion here,
             // `NOT si.folded`, on the argument that a macro's expansion "owns
@@ -4541,7 +4556,7 @@ impl<'a> EphTransaction<'a> {
             // Same placement as ephemeral instances, except a ref is a point:
             // it sits one step inside the instance it is placed in rather
             // than taking an interval.  See `insert_instance_level` for the
-            // rule, which is also how both indexers place a stored reference.
+            // rule and for where it differs from the clang indexer's.
             "INSERT INTO index.symbol_refs \
                  (id, to_symbol, from_object, from_offset_range, layer, \
                   nesting_level, dfs_enter) \

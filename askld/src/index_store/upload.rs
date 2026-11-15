@@ -1038,6 +1038,16 @@ async fn insert_symbol_refs(
     rows: &[NewSymbolRef],
 ) -> Result<(), UploadError> {
     for chunk in rows.chunks(MAX_INSERT_ROWS) {
+        // The conflict target must name `symbol_refs_layer_uq` exactly, as the
+        // instance insert above names its index: a mismatched target is a hard
+        // error on every insert, not a weaker guarantee.
+        //
+        // A reference is what it names, the token that names it, and where it
+        // sits.  One token read inside two declarations -- everything
+        // `KHASH_INIT(x, int, my_hash)` generates calls `my_hash` on the one
+        // token the caller typed -- is two references that differ only in
+        // `dfs_enter`.  Without it in the target the second was silently
+        // dropped here and one of the two functions called nothing.
         diesel::insert_into(index_schema::symbol_refs::table)
             .values(chunk)
             .on_conflict((
@@ -1045,6 +1055,7 @@ async fn insert_symbol_refs(
                 index_schema::symbol_refs::from_object,
                 index_schema::symbol_refs::from_offset_range,
                 index_schema::symbol_refs::layer,
+                index_schema::symbol_refs::dfs_enter,
             ))
             .do_nothing()
             .execute(conn)
