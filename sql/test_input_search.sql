@@ -74,6 +74,19 @@ INSERT INTO content_store (content_hash, content) VALUES
     -- macro generated, which is inside h13, so it is still h13's.
     --   offsets: M13(zq8,c) = [15,25), zq8 = [19,22)
     ('cs_argown',     E'void h13(void){M13(zq8,c);}\n'),
+    -- A macro that generates a declaration and then leaves a typed body:
+    -- `PF(int, send, yq7)` makes the variable `blah` and the head of the
+    -- function `blah_send`, whose body the author typed.  The only extent
+    -- `blah` has is the invocation's, which lies in `blah_send`'s text, yet it
+    -- was declared BESIDE the function.  Bytes and tree disagree here.
+    --   offsets: PF(int, send, yq7) = [0,18), yq7 = [14,17), vq3 = [28,31)
+    ('cs_sibling',    E'PF(int, send, yq7) { return vq3; }\n'),
+    -- A family on one extent, and a declaration inside ONE of them.  `fam_in`
+    -- lies in the bytes of both `fam_a` and `fam_b` and is contained by
+    -- `fam_a` only -- a tree has one parent.  That is not a disagreement: a
+    -- declaration with that extent does contain it.
+    --   offsets: MF(zr2) = [0,7), zr2 = [3,6)
+    ('cs_family',     E'MF(zr2) attr;\n'),
     ('cs_binary',     E'\\xfffefa666f6f0bff'::bytea),
     -- Cross-project shared content: hash referenced by an object in each
     -- project.  Exercises the (content_hash, project_id) constraint that
@@ -94,7 +107,9 @@ INSERT INTO objects (id, project_id, module_path, filesystem_path, filetype, con
     (11, 1, 'coext.c',   '/p1/coext.c',    'cc', 'cs_coext'),
     (12, 1, 'nestmac.c', '/p1/nestmac.c',  'cc', 'cs_nestmac'),
     (13, 1, 'argown.c',  '/p1/argown.c',   'cc', 'cs_argown'),
-    (14, 1, 'chain.go',  '/p1/chain.go',   'go', 'cs_chain');
+    (14, 1, 'chain.go',  '/p1/chain.go',   'go', 'cs_chain'),
+    (15, 1, 'sibling.c', '/p1/sibling.c',  'cc', 'cs_sibling'),
+    (16, 1, 'family.c',  '/p1/family.c',   'cc', 'cs_family');
 
 -- Sentinel function symbols for objects 1-3 just so composite-filter tests
 -- have somewhere to attach.  Object 5 is intentionally left symbol-less to
@@ -123,7 +138,15 @@ INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope) VALUES
     (26, 'chain_mod',    1, 3, 2),
     (27, '/p1',          1, 4, 2),
     (28, '/p1/chain.go', 1, 2, 2),
-    (29, 'h14',          1, 1, 2);
+    (29, 'h14',          1, 1, 2),
+    -- Object 15: a generated variable beside the function whose text holds it.
+    (30, '/p1/sibling.c', 1, 2, 2),
+    (31, 'blah',          1, 6, 2),
+    (32, 'blah_send',     1, 1, 2),
+    -- Object 16: two declarations on one extent, and one inside the first.
+    (33, 'fam_a',         1, 1, 2),
+    (34, 'fam_b',         1, 1, 2),
+    (35, 'fam_in',        1, 1, 2);
 
 INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type) VALUES
     (110, 10, 1, int4range(0, 16),  1),
@@ -199,6 +222,36 @@ INSERT INTO symbol_instances
     (127, 27, 14, int4range(0, 27),  5, 2048,  9216, 1),
     (128, 28, 14, int4range(0, 27),  9, 3072,  8192, 2),
     (129, 29, 14, int4range(11, 26), 1, 4096,  5120, 3);
+
+-- Object 15: BYTES AND TREE DISAGREE.  `blah` is what the macro declared before
+-- the function's head; its extent is the invocation, and the invocation lies
+-- in `blah_send`'s text.  The indexer puts it where the compiler read it,
+-- beside the function, so these numbers are stated by hand: ranges alone would
+-- nest it inside.
+--
+--    enter  exit  lvl  range     symbol
+--     1024  8192   0   [0,35)    /p1/sibling.c
+--     2048  3072   1   [0,18)      blah        (bytes inside blah_send's)
+--     4096  5120   1   [0,34)      blah_send
+INSERT INTO symbol_instances
+    (id, symbol, object_id, offset_range, instance_type,
+     dfs_enter, dfs_exit, nesting_level) VALUES
+    (130, 30, 15, int4range(0, 35), 9, 1024, 8192, 0),
+    (131, 31, 15, int4range(0, 18), 2, 2048, 3072, 1),
+    (132, 32, 15, int4range(0, 34), 1, 4096, 5120, 1);
+
+-- Object 16: `fam_in` is inside `fam_a` and lies in `fam_b`'s bytes as well.
+--
+--    enter  exit  lvl  range     symbol
+--     1024  4096   0   [0,13)    fam_a
+--     2048  3072   1   [0,7)       fam_in
+--     5120  6144   0   [0,13)    fam_b
+INSERT INTO symbol_instances
+    (id, symbol, object_id, offset_range, instance_type,
+     dfs_enter, dfs_exit, nesting_level) VALUES
+    (133, 33, 16, int4range(0, 13), 2, 1024, 4096, 0),
+    (135, 35, 16, int4range(0, 7),  2, 2048, 3072, 1),
+    (134, 34, 16, int4range(0, 13), 2, 5120, 6144, 0);
 
 -- Project 2 section: switch the layer DEFAULT to project 2's root layer.
 ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000002;

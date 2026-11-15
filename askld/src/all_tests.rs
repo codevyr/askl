@@ -10774,6 +10774,69 @@ fn a_scoped_search_is_restricted_to_its_scope_byte_ranges() {
 }
 
 #[test]
+fn a_match_passes_over_a_declaration_whose_bytes_are_not_its_text() {
+    // `PF(int, send, yq7) { return vq3; }` -- the macro declares a variable
+    // `blah` and the head of `blah_send`, and the author typed the body.  The
+    // only extent `blah` has is the invocation's `[0,18)`.  That lies in
+    // `blah_send`'s text `[0,34)`, and the indexer puts `blah` BESIDE the
+    // function, where the compiler read it.
+    //
+    // So the bytes say `blah` is inside `blah_send` and the tree says it is
+    // not, which can only mean the bytes are not `blah`'s text.  A match there
+    // is text the author of `blah_send` typed, and sits in `blah_send`.
+    //
+    // It used to sit in `blah`, the narrowest extent around it -- and so was
+    // outside the function it was typed in: `func("blah_send") {
+    // search("yq7") }` found the text in the function's corpus, placed it in
+    // the sibling, and reported that nothing related.
+    let eph = |q: &str| -> usize {
+        run_query(TEST_INPUT_SEARCH, q)
+            .nodes
+            .as_vec()
+            .iter()
+            .map(|id| <SymbolInstanceId as Into<i64>>::into(*id))
+            .filter(|id| *id < 0)
+            .count()
+    };
+
+    assert_eq!(
+        eph(r#"func("blah_send") { search("yq7") }"#),
+        1,
+        "the invocation's arguments are text of the function that runs on from it"
+    );
+    assert_eq!(
+        eph(r#"func("blah_send") { search("vq3") }"#),
+        1,
+        "as its typed body always was"
+    );
+    assert_eq!(
+        eph(r#"data("blah") { search("yq7") }"#),
+        0,
+        "and the generated variable has no text of its own for a match to sit in"
+    );
+    assert_eq!(
+        eph(r#"file("sibling.c") { search("yq7") }"#),
+        1,
+        "the file contains it either way"
+    );
+
+    // NOT A DISAGREEMENT: `fam_in` lies in the bytes of `fam_a` and of `fam_b`,
+    // which share one extent, and a tree gives it one parent.  A declaration
+    // with that extent does contain it, so its bytes are its text and the match
+    // sits in it, the innermost, as before.
+    assert_eq!(
+        eph(r#"func("fam_in") { search("zr2") }"#),
+        1,
+        "a declaration inside one of several on one extent keeps its matches"
+    );
+    assert_eq!(
+        eph(r#"func("fam_a") { search("zr2") }"#),
+        1,
+        "and so does the one that contains it"
+    );
+}
+
+#[test]
 fn a_layer_materialising_command_never_derives_its_selection() {
     // The fabrication bug: when a `search` had no selection,
     // `Command::derive_from_parent` ran a read that cannot express the search
