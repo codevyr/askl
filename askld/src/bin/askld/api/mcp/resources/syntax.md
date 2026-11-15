@@ -53,6 +53,13 @@ separate statements; a `{` must be on the same line as its verb to attach.
   one level down.  The mode goes **inside** the braces, on the statement whose
   reach it bounds (upward: `unnest { "x" }`), and does not inherit.
 - Naming a symbol always finds it, folded or not: `X { "__compiletime_assert_7" }`.
+- **Macros (C).** Using a macro is an edge from whoever typed the use:
+  `f -> BUILD_BUG_ON`. What is typed in a macro's arguments belongs to that
+  same function, not to a declaration the macro generated
+  (`BUILD_BUG_ON(sizeof(struct x))` in `f` gives `f -> x`). A helper handed to
+  a generating macro has an edge from **each** generated function that uses it:
+  `KHASH_INIT(x, int, my_hash)` gives `kh_get_x -> my_hash` and
+  `kh_put_x -> my_hash`, while `KHASH_INIT` itself is an edge from the file.
 
 ## Filters — constrain, add nothing
 - A **bare** type verb is a filter that **inherits** to all descendants:

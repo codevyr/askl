@@ -34,6 +34,8 @@ Full-text (raw source bytes — for text that is NOT a symbol name; to find a sy
 - Whole word, scoped:         `project("linux") search("EXPORT_SYMBOL", whole_word=true)`
 - Several literals (OR):      `search("foo") search("bar")`  (or as two top-level statements, `search("foo"); search("bar")` — both union; `search()` is literal, `search("a|b")` matches the text `a|b`, not a regex)
 - Children of each hit:       `search("kmalloc") { }`
+- Inside one function:        `func("vfs_read") { search("mmap_lock") }`
+- Functions containing a literal: `func { any search("mmap_lock") }`  (NOT `func { search(...) }`: a bare `func` is a filter that inherits to the search, no match is a function, and the result is empty; `any` drops the inherited type)
 
 Scope and hygiene
 - Restrict to a project:      `project("linux") "main" { }`
