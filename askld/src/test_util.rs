@@ -25,6 +25,8 @@ pub const TEST_INPUT_TYPE_FILTER: &'static str = index::db_diesel::Index::TEST_I
 pub const TEST_INPUT_STRUCT_FIELDS: &'static str =
     index::db_diesel::Index::TEST_INPUT_STRUCT_FIELDS;
 pub const VERB_TEST: &'static str = index::db_diesel::Index::VERB_TEST;
+pub const TEST_INPUT_HIDDEN_CHILDREN: &'static str =
+    index::db_diesel::Index::TEST_INPUT_HIDDEN_CHILDREN;
 pub const TEST_INPUT_SEARCH: &'static str = index::db_diesel::Index::TEST_INPUT_SEARCH;
 
 pub fn format_edges(edges: EdgeList) -> Vec<String> {
@@ -95,6 +97,7 @@ const ALL_FIXTURES: &[&str] = &[
     TEST_INPUT_STRUCT_FIELDS,
     VERB_TEST,
     TEST_INPUT_SEARCH,
+    TEST_INPUT_HIDDEN_CHILDREN,
 ];
 
 static FIXTURES: LazyLock<HashMap<&'static str, OnceLock<SharedFixture>>> = LazyLock::new(|| {

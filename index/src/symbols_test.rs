@@ -546,8 +546,16 @@ async fn a_family_the_relationship_cannot_read_is_not_fetched() -> anyhow::Resul
     let module = CompositeFilter::leaf(CompoundNameMixin::new("testmodule"));
 
     let demands = |refs: bool, has: bool| FamilyDemands {
-        parent: FamilyDemand { refs, has },
-        children: FamilyDemand { refs, has },
+        parent: FamilyDemand {
+            refs,
+            has,
+            listing: None,
+        },
+        children: FamilyDemand {
+            refs,
+            has,
+            listing: None,
+        },
     };
 
     let both = index

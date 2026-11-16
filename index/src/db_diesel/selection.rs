@@ -424,6 +424,10 @@ pub struct Selection {
     /// truncated set drops rows whose evidence sat in the part never read.
     /// `budget_bounded` drives a warning; this drives a refusal.
     pub capped: bool,
+    /// True when `capped` is owed only to a neighbourhood family that nobody
+    /// reads (see `find_symbol`).  The refusal stands and nothing is said:
+    /// what the answer shows was not cut.  Read through [`Selection::cut`].
+    pub capped_family_unread: bool,
 }
 
 impl Selection {
@@ -436,7 +440,20 @@ impl Selection {
             has_children: Vec::new(),
             budget_bounded: false,
             capped: false,
+            capped_family_unread: false,
         }
+    }
+
+    /// Whether a limit cut something out of what this selection shows -- the
+    /// condition for telling the user the graph is incomplete.
+    pub fn cut(&self) -> bool {
+        self.capped && !self.capped_family_unread
+    }
+
+    /// Record that the read which produced these nodes was truncated.
+    pub fn mark_cut(&mut self) {
+        self.capped = true;
+        self.capped_family_unread = false;
     }
 
     /// Set-union merge: `extend` is idempotent, so a selection stored under
@@ -501,7 +518,9 @@ impl Selection {
             (hc.parent_instance.id, hc.child_instance.id)
         });
         self.budget_bounded |= other.budget_bounded;
+        let cut = self.cut() || (other.capped && !other.capped_family_unread);
         self.capped |= other.capped;
+        self.capped_family_unread = self.capped && !cut;
     }
 
     pub fn is_empty(&self) -> bool {
