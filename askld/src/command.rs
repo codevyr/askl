@@ -743,11 +743,13 @@ impl Command {
             // it, M1's re-read of a cap+1 id set already re-trips the flag; this
             // carry is the case it misses.)
             let mut selection = selection;
-            selection.capped |= *derive_capped;
+            if *derive_capped {
+                selection.mark_cut();
+            }
             // The Phase-R emission sites cannot warn for a derived selection —
             // it is created here, after they ran — so a capped derive would
             // otherwise render a short answer silently.  Same message, no totals.
-            if selection.capped && !derive_cap_warned {
+            if selection.cut() && !derive_cap_warned {
                 derive_cap_warned = true;
                 warnings.push(Diagnostic::truncation(
                     Span::from_pest(selector.span(), self.span().input()),
@@ -864,7 +866,7 @@ impl Command {
             // A derive that came back discovery-capped must be SAID here: the
             // Phase-R warning sites ran before this selection existed.  Same
             // message, no totals.
-            if selection.as_ref().is_some_and(|sel| sel.capped) && !derive_cap_warned {
+            if selection.as_ref().is_some_and(|sel| sel.cut()) && !derive_cap_warned {
                 derive_cap_warned = true;
                 warnings.push(Diagnostic::truncation(
                     Span::from_pest(selector.span(), self.span().input()),
@@ -1190,7 +1192,7 @@ impl Command {
                         ),
                     ));
                 }
-                if selection.capped && !capped_warned {
+                if selection.cut() && !capped_warned {
                     capped_warned = true;
                     warnings.push(Diagnostic::truncation(
                         Span::from_pest(selector.span(), self.span().input()),
@@ -1255,7 +1257,7 @@ impl Command {
                 ));
             }
 
-            if selection.capped && !capped_warned {
+            if selection.cut() && !capped_warned {
                 warnings.push(Diagnostic::truncation(
                     Span::from_pest(fused[0].span(), self.span().input()),
                     "too many results: this part of the graph is incomplete. Narrow it with a name or glob, a type filter, `ignore(...)`, `project(...)`, or fewer hops"

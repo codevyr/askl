@@ -25,9 +25,9 @@ use super::cte::{
     build_has_children_query_against_cte, CteFindEdgesBetween, CteHasChildren,
 };
 use super::mixins::{
-    ChildrenQuery, CompositeFilter, CurrentIdQuery, CurrentQuery, EphVisibility, HasParentsQuery,
-    ParentsQuery, CONTAINER_INSTANCE_ALIAS, CONTAINER_SYMBOL_ALIAS, CONTAINER_TYPE_ALIAS,
-    INSTANCE_TYPE_DEFINITION, PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
+    ChildrenQuery, CompositeFilter, CurrentIdQuery, CurrentQuery, DirectOnlyMixin, EphVisibility,
+    HasParentsQuery, ParentsQuery, TraversalMode, CONTAINER_INSTANCE_ALIAS, CONTAINER_SYMBOL_ALIAS,
+    CONTAINER_TYPE_ALIAS, INSTANCE_TYPE_DEFINITION, PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
 };
 use super::selection::{
     is_eph_leak, ChildReference, EphContext, HasChildReference, HasParentReference,
@@ -83,10 +83,21 @@ impl ScopeContext {
 /// in the result is rediscovered by `find_edges_between` and
 /// `find_has_edges_between`, which ask about the answer rather than about a
 /// statement's neighbourhood.
+///
+/// `listing` narrows a family the same way: a family holds what the statements
+/// that read it can list.  When every reader is a bare `{ }` -- which lists
+/// under its traversal mode and nothing else -- the family is read under that
+/// mode's filter, so a symbol the listing leaves out for what it is (a folded
+/// one, by default) is not fetched and does not count towards the read's
+/// limit.  Without it `"EXPORT_SYMBOL_GPL" { }` on the kernel read 800 hidden
+/// rows to list one, and reported the one as an incomplete answer.  `None`
+/// when some reader selects by a predicate of its own: a named child is found
+/// behind a fold, so its evidence must not be filtered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FamilyDemand {
     pub refs: bool,
     pub has: bool,
+    pub listing: Option<TraversalMode>,
 }
 
 impl FamilyDemand {
@@ -96,6 +107,7 @@ impl FamilyDemand {
         Self {
             refs: true,
             has: true,
+            listing: None,
         }
     }
 }
@@ -1780,6 +1792,7 @@ impl Index {
     pub const TEST_INPUT_STRUCT_FIELDS: &'static str = "test_input_struct_fields.sql";
     pub const TEST_INPUT_ESCALATION: &'static str = "test_input_escalation.sql";
     pub const TEST_INPUT_REF_IDENTITY: &'static str = "test_input_ref_identity.sql";
+    pub const TEST_INPUT_HIDDEN_CHILDREN: &'static str = "test_input_hidden_children.sql";
     pub const TEST_INPUT_RECURSIVE_MULTI_INSTANCE: &'static str =
         "test_input_recursive_multi_instance.sql";
     pub const VERB_TEST: &'static str = "verb_test.sql";
@@ -1829,6 +1842,10 @@ impl Index {
         (
             "test_input_ref_identity.sql",
             include_str!("../../../sql/test_input_ref_identity.sql"),
+        ),
+        (
+            "test_input_hidden_children.sql",
+            include_str!("../../../sql/test_input_hidden_children.sql"),
         ),
         (
             "test_input_recursive_multi_instance.sql",
@@ -2231,6 +2248,12 @@ impl Index {
             }
         };
 
+        // What the readers of the children families list; see `FamilyDemand`.
+        let children_listing: Option<CompositeFilter> = demands
+            .children
+            .listing
+            .map(|mode| CompositeFilter::leaf(DirectOnlyMixin::new(mode)));
+
         let children = match children_scope {
             _ if !demands.children.refs => vec![],
             ScopeContext::Absent | ScopeContext::Deferred => vec![],
@@ -2254,6 +2277,12 @@ impl Index {
                     .cached_load_partitioned(eph, chain_dependent, |vis| {
                         let mut q = build_children_query(current_instance_ids.clone(), vis);
                         if let Some(expr) = filter.compose_children(vis) {
+                            q = q.filter(expr);
+                        }
+                        if let Some(expr) = children_listing
+                            .as_ref()
+                            .and_then(|l| l.compose_children(vis))
+                        {
                             q = q.filter(expr);
                         }
                         q.filter(vis.guard()).limit(read_limit)
@@ -2297,6 +2326,12 @@ impl Index {
                     .cached_load_partitioned(eph, chain_dependent, |vis| {
                         let mut q = build_children_query(current_instance_ids.clone(), vis);
                         if let Some(expr) = filter.compose_children(vis) {
+                            q = q.filter(expr);
+                        }
+                        if let Some(expr) = children_listing
+                            .as_ref()
+                            .and_then(|l| l.compose_children(vis))
+                        {
                             q = q.filter(expr);
                         }
                         // Always apply scope filter.
@@ -2399,7 +2434,8 @@ impl Index {
             .entered();
             let t0 = std::time::Instant::now();
 
-            let has_children_filtered = filter.constrains_has_children();
+            let has_children_filtered =
+                filter.constrains_has_children() || children_listing.is_some();
             let contained_scope = |q: super::mixins::HasChildrenQuery<'static>| {
                 let contained_instance = super::mixins::CONTAINED_INSTANCE_ALIAS;
                 match &has_children_scope_ids {
@@ -2416,6 +2452,12 @@ impl Index {
                     self.cached_load_partitioned(eph, chain_dependent, |vis| {
                         let mut q = build_has_children_query(current_instance_ids.clone(), vis);
                         if let Some(expr) = filter.compose_has_children(vis) {
+                            q = q.filter(expr);
+                        }
+                        if let Some(expr) = children_listing
+                            .as_ref()
+                            .and_then(|l| l.compose_has_children(vis))
+                        {
                             q = q.filter(expr);
                         }
                         contained_scope(q).filter(vis.guard()).limit(read_limit)
@@ -2470,11 +2512,21 @@ impl Index {
         // Uses `read_limit`, the effective bound actually applied, so it fires
         // for both the safety cap (composed reads) and the budget (bare reads).
         let hit = |n: usize| n as i64 >= read_limit;
-        let capped = hit(current.len())
-            || hit(parents.len())
+        let family_capped = hit(parents.len())
             || hit(children.len())
             || hit(has_parents.len())
             || hit(has_children.len());
+        let capped = hit(current.len()) || family_capped;
+
+        // A refusal is not always a warning.  While the result budget is in
+        // force (`leaf_limit`) nobody reads this statement's families: every
+        // neighbour is an echo, which derives what it shows through a read of
+        // its own, with its own limit and its own warning.  A family that
+        // filled its limit there has cut nothing out of the answer.  The
+        // selection is still `capped` -- its rows must not be used as
+        // evidence -- but saying "incomplete" over a complete answer is how
+        // the warning gets ignored the day it is true.
+        let capped_family_unread = capped && !hit(current.len()) && leaf_limit.is_some();
 
         let selection: Result<Selection> = {
             let _collect_span: tracing::span::EnteredSpan =
@@ -2600,6 +2652,7 @@ impl Index {
                 has_children,
                 budget_bounded,
                 capped,
+                capped_family_unread,
             })
         };
 

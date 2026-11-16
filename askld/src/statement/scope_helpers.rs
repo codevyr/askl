@@ -2,7 +2,7 @@ use crate::execution_context::ExecutionContext;
 use crate::execution_state::RelationshipType;
 use crate::hierarchy::Hierarchy;
 use index::db_diesel::{CompositeFilter, EphContext, ScopeContext};
-use index::db_diesel::{FamilyDemand, FamilyDemands};
+use index::db_diesel::{FamilyDemand, FamilyDemands, TraversalMode};
 
 use super::Statement;
 
@@ -234,14 +234,33 @@ pub(super) fn build_family_demands(statement: &Statement) -> FamilyDemands {
         None => FamilyDemand::both(),
     };
     let mut children_rel: Option<RelationshipType> = None;
+    // The one mode every child lists under, if they are all echoes.  An echo
+    // lists exactly what its mode admits (`derive_from_parent` reads under
+    // the same filter), so the family it reads need hold nothing else.  A
+    // child with a predicate of its own is found behind a fold and needs the
+    // whole family as evidence; so does `unnest`, which has no filter.
+    let mut listing: Option<Option<TraversalMode>> = None;
     for child in statement.children() {
         children_rel = Some(match children_rel {
             None => child.relationship_type,
             Some(acc) => acc | child.relationship_type,
         });
+        let mode = match child.traversal_mode() {
+            TraversalMode::Unnest => None,
+            mode if is_echo(&child) => Some(mode),
+            _ => None,
+        };
+        listing = Some(match listing {
+            None => mode,
+            Some(acc) if acc == mode => acc,
+            Some(_) => None,
+        });
     }
     let children = match children_rel {
-        Some(rel) => demand_of(rel),
+        Some(rel) => FamilyDemand {
+            listing: listing.flatten(),
+            ..demand_of(rel)
+        },
         None => FamilyDemand::both(),
     };
     FamilyDemands { parent, children }
@@ -251,5 +270,6 @@ fn demand_of(rel: RelationshipType) -> FamilyDemand {
     FamilyDemand {
         refs: rel.contains(RelationshipType::REFS),
         has: rel.contains(RelationshipType::HAS),
+        listing: None,
     }
 }

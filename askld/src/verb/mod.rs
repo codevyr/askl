@@ -1256,7 +1256,9 @@ pub trait Selector: std::fmt::Debug + Verb {
         // incomplete regardless of what the by-id re-read (which a selector
         // predicate can shrink below the cap) reports.  M3 then keeps this
         // selection out of composition; M8 says it.
-        selection.capped |= derive_capped;
+        if derive_capped {
+            selection.mark_cut();
+        }
 
         Ok(Some(selection))
     }

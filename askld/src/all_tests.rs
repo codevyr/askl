@@ -2,8 +2,8 @@ use crate::test_util::{
     format_edges, get_shared_db_url, get_shared_index, run_query, run_query_err,
     run_query_probe_traced, run_query_traced, run_query_with_budget, run_query_with_edge_cap,
     run_query_with_read_cap, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT,
-    TEST_INPUT_ESCALATION, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC, TEST_INPUT_SEARCH,
-    TEST_INPUT_STRUCT_FIELDS, TEST_INPUT_TREE_BROWSER, VERB_TEST,
+    TEST_INPUT_ESCALATION, TEST_INPUT_HIDDEN_CHILDREN, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC,
+    TEST_INPUT_SEARCH, TEST_INPUT_STRUCT_FIELDS, TEST_INPUT_TREE_BROWSER, VERB_TEST,
 };
 use index::db_diesel::FamilyDemands;
 use index::symbols::{SymbolId, SymbolInstanceId};
@@ -5642,6 +5642,99 @@ fn a_data_originating_child_costs_the_budget() {
             .map(|w| w.message.clone())
             .collect::<Vec<_>>(),
     );
+}
+
+/// The incompleteness warnings of a run, and its instance ids, sorted.
+fn incomplete_and_ids(res: &crate::statement::ExecutionResult) -> (Vec<String>, Vec<i64>) {
+    let said = res
+        .warnings
+        .iter()
+        .filter(|w| w.message.contains("this part of the graph is incomplete"))
+        .map(|w| w.message.clone())
+        .collect();
+    let mut ids: Vec<i64> = res.nodes.as_vec().iter().map(|i| (*i).into()).collect();
+    ids.sort();
+    (said, ids)
+}
+
+#[test]
+fn hidden_children_are_not_an_incomplete_answer() {
+    // `GEN` refers to `shown` and to twelve folded symbols.  `"GEN" { }` lists
+    // `shown`, and that is the whole answer: the twelve are left out for what
+    // they are, not because a limit cut them.
+    //
+    // GEN's own children read did not apply the listing's filter, so the
+    // twelve filled its limit (8 here) and the statement said "this part of
+    // the graph is incomplete" over a complete answer.  On the kernel that is
+    // every macro whose invocations generate hidden declarations.
+    let (said, ids) = incomplete_and_ids(&run_query_with_budget(
+        TEST_INPUT_HIDDEN_CHILDREN,
+        r#""GEN" { }"#,
+        1,
+    ));
+    assert_eq!(ids, vec![20, 30], "GEN and the one child it lists");
+    assert!(said.is_empty(), "nothing was cut, got {:?}", said);
+
+    // The same without a budget: the safety cap (3) is what the twelve fill.
+    let (said, ids) = incomplete_and_ids(&run_query_with_read_cap(
+        TEST_INPUT_HIDDEN_CHILDREN,
+        r#""GEN" { }"#,
+        3,
+    ));
+    assert_eq!(ids, vec![20, 30]);
+    assert!(said.is_empty(), "nothing was cut, got {:?}", said);
+
+    // Containment: `host` holds `inner` and twelve folded declarations.
+    let (said, ids) = incomplete_and_ids(&run_query_with_budget(
+        TEST_INPUT_HIDDEN_CHILDREN,
+        r#""host" { }"#,
+        1,
+    ));
+    assert_eq!(ids, vec![50, 60], "host and the one declaration it lists");
+    assert!(said.is_empty(), "nothing was cut, got {:?}", said);
+
+    let (said, ids) = incomplete_and_ids(&run_query_with_read_cap(
+        TEST_INPUT_HIDDEN_CHILDREN,
+        r#""host" { }"#,
+        3,
+    ));
+    assert_eq!(ids, vec![50, 60]);
+    assert!(said.is_empty(), "nothing was cut, got {:?}", said);
+
+    // `unnest` lists the hidden ones, so there a limit does cut the answer.
+    let (said, _) = incomplete_and_ids(&run_query_with_read_cap(
+        TEST_INPUT_HIDDEN_CHILDREN,
+        r#""GEN" { unnest }"#,
+        3,
+    ));
+    assert!(!said.is_empty(), "thirteen children, a cap of three");
+}
+
+#[test]
+fn a_family_nobody_reads_is_not_an_incomplete_answer() {
+    // `wide` refers to twelve listed symbols.  Under a budget its own children
+    // read stops at 8 rows, but nothing reads those rows: the `{ }` below
+    // derives its twelve through a read of its own, with its own limit and
+    // its own warning.  All twelve are in the answer, so nothing is said.
+    let (said, ids) = incomplete_and_ids(&run_query_with_budget(
+        TEST_INPUT_HIDDEN_CHILDREN,
+        r#""wide" { }"#,
+        1,
+    ));
+    let mut all: Vec<i64> = (2001..=2012).collect();
+    all.insert(0, 40);
+    assert_eq!(ids, all, "wide and all twelve children");
+    assert!(said.is_empty(), "nothing was cut, got {:?}", said);
+
+    // When the read that produces the listing is the one that is cut, it is
+    // said, and said once.
+    let (said, ids) = incomplete_and_ids(&run_query_with_read_cap(
+        TEST_INPUT_HIDDEN_CHILDREN,
+        r#""wide" { }"#,
+        3,
+    ));
+    assert!(ids.len() < all.len(), "the listing is cut, got {:?}", ids);
+    assert!(!said.is_empty(), "and that must be said");
 }
 
 #[test]
