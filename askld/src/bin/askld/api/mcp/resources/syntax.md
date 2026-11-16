@@ -60,6 +60,16 @@ separate statements; a `{` must be on the same line as its verb to attach.
   a generating macro has an edge from **each** generated function that uses it:
   `KHASH_INIT(x, int, my_hash)` gives `kh_get_x -> my_hash` and
   `kh_put_x -> my_hash`, while `KHASH_INIT` itself is an edge from the file.
+- **A macro leads to what its invocations declared.** `DEFINE_MUTEX(lock)`
+  gives `file -> DEFINE_MUTEX -> lock`, not `lock -> DEFINE_MUTEX`; a function
+  written `PROFILE_FUNC(int, send, x) { … }` is reached from `PROFILE_FUNC`
+  and does not lead to it.  `macro("DEFINE_MUTEX") { }` lists every mutex
+  declared with it; `{ "lock" }` shows `DEFINE_MUTEX` beside the users.  A
+  macro that only redeclares (`EXPORT_SYMBOL(foo)`) has no edge to `foo`.  A
+  macro is ONE node: `A -> MACRO -> d` does not mean `A`'s invocation
+  declared `d`, so do not read a path through a macro as a call chain.
+- "too many results: this part of the graph is incomplete" means a limit cut
+  the answer.  Folded symbols a listing leaves out never cause it.
 
 ## Filters — constrain, add nothing
 - A **bare** type verb is a filter that **inherits** to all descendants:
