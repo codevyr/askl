@@ -18,6 +18,8 @@ Call graph
 
 Containment
 - Functions a macro's body calls: `macro("LOG") { func }`
+- What a macro's invocations declared: `macro("DEFINE_MUTEX") { data }`, `macro("UCS_PROFILE_FUNC") { func }`  (add `unnest` for the ones nobody names)
+- Macros that declare or use a symbol: `macro { data("cgroup_mutex") }`  (type the child: under `macro` a bare name means macros and functions)
 - Everything in a module, incl. what macros generated: `mod("amdgpu") { unnest func }`  (the default leaves out symbols nobody wrote down, e.g. `__compiletime_assert_N`)
 - Fields of a struct:         `type("file_operations") has { field }`
 - Dispatch through a field:   `{ field("file_operations.read") }`
