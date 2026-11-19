@@ -10,7 +10,10 @@ use crate::name_pattern::NamePattern;
 use crate::offset_range::range_bounds_to_offsets;
 use crate::parser::Rule;
 use crate::scope::{Scope, StatementIter};
-use crate::verb::{name_filter, weak_notifier_blocks, LabelResolutions, NotificationContext};
+use crate::verb::{
+    name_filter, typed_selector_text, typed_selectors_for, weak_notifier_blocks,
+    word_a_bare_name_cannot_replace, LabelResolutions, NotificationContext,
+};
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::{CompositeFilter, EphContext, ScopeContext, Selection, TraversalMode};
@@ -67,19 +70,26 @@ pub struct PropagationResult {
     pub changed: bool,
 }
 
-/// Statement-level enrichment: for each `NoMatch` warning that carries a typed
-/// name, decide whether it's a real typo (offer "did you mean?" suggestions) or a
-/// name that exists somewhere but was excluded by a filter/scope. Done here,
-/// once, after all statements have executed — the index and visible projects are
-/// available, and it keeps the DB side-effect out of the selector's compute.
+/// Statement-level enrichment of the `NoMatch` warnings that carry a typed
+/// name.  One law: **a no-match warning suggests only what would match if
+/// typed.**  Done here, once, after all statements have executed — the index
+/// and visible projects are available, and it keeps the DB side-effect out
+/// of the selector's compute.
 ///
-/// The check is deliberately **name-only**: "does this name exist *anywhere
-/// visible*, ignoring type/project/relationship filters?" We build just the name
-/// predicate (`name_filter`, so its case/leaf/compound routing mirrors the
-/// selector) and probe with `has_symbol_matching`. If it exists, the empty
-/// selection is due to some other filter (not spelling), so we set `name_exists`
-/// (the renderer phrases it and points at type/project/relationship) instead of
-/// suggesting. Only when the name exists nowhere do we offer fuzzy suggestions.
+/// Two questions, in order:
+///
+/// 1. Does the name exist, under some type?  Each `word("name")` selector is
+///    probed with the predicate that selector itself runs
+///    ([`typed_selectors_for`]), so the answer is what typing it would find.
+///    Those that match are the suggestions, minus the one the query already
+///    wrote: `func("module_mutex")` is told `data("module_mutex")`, and a bare
+///    `"/src/a.c"` is told `file("/src/a.c")` — a file is not found by its
+///    bare name, and the old name-only probe concluded it did not exist and
+///    then "suggested" the string just typed.  `name_exists` is set either
+///    way: this is not a typo, and when no other spelling is left the
+///    renderer points at `project(...)` and the scope instead.
+/// 2. Otherwise it is a typo: the nearest existing names, each spelled so
+///    that it selects — a file or directory as `file("…")` / `dir("…")`.
 async fn enrich_no_match_suggestions(
     warnings: &mut [Diagnostic],
     ctx: &ExecutionContext,
@@ -98,31 +108,70 @@ async fn enrich_no_match_suggestions(
         let Some(token) = w.token.clone() else {
             continue;
         };
-
-        // Name-only existence: does the name exist anywhere visible, ignoring
-        // the type/project/relationship filters? Reuse the selector's own name
-        // predicate so case/leaf/compound routing matches exactly; the lean
-        // `has_symbol_matching` probe is current-query-only + LIMIT 1.
-        let filter = name_filter(&NamePattern::Exact(token.clone()));
-        let exists = match cfg.index.has_symbol_matching(&filter, &ctx.eph).await {
-            Ok(exists) => exists,
-            Err(e) => {
-                tracing::debug!("existence check for {:?} failed: {}", token, e);
-                continue;
-            }
+        // What the query wrote, to keep a selector from being told to type
+        // itself: `data("x")` that misses is not helped by `data("x")`.
+        let written = w.span.as_str().trim().to_string();
+        let wrote = |text: &str| {
+            let word = text.split('(').next().unwrap_or(text);
+            written == text || written.starts_with(&format!("{word}("))
         };
 
-        if exists {
-            // The name is real; an excluding filter (type/project/relationship)
-            // emptied the selection. Structured flag → the renderer phrases it.
+        let mut failed = false;
+        let mut exists_as: Vec<String> = Vec::new();
+        for (text, filter) in typed_selectors_for(&token) {
+            match cfg.index.has_symbol_matching(&filter, &ctx.eph).await {
+                Ok(true) => exists_as.push(text),
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!("existence check for {:?} failed: {}", text, e);
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        if failed {
+            continue;
+        }
+        // The bare name's own predicate, for whatever it reaches that no
+        // typed spelling did.
+        if exists_as.is_empty() {
+            let filter = name_filter(&NamePattern::Exact(token.clone()));
+            match cfg.index.has_symbol_matching(&filter, &ctx.eph).await {
+                Ok(true) => {
+                    w.name_exists = true;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!("existence check for {:?} failed: {}", token, e);
+                    continue;
+                }
+            }
+        }
+
+        if !exists_as.is_empty() {
+            // The name is real; a filter (type, project, scope) emptied the
+            // selection.
             w.name_exists = true;
+            w.suggestions = exists_as.into_iter().filter(|text| !wrote(text)).collect();
         } else {
             match cfg
                 .index
                 .suggest_symbol_names(&token, &project_ids, &visible_ids, MAX_SUGGESTIONS)
                 .await
             {
-                Ok(names) => w.suggestions = names,
+                Ok(names) => {
+                    w.suggestions = names
+                        .into_iter()
+                        .filter(|(name, _)| *name != token)
+                        .map(
+                            |(name, types)| match word_a_bare_name_cannot_replace(&types) {
+                                Some(word) => typed_selector_text(word, &name),
+                                None => name,
+                            },
+                        )
+                        .collect()
+                }
                 Err(e) => tracing::debug!("name suggestions for {:?} failed: {}", token, e),
             }
         }

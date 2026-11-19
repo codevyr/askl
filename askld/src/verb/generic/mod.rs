@@ -184,6 +184,39 @@ pub(crate) fn build_generic_verb(
 
 /// Returns a name filter for the type-agnostic case (bare selectors).
 /// Treats '.' as a separator (code symbol convention).
+/// Every typed selector that could be written for an exact name: its
+/// spelling (`data("x")`) and the predicate that spelling runs.  For the
+/// no-match diagnostics, which answer "what WOULD have matched" with a query
+/// the reader can type.
+pub(crate) fn typed_selectors_for(name: &str) -> Vec<(String, CompositeFilter)> {
+    let pattern = NamePattern::Exact(name.to_string());
+    TypeSelector::WORDS
+        .iter()
+        .map(|(id, word)| {
+            (
+                typed_selector_text(word, name),
+                TypeSelector::typed_name_filter(&pattern, *id),
+            )
+        })
+        .collect()
+}
+
+/// `word("name")`, with the two characters a quoted string escapes.
+pub(crate) fn typed_selector_text(word: &str, name: &str) -> String {
+    let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("{word}(\"{escaped}\")")
+}
+
+/// The type word that selects a symbol of this type by name, when a bare
+/// name does not: a file or a directory.
+pub(crate) fn word_a_bare_name_cannot_replace(symbol_types: &[i32]) -> Option<&'static str> {
+    match symbol_types {
+        [SYMBOL_TYPE_FILE] => Some(TypeSelector::NAME_FILE),
+        [SYMBOL_TYPE_DIRECTORY] => Some(TypeSelector::NAME_DIRECTORY),
+        _ => None,
+    }
+}
+
 pub(crate) fn name_filter(pattern: &NamePattern) -> CompositeFilter {
     match pattern {
         NamePattern::Exact(name) => {

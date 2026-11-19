@@ -320,11 +320,14 @@ pub struct ErrorResponse {
     /// The typed token this diagnostic is about (e.g. `vfs_rea`), when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-    /// Nearest existing symbol names for a no-match diagnostic.
+    /// Selectors that would match, for a no-match diagnostic: query text to
+    /// type in place of the one that missed (`data("x")`, `file("/a/b.c")`, or
+    /// the nearest existing names for a typo).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suggestions: Vec<String>,
     /// True when the typed name exists but was excluded by a filter/scope
-    /// (so it is not a typo). Mutually exclusive with `suggestions`.
+    /// (so it is not a typo).  `suggestions`, when present, are the spellings
+    /// that find it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub name_exists: bool,
 }

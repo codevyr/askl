@@ -441,8 +441,8 @@ fn warning_bullet(w: &ErrorResponse) -> String {
         out.push_str(&format!(". Did you mean: {}?", names.join(", ")));
     } else if w.name_exists {
         out.push_str(
-            ". The name exists but wasn't matched here — check the type, `project(...)`, \
-             or relationship (caller/callee) filters.",
+            ". The name exists but wasn't matched here — check `project(...)` and the \
+             scope it is asked in.",
         );
     }
     out
@@ -820,8 +820,25 @@ mod tests {
             bullet.contains("name exists but wasn't matched here"),
             "{bullet}"
         );
-        assert!(bullet.contains("type"), "{bullet}");
+        assert!(bullet.contains("project(...)"), "{bullet}");
         assert!(!bullet.contains("Did you mean"), "{bullet}");
+    }
+
+    #[test]
+    fn warning_bullet_offers_the_spelling_that_matches() {
+        // The name exists as data: the suggestion is the selector to type.
+        let mut w = warning(
+            "`func(\"module_mutex\")` matched no symbols",
+            1,
+            Some("module_mutex"),
+            &["data(\"module_mutex\")"],
+        );
+        w.name_exists = true;
+        let bullet = warning_bullet(&w);
+        assert!(
+            bullet.ends_with("Did you mean: `data(\"module_mutex\")`?"),
+            "{bullet}"
+        );
     }
 
     #[test]

@@ -208,7 +208,10 @@ mod preamble;
 
 pub(crate) use self::args::Args;
 pub(crate) use self::compound::build_compound_filter;
-pub(crate) use self::generic::{name_filter, EphemeralOps, LabelResolutions};
+pub(crate) use self::generic::{
+    name_filter, typed_selector_text, typed_selectors_for, word_a_bare_name_cannot_replace,
+    EphemeralOps, LabelResolutions,
+};
 pub use self::generic::{
     DefaultTypeFilter, GenericFilter, GenericSelector, NameSelector, UnitVerb,
 };
