@@ -83,6 +83,9 @@ pub struct SkeletonGraph {
     pub warnings: Vec<ErrorResponse>,
     pub truncated: bool,
     pub total_symbols: usize,
+    /// See `Graph::incomplete`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub incomplete: bool,
     pub edges_truncated: Vec<String>,
 }
 
@@ -326,6 +329,7 @@ pub fn to_skeleton(graph: Graph) -> SkeletonGraph {
         warnings: graph.warnings,
         truncated: graph.truncated,
         total_symbols: graph.total_symbols,
+        incomplete: graph.incomplete,
         edges_truncated: graph.edges_truncated,
     }
 }

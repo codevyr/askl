@@ -72,8 +72,12 @@ separate statements; a `{` must be on the same line as its verb to attach.
   macro that only redeclares (`EXPORT_SYMBOL(foo)`) has no edge to `foo`.  A
   macro is ONE node: `A -> MACRO -> d` does not mean `A`'s invocation
   declared `d`, so do not read a path through a macro as a call chain.
-- "too many results: this part of the graph is incomplete" means a limit cut
-  the answer.  Folded symbols a listing leaves out never cause it.
+- "too many results in `<statement>`: this part of the graph is incomplete"
+  means a limit cut that statement's answer.  Folded symbols a listing leaves
+  out never cause it.  Counts then read "N of at least M" (M is how far the
+  reading got, not a total) and JSON carries `"incomplete": true`;
+  `"truncated"` alone means everything was found and `limits(symbols=)`
+  shows more of it.
 
 ## Filters — constrain, add nothing
 - A **bare** type verb is a filter: `func`, `type`, `data`, `macro`, `field`,
