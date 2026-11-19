@@ -22,8 +22,12 @@ separate statements; a `{` must be on the same line as its verb to attach.
   **symbol by name, prefer a glob `g"*name*"`** (indexed, cheaper) — use `search()`
   only for non-symbol text. `>=3` chars, smart-case, options `whole_word=true`,
   `case="sensitive"|"insensitive"`, `limit=500`.
-- Several selectors in one statement are **ORed** (union): `"a" "b"` (or
-  `func("a") func("b")`) selects symbols matching *either*; `"a" or "b"` is
+- Several selectors in one statement are **ORed** (union): `"a" "b"`,
+  `func("a") func("b")` or `func("a") data("b")` selects symbols matching
+  *either* — a named selector carries its own type. A bare type word beside
+  them filters all of them (`func "a" "b"`), so two type words side by side
+  (`macro func`, `data func("a")`) are an error: write `macro or func`.
+  `"a" or "b"` is
   the explicit spelling (one no-match warning for the group — see Boolean
   operators). Inside a scope this is exactly the contrast with `;` —
   `X { A B }` disjoins, `X { A ; B }` conjoins. See Scopes.

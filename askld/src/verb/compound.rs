@@ -131,6 +131,22 @@ impl PredicateExpr {
         dims
     }
 
+    /// The dimensions the positive atoms write — what the expression
+    /// replaces in the statement it joins, branch or filter.
+    fn positive_writes(&self) -> Vec<Dimension> {
+        let mut dims: Vec<Dimension> = Vec::new();
+        self.for_each_atom(true, &mut |v, positive| {
+            if positive {
+                for d in v.writes() {
+                    if !dims.contains(&d) {
+                        dims.push(d);
+                    }
+                }
+            }
+        });
+        dims
+    }
+
     /// Whether a positive atom constrains by name (weakness accounting).
     fn has_positive_name(&self) -> bool {
         let mut has = false;
@@ -263,14 +279,29 @@ impl Verb for CompoundVerb {
 
     /// Slots are held by CONSTRAINTS.  An anchor-capable compound is a
     /// branch — it produces rows rather than narrowing them — so it occupies
-    /// no dimension and a later filter cannot evict it: `func("a") or
-    /// method("a") data` keeps its anchor and simply conjoins `data`.
+    /// no dimension and nothing written after it can evict it.  (What it
+    /// replaces is a separate question: see `writes`.)
     fn dimensions(&self) -> Vec<Dimension> {
         if self.anchor_kind().is_some() {
             Vec::new()
         } else {
             self.expr.positive_dimensions()
         }
+    }
+
+    /// A branch holds no slot, and still replaces the type it inherited:
+    /// `func(inherit=true) { data("a") or data("b") }` finds the two as
+    /// data, exactly as `{ data("a") }` alone does.
+    fn writes(&self) -> Vec<Dimension> {
+        self.expr.positive_writes()
+    }
+
+    fn is_type_word(&self) -> bool {
+        let mut any = false;
+        self.expr.for_each_atom(true, &mut |v, positive| {
+            any |= positive && v.is_type_word();
+        });
+        any
     }
 
     fn anchor_kind(&self) -> Option<AnchorKind> {
@@ -312,7 +343,7 @@ impl Verb for CompoundVerb {
     /// default-injection question, which a branch mentioning the type
     /// dimension must answer just as a filter does.
     fn suppresses_default_type_filter(&self) -> bool {
-        self.expr.positive_dimensions().contains(&Dimension::Type)
+        self.expr.positive_writes().contains(&Dimension::Type)
     }
 
     fn as_filter<'a>(&'a self) -> Option<&'a dyn Filter> {

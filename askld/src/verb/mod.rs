@@ -435,8 +435,9 @@ pub enum VerbClass {
 /// The dimension a predicate verb constrains — the slot key of the
 /// filter-expressions design.  Within a statement (and across a scope
 /// boundary via inheritance), writing a dimension REPLACES the previous
-/// holder of that dimension wholesale; verbs with no dimension (name
-/// anchors, `ignore`, `search`, `loc`, layer literals, units) accumulate.
+/// holder of that dimension wholesale; verbs that hold no dimension
+/// (anchors of every kind, `ignore`, `search`, `loc`, layer literals, units)
+/// accumulate.
 /// This is the entire conflict-resolution law: no verb knows about any
 /// other verb.
 ///
@@ -451,9 +452,10 @@ pub enum Dimension {
     Project,
     /// `select`.
     Select,
-    /// Bare and named type selectors (`func`, `data("x")`, `any`) and
-    /// `filter("type", ...)` — one dimension, so they replace each other
-    /// symmetrically.
+    /// Type words (`func`, `data("x")`, `any`) and `filter("type", ...)` —
+    /// one dimension.  The filters among them hold it and replace each
+    /// other; a named selector writes it without holding it (see
+    /// [`Verb::writes`]).
     Type,
     /// `filter("exact_name", ...)`.
     FilterExactName,
@@ -528,6 +530,24 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
     /// later write).
     fn dimensions(&self) -> Vec<Dimension> {
         self.dimension().into_iter().collect()
+    }
+
+    /// The dimensions this verb REPLACES: writing one evicts whoever holds
+    /// it.  For a filter that is the slot it holds itself.  A branch — a
+    /// named type selector, an anchored expression — holds no slot, since it
+    /// selects rather than constrains, yet it still says a type, and what it
+    /// says replaces a type the statement inherited.
+    fn writes(&self) -> Vec<Dimension> {
+        self.dimensions()
+    }
+
+    /// A type word: `func`, `data("x")`, `any`, or an expression built from
+    /// them.  Two of them in one statement where the later replaces the
+    /// earlier is reported rather than obeyed (see `Command::said_twice`);
+    /// the explicit `filter(...)`, `project(...)` and `package(...)` forms
+    /// keep replacing in place, which is what they are documented to do.
+    fn is_type_word(&self) -> bool {
+        false
     }
 
     /// Whether this verb may appear as an atom inside a compound expression
