@@ -72,12 +72,15 @@ separate statements; a `{` must be on the same line as its verb to attach.
   the answer.  Folded symbols a listing leaves out never cause it.
 
 ## Filters — constrain, add nothing
-- A **bare** type verb is a filter that **inherits** to all descendants:
-  `func`, `type`, `data`, `macro`, `field`, `mod`, `file`, `dir`, and `any`.
-- **`any` is the type verb that constrains no type.** Bare `any` in a child
-  scope drops an inherited type filter — `func("x") { any }` is everything `x`
-  references, not just the functions. With a name it matches that name at every
-  type: `any("ioctl")` finds the function, the macro and the struct.
+- A **bare** type verb is a filter: `func`, `type`, `data`, `macro`, `field`,
+  `mod`, `file`, `dir`, and `any`. **It filters the statement it is written
+  in, and no other.** `func { "x" }` is the functions that use `x`, whatever
+  `x` is (data, a macro, a type); `"x" { func { } }` leaves the innermost
+  scope open to every type. To carry a type into every scope below, ask:
+  `data(inherit=true) { { "x" } }`.
+- **`any` is the type verb that constrains no type.** With a name it matches
+  that name at every type: `any("ioctl")` finds the function, the macro and
+  the struct. Bare, it drops a type carried down by `inherit=true`.
 - **Duality:** `func("x")` (with a name) is a *selector* that queries; bare `func`
   is a *filter* that constrains. This is the most common point of confusion.
   `any` follows the same rule: `any("x")` queries, bare `any` constrains.
@@ -106,9 +109,10 @@ separate statements; a `{` must be on the same line as its verb to attach.
   `test` anywhere (so `ignore("foo")` drops `foo.bar`, `not "foo"` keeps it).
   They coincide on plain leaf names. `func and not g"test_*"` = functions
   except test_*. Exclusions accumulate and inherit.
-- A filter group inherits into `{ }` as a unit and is **replaced wholesale**
-  by a child writing the same dimension: `func or method { data "x" }` finds
-  `x` as data.
+- A filter group inherits into `{ }` as a unit, when every positive member
+  would on its own: `project("a") or project("b")` does, `func or method`
+  does not (a type word stays in its statement). An inherited group is
+  **replaced wholesale** by a child writing the same dimension.
 - **One line per expression, unless a `(` is open**: an operator at the END
   of a line continues onto the next (`"a" or` ⏎ `"b"`), but a line STARTING
   with `or`/`and` is a new statement and errors. Newlines are free inside

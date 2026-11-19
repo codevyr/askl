@@ -1699,51 +1699,37 @@ fn containment_does_not_depend_on_how_the_query_was_phrased() {
     }
 }
 
+fn sorted_ids(res: &crate::statement::ExecutionResult) -> Vec<i64> {
+    let mut ids: Vec<i64> = res.nodes.as_vec().iter().map(|id| (*id).into()).collect();
+    ids.sort();
+    ids
+}
+
 #[test]
 fn has_children_query() {
     // mod("testmodule") has { file has { "foo" } }
-    // Bare `file` (no name) now inherits FILE type filter into children (inherit=true).
-    // "foo" inherits the FILE type filter, but foo is a FUNCTION — type mismatch.
-    // "foo" (strong) finds nothing → constrains file away → constrains mod away.
-    // Result: 0 nodes.
+    // The word `file` filters its own statement.  It says nothing about
+    // "foo", which is a function the file contains.
     const QUERY: &str = r#"mod("testmodule") has { file has { "foo" } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
-
-    println!("{:#?}", res.nodes);
-    println!("{:#?}", res.edges);
-
-    assert_eq!(res.nodes.as_vec().len(), 0);
+    assert_eq!(sorted_ids(&res), vec![10, 20, 510]);
 }
 
 #[test]
 fn has_parents_query() {
-    // file has { "foo" }
-    // Bare `file` (no name) now inherits FILE type filter into children (inherit=true).
-    // "foo" inherits the FILE type filter, but foo is a FUNCTION — type mismatch.
-    // "foo" (strong) finds nothing → constrains file away. Result: 0 nodes.
+    // file has { "foo" }: the file that contains the function foo.
     const QUERY: &str = r#"file has { "foo" }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
-
-    println!("{:#?}", res.nodes);
-    println!("{:#?}", res.edges);
-
-    assert_eq!(res.nodes.as_vec().len(), 0);
+    assert_eq!(sorted_ids(&res), vec![20, 510]);
 }
 
 #[test]
 fn mixed_has_refs_query() {
     // mod("testmodule") has { file has { "foo" refs {} } }
-    // Bare `file` (no name) now inherits FILE type filter into children (inherit=true).
-    // "foo" inherits the FILE type filter, but foo is a FUNCTION — type mismatch.
-    // "foo" (strong) finds nothing → constrains file away → constrains mod away.
-    // Result: 0 nodes.
+    // Containment down to foo, then what foo refers to (bar).
     const QUERY: &str = r#"mod("testmodule") has { file has { "foo" refs {} } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
-
-    println!("{:#?}", res.nodes);
-    println!("{:#?}", res.edges);
-
-    assert_eq!(res.nodes.as_vec().len(), 0);
+    assert_eq!(sorted_ids(&res), vec![10, 20, 30, 510]);
 }
 
 #[test]
@@ -1821,17 +1807,10 @@ fn has_propagates_by_default() {
 
 #[test]
 fn has_with_explicit_refs_override() {
-    // file has { "foo" refs { "bar" } }
-    // Bare `file` (no name) now inherits FILE type filter into children (inherit=true).
-    // "foo" inherits the FILE type filter, but foo is a FUNCTION — type mismatch.
-    // "foo" (strong) finds nothing → constrains file away. Result: 0 nodes.
+    // file has { "foo" refs { "bar" } }: `has` reaches foo, `refs` reaches bar.
     const QUERY: &str = r#"file has { "foo" refs { "bar" } }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
-
-    println!("{:#?}", res.nodes);
-    println!("{:#?}", res.edges);
-
-    assert_eq!(res.nodes.as_vec().len(), 0);
+    assert_eq!(sorted_ids(&res), vec![20, 30, 510]);
 }
 
 // ============================================================================
@@ -2248,7 +2227,7 @@ fn directory_src_util_contains_its_direct_files() {
     // dir("/src/util") has { file }
     // /src/util has instances: 1030 (self on obj 103), 1031 (on obj 2), 1032 (on obj 3).
     // Files: util.go(2020 on obj 2), helper.go(2030 on obj 3).
-    // Bare `file` (no name, inherit=true) doesn't affect selection since file is a leaf.
+    // Bare `file` filters its own statement; a file is a leaf here anyway.
     // Result: dir(3 instances) + 2 files = 5 nodes.
     const QUERY: &str = r#"dir("/src/util") has { file }"#;
     let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
@@ -2269,7 +2248,7 @@ fn directory_docs_contains_its_direct_file() {
     // dir("/docs") has { file }
     // /docs has instances: 1020 (self on obj 102) and 1021 (on obj 5).
     // File: readme.md(2050 on obj 5).
-    // Bare `file` (no name, inherit=true) doesn't affect selection since file is a leaf.
+    // Bare `file` filters its own statement; a file is a leaf here anyway.
     // Result: dir(2 instances) + 1 file = 3 nodes.
     const QUERY: &str = r#"dir("/docs") has { file }"#;
     let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
@@ -2532,13 +2511,44 @@ fn generic_filter_with_select_constrains_parent() {
 }
 
 #[test]
+fn a_type_word_filters_its_own_statement_only() {
+    // "A type word filters the statement it is written in, and no other."
+    // `func { "config.Debug" }` asks which functions use `config.Debug`.
+    // The word `func` is about the users; what is used is data, and stays
+    // findable without `data(...)` or `any`.
+    let res = run_query(VERB_TEST, r#"func { "config.Debug" }"#);
+    let nodes = res.nodes.as_vec();
+    assert!(
+        nodes.contains(&SymbolInstanceId::new(91)) && nodes.contains(&SymbolInstanceId::new(97)),
+        "foo (a function) uses config.Debug (data); got {:?}",
+        nodes
+    );
+
+    // The same going down: the type word on the child says nothing about
+    // the grandchild.
+    let res = run_query(VERB_TEST, r#""driver" { data { "info_a" } }"#);
+    let nodes = res.nodes.as_vec();
+    assert!(
+        [200, 210, 220]
+            .iter()
+            .all(|id| nodes.contains(&SymbolInstanceId::new(*id))),
+        "driver -> id_table -> info_a; got {:?}",
+        nodes
+    );
+    // `inherit=true` is how a type word is carried into every scope below.
+    let res = run_query(VERB_TEST, r#"func(inherit=true) { "config.Debug" }"#);
+    assert!(
+        !res.nodes.as_vec().contains(&SymbolInstanceId::new(97)),
+        "an inherited `func` makes the child a function, and config.Debug is data"
+    );
+}
+
+#[test]
 fn weak_child_does_not_eliminate_parent() {
-    // `data(inherit=false)` is a bare type selector that does NOT inherit,
-    // so unlike plain `data` it IS a selector — non-unit and
-    // non-constraining, i.e. weak and yet a participant in the parent
-    // conjunction.  The fixture has no data symbols, so the child resolves
-    // empty.  A weak child is a display echo: its emptiness must not take
-    // the parent with it.
+    // A bare type word constrains nothing about its neighbours: it is weak.
+    // The fixture has no data symbols, so the child resolves empty.  A weak
+    // child is a display echo: its emptiness must not take the parent with
+    // it.  (`inherit=false` is the default, spelled out.)
     const QUERY: &str = r#""foo" { data(inherit=false) }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
@@ -2569,11 +2579,8 @@ fn weak_parent_does_not_eliminate_child() {
 
 #[test]
 fn bare_and_explicit_type_children_agree() {
-    // `data` and `data(inherit=false)` differ only in whether the type
-    // constraint is inherited into child scopes — neither constrains a
-    // parent.  Bare `data` reaches the parent merge as unit+filter and is
-    // skipped outright; the explicit form arrives as a weak selector.  Two
-    // routes, one answer.
+    // `data` and `data(inherit=false)` are one statement: a type word does
+    // not inherit unless asked to, and neither spelling constrains a parent.
     let bare = run_query(TEST_INPUT_CONTAINMENT, r#""foo" { data }"#);
     let explicit = run_query(TEST_INPUT_CONTAINMENT, r#""foo" { data(inherit=false) }"#);
 
@@ -3036,21 +3043,20 @@ fn non_constraining_wrapped_bare_func_same_as_unwrapped() {
 
 #[test]
 fn non_constraining_bare_mod_does_not_narrow_caller_chain() {
-    // mod {{ "baz" }} — bare mod now inherits MODULE type into children (inherit=true).
-    // The inherited MODULE type propagates through the intermediate {} scope to "baz".
-    // "baz" is a FUNCTION — type mismatch with inherited MODULE filter.
-    // "baz" (strong) finds nothing → constrains intermediate away → constrains mod away.
-    // Result: 0 nodes.
+    // mod {{ "baz" }}: the word `mod` is about the outermost statement only,
+    // so baz (a function) is found two scopes below it.
     const QUERY: &str = r#"mod {{ "baz" }}"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
-
-    println!("{:#?}", res.nodes);
-    let nodes = res.nodes.as_vec();
-    assert_eq!(
-        nodes.len(),
-        0,
-        "inherited MODULE type filter blocks FUNCTION baz"
+    let ids = sorted_ids(&res);
+    assert!(
+        ids.contains(&10) && ids.contains(&40),
+        "the module and baz; got {:?}",
+        ids
     );
+
+    // Carried down on request, the type meets a function and finds nothing.
+    let res = run_query(TEST_INPUT_CONTAINMENT, r#"mod(inherit=true) {{ "baz" }}"#);
+    assert_eq!(sorted_ids(&res), Vec::<i64>::new());
 }
 
 #[test]

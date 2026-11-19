@@ -401,8 +401,10 @@ pub(in crate::verb) struct TypeSelector {
     symbol_type_id: Option<i32>,
     name_pattern: Option<NamePattern>,
     /// If true, this filter is inherited (cloned) into derived child scopes,
-    /// so it constrains every descendant: `mod("test", inherit=true) { ... }`.
-    /// Bare type verbs inherit by default; named ones do not.
+    /// so it constrains every descendant: `data(inherit=true) { { "x" } }`.
+    /// Off unless asked for: a type word filters the statement it is
+    /// written in, and no other.  `func { "x" }` asks which functions use
+    /// `x`, whatever `x` is.
     inherit: bool,
     /// `match="contains"` was written: the name pattern may match anywhere
     /// in the leaf.  Without it a glob anchors to the whole leaf name for
@@ -440,11 +442,9 @@ impl TypeSelector {
 
         args.accepts(1, &["inherit", "match"])?;
 
-        // Bare type selectors (no name) inherit by default so they propagate
-        // the type filter into child scopes. Named type selectors don't inherit.
-        let inherit = args
-            .named_bool("inherit")?
-            .unwrap_or_else(|| name_pattern.is_none());
+        // A type word is about its own statement.  It reaches the scopes
+        // below only when the query says so.
+        let inherit = args.named_bool("inherit")?.unwrap_or(false);
 
         let contains = matches!(args.named_str("match")?, Some("contains"));
 
@@ -576,10 +576,10 @@ impl Verb for TypeSelector {
     }
 
     fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
-        // Instance-conditional role: an inherited bare type selector is a
-        // pure filter (it propagates the type constraint, never anchors or
-        // holds execution state of its own).
-        if self.name_pattern.is_none() && self.inherit {
+        // Instance-conditional role: a bare type word is a pure filter (it
+        // constrains the type, never anchors or holds execution state of
+        // its own), inherited or not.
+        if self.name_pattern.is_none() {
             None
         } else {
             Some(self)
