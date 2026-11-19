@@ -1791,6 +1791,58 @@ impl FilterLeaf for InnermostOnlyMixin {
     }
 }
 
+/// FoldedOnlyMixin — the complement of the default listing: what
+/// [`DirectOnlyMixin`] and [`InnermostOnlyMixin`] leave out in
+/// [`TraversalMode::Unfolded`].
+///
+/// It selects nothing a query shows.  A derive read run a second time with
+/// this in place of the listing filter returns exactly the neighbours the
+/// first one passed over, which is what lets a listing SAY that it left
+/// something out instead of reading as "there is nothing more here".
+#[derive(Debug, Clone, Default)]
+pub struct FoldedOnlyMixin;
+
+impl FoldedOnlyMixin {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn fragment(sql: &'static str) -> EphSqlFragment<Bool> {
+        EphSqlFragment::<Bool>::builder().sql(sql).build()
+    }
+}
+
+impl FilterLeaf for FoldedOnlyMixin {
+    // The same four symbol rows the two listing filters test, negated.
+    fn has_children_expr(&self, _vis: &EphVisibility) -> Option<HasChildrenBoolExpr> {
+        Some(Box::new(Self::fragment("contained_symbols.folded")))
+    }
+
+    fn children_expr(&self, _vis: &EphVisibility) -> Option<ChildrenBoolExpr> {
+        Some(Box::new(Self::fragment("symbols.folded")))
+    }
+
+    fn has_parents_expr(&self, _vis: &EphVisibility) -> Option<HasParentsBoolExpr> {
+        Some(Box::new(Self::fragment("container_symbols.folded")))
+    }
+
+    fn parents_expr(&self, _vis: &EphVisibility) -> Option<ParentsBoolExpr> {
+        Some(Box::new(Self::fragment("parent_symbols.folded")))
+    }
+
+    fn hash_into(&self, h: &mut Sha256) {
+        h.update(b"FoldedOnly");
+    }
+
+    fn is_chain_dependent(&self) -> bool {
+        true // as the filters it complements; see DirectOnlyMixin
+    }
+
+    fn constrains_has_children(&self) -> bool {
+        true
+    }
+}
+
 /// OuterParentFilterMixin — filters out nested parent instances from REFS queries.
 #[derive(Debug, Clone)]
 pub struct OuterParentFilterMixin {

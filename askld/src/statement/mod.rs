@@ -1317,12 +1317,13 @@ impl Statement {
         }
 
         // Order by start; among equal starts, NoMatch before Note so it is the
-        // one kept when spans coincide.  Truncation warnings sort with Notes
-        // but are EXEMPT from the overlap-collapse below.
+        // one kept when spans coincide.  Truncation and left-out warnings sort
+        // after them and are EXEMPT from the overlap-collapse below.
         let kind_rank = |d: &Diagnostic| match d.kind {
             DiagnosticKind::NoMatch => 0u8,
             DiagnosticKind::Note => 1u8,
             DiagnosticKind::Truncation => 2u8,
+            DiagnosticKind::LeftOut => 3u8,
         };
         all_warnings.sort_by_key(|d| (d.start(), kind_rank(d)));
 
@@ -1330,16 +1331,13 @@ impl Statement {
         for warning in all_warnings {
             // Truncation must always surface: it is never dropped by the
             // overlap-collapse and never displaces/gets displaced.  Truncation
-            // is acceptable, hidden truncation is not.
-            if warning.kind == DiagnosticKind::Truncation {
+            // is acceptable, hidden truncation is not.  The same goes for a
+            // listing that left folded symbols out.
+            if warning.kind.always_surfaces() {
                 filtered.push(warning);
                 continue;
             }
-            if let Some(last) = filtered
-                .iter()
-                .rev()
-                .find(|d| d.kind != DiagnosticKind::Truncation)
-            {
+            if let Some(last) = filtered.iter().rev().find(|d| !d.kind.always_surfaces()) {
                 if last.end() >= warning.start() {
                     // Overlaps the previous kept warning. A NoMatch may still
                     // displace a kept Note (it carries the useful payload);
@@ -1348,7 +1346,7 @@ impl Statement {
                     {
                         let idx = filtered
                             .iter()
-                            .rposition(|d| d.kind != DiagnosticKind::Truncation)
+                            .rposition(|d| !d.kind.always_surfaces())
                             .unwrap();
                         filtered[idx] = warning;
                     }

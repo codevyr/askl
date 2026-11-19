@@ -10,8 +10,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use index::db_diesel::FamilyDemands;
 use index::db_diesel::{
-    CompositeFilter, DirectOnlyMixin, EphContext, EphScopedFut, EphTransaction, Index,
-    OuterParentFilterMixin, RootLayer, RootShardRef, ScopeContext, Selection,
+    CompositeFilter, DirectOnlyMixin, EphContext, EphScopedFut, EphTransaction, FoldedOnlyMixin,
+    Index, OuterParentFilterMixin, RootLayer, RootShardRef, ScopeContext, Selection,
     SymbolInstanceIdMixin, TraversalMode,
 };
 
@@ -1286,6 +1286,53 @@ pub trait Selector: std::fmt::Debug + Verb {
         Ok(Some(selection))
     }
 
+    /// What the listing [`Selector::derive_from_parent`] produced passed
+    /// over: the folded symbols that sit where its children sit and match the
+    /// statement's own predicate.  `None` when there are none, and for a
+    /// selector whose derivation is not a listing.
+    ///
+    /// The same read as the derive, with the listing filter replaced by its
+    /// complement -- so the two cannot disagree about what "would have been
+    /// listed" means.  Only the default mode leaves anything out for being
+    /// folded: `unnest` lists everything and `nested` asks about depth.
+    async fn left_out_of_parent(
+        &self,
+        ctx: &mut ExecutionContext,
+        index: &Index,
+        selector_filters: &[&dyn Filter],
+        parent: &Statement,
+        notif_ctx: &NotificationContext,
+    ) -> Result<Option<LeftOut>> {
+        if self.has_layer_spec() || notif_ctx.mode != TraversalMode::Unfolded {
+            return Ok(None);
+        }
+        let parent_ids = match parent.get_selection(&ctx) {
+            Some(selection) => selection.get_instance_ids(),
+            None => return Ok(None),
+        };
+        let eph = &ctx.eph;
+        let mut find_parts: Vec<CompositeFilter> = vec![
+            CompositeFilter::leaf(FoldedOnlyMixin::new()),
+            CompositeFilter::leaf(OuterParentFilterMixin::new(&parent_ids)),
+        ];
+        find_parts.extend(
+            selector_filters
+                .iter()
+                .filter_map(|f| f.get_composite_filter(eph)),
+        );
+        let found = index
+            .find_child_instance_ids(
+                &parent_ids,
+                notif_ctx.rel_type.contains(RelationshipType::REFS),
+                notif_ctx.rel_type.contains(RelationshipType::HAS),
+                &CompositeFilter::and(find_parts),
+                eph,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to find left-out children: {}", e))?;
+        LeftOut::named(index, found, eph).await
+    }
+
     async fn derive_from_provider(
         &self,
         ctx: &mut ExecutionContext,
@@ -1298,6 +1345,39 @@ pub trait Selector: std::fmt::Debug + Verb {
             None => return Ok(None),
         };
         Ok(Some((*provider).clone()))
+    }
+}
+
+/// The folded symbols a default listing passed over; see
+/// [`crate::diagnostic::Diagnostic::left_out`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeftOut {
+    /// Distinct symbol names, sorted.
+    pub names: Vec<String>,
+    /// The read that found them was cut, so there are more.
+    pub at_least: bool,
+}
+
+impl LeftOut {
+    /// Name the instances a complement read returned.  A symbol with many
+    /// instances is one thing left out, so this counts names, not rows.
+    pub(crate) async fn named(
+        index: &Index,
+        (instances, capped): (Vec<SymbolInstanceId>, bool),
+        eph: &EphContext,
+    ) -> Result<Option<LeftOut>> {
+        if instances.is_empty() {
+            return Ok(None);
+        }
+        let filter = CompositeFilter::leaf(SymbolInstanceIdMixin::new(&instances));
+        let names = index.symbol_names_matching(&filter, eph).await?;
+        if names.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(LeftOut {
+            names,
+            at_least: capped,
+        }))
     }
 }
 

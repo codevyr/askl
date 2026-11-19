@@ -24,6 +24,20 @@ pub enum DiagnosticKind {
     /// collapsed by the overlap-dedup in `gather_warnings`: truncation is
     /// acceptable, hidden truncation is not.
     Truncation,
+    /// A default listing passed over folded symbols.  Like `Truncation` it is
+    /// never collapsed: it is the only thing saying the answer is not all
+    /// there is.  Unlike `Truncation` the answer is complete for what was
+    /// asked -- nothing was cut.
+    LeftOut,
+}
+
+impl DiagnosticKind {
+    /// Exempt from the overlap-collapse in `gather_warnings`: each of these
+    /// says something about ONE statement's answer that no warning of another
+    /// statement can stand for.
+    pub fn always_surfaces(&self) -> bool {
+        matches!(self, DiagnosticKind::Truncation | DiagnosticKind::LeftOut)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +118,46 @@ impl Diagnostic {
 
     /// A statement's text on one line, cut to a length that still tells it
     /// from its neighbours.
+    /// "A listing that passes over a folded symbol says so."  `names` are the
+    /// symbols the statement at `span` would also have listed were they not
+    /// folded; `at_least` when the read that found them was itself cut.
+    pub fn left_out(span: Span, names: &[String], at_least: bool) -> Self {
+        const SHOWN: usize = 3;
+        let mut listed = names
+            .iter()
+            .take(SHOWN)
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if names.len() > SHOWN {
+            if at_least {
+                listed.push_str(" and more");
+            } else {
+                listed.push_str(&format!(" and {} more", names.len() - SHOWN));
+            }
+        }
+        let one = names.len() == 1 && !at_least;
+        let message = format!(
+            "`{}` leaves out {}{} folded (macro-generated) symbol{}: {}. Add `unnest` to \
+             list {}, or name {}",
+            Self::quote(span.as_str()),
+            if at_least { "at least " } else { "" },
+            names.len(),
+            if one { "" } else { "s" },
+            listed,
+            if one { "it" } else { "them" },
+            if one { "it" } else { "one" },
+        );
+        Diagnostic {
+            span,
+            kind: DiagnosticKind::LeftOut,
+            message,
+            token: None,
+            suggestions: Vec::new(),
+            name_exists: false,
+        }
+    }
+
     fn quote(text: &str) -> String {
         const MAX: usize = 48;
         let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");

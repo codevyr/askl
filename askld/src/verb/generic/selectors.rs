@@ -231,6 +231,19 @@ impl Selector for ForcedVerb {
         Ok(None)
     }
 
+    /// The selection below is fabricated from what the label already holds,
+    /// not listed out of the parent, so no listing left anything out.
+    async fn left_out_of_parent(
+        &self,
+        _ctx: &mut ExecutionContext,
+        _index: &Index,
+        _selector_filters: &[&dyn Filter],
+        _parent: &Statement,
+        _notif_ctx: &super::super::NotificationContext,
+    ) -> Result<Option<crate::verb::LeftOut>> {
+        Ok(None)
+    }
+
     async fn derive_from_parent(
         &self,
         ctx: &mut ExecutionContext,
