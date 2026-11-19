@@ -96,11 +96,17 @@ pub fn render_markdown(
                 "- Result truncated to {} of {} symbols — narrow with a type filter \
                  (`{{ func }}`), `ignore(...)`, `project(...)`, or fewer hops.\n",
                 graph.nodes.len(),
-                graph.total_symbols,
+                total_symbols_text(graph),
             ));
         }
+        // Two statements can earn the same words; said once is enough.
+        let mut said: Vec<String> = Vec::new();
         for w in &graph.warnings {
-            out.push_str(&format!("- {}\n", warning_bullet(w)));
+            let bullet = warning_bullet(w);
+            if !said.contains(&bullet) {
+                out.push_str(&format!("- {}\n", bullet));
+                said.push(bullet);
+            }
         }
         out.push('\n');
     }
@@ -217,7 +223,12 @@ impl<'a> RenderCtx<'a> {
         let mut parts = Vec::new();
         if symbols > 0 || matches == 0 {
             if graph.truncated {
-                parts.push(format!("{symbols} of {} symbols", graph.total_symbols));
+                parts.push(format!(
+                    "{symbols} of {} symbols",
+                    total_symbols_text(graph)
+                ));
+            } else if graph.incomplete {
+                parts.push(format!("{symbols} symbols (incomplete)"));
             } else {
                 parts.push(format!("{symbols} symbols"));
             }
@@ -425,6 +436,17 @@ impl<'a> RenderCtx<'a> {
                 }
             }
         }
+    }
+}
+
+/// How many symbols the query found, as far as anyone knows.  A count that a
+/// limit cut is a lower bound, and is never printed as a total: "101 of 930"
+/// read as "930 exist" when 930 was where the reading stopped.
+fn total_symbols_text(graph: &Graph) -> String {
+    if graph.incomplete {
+        format!("at least {}", graph.total_symbols)
+    } else {
+        graph.total_symbols.to_string()
     }
 }
 
@@ -688,6 +710,32 @@ mod tests {
         assert!(md.contains("1 of 42 symbols"), "{md}");
         assert!(md.contains("# Warnings"), "{md}");
         assert!(md.contains("truncated to 1 of 42 symbols"), "{md}");
+
+        // The same answer when a limit cut the reading as well: 42 is how
+        // far it got, not how many there are.
+        g.incomplete = true;
+        let md = render_markdown("\"f\"", &g, &src, Projection::Names);
+        assert!(md.contains("1 of at least 42 symbols"), "{md}");
+        assert!(md.contains("truncated to 1 of at least 42 symbols"), "{md}");
+
+        // Cut while reading, and everything read is shown.
+        g.truncated = false;
+        let md = render_markdown("\"f\"", &g, &src, Projection::Names);
+        assert!(md.contains("1 symbols (incomplete)"), "{md}");
+    }
+
+    #[test]
+    fn a_warning_said_twice_is_printed_once() {
+        let mut g = Graph::new();
+        for _ in 0..2 {
+            g.warnings
+                .push(warning("too many results in `{ }`", 1, None, &[]));
+        }
+        g.warnings
+            .push(warning("too many results in `func`", 1, None, &[]));
+        let md = render_markdown("{ }", &g, &SourceMap::new(), Projection::Names);
+        assert_eq!(md.matches("too many results in `{ }`").count(), 1, "{md}");
+        assert_eq!(md.matches("too many results in `func`").count(), 1, "{md}");
     }
 
     #[test]

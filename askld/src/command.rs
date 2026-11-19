@@ -782,11 +782,10 @@ impl Command {
             // otherwise render a short answer silently.  Same message, no totals.
             if selection.cut() && !derive_cap_warned {
                 derive_cap_warned = true;
-                warnings.push(Diagnostic::truncation(
-                    Span::from_pest(selector.span(), self.span().input()),
-                    "too many results: this part of the graph is incomplete. Narrow it with a name or glob, a type filter, `ignore(...)`, `project(...)`, or fewer hops"
-                        .to_string(),
-                ));
+                warnings.push(Diagnostic::incomplete(Span::from_pest(
+                    selector.span(),
+                    self.span().input(),
+                )));
             }
 
             let changed_here = selector_state_with(&mut ctx.registry, selector, |state| {
@@ -899,11 +898,10 @@ impl Command {
             // message, no totals.
             if selection.as_ref().is_some_and(|sel| sel.cut()) && !derive_cap_warned {
                 derive_cap_warned = true;
-                warnings.push(Diagnostic::truncation(
-                    Span::from_pest(selector.span(), self.span().input()),
-                    "too many results: this part of the graph is incomplete. Narrow it with a name or glob, a type filter, `ignore(...)`, `project(...)`, or fewer hops"
-                        .to_string(),
-                ));
+                warnings.push(Diagnostic::incomplete(Span::from_pest(
+                    selector.span(),
+                    self.span().input(),
+                )));
             }
             let changed_here = selector_state_with(&mut ctx.registry, selector, |state| {
                 state.set_selection_reporting_change(selection)
@@ -1225,11 +1223,10 @@ impl Command {
                 }
                 if selection.cut() && !capped_warned {
                     capped_warned = true;
-                    warnings.push(Diagnostic::truncation(
-                        Span::from_pest(selector.span(), self.span().input()),
-                        "too many results: this part of the graph is incomplete. Narrow it with a name or glob, a type filter, `ignore(...)`, `project(...)`, or fewer hops"
-                            .to_string(),
-                    ));
+                    warnings.push(Diagnostic::incomplete(Span::from_pest(
+                        selector.span(),
+                        self.span().input(),
+                    )));
                 }
                 if selection.is_empty() {
                     warnings.push(Diagnostic::no_match(
@@ -1289,11 +1286,10 @@ impl Command {
             }
 
             if selection.cut() && !capped_warned {
-                warnings.push(Diagnostic::truncation(
-                    Span::from_pest(fused[0].span(), self.span().input()),
-                    "too many results: this part of the graph is incomplete. Narrow it with a name or glob, a type filter, `ignore(...)`, `project(...)`, or fewer hops"
-                        .to_string(),
-                ));
+                warnings.push(Diagnostic::incomplete(Span::from_pest(
+                    fused[0].span(),
+                    self.span().input(),
+                )));
             }
 
             if selection.is_empty() {
