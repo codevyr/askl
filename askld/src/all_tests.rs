@@ -2568,6 +2568,53 @@ fn named_selectors_of_one_statement_union() {
     assert_eq!(sorted_ids(&res), vec![94]);
 }
 
+fn no_match_suggestions(input: &str, query: &str) -> Vec<String> {
+    let res = run_query(input, query);
+    let found: Vec<&crate::diagnostic::Diagnostic> = res
+        .warnings
+        .iter()
+        .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::NoMatch)
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "`{}`: one no-match warning, got {:?}",
+        query,
+        res.warnings
+    );
+    found[0].suggestions.clone()
+}
+
+#[test]
+fn a_no_match_suggests_only_what_would_match() {
+    // "A no-match warning suggests only what would match if typed."
+    // The name exists, as data: say how to ask for it.
+    assert_eq!(
+        no_match_suggestions(VERB_TEST, r#"func("config.Debug")"#),
+        vec![r#"data("config.Debug")"#]
+    );
+    // A file is selected by its type.  The bare path used to be answered
+    // with "Did you mean: /main.c" -- the string just typed.
+    assert_eq!(
+        no_match_suggestions(VERB_TEST, r#"project("test_project") "/main.c""#),
+        vec![r#"file("/main.c")"#]
+    );
+    // A typed selector that misses under its own type is not told to type
+    // itself: tar is a function, and nothing else.
+    assert_eq!(
+        no_match_suggestions(VERB_TEST, r#"data("tar")"#),
+        vec![r#"func("tar")"#]
+    );
+    let res = run_query(VERB_TEST, r#"project("no_such_project") func("tar")"#);
+    assert!(
+        res.warnings
+            .iter()
+            .all(|w| !w.suggestions.contains(&r#"func("tar")"#.to_string())),
+        "{:?}",
+        res.warnings
+    );
+}
+
 #[test]
 fn two_type_words_in_one_statement_are_an_error() {
     // `macro func` used to run as `func`: the later word replaced the

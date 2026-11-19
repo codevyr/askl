@@ -524,6 +524,29 @@ impl TypeSelector {
         }
     }
 
+    /// What `word("name")` selects, for every type word: the pairs of a type
+    /// and its spelling, and the predicate a named selector of that type
+    /// runs.  The no-match diagnostics ask "which typed selector WOULD have
+    /// matched" with exactly these, so their answer cannot drift from what
+    /// typing it does.
+    pub(crate) const WORDS: [(i32, &'static str); 8] = [
+        (SYMBOL_TYPE_FUNCTION, Self::NAME_FUNCTION),
+        (SYMBOL_TYPE_TYPE, Self::NAME_TYPE),
+        (SYMBOL_TYPE_DATA, Self::NAME_DATA),
+        (SYMBOL_TYPE_MACRO, Self::NAME_MACRO),
+        (SYMBOL_TYPE_FIELD, Self::NAME_FIELD),
+        (SYMBOL_TYPE_MODULE, Self::NAME_MODULE),
+        (SYMBOL_TYPE_FILE, Self::NAME_FILE),
+        (SYMBOL_TYPE_DIRECTORY, Self::NAME_DIRECTORY),
+    ];
+
+    pub(crate) fn typed_name_filter(pattern: &NamePattern, symbol_type_id: i32) -> CompositeFilter {
+        CompositeFilter::and(vec![
+            CompositeFilter::leaf(SymbolTypeMixin::new(symbol_type_id)),
+            Self::name_filter_leaf(pattern, symbol_type_id, false),
+        ])
+    }
+
     /// Build composite filter parts for this type selector.
     ///
     /// `any` contributes no type part, and takes its name predicate from
