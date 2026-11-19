@@ -36,13 +36,17 @@ pub struct Diagnostic {
     /// The bare typed name (e.g. `vfs_rea`) for a `NoMatch` on a plain-name
     /// selector; drives the suggestion lookup. `None` for globs / other selectors.
     pub token: Option<String>,
-    /// Nearest existing symbol names, filled by the statement-level enrichment
-    /// pass for `NoMatch` diagnostics that have a `token`.
+    /// Selectors that would match, filled by the statement-level enrichment
+    /// pass for `NoMatch` diagnostics that have a `token`: each is query text
+    /// to type in place of the selector that missed — the same name under the
+    /// type it exists as (`data("x")`, `file("/a/b.c")`), or, for a typo, the
+    /// nearest existing names.  Never the selector that was written.
     pub suggestions: Vec<String>,
     /// Set by enrichment when the typed name *exists somewhere visible* but was
-    /// excluded by a filter/scope (so it is not a typo). Mutually exclusive with
-    /// `suggestions`; the renderer phrases the two differently. Structured (not
-    /// baked into `message`) so JSON consumers can distinguish the cases.
+    /// excluded by a filter/scope (so it is not a typo).  With `suggestions`,
+    /// those are the spellings that find it; without, nothing but
+    /// `project(...)` or the scope can be the reason.  Structured (not baked
+    /// into `message`) so JSON consumers can distinguish the cases.
     pub name_exists: bool,
 }
 

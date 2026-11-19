@@ -1967,13 +1967,17 @@ impl Index {
     /// `SET` it, so it is deterministic. Lowering it for more short-typo recall
     /// would need a txn-scoped `SET LOCAL` (the GIN `<%` operator is threshold-
     /// bound) and is deferred.
+    ///
+    /// Each name comes with the symbol types it is declared as, so a caller
+    /// can offer a selector that matches it: a file is not found by its bare
+    /// name.
     pub async fn suggest_symbol_names(
         &self,
         query: &str,
         project_ids: &[i32],
         visible_ids: &[i64],
         limit: usize,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<(String, Vec<i32>)>> {
         use diesel::sql_types::{Array, BigInt, Integer, Text};
 
         if query.trim().is_empty() || project_ids.is_empty() {
@@ -1981,9 +1985,11 @@ impl Index {
         }
 
         let sql = r#"
-            SELECT name, MAX(score)::float8 AS score
+            SELECT name, MAX(score)::float8 AS score,
+                   array_agg(DISTINCT symbol_type ORDER BY symbol_type) AS symbol_types
             FROM (
                 SELECT s.name AS name,
+                       s.symbol_type AS symbol_type,
                        GREATEST(
                            word_similarity($1, s.name),
                            word_similarity($1, s.leaf_name)
@@ -2006,7 +2012,10 @@ impl Index {
 
         let rows: std::sync::Arc<Vec<NameSuggestionRow>> = self.cached_load(sql_query).await?;
 
-        Ok(rows.iter().map(|r| r.name.clone()).collect())
+        Ok(rows
+            .iter()
+            .map(|r| (r.name.clone(), r.symbol_types.clone()))
+            .collect())
     }
 
     /// Raw file bytes, exactly as indexed — no lossy UTF-8 conversion, so byte
@@ -4065,6 +4074,8 @@ pub struct SearchMatchRow {
 pub struct NameSuggestionRow {
     #[diesel(sql_type = diesel::sql_types::Text)]
     pub name: String,
+    #[diesel(sql_type = diesel::sql_types::Array<diesel::sql_types::Integer>)]
+    pub symbol_types: Vec<i32>,
 }
 
 /// LIKE-escape a raw user query and wrap with the surrounding wildcards.  The
