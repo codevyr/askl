@@ -411,6 +411,9 @@ pub(in crate::verb) struct TypeSelector {
     /// every type, and an exact compound name anchors its last token to the
     /// leaf for files and directories only — see `name_filter_leaf`.
     contains: bool,
+    /// This instance was cloned into a child scope by `inherit=true`.  There
+    /// it constrains — it never selects — whether or not it carries a name.
+    derived: bool,
 }
 
 impl TypeSelector {
@@ -454,7 +457,16 @@ impl TypeSelector {
             name_pattern,
             inherit,
             contains,
+            derived: false,
         }))
+    }
+
+    /// A named type selector is a BRANCH of its statement: it selects the
+    /// symbols of its type and name, beside whatever the statement's other
+    /// selectors select.  A bare type word, and anything inheritance carried
+    /// down, is a filter over all of them.
+    fn is_branch(&self) -> bool {
+        self.name_pattern.is_some() && !self.derived
     }
 
     /// Returns the appropriate name filter for the given pattern and symbol type.
@@ -558,7 +570,7 @@ impl Verb for TypeSelector {
     /// `func("foo")` anchors by name; bare `func` is a pure constraint
     /// (`func select` is the enumerate-all opt-in).
     fn anchor_kind(&self) -> Option<AnchorKind> {
-        self.name_pattern.as_ref().map(|_| AnchorKind::Name)
+        self.is_branch().then_some(AnchorKind::Name)
     }
 
     fn matched_token(&self) -> Option<String> {
@@ -566,7 +578,7 @@ impl Verb for TypeSelector {
         // it so no-match diagnostics offer suggestions for these too, not just
         // bare NameSelector. Globs don't get suggestions (see NameSelector).
         match &self.name_pattern {
-            Some(NamePattern::Exact(name)) => Some(name.clone()),
+            Some(NamePattern::Exact(name)) if self.is_branch() => Some(name.clone()),
             _ => None,
         }
     }
@@ -576,18 +588,26 @@ impl Verb for TypeSelector {
     }
 
     fn as_selector<'a>(&'a self) -> Option<&'a dyn Selector> {
-        // Instance-conditional role: a bare type word is a pure filter (it
-        // constrains the type, never anchors or holds execution state of
-        // its own), inherited or not.
-        if self.name_pattern.is_none() {
-            None
-        } else {
+        // Instance-conditional role.  A named type selector is a branch: it
+        // selects.  A bare type word is a pure filter (it constrains the
+        // type, never anchors or holds execution state of its own).
+        if self.is_branch() {
             Some(self)
+        } else {
+            None
         }
     }
 
     fn as_filter<'a>(&'a self) -> Option<&'a dyn Filter> {
-        Some(self)
+        // The two roles are exclusive.  A branch's type and name are its own
+        // predicate, ORed with its siblings'; were they also a statement
+        // filter, `func("a") func("b")` would ask for one symbol with both
+        // names.
+        if self.is_branch() {
+            None
+        } else {
+            Some(self)
+        }
     }
 
     fn derive_method(&self) -> DeriveMethod {
@@ -607,16 +627,32 @@ impl Verb for TypeSelector {
             name_pattern: self.name_pattern.clone(),
             inherit: self.inherit,
             contains: self.contains,
+            derived: true,
         }))
     }
 
-    /// Any type selector — bare or named — writes the type dimension, so it
-    /// replaces an earlier type constraint (`data` or `data("foo")` inside a
-    /// `func` scope replaces the inherited func filter rather than AND'ing
-    /// with it).  It no longer evicts `search`/`loc`/`layer`: those suppress
-    /// the DEFAULT type filter but do not occupy the type dimension.
+    /// A type FILTER holds the type slot: a later write replaces it.  A
+    /// branch holds nothing — it is not a constraint on the statement — so
+    /// the selector written after it joins it instead of replacing it.
     fn dimension(&self) -> Option<Dimension> {
-        Some(Dimension::Type)
+        if self.is_branch() {
+            None
+        } else {
+            Some(Dimension::Type)
+        }
+    }
+
+    /// Every type selector — bare or named — writes the type: `data` or
+    /// `data("foo")` under `func(inherit=true)` replaces the inherited
+    /// filter rather than AND'ing with it.  It does not evict
+    /// `search`/`loc`/`layer`: those suppress the DEFAULT type filter but do
+    /// not occupy the type dimension.
+    fn writes(&self) -> Vec<Dimension> {
+        vec![Dimension::Type]
+    }
+
+    fn is_type_word(&self) -> bool {
+        true
     }
 
     /// Bare `any` constrains nothing (its filter compiles to no constraint),
@@ -695,12 +731,12 @@ impl Selector for TypeSelector {
         command: &crate::command::Command,
         eph: &EphContext,
     ) -> Option<CompositeFilter> {
-        // TypeSelector implements as_filter(), so its get_composite_filter()
-        // is already included via command.filters().
-        let parts: Vec<CompositeFilter> = command
+        // The statement's filters, and this branch's own type and name.
+        let mut parts: Vec<CompositeFilter> = command
             .filters()
             .filter_map(|f| f.get_composite_filter(eph))
             .collect();
+        parts.extend(self.build_filter_parts());
         if parts.is_empty() {
             None
         } else {
@@ -708,16 +744,20 @@ impl Selector for TypeSelector {
         }
     }
 
-    /// No extra constraint beyond the filter conjunction (this selector's
-    /// type/name criteria arrive via `as_filter`).  Fusable only in selector
-    /// mode: filter-only emission is `None` (waits to be derived), which one
-    /// shared statement query must not replace with rows.
+    /// The branch: this selector's type and name.  (A bare type word is no
+    /// selector at all, so only a named one gets here; `any("x")` has no
+    /// type part and is its name alone.)
     fn own_predicate(&self, _eph: &EphContext) -> OwnPredicate {
-        OwnPredicate::Filter(None)
+        let parts = self.build_filter_parts();
+        if parts.is_empty() {
+            OwnPredicate::Filter(None)
+        } else {
+            OwnPredicate::Filter(Some(CompositeFilter::and(parts)))
+        }
     }
 
     fn fusable(&self) -> bool {
-        self.name_pattern.is_some()
+        true
     }
 
     async fn select_from_all_impl(
@@ -729,13 +769,8 @@ impl Selector for TypeSelector {
         demands: FamilyDemands,
         eph: &EphContext,
     ) -> Result<Option<Selection>> {
-        if self.name_pattern.is_none() {
-            // Pure constraint: nothing to emit; the statement derives.
-            return Ok(None);
-        }
-
-        // `filter` already contains this TypeSelector's get_composite_filter()
-        // (collected at compute_selected). Just use it directly.
+        // `filter` is this selector's whole predicate: the statement's
+        // filters and its own type and name (`build_composite_filter`).
         let selection = cfg
             .index
             .find_symbol(&filter, parent_scope, children_scope, demands, eph)

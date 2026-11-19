@@ -188,6 +188,11 @@ impl ParserContext {
         ctx.command.borrow_mut().extend(verb);
     }
 
+    /// See [`Command::said_twice`].
+    pub fn said_twice(&self) -> Option<((usize, usize), (usize, usize))> {
+        self.command.borrow().said_twice()
+    }
+
     pub fn source(&self) -> Arc<String> {
         self.source.clone()
     }
