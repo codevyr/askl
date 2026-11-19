@@ -18,6 +18,7 @@ pub use index_impl::{
     LayerOutcome, MaterialisedLayer, NameSuggestionRow, ProbeOutcome, ProbeRole,
     ResolvedSourceFile, RootShardRef, ScopeContext, SearchMatchRow, ShardRole, DEFAULT_READ_CAP,
     DEFAULT_SQL_CACHE_BYTES, DFS_STRIDE, EPH_POOL_IDLE_IN_TXN_TIMEOUT, EPH_POOL_RECYCLING_QUERY,
+    PROBE_ROLE_ROWS_PER_CAP,
 };
 pub use mixins::{
     CompositeFilter, CompoundNameMixin, CurrentQuery, DefaultSymbolTypeMixin, DirectOnlyMixin,
