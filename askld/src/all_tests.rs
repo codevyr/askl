@@ -2544,6 +2544,90 @@ fn a_type_word_filters_its_own_statement_only() {
 }
 
 #[test]
+fn named_selectors_of_one_statement_union() {
+    // "Every named selector in a statement is a branch, and the statement is
+    // the union of its branches."  A type on the selector does not change
+    // that: the second used to replace the first.
+    let res = run_query(TEST_INPUT_CONTAINMENT, r#"func("foo") func("bar")"#);
+    assert_eq!(sorted_ids(&res), vec![20, 30]);
+
+    // Each branch carries its own type.
+    let res = run_query(VERB_TEST, r#"func("tar") data("config.Port")"#);
+    assert_eq!(sorted_ids(&res), vec![94, 98]);
+
+    // Mixed with a bare name, and under a parent: foo uses foo.bar (a
+    // function) and config.Debug (data).
+    let res = run_query(
+        VERB_TEST,
+        r#""foo" { func("foo.bar") data("config.Debug") "nothing_by_this_name" }"#,
+    );
+    assert_eq!(sorted_ids(&res), vec![91, 92, 97]);
+
+    // A type word beside them filters all of them.
+    let res = run_query(VERB_TEST, r#"func "tar" "config.Port""#);
+    assert_eq!(sorted_ids(&res), vec![94]);
+}
+
+#[test]
+fn two_type_words_in_one_statement_are_an_error() {
+    // `macro func` used to run as `func`: the later word replaced the
+    // earlier without a word.  The message gives the spelling that works.
+    for (query, fix) in [
+        (r#""foo" { macro func }"#, "`macro or func`"),
+        (r#"data func("foo")"#, r#"`data or func("foo")`"#),
+        (r#"func "foo" data("config.Port")"#, "replaces `func`"),
+    ] {
+        let err = match run_query_err(VERB_TEST, query) {
+            Err(err) => format!("{:#}", err),
+            Ok(_) => panic!("`{}` must not run", query),
+        };
+        assert!(
+            err.contains("in the same statement") && err.contains(fix),
+            "`{}`: {}",
+            query,
+            err
+        );
+    }
+    // Not an error: the type said once, a group, an inherited type replaced
+    // by the child's, and the explicit filters, which replace in place.
+    for query in [
+        r#"func "foo" "tar""#,
+        r#""foo" { macro or func }"#,
+        r#"func(inherit=true) "foo" { data }"#,
+        r#"filter("type", "func") filter("type", "mod") "foo""#,
+    ] {
+        assert!(
+            run_query_err(VERB_TEST, query).is_ok(),
+            "`{}` must run",
+            query
+        );
+    }
+}
+
+#[test]
+fn a_group_that_says_a_type_replaces_the_inherited_one() {
+    // foo uses config.Debug and not config.Port.  Under an inherited `func`,
+    // one typed child replaces the type...
+    let one = run_query(
+        VERB_TEST,
+        r#"func(inherit=true) "foo" { data("config.Debug") }"#,
+    );
+    assert_eq!(sorted_ids(&one), vec![91, 97]);
+    // ...and so does a group of them.  The group used to keep the inherited
+    // `func` beside its own `data` and match nothing.
+    let group = run_query(
+        VERB_TEST,
+        r#"func(inherit=true) "foo" { data("config.Debug") or data("config.Port") }"#,
+    );
+    assert_eq!(sorted_ids(&group), vec![91, 97]);
+    let juxtaposed = run_query(
+        VERB_TEST,
+        r#"func(inherit=true) "foo" { data("config.Debug") data("config.Port") }"#,
+    );
+    assert_eq!(sorted_ids(&juxtaposed), vec![91, 97]);
+}
+
+#[test]
 fn weak_child_does_not_eliminate_parent() {
     // A bare type word constrains nothing about its neighbours: it is weak.
     // The fixture has no data symbols, so the child resolves empty.  A weak

@@ -81,6 +81,32 @@ pub fn build_statement<'a>(
         ));
     }
 
+    // One statement says its type once.  An inherited type is replaced
+    // silently -- that is the cascade -- but a type word replacing another
+    // type word of the same statement used to drop the earlier one without a
+    // word: `macro func` ran as `func`.  (A preamble's verbs live on the global
+    // context, where a later directive replacing an earlier one is the
+    // design; this command is not theirs.)
+    if !sub_ctx.redirects_to_global() {
+        if let Some((replaced, replacing)) = sub_ctx.said_twice() {
+            let source = sub_ctx.source();
+            let text = |r: (usize, usize)| source[r.0..r.1].trim().to_string();
+            let (old, new) = (text(replaced), text(replacing));
+            let span = pest::Span::new(source.as_str(), replacing.0, replacing.1)
+                .expect("a verb's span lies inside the query");
+            return Err(Error::new_from_span(
+                pest::error::ErrorVariant::CustomError {
+                    message: format!(
+                        "`{new}` replaces `{old}`, written before it in the same statement. \
+                         Keep one of them, or join them with `or` to accept either: \
+                         `{old} or {new}`."
+                    ),
+                },
+                span,
+            ));
+        }
+    }
+
     // If no explicit type selector was used, add a DefaultTypeFilter.
     // None → no inherited default, all types (no filtering needed, skip verb).
     // Some(vec![]) → explicitly set to "all types" (no filtering needed, skip verb).

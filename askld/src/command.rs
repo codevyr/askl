@@ -153,6 +153,15 @@ pub struct Command {
     env: Vec<Arc<dyn Verb>>,
     span: Option<Span>,
     verb_span: Option<Span>,
+    /// How many leading `predicate` verbs came from the enclosing scopes.
+    /// The cascade replaces those silently; that is what inheriting is.
+    inherited: usize,
+    /// A type word of THIS statement that another type word of this
+    /// statement replaced: the byte ranges of the replaced and the replacing
+    /// verb.  One statement saying two types side by side is a mistake the
+    /// cascade used to hide (`macro func` ran as `func`); the parser reports
+    /// it.
+    said_twice: Option<((usize, usize), (usize, usize))>,
 }
 
 fn derive_aspect(verbs: &[Arc<dyn Verb>]) -> Vec<Arc<dyn Verb>> {
@@ -179,14 +188,23 @@ impl Command {
     }
 
     pub fn derive(&self, span: Span) -> Self {
+        let predicate = derive_aspect(&self.predicate);
         Self {
-            predicate: derive_aspect(&self.predicate),
+            inherited: predicate.len(),
+            predicate,
             relationship: derive_aspect(&self.relationship),
             bindings: derive_aspect(&self.bindings),
             env: derive_aspect(&self.env),
             span: Some(span),
             verb_span: None,
+            said_twice: None,
         }
+    }
+
+    /// The first pair of this statement's own type words where the later one
+    /// replaced the earlier, as byte ranges `(replaced, replacing)`.
+    pub fn said_twice(&self) -> Option<((usize, usize), (usize, usize))> {
+        self.said_twice
     }
 
     /// All verbs across every aspect, predicate first.  For aspect-agnostic
@@ -252,15 +270,28 @@ impl Command {
         );
         match other.class() {
             // The slot cascade, in full: writing a dimension replaces the
-            // previous holder of that dimension wholesale; dimensionless
-            // predicate verbs (anchors, exclusions, layer-backed selectors)
+            // previous holder of that dimension wholesale; predicate verbs
+            // that hold none (anchors, exclusions, layer-backed selectors)
             // accumulate.  Compound expressions can hold several dimensions;
             // eviction is by intersection.  Verbs never inspect each other.
             VerbClass::Predicate => {
-                let dims = other.dimensions();
+                let dims = other.writes();
                 if !dims.is_empty() {
-                    self.predicate
-                        .retain(|v| !v.dimensions().iter().any(|d| dims.contains(d)));
+                    let holds = |v: &Arc<dyn Verb>| v.dimensions().iter().any(|d| dims.contains(d));
+                    if self.said_twice.is_none() && other.is_type_word() {
+                        if let Some(own) = self.predicate[self.inherited..]
+                            .iter()
+                            .find(|v| holds(v) && v.is_type_word())
+                        {
+                            let range = |s: pest::Span<'_>| (s.start(), s.end());
+                            self.said_twice = Some((range(own.span()), range(other.span())));
+                        }
+                    }
+                    self.inherited -= self.predicate[..self.inherited]
+                        .iter()
+                        .filter(|v| holds(v))
+                        .count();
+                    self.predicate.retain(|v| !holds(v));
                 }
                 self.predicate.push(other);
             }
