@@ -802,6 +802,44 @@ fn build_children_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ChildrenQu
         .into_boxed::<Pg>()
 }
 
+/// The scope of a children read: the referenced symbol has an instance among
+/// `scope_ids`, and that instance is the row's.
+///
+/// A READ OF WHAT THE PARENTS REFERENCE STARTS FROM THE PARENTS.  Said plainly
+/// (`symbol_instances.id = ANY(scope)`), the scope is an index condition, and
+/// the planner starts from it: scope instance -> its symbol -> every reference
+/// to that symbol anywhere -> is it inside a parent?  That repeats each
+/// reference once per instance of its target.  `struct device` has 809
+/// instances and 20,906 references: 16.9 million rows hashed to keep 1001
+/// (12.9 s).  `"schedule" { }` reads every reference to `current` and `NULL`
+/// in the kernel to keep the 220 written in one function.
+///
+/// The `+ 0` makes both halves filters and nothing else, so the only place a
+/// plan can start is the parents (at most the read cap, by primary key) and
+/// the work is bounded by what the parents contain.  The rows are the same.
+/// The first half is there to drop a reference before its target's instances
+/// are fetched, most of which the second half would then discard.
+///
+/// Measured on the Linux index, same rows before and after: `{ "device" }`
+/// 12.9 s -> 25 ms, `macro { "task_struct" }` 89 ms -> 8 ms.
+fn children_in_scope(
+    scope_ids: Vec<i64>,
+    vis: &EphVisibility,
+) -> EphSqlFragment<diesel::sql_types::Bool> {
+    EphSqlFragment::<diesel::sql_types::Bool>::builder()
+        .sql(
+            "(symbol_refs.to_symbol + 0 IN (\
+                SELECT si2.symbol FROM index.symbol_instances si2 WHERE ",
+        )
+        .eph_visibility("si2.layer", vis)
+        .sql(" AND si2.id = ANY(")
+        .bind(scope_ids.clone())
+        .sql(")) AND symbol_instances.id + 0 = ANY(")
+        .bind(scope_ids)
+        .sql("))")
+        .build()
+}
+
 fn build_has_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> HasParentsQuery<'static> {
     use crate::schema_diesel::*;
 
@@ -2420,7 +2458,7 @@ impl Index {
                             q = q.filter(expr);
                         }
                         // Always apply scope filter.
-                        q = q.filter(symbol_instances::dsl::id.eq_any(scope_ids.clone()));
+                        q = q.filter(children_in_scope(scope_ids.clone(), vis));
                         q.filter(vis.guard()).limit(read_limit)
                     })
                     .await
