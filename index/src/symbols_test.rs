@@ -482,6 +482,122 @@ async fn test_probe_instance_ids() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// "A probe that cannot answer within its budget answers Capped."
+///
+/// A probe exists to say "small, and here it is" or "too big".  Its roles used
+/// to be computed in full before the outer LIMIT could stop anything, so "too
+/// big" was the most expensive answer it had: on the kernel
+/// `{ "task_struct" }` spent 16.5 s enumerating 980,880 (reference, container)
+/// rows to learn that the statement has more than 1000 instances.
+#[tokio::test(flavor = "current_thread")]
+async fn a_probe_role_past_its_budget_is_capped() -> anyhow::Result<()> {
+    use crate::db_diesel::{EphContext, Index, ProbeOutcome, ProbeRole, PROBE_ROLE_ROWS_PER_CAP};
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+
+    let mut index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_HIDDEN_CHILDREN)
+        .await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+
+    // `genmod` (instance 10) contains 42 instances; one of them is `wide`.
+    let wide = CompositeFilter::leaf(CompoundNameMixin::new("wide"));
+    let inside_genmod = || vec![ProbeRole::HasChildrenOf(vec![10])];
+    let within = 42usize.div_ceil(PROBE_ROLE_ROWS_PER_CAP);
+
+    // The role fits the budget: the answer is exact.
+    assert_eq!(
+        index
+            .probe_instance_ids(&wide, inside_genmod(), within, &eph)
+            .await?,
+        ProbeOutcome::Resolved(vec![40])
+    );
+    // It does not: the probe stops there.  One instance matches, and the
+    // answer is still Capped -- the probe did not look far enough to know.
+    assert_eq!(
+        index
+            .probe_instance_ids(&wide, inside_genmod(), within - 1, &eph)
+            .await?,
+        ProbeOutcome::Capped
+    );
+
+    // The same for references: `wide` (instance 40) refers to twelve symbols.
+    let vis_1 = CompositeFilter::leaf(CompoundNameMixin::new("vis_1"));
+    let called_by_wide = || vec![ProbeRole::RefsChildrenOf(vec![40])];
+    let within = 12usize.div_ceil(PROBE_ROLE_ROWS_PER_CAP);
+    assert_eq!(
+        index
+            .probe_instance_ids(&vis_1, called_by_wide(), within, &eph)
+            .await?,
+        ProbeOutcome::Resolved(vec![2001])
+    );
+    if within > 1 {
+        assert_eq!(
+            index
+                .probe_instance_ids(&vis_1, called_by_wide(), within - 1, &eph)
+                .await?,
+            ProbeOutcome::Capped
+        );
+    }
+
+    Ok(())
+}
+
+/// A symbol with several instances is ONE thing referred to: each reference
+/// to it is one role row, not one per instance.  `struct task_struct` has 60
+/// instances on the kernel, and its callers-role counted every reference 60
+/// times -- 312,180 loop iterations for 5,203 references.
+#[tokio::test(flavor = "current_thread")]
+async fn a_reference_is_one_role_row_however_many_instances_its_target_has() -> anyhow::Result<()> {
+    use crate::db_diesel::{EphContext, Index, ProbeOutcome, ProbeRole, PROBE_ROLE_ROWS_PER_CAP};
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_A).await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+
+    // TEST_INPUT_A: three call sites name b(92) -- one in main, two in a --
+    // and each sits in its function, the file and the directory: 9 role rows.
+    // Give `b` many more instances; the role must not grow with them.
+    {
+        use diesel::connection::SimpleConnection;
+        let mut connection = <diesel::PgConnection as diesel::Connection>::establish(&url)?;
+        connection.batch_execute(
+            "INSERT INTO index.symbol_instances \
+                 (id, symbol, object_id, offset_range, instance_type, layer) \
+             SELECT 50000 + i, (SELECT symbol FROM index.symbol_instances WHERE id = 92), 2, \
+                    int4range(100000 + i * 10, 100005 + i * 10), 2, 1000001 \
+             FROM generate_series(1, 40) AS i",
+        )?;
+    }
+    let mut all_b: Vec<i64> = vec![92];
+    all_b.extend(50001..=50040);
+
+    let unconstrained = CompositeFilter::and(vec![]);
+    let cap = 9usize.div_ceil(PROBE_ROLE_ROWS_PER_CAP).max(6);
+    let outcome = index
+        .probe_instance_ids(
+            &unconstrained,
+            vec![ProbeRole::RefsParentsOf(all_b)],
+            cap,
+            &eph,
+        )
+        .await?;
+    assert_eq!(
+        outcome,
+        ProbeOutcome::Resolved(vec![91, 942, 1001, 1002, 1003]),
+        "41 instances of the target, {} role rows allowed",
+        cap * PROBE_ROLE_ROWS_PER_CAP
+    );
+    Ok(())
+}
+
 /// `find_edges_between` prunes the target side to two rows per symbol; this
 /// is the case that proves two is the floor, not one.
 ///

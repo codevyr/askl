@@ -421,9 +421,41 @@ pub(super) const PROBE_ROLE_CTE_NAMES: [&str; 8] = [
 /// the tiny role set (measured 1.8–10.6 s against a full 14.8M-row scan);
 /// materialised first, the outer query runs id-driven through the pkey
 /// (0.5–6.9 ms).  See perf/PROBE_BASELINE.md.
+///
+/// **Each role is bounded.**  A materialised role is computed in full before
+/// the outer `LIMIT` can stop anything, so a role with a huge fan-out (every
+/// container of every reference to `struct task_struct`: 980,880 rows, 16.5 s)
+/// made "too big" the most expensive answer a probe could give.  So a role
+/// reads at most `role_budget + 1` rows.  One that reads that many did not
+/// see everything, and the probe says so with [`PROBE_OVERFLOW`]: a row no
+/// instance can have, emitted when any role overflowed.  The caller turns it
+/// into `ProbeOutcome::Capped`, which is always a safe answer -- "I do not
+/// know this set" -- and the outer query is skipped for such a probe (see the
+/// budget guard `probe_instance_ids` adds to it).
+///
+/// The bound is on ROWS READ, not on distinct symbols, because rows are what
+/// cost: a role can hold a million rows naming two hundred symbols.  Which
+/// rows a `LIMIT` without an order returns is arbitrary, but whether there
+/// are more than the budget is not, so the outcome stays deterministic.
 pub(super) struct ProbeCtes<Outer> {
     pub bodies: Vec<Box<dyn QueryFragment<Pg> + Send>>,
     pub outer: Outer,
+    pub role_budget: i64,
+}
+
+/// The id a probe returns when one of its roles overflowed its budget.
+/// Persistent ids are positive and ephemeral ones negative, so no instance
+/// has it.
+pub(super) const PROBE_OVERFLOW: i64 = 0;
+
+/// `(SELECT count(*) FROM probe_role_<i>) <cmp> <budget>` -- the one place the
+/// overflow test is spelled, for the outer query's guard (`<=`) and the
+/// overflow row (`>`).
+pub(super) fn probe_role_budget_sql(role: usize, cmp: &str, role_budget: i64) -> String {
+    format!(
+        "(SELECT count(*) FROM {}) {cmp} {role_budget}",
+        PROBE_ROLE_CTE_NAMES[role]
+    )
 }
 
 impl<Outer> QueryId for ProbeCtes<Outer> {
@@ -452,10 +484,21 @@ where
                 out.push_sql(PROBE_ROLE_CTE_NAMES[i]);
                 out.push_sql(" AS MATERIALIZED (");
                 body.walk_ast(out.reborrow())?;
-                out.push_sql(") ");
+                out.push_sql(&format!(" LIMIT {}) ", self.role_budget + 1));
             }
         }
+        out.push_sql("(");
         self.outer.walk_ast(out.reborrow())?;
+        out.push_sql(")");
+        if !self.bodies.is_empty() {
+            let overflowed: Vec<String> = (0..self.bodies.len())
+                .map(|i| probe_role_budget_sql(i, ">", self.role_budget))
+                .collect();
+            out.push_sql(&format!(
+                " UNION ALL (SELECT {PROBE_OVERFLOW}::bigint WHERE {})",
+                overflowed.join(" OR ")
+            ));
+        }
         Ok(())
     }
 }

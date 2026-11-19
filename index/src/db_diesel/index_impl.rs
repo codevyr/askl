@@ -262,35 +262,51 @@ fn refs_role_cte_body(
     vis: &EphVisibility,
 ) -> Box<dyn diesel::query_builder::QueryFragment<Pg> + Send> {
     let builder = EphSqlFragment::<diesel::sql_types::BigInt>::builder();
-    let builder = if parents {
-        builder
-            .sql(
-                "SELECT pd.symbol AS symbol FROM index.symbol_refs sr \
-                 JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                   AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
-                 JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
-                 WHERE ",
-            )
-            .eph_visibility("sr.layer", vis)
-            .sql(" AND ")
-            .eph_visibility("si.layer", vis)
-            .sql(" AND ")
-            .eph_visibility("pd.layer", vis)
-            .sql(" AND si.id = ANY(")
+    if parents {
+        // The referenced symbols are a semi-join, not a join: a symbol with
+        // sixty instances is still one thing referred to, and joining its
+        // instances repeated every reference sixty times (`struct
+        // task_struct`).  `build_parents_query` binds the same way, for the
+        // same reason.
+        Box::new(
+            builder
+                .sql(
+                    "SELECT pd.symbol AS symbol FROM index.symbol_refs sr \
+                     JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
+                       AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
+                     WHERE ",
+                )
+                .eph_visibility("sr.layer", vis)
+                .sql(" AND ")
+                .eph_visibility("pd.layer", vis)
+                .sql(
+                    " AND sr.to_symbol IN \
+                     (SELECT si.symbol FROM index.symbol_instances si WHERE ",
+                )
+                .eph_visibility("si.layer", vis)
+                .sql(" AND si.id = ANY(")
+                .bind(ids)
+                .sql("))")
+                .build(),
+        )
     } else {
-        builder
-            .sql(
-                "SELECT sr.to_symbol AS symbol FROM index.symbol_refs sr \
-                 JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                   AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
-                 WHERE ",
-            )
-            .eph_visibility("sr.layer", vis)
-            .sql(" AND ")
-            .eph_visibility("pd.layer", vis)
-            .sql(" AND pd.id = ANY(")
-    };
-    Box::new(builder.bind(ids).sql(")").build())
+        Box::new(
+            builder
+                .sql(
+                    "SELECT sr.to_symbol AS symbol FROM index.symbol_refs sr \
+                     JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
+                       AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
+                     WHERE ",
+                )
+                .eph_visibility("sr.layer", vis)
+                .sql(" AND ")
+                .eph_visibility("pd.layer", vis)
+                .sql(" AND pd.id = ANY(")
+                .bind(ids)
+                .sql(")")
+                .build(),
+        )
+    }
 }
 
 /// Resolve a CompositeFilter to instance IDs by running a CurrentQuery.
@@ -392,7 +408,7 @@ impl Index {
         cap: usize,
         eph: &EphContext,
     ) -> Result<ProbeOutcome> {
-        use super::cte::{ProbeCtes, PROBE_ROLE_CTE_NAMES};
+        use super::cte::{probe_role_budget_sql, ProbeCtes, PROBE_OVERFLOW, PROBE_ROLE_CTE_NAMES};
 
         let _span = tracing::info_span!("probe_instance_ids", cap, roles = roles.len()).entered();
         let t0 = std::time::Instant::now();
@@ -458,6 +474,16 @@ impl Index {
             }
         }
 
+        // A role that overflowed its budget is not all there, so nothing read
+        // through it is an answer: skip the outer query for such a probe.
+        // The overflow row `ProbeCtes` appends is what reports it.
+        let role_budget = (cap.max(1) * PROBE_ROLE_ROWS_PER_CAP) as i64;
+        for role in 0..cte_bodies.len() {
+            query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
+                &probe_role_budget_sql(role, "<=", role_budget),
+            ));
+        }
+
         let query = query.limit(cap as i64 + 1);
         let rows: std::sync::Arc<Vec<i64>> = if cte_bodies.is_empty() {
             self.cached_load(query).await?
@@ -465,11 +491,12 @@ impl Index {
             self.cached_load(ProbeCtes {
                 bodies: cte_bodies,
                 outer: query,
+                role_budget,
             })
             .await?
         };
 
-        let outcome = if rows.len() > cap {
+        let outcome = if rows.len() > cap || rows.contains(&PROBE_OVERFLOW) {
             ProbeOutcome::Capped
         } else {
             let mut ids = rows.as_ref().clone();
@@ -917,13 +944,30 @@ pub enum ProbeRole {
     HasParentsOf(Vec<i64>),
 }
 
+/// How many role rows a probe may read per row of its cap.
+///
+/// A probe resolves a statement to at most `cap` instances, and it gets there
+/// through its roles: every (reference, container) pair of the neighbours it
+/// is refined by.  A role costs what it reads, so it reads at most
+/// `cap * PROBE_ROLE_ROWS_PER_CAP` rows; past that the probe answers
+/// `Capped` without looking further (see `ProbeCtes`).
+///
+/// Ten, measured on the kernel at the default cap of 1000: reading 10,001
+/// role rows takes 40-300 ms for the hottest names there are (`device`,
+/// `inode`, `NULL`, `u32`, `task_struct`), against 17 s to 60 s+ for reading
+/// them all.  A reference sits in about three containers, so the budget is a
+/// neighbour with some 3,000 references: beyond that it is too hot to refine
+/// by, and the statement is derived under the read cap instead.
+pub const PROBE_ROLE_ROWS_PER_CAP: usize = 10;
+
 /// What a capped cardinality probe learned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeOutcome {
     /// At most `cap` rows exist; these are ALL of them (sorted, deduped) —
     /// the probe result IS the statement's exact current-instance set.
     Resolved(Vec<i64>),
-    /// More than `cap` rows exist; the fetched sample was discarded.
+    /// More than `cap` rows exist, or a role ran past its budget before the
+    /// probe could tell; the fetched sample was discarded.
     Capped,
 }
 
