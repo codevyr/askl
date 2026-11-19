@@ -19,7 +19,7 @@ Call graph
 Containment
 - Functions a macro's body calls: `macro("LOG") { func }`
 - What a macro's invocations declared: `macro("DEFINE_MUTEX") { data }`, `macro("UCS_PROFILE_FUNC") { func }`  (add `unnest` for the ones nobody names)
-- Macros that declare or use a symbol: `macro { data("cgroup_mutex") }`  (type the child: under `macro` a bare name means macros and functions)
+- Macros that declare or use a symbol: `macro { "cgroup_mutex" }`  (the word `macro` is about the users only; the name matches at every type)
 - Everything in a module, incl. what macros generated: `mod("amdgpu") { unnest func }`  (the default leaves out symbols nobody wrote down, e.g. `__compiletime_assert_N`)
 - Fields of a struct:         `type("file_operations") has { field }`
 - Dispatch through a field:   `{ field("file_operations.read") }`
@@ -37,7 +37,7 @@ Full-text (raw source bytes — for text that is NOT a symbol name; to find a sy
 - Several literals (OR):      `search("foo") search("bar")`  (or as two top-level statements, `search("foo"); search("bar")` — both union; `search()` is literal, `search("a|b")` matches the text `a|b`, not a regex)
 - Children of each hit:       `search("kmalloc") { }`
 - Inside one function:        `func("vfs_read") { search("mmap_lock") }`
-- Functions containing a literal: `func { any search("mmap_lock") }`  (NOT `func { search(...) }`: a bare `func` is a filter that inherits to the search, no match is a function, and the result is empty; `any` drops the inherited type)
+- Functions containing a literal: `func { search("mmap_lock") }`
 
 Scope and hygiene
 - Restrict to a project:      `project("linux") "main" { }`
