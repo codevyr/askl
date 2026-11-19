@@ -90,6 +90,31 @@ impl Diagnostic {
         }
     }
 
+    /// A limit cut this statement's answer.  The message quotes the statement,
+    /// because a query can hold several and each is warned about separately:
+    /// two such warnings used to read identically, down to "(line 1)".
+    pub fn incomplete(span: Span) -> Self {
+        let message = format!(
+            "too many results in `{}`: this part of the graph is incomplete. Narrow it \
+             with a name or glob, a type filter, `ignore(...)`, `project(...)`, or fewer hops",
+            Self::quote(span.as_str())
+        );
+        Self::truncation(span, message)
+    }
+
+    /// A statement's text on one line, cut to a length that still tells it
+    /// from its neighbours.
+    fn quote(text: &str) -> String {
+        const MAX: usize = 48;
+        let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if one_line.chars().count() <= MAX {
+            one_line
+        } else {
+            let head: String = one_line.chars().take(MAX).collect();
+            format!("{} …", head.trim_end())
+        }
+    }
+
     /// Byte offset where the diagnostic's span starts — used to order/dedup.
     pub fn start(&self) -> usize {
         self.span.start()

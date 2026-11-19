@@ -232,8 +232,17 @@ pub struct Graph {
     /// (the cap is per statement — a selector never competes with another
     /// statement's fan-out).
     pub truncated: bool,
-    /// Distinct symbol count across the whole result before capping.
+    /// Distinct symbol count across the whole result before capping.  When
+    /// `incomplete` is set this counts what a limit let through, so it is a
+    /// lower bound and not a total.
     pub total_symbols: usize,
+    /// True when a limit cut the answer while it was being computed (the
+    /// response carries the warning that says where).  Not the same thing
+    /// as `truncated`: that one means the symbols were all found and the
+    /// response shows the first of them, which a larger `limits(symbols=)`
+    /// fixes; this one means the rest were never read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub incomplete: bool,
     /// Node ids (symbol ids, same encoding as `Node.id`) whose implicit
     /// out-edge list was capped by `edge_cap` — assembly capping: each is an
     /// invitation to fetch that node's remaining references, never a sign the
@@ -251,6 +260,7 @@ impl Graph {
             warnings: vec![],
             truncated: false,
             total_symbols: 0,
+            incomplete: false,
             edges_truncated: vec![],
         }
     }
@@ -268,6 +278,10 @@ impl Graph {
     }
 
     pub fn add_warnings(&mut self, warnings: Vec<Diagnostic>) {
+        // Every truncation notice says some limit cut the answer short.
+        self.incomplete |= warnings
+            .iter()
+            .any(|w| w.kind == askld::diagnostic::DiagnosticKind::Truncation);
         for warning in &warnings {
             self.warnings.push(ErrorResponse::from_diagnostic(warning));
         }

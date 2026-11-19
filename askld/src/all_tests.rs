@@ -1367,6 +1367,25 @@ fn a_capped_attempt_escalates_to_a_composition_that_bounds_it() {
 }
 
 #[test]
+fn an_incomplete_warning_quotes_its_statement() {
+    // Two statements of one query can each be cut.  Their warnings used to
+    // be the same sentence twice; each now names the statement it is about.
+    let capped = run_query_with_read_cap(TEST_INPUT_ESCALATION, r#"{ "lock" }"#, 3);
+    let said: Vec<&str> = capped
+        .warnings
+        .iter()
+        .filter(|w| w.message.contains("this part of the graph is incomplete"))
+        .map(|w| w.message.as_str())
+        .collect();
+    assert_eq!(said.len(), 1, "{:?}", said);
+    assert!(
+        said[0].starts_with(r#"too many results in `{ "lock" }`:"#),
+        "{:?}",
+        said
+    );
+}
+
+#[test]
 fn a_capped_derive_is_flagged_and_said() {
     // The derive path used to LAUNDER a capped read: `find_parent_instance_ids`
     // applies the safety LIMIT but returned bare ids, so a derivation built
