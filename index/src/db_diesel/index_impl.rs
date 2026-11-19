@@ -1494,10 +1494,42 @@ pub const EPH_POOL_RECYCLING_QUERY: &str = "ROLLBACK";
 /// with that in mind.
 pub const EPH_POOL_IDLE_IN_TXN_TIMEOUT: &str = "60s";
 
+/// A PLAN IS MADE FOR THE VALUES IT IS GIVEN.
+///
+/// Every read here binds arrays -- the ids of a selection, the visible
+/// layers -- and how long those arrays are is what decides the right plan.
+/// Postgres, left at `plan_cache_mode = auto`, stops asking after a prepared
+/// statement's fifth execution on a connection: it keeps one generic plan,
+/// costed as if every array held ten elements.  For `find_edges_between` over
+/// 1,571 instances that plan is a cross join of candidates and targets, 2.3
+/// million index probes, 2,090 ms where the plan made for the real arrays
+/// takes 239 ms.  Which of the two a query got depended on which pooled
+/// connection it drew and how often that connection had run the statement,
+/// so the same query took 0.4 s after a restart and 2 s a minute later.
+///
+/// Planning every execution costs 2-15 ms on the widest statements.
+pub const POOL_PLAN_CACHE_MODE: &str = "force_custom_plan";
+
+/// What every pooled session is told when it opens: the idle-in-transaction
+/// backstop and the plan cache mode.  Every `custom_setup` calls this -- a
+/// replaced `custom_setup` does not compose with the one it replaces, and
+/// the settings were once repeated by hand at each site.
+pub async fn setup_pool_session(
+    conn: &mut AsyncPgConnection,
+) -> std::result::Result<(), diesel::ConnectionError> {
+    use diesel_async::SimpleAsyncConnection;
+    conn.batch_execute(&format!(
+        "SET idle_in_transaction_session_timeout = '{EPH_POOL_IDLE_IN_TXN_TIMEOUT}'; \
+         SET plan_cache_mode = {POOL_PLAN_CACHE_MODE}"
+    ))
+    .await
+    .map_err(diesel::ConnectionError::CouldntSetupConfiguration)
+}
+
 /// The one true `ManagerConfig` for pools that touch ephemeral layers:
-/// checkout-recycling ROLLBACK plus the idle-in-transaction session
-/// timeout.  Every pool-builder site must use this instead of hand-rolling
-/// a config, so the sites cannot drift apart.
+/// checkout-recycling ROLLBACK plus the session settings of
+/// [`setup_pool_session`].  Every pool-builder site must use this instead of
+/// hand-rolling a config, so the sites cannot drift apart.
 pub fn eph_pool_manager_config() -> ManagerConfig<AsyncPgConnection> {
     use diesel_async::AsyncConnection;
     use futures::FutureExt;
@@ -1506,13 +1538,7 @@ pub fn eph_pool_manager_config() -> ManagerConfig<AsyncPgConnection> {
     config.custom_setup = Box::new(|url| {
         async move {
             let mut conn = AsyncPgConnection::establish(url).await?;
-            diesel::sql_query(format!(
-                "SET idle_in_transaction_session_timeout = '{}'",
-                EPH_POOL_IDLE_IN_TXN_TIMEOUT
-            ))
-            .execute(&mut conn)
-            .await
-            .map_err(diesel::ConnectionError::CouldntSetupConfiguration)?;
+            setup_pool_session(&mut conn).await?;
             Ok(conn)
         }
         .boxed()
