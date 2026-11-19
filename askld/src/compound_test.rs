@@ -208,10 +208,11 @@ fn ignore_with_no_usable_package_still_parses_standalone() {
 
 /// Exclusions inherit unconditionally, so mixing one into a filter group
 /// must not stop the GROUP from inheriting: the child scope keeps both the
-/// type constraint and the exclusion.
+/// type constraint and the exclusion.  The group inherits when its type
+/// word does, which a type word does only on request.
 #[test]
 fn filter_group_with_an_exclusion_still_inherits() {
-    let ast = parse(r#"func and not g"test_*" { "x" }"#).unwrap();
+    let ast = parse(r#"func(inherit=true) and not g"test_*" { "x" }"#).unwrap();
     let outer: Vec<_> = ast.scope().statements().collect();
     let inner: Vec<_> = outer[0].scope().statements().collect();
     let child: Vec<String> = inner[0]
