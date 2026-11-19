@@ -13,12 +13,12 @@ pub mod stats;
 
 pub use index_impl::{
     eph_pool_manager_config, layer_shard_hash, purge_eph_cache, selection_shard_hash,
-    ContainmentEdge, EphInstanceRow, EphLayerKind, EphLayerMeta, EphRefRow, EphScopedFut,
-    EphSymbolRow, EphTransaction, FamilyDemand, FamilyDemands, ImplicitEdge, Index, LayerBatch,
-    LayerOutcome, MaterialisedLayer, NameSuggestionRow, ProbeOutcome, ProbeRole,
+    setup_pool_session, ContainmentEdge, EphInstanceRow, EphLayerKind, EphLayerMeta, EphRefRow,
+    EphScopedFut, EphSymbolRow, EphTransaction, FamilyDemand, FamilyDemands, ImplicitEdge, Index,
+    LayerBatch, LayerOutcome, MaterialisedLayer, NameSuggestionRow, ProbeOutcome, ProbeRole,
     ResolvedSourceFile, RootShardRef, ScopeContext, SearchMatchRow, ShardRole, DEFAULT_READ_CAP,
     DEFAULT_SQL_CACHE_BYTES, DFS_STRIDE, EPH_POOL_IDLE_IN_TXN_TIMEOUT, EPH_POOL_RECYCLING_QUERY,
-    PROBE_ROLE_ROWS_PER_CAP,
+    POOL_PLAN_CACHE_MODE, PROBE_ROLE_ROWS_PER_CAP,
 };
 pub use mixins::{
     CompositeFilter, CompoundNameMixin, CurrentQuery, DefaultSymbolTypeMixin, DirectOnlyMixin,

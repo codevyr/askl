@@ -1486,3 +1486,44 @@ async fn symbol_instances_page_with_a_cursor_and_count_exactly() -> anyhow::Resu
     assert_eq!(index.count_symbol_instances(999_999, &eph).await?, 0);
     Ok(())
 }
+
+/// A PLAN IS MADE FOR THE VALUES IT IS GIVEN: every session a pool opens
+/// plans each execution anew.  Left to Postgres, a statement's sixth run on a
+/// connection reuses one plan costed for ten-element arrays, and
+/// `find_edges_between` over 1,571 instances took 2,090 ms where it takes 239.
+#[tokio::test(flavor = "current_thread")]
+async fn a_pooled_session_plans_for_the_values_it_is_given() -> anyhow::Result<()> {
+    use crate::db_diesel::{eph_pool_manager_config, POOL_PLAN_CACHE_MODE};
+    use diesel_async::pooled_connection::{bb8::Pool, AsyncDieselConnectionManager};
+    use diesel_async::{AsyncPgConnection, RunQueryDsl};
+
+    #[derive(diesel::QueryableByName)]
+    struct Setting {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        value: String,
+    }
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+
+    let manager = AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(
+        &url,
+        eph_pool_manager_config(),
+    );
+    let pool = Pool::builder().max_size(1).build(manager).await?;
+    let mut conn = pool.get().await?;
+
+    let plan: Setting = diesel::sql_query("SELECT current_setting('plan_cache_mode') AS value")
+        .get_result(&mut conn)
+        .await?;
+    assert_eq!(plan.value, POOL_PLAN_CACHE_MODE);
+
+    // The setting it shares a round trip with is still made.
+    let idle: Setting =
+        diesel::sql_query("SELECT current_setting('idle_in_transaction_session_timeout') AS value")
+            .get_result(&mut conn)
+            .await?;
+    assert_eq!(idle.value, "1min");
+    Ok(())
+}

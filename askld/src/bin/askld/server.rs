@@ -110,8 +110,8 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
 
     // Async pool for Index queries (with statement_timeout).  Starts from
     // the shared eph config but overrides custom_setup to ALSO set the
-    // per-query statement_timeout; the idle-in-transaction timeout must be
-    // re-applied here because a replaced custom_setup does not compose.
+    // per-query statement_timeout; the shared session settings are applied
+    // again here because a replaced custom_setup does not compose.
     let query_timeout_secs = serve_args.query_timeout;
     let query_timeout_ms = query_timeout_secs * 1000;
     let mut index_pool_config = index::db_diesel::eph_pool_manager_config();
@@ -124,15 +124,7 @@ pub async fn run(serve_args: ServeArgs) -> std::io::Result<()> {
             )
             .await
             .map_err(diesel::ConnectionError::CouldntSetupConfiguration)?;
-            diesel_async::RunQueryDsl::<AsyncPgConnection>::execute(
-                diesel::sql_query(&format!(
-                    "SET idle_in_transaction_session_timeout = '{}'",
-                    index::db_diesel::EPH_POOL_IDLE_IN_TXN_TIMEOUT
-                )),
-                &mut conn,
-            )
-            .await
-            .map_err(diesel::ConnectionError::CouldntSetupConfiguration)?;
+            index::db_diesel::setup_pool_session(&mut conn).await?;
             Ok(conn)
         }
         .boxed()
