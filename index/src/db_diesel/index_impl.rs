@@ -2099,6 +2099,38 @@ impl Index {
         Ok(!rows.is_empty())
     }
 
+    /// The distinct names of the symbols `filter` matches, sorted.
+    ///
+    /// For messages, not for selections: the caller passes an id leaf over
+    /// instances it already holds and wants to say what they are.  Bounded
+    /// like every other read.
+    pub async fn symbol_names_matching(
+        &self,
+        filter: &CompositeFilter,
+        eph: &EphContext,
+    ) -> Result<Vec<String>> {
+        let chain_dependent = filter.is_chain_dependent();
+        let read_limit: i64 = match eph.read_cap() {
+            0 => i64::MAX,
+            c => c as i64 + 1,
+        };
+        let rows: Vec<(Symbol, SymbolInstance, Object, Project)> = self
+            .cached_load_partitioned(eph, chain_dependent, |vis| {
+                let mut q = build_current_query(vis);
+                if let Some(expr) = filter.compose_current(vis) {
+                    q = q.filter(expr);
+                }
+                q.filter(vis.guard()).limit(read_limit)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to read symbol names: {}", e))?;
+        let names: std::collections::BTreeSet<String> = rows
+            .into_iter()
+            .map(|(symbol, _, _, _)| symbol.name)
+            .collect();
+        Ok(names.into_iter().collect())
+    }
+
     pub async fn find_symbol(
         &self,
         filter: &CompositeFilter,

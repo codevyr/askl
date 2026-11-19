@@ -21,9 +21,9 @@ pub use index_impl::{
 };
 pub use mixins::{
     CompositeFilter, CompoundNameMixin, CurrentQuery, DefaultSymbolTypeMixin, DirectOnlyMixin,
-    ExactNameMixin, FilterLeaf, FullNameGlobMixin, GlobNameMixin, GlobPiece, InnermostOnlyMixin,
-    LeafNameMixin, OuterParentFilterMixin, PackageDescendantLeaf, ProjectFilterMixin,
-    SymbolInstanceIdMixin, SymbolTypeMixin, TraversalMode, INSTANCE_TYPE_BUILD,
+    ExactNameMixin, FilterLeaf, FoldedOnlyMixin, FullNameGlobMixin, GlobNameMixin, GlobPiece,
+    InnermostOnlyMixin, LeafNameMixin, OuterParentFilterMixin, PackageDescendantLeaf,
+    ProjectFilterMixin, SymbolInstanceIdMixin, SymbolTypeMixin, TraversalMode, INSTANCE_TYPE_BUILD,
     INSTANCE_TYPE_CONTAINMENT, INSTANCE_TYPE_DECLARATION, INSTANCE_TYPE_DEFINITION,
     INSTANCE_TYPE_DOCUMENTATION, INSTANCE_TYPE_EXPANSION, INSTANCE_TYPE_FILE, INSTANCE_TYPE_HEADER,
     INSTANCE_TYPE_SENTINEL, INSTANCE_TYPE_SOURCE, SYMBOL_TYPE_CONTENT, SYMBOL_TYPE_DATA,

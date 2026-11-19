@@ -5867,6 +5867,62 @@ fn hidden_children_are_not_an_incomplete_answer() {
 }
 
 #[test]
+fn what_was_left_out_is_counted_by_name() {
+    // "A listing that passes over a folded symbol says so."  Twelve are left
+    // out here; three are named and the rest counted.
+    let said = |res: &crate::statement::ExecutionResult| -> Vec<String> {
+        res.warnings
+            .iter()
+            .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::LeftOut)
+            .map(|w| w.message.clone())
+            .collect()
+    };
+    assert_eq!(
+        said(&run_query(TEST_INPUT_HIDDEN_CHILDREN, r#""GEN" { }"#)),
+        vec![
+            "`{ }` leaves out 12 folded (macro-generated) symbols: `hid_1`, `hid_10`, \
+             `hid_11` and 9 more. Add `unnest` to list them, or name one"
+        ]
+    );
+    // Containment says it too.
+    assert_eq!(
+        said(&run_query(TEST_INPUT_HIDDEN_CHILDREN, r#""host" { }"#)),
+        vec![
+            "`{ }` leaves out 12 folded (macro-generated) symbols: `g_1`, `g_10`, `g_11` \
+             and 9 more. Add `unnest` to list them, or name one"
+        ]
+    );
+    // The read that finds them is bounded like any other, and says so.
+    assert_eq!(
+        said(&run_query_with_read_cap(
+            TEST_INPUT_HIDDEN_CHILDREN,
+            r#""GEN" { }"#,
+            3
+        )),
+        vec![
+            "`{ }` leaves out at least 4 folded (macro-generated) symbols: `hid_1`, \
+             `hid_2`, `hid_3` and more. Add `unnest` to list them, or name one"
+        ]
+    );
+    // Nothing folded under `wide`.
+    assert!(said(&run_query(TEST_INPUT_HIDDEN_CHILDREN, r#""wide" { }"#)).is_empty());
+    // A listing that was itself cut is not read a second time: it stopped
+    // early, and its complement could not.  It says "incomplete" instead.
+    // `GEN` and `wide` together list thirteen and leave out twelve.
+    let both = r#""GEN" "wide" { }"#;
+    assert_eq!(said(&run_query(TEST_INPUT_HIDDEN_CHILDREN, both)).len(), 1);
+    let cut = run_query_with_read_cap(TEST_INPUT_HIDDEN_CHILDREN, both, 3);
+    assert!(said(&cut).is_empty(), "{:?}", cut.warnings);
+    assert!(
+        cut.warnings
+            .iter()
+            .any(|w| w.message.contains("this part of the graph is incomplete")),
+        "{:?}",
+        cut.warnings
+    );
+}
+
+#[test]
 fn a_family_nobody_reads_is_not_an_incomplete_answer() {
     // `wide` refers to twelve listed symbols.  Under a budget its own children
     // read stops at 8 rows, but nothing reads those rows: the `{ }` below

@@ -707,3 +707,70 @@ fn nested_upward_returns_only_the_immediate_container() {
         "dir_root is three levels up"
     );
 }
+
+/// The messages of the "left out" warnings a query produced.
+fn left_out(input: &str, query: &str) -> Vec<String> {
+    run_query(input, query)
+        .warnings
+        .iter()
+        .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::LeftOut)
+        .map(|w| w.message.clone())
+        .collect()
+}
+
+#[test]
+fn a_listing_says_what_it_left_out() {
+    // "A listing that passes over a folded symbol says so."
+    //
+    // `func_a { }` lists macro_m and data_d and not data_macro_only.  Nothing
+    // said so: the answer read as "this is everything in func_a", and when
+    // the one callee of a function is generated, as "this function calls
+    // nothing".
+    assert_eq!(
+        left_out(TEST_INPUT_TYPE_FILTER, r#"func("func_a") {}"#),
+        vec![
+            "`{}` leaves out 1 folded (macro-generated) symbol: `data_macro_only`. Add \
+             `unnest` to list it, or name it"
+        ]
+    );
+    // Upward the same: gen_g holds data_g and is passed over.
+    assert_eq!(
+        left_out(TEST_INPUT_TYPE_FILTER, r#"{ "data_g" }"#),
+        vec![
+            "`{ \"data_g\" }` leaves out 1 folded (macro-generated) symbol: `gen_g`. Add \
+             `unnest` to list it, or name it"
+        ]
+    );
+    // Only what the statement would otherwise have listed: `gen_g` is a
+    // function, so a listing of data did not leave it out.
+    assert_eq!(
+        left_out(TEST_INPUT_TYPE_FILTER, r#"func("func_b") { data }"#),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        left_out(TEST_INPUT_TYPE_FILTER, r#"func("func_b") { func }"#).len(),
+        1
+    );
+}
+
+#[test]
+fn a_listing_that_left_nothing_out_says_nothing() {
+    // `unnest` lists the folded symbols, so nothing is left out.
+    for query in [
+        r#"func("func_a") { unnest }"#,
+        r#"unnest { "data_g" }"#,
+        // A statement that names what it wants lists it folded or not.
+        r#"func("func_a") { "data_macro_only" }"#,
+        r#""gen_g" { "data_g" }"#,
+        // `nested` asks about depth, and folding plays no part in it.
+        r#"func("func_a") { nested }"#,
+        // Nothing folded sits under data_d.
+        r#"{ "data_d" }"#,
+    ] {
+        assert_eq!(
+            left_out(TEST_INPUT_TYPE_FILTER, query),
+            Vec::<String>::new(),
+            "{query}"
+        );
+    }
+}

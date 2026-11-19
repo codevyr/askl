@@ -14,8 +14,8 @@ use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::FamilyDemands;
 use index::db_diesel::{
-    CompositeFilter, EphContext, Index, InnermostOnlyMixin, ScopeContext, Selection,
-    SymbolInstanceIdMixin, TraversalMode,
+    CompositeFilter, EphContext, FoldedOnlyMixin, Index, InnermostOnlyMixin, ScopeContext,
+    Selection, SymbolInstanceIdMixin, TraversalMode,
 };
 use index::symbols::SymbolInstanceId;
 use sha2::{Digest, Sha256};
@@ -674,6 +674,7 @@ impl Command {
         let mut changed = false;
         let mut warnings = vec![];
         let mut derive_cap_warned = false;
+        let mut left_out_said = false;
         let selector_filters: Vec<&dyn Filter> = self.filters().collect();
         let mut derivation_ids = None;
         for selector in self.selectors() {
@@ -788,6 +789,48 @@ impl Command {
                 )));
             }
 
+            // "A listing that passes over a folded symbol says so": the same
+            // read with the listing filter's complement, once per statement,
+            // and only when the listing itself was not cut (see
+            // `accept_notification`).
+            if mode == TraversalMode::Unfolded && !left_out_said && !selection.cut() {
+                left_out_said = true;
+                let mut find_parts = vec![CompositeFilter::leaf(FoldedOnlyMixin::new())];
+                find_parts.extend(
+                    selector_filters
+                        .iter()
+                        .filter_map(|f| f.get_composite_filter(&ctx.eph)),
+                );
+                let to_pest = |e: anyhow::Error| {
+                    pest::error::Error::new_from_span(
+                        pest::error::ErrorVariant::CustomError {
+                            message: format!("Failed to read what a listing left out: {}", e),
+                        },
+                        selector.span(),
+                    )
+                };
+                let found = index
+                    .find_parent_instance_ids(
+                        &dependency.get_instance_ids(),
+                        rel_type.contains(RelationshipType::REFS),
+                        rel_type.contains(RelationshipType::HAS),
+                        &CompositeFilter::and(find_parts),
+                        &ctx.eph,
+                    )
+                    .await
+                    .map_err(to_pest)?;
+                let left_out = crate::verb::LeftOut::named(index, found, &ctx.eph)
+                    .await
+                    .map_err(to_pest)?;
+                if let Some(left_out) = left_out {
+                    warnings.push(Diagnostic::left_out(
+                        Span::from_pest(selector.span(), self.span().input()),
+                        &left_out.names,
+                        left_out.at_least,
+                    ));
+                }
+            }
+
             let changed_here = selector_state_with(&mut ctx.registry, selector, |state| {
                 state.set_selection_reporting_change(Some(selection))
             });
@@ -817,6 +860,7 @@ impl Command {
 
         let mut changed = false;
         let mut derive_cap_warned = false;
+        let mut left_out_said = false;
         let mut warnings = vec![];
         let selector_filters: Vec<&dyn Filter> = self.filters().collect();
         let notifier_labels = if notif_ctx.role == DependencyRole::User {
@@ -902,6 +946,39 @@ impl Command {
                     selector.span(),
                     self.span().input(),
                 )));
+            }
+            // "A listing that passes over a folded symbol says so."  Asked
+            // only where a listing was derived, so a statement that named its
+            // children -- and so listed them folded or not -- says nothing.
+            //
+            // And only of a listing that was not cut.  A complete listing read
+            // its parents' whole fan-out, so reading it once more for the
+            // complement costs the same again; a cut one stopped early, and
+            // its complement would have to read on through everything the
+            // limit spared it.  That answer already says it is incomplete.
+            if selection.as_ref().is_some_and(|sel| !sel.cut())
+                && notif_ctx.role == DependencyRole::Child
+                && !left_out_said
+            {
+                let left_out = selector
+                    .left_out_of_parent(ctx, index, &selector_filters, notifier, &notif_ctx)
+                    .await
+                    .map_err(|e| {
+                        pest::error::Error::new_from_span(
+                            pest::error::ErrorVariant::CustomError {
+                                message: format!("Failed to read what a listing left out: {}", e),
+                            },
+                            selector.span(),
+                        )
+                    })?;
+                if let Some(left_out) = left_out {
+                    left_out_said = true;
+                    warnings.push(Diagnostic::left_out(
+                        Span::from_pest(selector.span(), self.span().input()),
+                        &left_out.names,
+                        left_out.at_least,
+                    ));
+                }
             }
             let changed_here = selector_state_with(&mut ctx.registry, selector, |state| {
                 state.set_selection_reporting_change(selection)

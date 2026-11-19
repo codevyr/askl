@@ -57,6 +57,11 @@ separate statements; a `{` must be on the same line as its verb to attach.
   one level down.  The mode goes **inside** the braces, on the statement whose
   reach it bounds (upward: `unnest { "x" }`), and does not inherit.
 - Naming a symbol always finds it, folded or not: `X { "__compiletime_assert_7" }`.
+- A listing that passed over folded symbols says so in `warnings`: "`{ }` leaves
+  out 1 folded (macro-generated) symbol: `__se_sys_read`. Add `unnest` …".
+  Heed it in a call chain: a generated function nobody names breaks the chain
+  there (`"__x64_sys_read" { }` lists no callee), and `unnest` on that
+  statement shows the hop.  A listing a limit cut says "incomplete" instead.
 - **Macros (C).** Using a macro is an edge from whoever typed the use:
   `f -> BUILD_BUG_ON`. What is typed in a macro's arguments belongs to that
   same function, not to a declaration the macro generated
