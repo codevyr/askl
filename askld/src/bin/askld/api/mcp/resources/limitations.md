@@ -10,6 +10,12 @@
 - **Static edges.** Call/reference edges come from static analysis. Indirect
   calls (function pointers, virtual dispatch) may be missing; `field`/`method`
   and `!forced` help model dispatch, but coverage is not guaranteed.
+- **One name is one symbol (C).** Every driver's `DEVICE_NAME` and every
+  module's `init_module` is the same node. The report shows such a symbol at
+  the definition nearest to whoever led to it and marks the choice:
+  `(1 of 47 definitions)`. That is exact when a definition is in the file
+  that refers to it and a guess otherwise, and a path through such a node
+  (`a -> DEVICE_NAME -> b`) may join two unrelated files.
 - **`search()` is literal.** No regex — the query matches an exact byte sequence.
 - **A `search()` match has one place.** Text inside a macro invocation that
   generated several declarations is reported under one of them. Scope by the
