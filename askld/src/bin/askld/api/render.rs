@@ -8,7 +8,8 @@
 //! Direction is uniform: a reference edge is printed `from → to` meaning "from
 //! references/calls to", and a containment edge `parent ▸ child`. A single
 //! well-understood convention avoids the ambiguity of guessing a query's
-//! intent (caller vs. callee) from a flat graph.
+//! intent (caller vs. callee) from a flat graph.  The report states the
+//! convention itself, in one line under `# Results`, for the marks it uses.
 
 use askld::line_index::LineIndex;
 use index::symbols::{InstanceType, SymbolId, SymbolType};
@@ -150,6 +151,22 @@ pub fn render_markdown(
         })
         .collect();
     top_level.sort_by(|a, b| ctx.sort_key(a).cmp(&ctx.sort_key(b)));
+
+    // THE REPORT SAYS WHAT ITS MARKS MEAN: the ones it uses, once, before the
+    // first of them.  Two marks hang under a symbol, and nothing in the
+    // answer told a call from a member.
+    let drawn = |kind: fn(&EdgeKind) -> bool| children.values().flatten().any(|(_, k)| kind(k));
+    let mut legend: Vec<&str> = Vec::new();
+    if drawn(|k| matches!(k, EdgeKind::Ref)) {
+        legend.push("`→` refers to");
+    }
+    if drawn(|k| matches!(k, EdgeKind::Has)) {
+        legend.push("`▸` contains");
+    }
+    if !legend.is_empty() {
+        out.push_str(&legend.join(", "));
+        out.push('\n');
+    }
 
     for node in top_level {
         let id = node.id();
@@ -685,6 +702,65 @@ mod tests {
         // g should not also appear as its own top-level line
         let top_level_g = md.lines().any(|l| l.starts_with("g  (func)"));
         assert!(!top_level_g, "g should only appear as a child:\n{md}");
+    }
+
+    /// THE REPORT SAYS WHAT ITS MARKS MEAN -- the ones it uses, once, before
+    /// the first of them.  A reader met `→` and `▸` under one symbol with
+    /// nothing to tell a call from a member.
+    #[test]
+    fn the_report_explains_the_marks_it_uses() {
+        let (src, start, end) = body_source();
+        let function = |id: i64, label: &str| {
+            node(
+                id,
+                label,
+                vec![inst(
+                    "10",
+                    start,
+                    end,
+                    SymbolType::Function,
+                    InstanceType::Definition,
+                )],
+            )
+        };
+
+        // Nothing drawn, nothing to explain.
+        let mut alone = Graph::new();
+        obj(&mut alone, "10", "/a.c");
+        alone.add_node(function(1, "f"));
+        let md = render_markdown("\"f\"", &alone, &src, Projection::Names);
+        assert!(
+            !md.contains("refers to") && !md.contains("contains"),
+            "{md}"
+        );
+
+        // A reference only: `▸` is not in the report, so not in its legend.
+        let mut refs = Graph::new();
+        obj(&mut refs, "10", "/a.c");
+        refs.add_node(function(1, "f"));
+        refs.add_node(function(2, "g"));
+        refs.add_edge(crate::api::types::Edge::new(
+            SymbolId(1),
+            SymbolId(2),
+            1,
+            Vec::new(),
+        ));
+        let md = render_markdown("\"f\" { }", &refs, &src, Projection::Names);
+        assert!(md.contains("# Results\n`→` refers to\n"), "{md}");
+
+        // Both kinds, each from its own pair.
+        refs.add_node(function(3, "h"));
+        refs.add_has_edge(crate::api::types::HasEdge::new(
+            SymbolId(1),
+            SymbolId(3),
+            index::symbols::SymbolInstanceId::new(1),
+            index::symbols::SymbolInstanceId::new(3),
+        ));
+        let md = render_markdown("\"f\" { }", &refs, &src, Projection::Names);
+        assert!(
+            md.contains("# Results\n`→` refers to, `▸` contains\n"),
+            "{md}"
+        );
     }
 
     #[test]
