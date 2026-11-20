@@ -181,12 +181,13 @@ pub fn render_markdown(
         if let Some(kids) = children.get(&id) {
             let mut kids = kids.clone();
             kids.sort_by(|(a, ka), (b, kb)| {
-                kind_rank(*ka)
-                    .cmp(&kind_rank(*kb))
-                    .then_with(|| ctx.target_sort_key(*a).cmp(&ctx.target_sort_key(*b)))
+                kind_rank(*ka).cmp(&kind_rank(*kb)).then_with(|| {
+                    ctx.target_sort_key(id, *a)
+                        .cmp(&ctx.target_sort_key(id, *b))
+                })
             });
             for (target, kind) in kids {
-                out.push_str(&ctx.child_line(target, kind));
+                out.push_str(&ctx.child_line(id, target, kind));
                 out.push('\n');
             }
         }
@@ -203,6 +204,38 @@ struct RenderCtx<'a> {
     /// object_id -> raw content.
     sources: &'a SourceMap,
     nodes_by_id: HashMap<SymbolId, &'a Node>,
+    /// (parent, child) -> how the parent led to the child.
+    pair_lead: HashMap<(SymbolId, SymbolId), Lead<'a>>,
+    /// Symbol -> how the result led to it, from everywhere.
+    own_lead: HashMap<SymbolId, Lead<'a>>,
+}
+
+/// How the result reached a symbol: what says which of its instances is meant.
+#[derive(Default)]
+struct Lead<'a> {
+    /// Instances a containment edge names.  Exact.
+    instances: Vec<&'a str>,
+    /// Files whose text refers to the symbol.
+    objects: Vec<&'a str>,
+}
+
+/// The instance a symbol is shown at, and what to say about the others.
+struct Shown<'n> {
+    inst: &'n NodeSymbolInstance,
+    /// "(1 of 47 definitions)" when the instance was a choice among several.
+    others: Option<String>,
+}
+
+/// How many leading directories two paths share.
+fn shared_dirs(a: &str, b: &str) -> usize {
+    fn dirs(path: &str) -> &str {
+        path.rsplit_once('/').map_or("", |(dir, _)| dir)
+    }
+    dirs(a)
+        .split('/')
+        .zip(dirs(b).split('/'))
+        .take_while(|(x, y)| x == y)
+        .count()
 }
 
 impl<'a> RenderCtx<'a> {
@@ -217,11 +250,61 @@ impl<'a> RenderCtx<'a> {
             .map(|(oid, content)| (oid.as_str(), LineIndex::new(content)))
             .collect();
         let nodes_by_id = graph.nodes.iter().map(|n| (n.id(), n)).collect();
+
+        let mut pair_lead: HashMap<(SymbolId, SymbolId), Lead<'a>> = HashMap::new();
+        let mut own_lead: HashMap<SymbolId, Lead<'a>> = HashMap::new();
+        // Where a symbol's own references are written: what is left to go
+        // by for one that nothing in the result refers to.
+        let mut written_in: HashMap<SymbolId, Vec<&'a str>> = HashMap::new();
+        for edge in &graph.edges {
+            let files = edge.from_objects().iter().map(String::as_str);
+            pair_lead
+                .entry((edge.from(), edge.to()))
+                .or_default()
+                .objects
+                .extend(files.clone());
+            // A symbol's reference to itself says where it is, not who led
+            // to it.
+            if edge.from() != edge.to() {
+                own_lead
+                    .entry(edge.to())
+                    .or_default()
+                    .objects
+                    .extend(files.clone());
+            }
+            written_in.entry(edge.from()).or_default().extend(files);
+        }
+        for he in &graph.has_edges {
+            pair_lead
+                .entry((he.parent(), he.child()))
+                .or_default()
+                .instances
+                .push(he.child_instance());
+            own_lead
+                .entry(he.child())
+                .or_default()
+                .instances
+                .push(he.child_instance());
+            own_lead
+                .entry(he.parent())
+                .or_default()
+                .instances
+                .push(he.parent_instance());
+        }
+        for (symbol, files) in written_in {
+            let lead = own_lead.entry(symbol).or_default();
+            if lead.objects.is_empty() {
+                lead.objects = files;
+            }
+        }
+
         RenderCtx {
             paths,
             lines,
             sources,
             nodes_by_id,
+            pair_lead,
+            own_lead,
         }
     }
 
@@ -264,7 +347,11 @@ impl<'a> RenderCtx<'a> {
 
     /// Deterministic ordering key for a node: (path, line, label).
     fn sort_key(&self, node: &Node) -> (String, usize, String) {
-        match self.primary(node) {
+        self.sort_key_at(node, self.shown(node, self.own_lead.get(&node.id())))
+    }
+
+    fn sort_key_at(&self, node: &Node, shown: Option<Shown<'_>>) -> (String, usize, String) {
+        match shown.map(|s| s.inst) {
             Some(inst) => {
                 let oid = inst.object_id.as_str();
                 let path = self.paths.get(oid).copied().unwrap_or("").to_string();
@@ -279,10 +366,14 @@ impl<'a> RenderCtx<'a> {
         }
     }
 
-    /// Owned ordering key for an edge target (looked up by id).
-    fn target_sort_key(&self, target: SymbolId) -> (String, usize, String) {
+    /// Owned ordering key for an edge target (looked up by id), as it is
+    /// shown under `parent`.
+    fn target_sort_key(&self, parent: SymbolId, target: SymbolId) -> (String, usize, String) {
         match self.nodes_by_id.get(&target) {
-            Some(node) => self.sort_key(node),
+            Some(node) => self.sort_key_at(
+                node,
+                self.shown(node, self.pair_lead.get(&(parent, target))),
+            ),
             None => (String::new(), 0, format!("#{}", target.0)),
         }
     }
@@ -294,18 +385,91 @@ impl<'a> RenderCtx<'a> {
             .unwrap_or(false)
     }
 
-    /// Prefer a definition, then a declaration, then any instance.
-    fn primary<'n>(&self, node: &'n Node) -> Option<&'n NodeSymbolInstance> {
+    /// A SYMBOL IS SHOWN AT THE DEFINITION NEAREST TO WHOEVER LED TO IT, AND
+    /// SAYS HOW MANY THERE ARE.
+    ///
+    /// One name is one symbol, however many files define it: the kernel has
+    /// 47 `DEVICE_NAME`s and 9,714 `init_module`s.  A report line has room
+    /// for one place.  It used to be the first definition in the list, so a
+    /// driver "referred to" another driver's macro, at a different place on
+    /// the next run.
+    ///
+    /// What led here says which one is meant:
+    ///   - a containment edge names the instance it holds, exactly;
+    ///   - a reference is written in some files, and the definition in one of
+    ///     them is the one in sight there; failing that, the definition that
+    ///     shares the most directories with them (a driver's own header
+    ///     before a namesake across the tree).
+    ///
+    /// Nearest is a guess where no file matches -- which definition a
+    /// reference resolves to is not in the index -- so a choice among several
+    /// is always labelled as one.  With nothing to go by, the first by path:
+    /// the same every time.
+    ///
+    /// A definition is preferred to a declaration and a declaration to
+    /// anything else, as before.
+    fn shown<'n>(&self, node: &'n Node, lead: Option<&Lead<'_>>) -> Option<Shown<'n>> {
         let insts = node.instances();
-        insts
+        let path =
+            |i: &NodeSymbolInstance| self.paths.get(i.object_id.as_str()).copied().unwrap_or("");
+        let order = |i: &&'n NodeSymbolInstance| (path(i), i.start_offset, i.id.as_str());
+
+        if let Some(lead) = lead {
+            let held = insts
+                .iter()
+                .filter(|i| lead.instances.contains(&i.id.as_str()))
+                .min_by_key(order);
+            if let Some(inst) = held {
+                return Some(Shown { inst, others: None });
+            }
+        }
+
+        let class = [InstanceType::Definition, InstanceType::Declaration]
+            .into_iter()
+            .find(|class| insts.iter().any(|i| i.instance_type == *class));
+        let candidates: Vec<&'n NodeSymbolInstance> = insts
             .iter()
-            .find(|i| i.instance_type == InstanceType::Definition)
-            .or_else(|| {
-                insts
-                    .iter()
-                    .find(|i| i.instance_type == InstanceType::Declaration)
-            })
-            .or_else(|| insts.first())
+            .filter(|i| class.is_none_or(|class| i.instance_type == class))
+            .collect();
+
+        let files: &[&str] = lead.map(|l| l.objects.as_slice()).unwrap_or(&[]);
+        let file_paths: Vec<&str> = files
+            .iter()
+            .filter_map(|object| self.paths.get(object).copied())
+            .collect();
+        let distance = |i: &NodeSymbolInstance| {
+            if files.contains(&i.object_id.as_str()) {
+                return 0;
+            }
+            let shared = file_paths
+                .iter()
+                .map(|file| shared_dirs(path(i), file))
+                .max()
+                .unwrap_or(0);
+            usize::MAX - shared
+        };
+        let inst = candidates
+            .iter()
+            .copied()
+            .min_by_key(|i| (distance(i), order(i)))?;
+
+        let others = match class {
+            Some(class) if candidates.len() > 1 => {
+                let what = match class {
+                    InstanceType::Definition => "definitions",
+                    _ => "declarations",
+                };
+                // A list the instance cap cut is not a count of them.
+                let at_least = if node.instances_truncated() {
+                    "at least "
+                } else {
+                    ""
+                };
+                Some(format!("(1 of {at_least}{} {what})", candidates.len()))
+            }
+            _ => None,
+        };
+        Some(Shown { inst, others })
     }
 
     fn location(&self, inst: &NodeSymbolInstance) -> String {
@@ -354,7 +518,7 @@ impl<'a> RenderCtx<'a> {
     }
 
     fn node_line(&self, node: &Node, projection: Projection) -> String {
-        let Some(inst) = self.primary(node) else {
+        let Some(Shown { inst, others }) = self.shown(node, self.own_lead.get(&node.id())) else {
             return node.label().to_string();
         };
         let mut line = format!(
@@ -363,6 +527,9 @@ impl<'a> RenderCtx<'a> {
             type_abbr(inst.symbol_type),
             self.location(inst),
         );
+        if let Some(others) = others {
+            line.push_str(&format!("  {others}"));
+        }
         if matches!(projection, Projection::Signature | Projection::Body) {
             if let Some(sig) = self.signature(inst) {
                 line.push_str(&format!("\n    {sig}"));
@@ -392,7 +559,11 @@ impl<'a> RenderCtx<'a> {
             })
             .collect();
         if parts.is_empty() {
-            parts = self.primary(node).into_iter().collect();
+            parts = self
+                .shown(node, self.own_lead.get(&node.id()))
+                .map(|shown| shown.inst)
+                .into_iter()
+                .collect();
         }
         parts.sort_by_key(|i| {
             (
@@ -418,11 +589,17 @@ impl<'a> RenderCtx<'a> {
         (!body.is_empty()).then_some((lang, body))
     }
 
-    fn child_line(&self, target: SymbolId, kind: EdgeKind) -> String {
+    fn child_line(&self, parent: SymbolId, target: SymbolId, kind: EdgeKind) -> String {
         match self.nodes_by_id.get(&target) {
             Some(node) => {
-                let (ty, loc) = match self.primary(node) {
-                    Some(inst) => (type_abbr(inst.symbol_type), self.location(inst)),
+                let (ty, loc) = match self.shown(node, self.pair_lead.get(&(parent, target))) {
+                    Some(Shown { inst, others }) => {
+                        let mut loc = self.location(inst);
+                        if let Some(others) = others {
+                            loc.push_str(&format!("  {others}"));
+                        }
+                        (type_abbr(inst.symbol_type), loc)
+                    }
                     None => ("?", String::new()),
                 };
                 format!("  {} {}  ({})  {}", kind.arrow(), node.label(), ty, loc)
@@ -962,6 +1139,169 @@ mod tests {
         assert!(
             bullet.ends_with("Did you mean: `data(\"module_mutex\")`?"),
             "{bullet}"
+        );
+    }
+
+    /// The child line printed under `parent` for `child`.
+    fn child_line_of<'m>(md: &'m str, parent: &str, child: &str) -> &'m str {
+        let mut lines = md.lines().skip_while(|l| !l.starts_with(parent));
+        lines
+            .next()
+            .unwrap_or_else(|| panic!("no `{parent}` in:\n{md}"));
+        lines
+            .take_while(|l| l.starts_with("  "))
+            .find(|l| l.contains(child))
+            .unwrap_or_else(|| panic!("no `{child}` under `{parent}` in:\n{md}"))
+    }
+
+    /// A SYMBOL IS SHOWN AT THE DEFINITION NEAREST TO WHOEVER LED TO IT, AND
+    /// SAYS HOW MANY THERE ARE.
+    ///
+    /// C has one `DEVICE_NAME` per driver and the index has one symbol for
+    /// the name, with 47 definitions.  The report printed whichever came
+    /// first, so `bt_bmc_probe` in `bt-bmc.c` "referred to" the
+    /// `DEVICE_NAME` of a USB sound card, at another place on the next run,
+    /// and nothing said there was more than one.
+    ///
+    /// The edge knows which files its references are written in.  The
+    /// definition in one of those files is the one meant; failing that, the
+    /// one that shares the most directories with them.
+    #[test]
+    fn a_symbol_is_shown_at_the_definition_nearest_to_whoever_led_to_it() {
+        use crate::api::types::Edge;
+        let src = SourceMap::new();
+        let def = |object: &str, ty| inst(object, 0, 1, ty, InstanceType::Definition);
+        let (func, mac) = (SymbolType::Function, SymbolType::Macro);
+
+        let mut g = Graph::new();
+        obj(&mut g, "10", "/k/drivers/char/ipmi/bt-bmc.c");
+        obj(&mut g, "11", "/k/drivers/hid/hid-udraw-ps3.c");
+        obj(&mut g, "12", "/k/sound/usb/card.c");
+        obj(&mut g, "13", "/k/drivers/char/ipmi/ipmi_si.h");
+        obj(&mut g, "14", "/k/drivers/char/ipmi/kcs_bmc.c");
+        g.add_node(node(1, "bt_bmc_probe", vec![def("10", func)]));
+        g.add_node(node(
+            2,
+            "DEVICE_NAME",
+            vec![def("12", mac), def("11", mac), def("10", mac)],
+        ));
+        g.add_node(node(3, "snd_probe", vec![def("12", func)]));
+        g.add_node(node(4, "kcs_probe", vec![def("14", func)]));
+        g.add_node(node(5, "SI_NAME", vec![def("12", mac), def("13", mac)]));
+        g.add_edge(Edge::new(SymbolId(1), SymbolId(2), 1, vec!["10".into()]));
+        g.add_edge(Edge::new(SymbolId(3), SymbolId(2), 1, vec!["12".into()]));
+        g.add_edge(Edge::new(SymbolId(4), SymbolId(5), 1, vec!["14".into()]));
+        let md = render_markdown("q", &g, &src, Projection::Names);
+
+        // In the file that refers to it -- a different one under each parent.
+        assert_eq!(
+            child_line_of(&md, "bt_bmc_probe", "DEVICE_NAME"),
+            "  → DEVICE_NAME  (macro)  /k/drivers/char/ipmi/bt-bmc.c  (1 of 3 definitions)",
+            "{md}"
+        );
+        assert_eq!(
+            child_line_of(&md, "snd_probe", "DEVICE_NAME"),
+            "  → DEVICE_NAME  (macro)  /k/sound/usb/card.c  (1 of 3 definitions)",
+            "{md}"
+        );
+        // In no such file: the header beside it, not the one across the tree.
+        assert_eq!(
+            child_line_of(&md, "kcs_probe", "SI_NAME"),
+            "  → SI_NAME  (macro)  /k/drivers/char/ipmi/ipmi_si.h  (1 of 2 definitions)",
+            "{md}"
+        );
+        // One definition is the definition: nothing to add.
+        assert!(
+            md.contains("bt_bmc_probe  (func)  /k/drivers/char/ipmi/bt-bmc.c\n"),
+            "{md}"
+        );
+    }
+
+    /// Nobody led to a symbol that was asked for by name.  Its definitions
+    /// are all the answer; the first by path is shown, the same one every
+    /// time, and the count says there are others.
+    #[test]
+    fn a_symbol_nobody_led_to_is_shown_at_its_first_definition() {
+        let src = SourceMap::new();
+        let def = |object: &str| inst(object, 0, 1, SymbolType::Macro, InstanceType::Definition);
+        let mut g = Graph::new();
+        obj(&mut g, "10", "/k/drivers/char/ipmi/bt-bmc.c");
+        obj(&mut g, "11", "/k/drivers/hid/hid-udraw-ps3.c");
+        obj(&mut g, "12", "/k/sound/usb/card.c");
+        g.add_node(node(
+            2,
+            "DEVICE_NAME",
+            vec![def("12"), def("11"), def("10")],
+        ));
+        let md = render_markdown("q", &g, &src, Projection::Names);
+        assert!(
+            md.contains(
+                "DEVICE_NAME  (macro)  /k/drivers/char/ipmi/bt-bmc.c  (1 of 3 definitions)\n"
+            ),
+            "{md}"
+        );
+
+        // A list the instance cap cut is not a count of the definitions.
+        let mut cut = Graph::new();
+        obj(&mut cut, "10", "/k/drivers/char/ipmi/bt-bmc.c");
+        obj(&mut cut, "11", "/k/drivers/hid/hid-udraw-ps3.c");
+        cut.add_node(Node::new(
+            SymbolId(2),
+            "pr_fmt".into(),
+            vec![def("11"), def("10")],
+            Vec::<QueryStatement>::new(),
+            true,
+            1877,
+        ));
+        let md = render_markdown("q", &cut, &src, Projection::Names);
+        assert!(md.contains("(1 of at least 2 definitions)"), "{md}");
+    }
+
+    /// Containment names the instance it holds, so there is nothing to
+    /// choose: every module's `init_module` is one symbol, and the one a file
+    /// contains is the one in that file.
+    #[test]
+    fn a_contained_symbol_is_shown_at_the_instance_that_is_contained() {
+        use crate::api::types::HasEdge;
+        use index::symbols::SymbolInstanceId;
+        let src = SourceMap::new();
+        let decl = |id: &str, object: &str| NodeSymbolInstance {
+            id: id.into(),
+            ..inst(
+                object,
+                0,
+                1,
+                SymbolType::Function,
+                InstanceType::Declaration,
+            )
+        };
+        let mut g = Graph::new();
+        obj(&mut g, "10", "/k/drivers/char/ipmi/bt-bmc.c");
+        obj(&mut g, "11", "/k/drivers/clk/clk-a.c");
+        g.add_node(node(
+            1,
+            "/k/drivers/char/ipmi/bt-bmc.c",
+            vec![NodeSymbolInstance {
+                id: "100".into(),
+                ..inst("10", 0, 1, SymbolType::File, InstanceType::Definition)
+            }],
+        ));
+        g.add_node(node(
+            2,
+            "init_module",
+            vec![decl("201", "11"), decl("202", "10")],
+        ));
+        g.add_has_edge(HasEdge::new(
+            SymbolId(1),
+            SymbolId(2),
+            SymbolInstanceId::new(100),
+            SymbolInstanceId::new(202),
+        ));
+        let md = render_markdown("q", &g, &src, Projection::Names);
+        assert_eq!(
+            child_line_of(&md, "/k/drivers/char/ipmi/bt-bmc.c", "init_module"),
+            "  ▸ init_module  (func)  /k/drivers/char/ipmi/bt-bmc.c",
+            "{md}"
         );
     }
 
