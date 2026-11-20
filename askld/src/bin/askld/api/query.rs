@@ -1,6 +1,7 @@
 use actix_web::http::StatusCode;
 use actix_web::{get, post, web, HttpResponse, Responder};
 use askld::execution_context::ExecutionContext;
+use askld::line_index::LineIndex;
 use askld::offset_range::range_bounds_to_offsets;
 use askld::parser::parse;
 use index::db_diesel::RootLayer;
@@ -162,7 +163,7 @@ pub async fn query(
     // assembles uncapped — it ships no instances, so this costs nothing on
     // the wire.
     let listing = if want_skeleton { Some(0) } else { opts.listing };
-    let result_graph =
+    let mut result_graph =
         match build_result_graph(&data, &req_body, opts.limit, &projects, listing).await {
             Ok(graph) => graph,
             Err(err) => return err.into_http_response(want_markdown),
@@ -178,6 +179,8 @@ pub async fn query(
     let json_graph = if want_skeleton {
         serde_json::to_string(&crate::api::skeleton::to_skeleton(result_graph)).unwrap()
     } else {
+        let sources = fetch_sources(&data, &result_graph).await;
+        say_lines(&mut result_graph, &sources);
         serde_json::to_string_pretty(&result_graph).unwrap()
     };
     if json_graph.len() > MAX_RESPONSE_BYTES {
@@ -519,6 +522,7 @@ pub async fn build_result_graph(
                 instance_type: InstanceType::from(n.symbol_instance.instance_type),
                 start_offset,
                 end_offset,
+                line: None,
             });
         }
 
@@ -543,14 +547,17 @@ pub async fn build_result_graph(
         for inst in &symbol_instances {
             shipped_objects.insert(inst.object_id.clone());
         }
-        result_graph.add_node(Node::new(
-            SymbolId(symbol.id),
-            symbol.name.clone(),
-            symbol_instances,
-            query_stmts,
-            instances_truncated,
-            total_instances,
-        ));
+        result_graph.add_node(
+            Node::new(
+                SymbolId(symbol.id),
+                symbol.name.clone(),
+                symbol_instances,
+                query_stmts,
+                instances_truncated,
+                total_instances,
+            )
+            .of_symbol(SymbolType::from(symbol.symbol_type), symbol.folded),
+        );
     }
 
     result_graph.objects = result_objects
@@ -573,6 +580,13 @@ pub async fn render_graph_markdown(
     graph: &Graph,
     projection: Projection,
 ) -> String {
+    let sources = fetch_sources(data, graph).await;
+    render_markdown(query_text, graph, &sources, projection)
+}
+
+/// The raw bytes of every file the graph names, by object id.  A file whose
+/// content is not stored is left out.
+async fn fetch_sources(data: &AsklData, graph: &Graph) -> SourceMap {
     let mut sources = SourceMap::new();
     for obj in &graph.objects {
         let Ok(id) = obj.object_id.parse::<i32>() else {
@@ -587,11 +601,32 @@ pub async fn render_graph_markdown(
             Ok(bytes) => {
                 sources.insert(obj.object_id.clone(), bytes);
             }
-            Err(err) => debug!("markdown: no content for object {}: {}", obj.object_id, err),
+            Err(err) => debug!("no content for object {}: {}", obj.object_id, err),
         }
     }
+    sources
+}
 
-    render_markdown(query_text, graph, &sources, projection)
+/// THE FULL ANSWER SAYS WHAT THE REPORT SAYS: the line each instance starts
+/// on, from the same bytes and the same table the markdown report reads.
+///
+/// Only the full answer: it is the one-shot shape, for a consumer that will
+/// not come back, and it already names every file whose content this reads.
+/// The skeleton ships no instances.  Reading the contents measured 0-75 ms on
+/// the kernel index (372 files at the top), the difference between this
+/// answer and the markdown one before it.
+fn say_lines(graph: &mut Graph, sources: &SourceMap) {
+    let tables: HashMap<&str, LineIndex> = sources
+        .iter()
+        .map(|(object, content)| (object.as_str(), LineIndex::new(content)))
+        .collect();
+    for node in &mut graph.nodes {
+        for inst in node.instances_mut() {
+            inst.line = tables
+                .get(inst.object_id.as_str())
+                .map(|table| table.line_of(inst.start_offset.max(0) as usize));
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -730,7 +765,73 @@ mod tests {
             instance_type: itype,
             start_offset: off,
             end_offset: off + 1,
+            line: None,
         }
+    }
+
+    /// THE FULL ANSWER SAYS WHAT THE REPORT SAYS: where each instance is, as a
+    /// line.  It gave byte offsets only, and a reader of the JSON had to open
+    /// the source and count newlines to say what the markdown says in every
+    /// row.
+    #[test]
+    fn the_full_answer_says_the_line_of_each_instance() {
+        use index::symbols::InstanceType::{Declaration, Definition};
+        let mut g = Graph::new();
+        g.add_node(Node::new(
+            index::symbols::SymbolId(1),
+            "f".into(),
+            vec![
+                inst("a", Definition, 19),
+                inst("b", Declaration, 6),
+                NodeSymbolInstance {
+                    object_id: "2".into(),
+                    ..inst("c", Declaration, 6)
+                },
+            ],
+            Vec::new(),
+            false,
+            3,
+        ));
+        let mut sources = SourceMap::new();
+        sources.insert(
+            "1".into(),
+            b"hello\nint f(void);\nint f(void) { }\n".to_vec(),
+        );
+        say_lines(&mut g, &sources);
+
+        let json = serde_json::to_value(&g).unwrap();
+        let instances = json["nodes"][0]["symbol_instances"].as_array().unwrap();
+        assert_eq!(instances[0]["line"], 3);
+        assert_eq!(instances[1]["line"], 2);
+        // A file whose content is not there has no line to give: the field is
+        // absent, not zero.
+        assert!(instances[2].get("line").is_none(), "{}", instances[2]);
+    }
+
+    /// ...and what each symbol is: its type, which was only on its instances
+    /// (and so unknown for a node that shipped none), and whether it is
+    /// folded, which was nowhere.
+    #[test]
+    fn a_node_says_its_type_and_whether_it_is_folded() {
+        use index::symbols::InstanceType::Definition;
+        use index::symbols::{SymbolId, SymbolType};
+        let from_instances = Node::new(
+            SymbolId(1),
+            "f".into(),
+            vec![inst("a", Definition, 0)],
+            Vec::new(),
+            false,
+            1,
+        );
+        let json = serde_json::to_value(&from_instances).unwrap();
+        assert_eq!(json["symbol_type"], "Function");
+        assert_eq!(json["folded"], false);
+
+        let bare = Node::new(SymbolId(2), "g".into(), Vec::new(), Vec::new(), false, 0)
+            .of_symbol(SymbolType::Data, true);
+        let json = serde_json::to_value(&bare).unwrap();
+        assert_eq!(json["symbol_type"], "Data");
+        assert_eq!(json["folded"], true);
     }
 
     #[test]

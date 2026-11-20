@@ -37,6 +37,9 @@ pub struct SkeletonNode {
     pub symbol_ids: Vec<String>,
     pub label: String,
     pub symbol_type: Option<SymbolType>,
+    /// Not listed by default (a macro generated it for itself); here because
+    /// the query named it or asked for `unnest`.
+    pub folded: bool,
     /// True for symbols that ARE containers (module/directory/file), read
     /// off the symbol type rather than off instance types, so group-node
     /// rendering needs no instances.
@@ -195,6 +198,7 @@ pub fn to_skeleton(graph: Graph) -> SkeletonGraph {
                 symbol_ids: vec![symbol.clone()],
                 label: node.label().to_string(),
                 symbol_type,
+                folded: node.folded(),
                 is_directory: is_container_type(symbol_type),
                 instance_count,
                 parent_symbol: ctx.clone(),
@@ -350,6 +354,7 @@ mod tests {
             instance_type: InstanceType::Definition,
             start_offset: 0,
             end_offset: 1,
+            line: None,
         }
     }
 
@@ -373,6 +378,34 @@ mod tests {
         g.has_edges = has_edges;
         g.edges = edges;
         g
+    }
+
+    /// The skeleton says whether a symbol is folded, on every node it is
+    /// split into: a client drawing a generated symbol differently needs no
+    /// second request to learn which ones are.
+    #[test]
+    fn a_skeleton_node_says_whether_its_symbol_is_folded() {
+        let g = graph_of(
+            vec![
+                node(
+                    1,
+                    "written",
+                    vec![inst("10", 1, "o1", SymbolType::Function)],
+                ),
+                node(
+                    2,
+                    "generated",
+                    vec![inst("20", 2, "o1", SymbolType::Function)],
+                )
+                .of_symbol(SymbolType::Function, true),
+            ],
+            vec![],
+            vec![],
+        );
+        let sk = to_skeleton(g);
+        let folded = |label: &str| sk.nodes.iter().find(|n| n.label == label).unwrap().folded;
+        assert!(!folded("written"));
+        assert!(folded("generated"));
     }
 
     #[test]

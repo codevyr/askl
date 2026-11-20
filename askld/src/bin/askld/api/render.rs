@@ -546,6 +546,7 @@ mod tests {
             instance_type: it,
             start_offset: start,
             end_offset: end,
+            line: None,
         }
     }
 
