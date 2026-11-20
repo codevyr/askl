@@ -131,11 +131,16 @@ pub fn render_markdown(
             children.entry(from).or_default().push((to, kind));
         }
     };
-    for edge in &graph.edges {
-        record(edge.from(), edge.to(), EdgeKind::Ref);
-    }
+    // A PAIR THAT CONTAINS IS DRAWN `▸`, whatever else relates it.  A
+    // container holds the text of every reference made inside it, so it
+    // "refers to" each member another member uses; that it contains the
+    // member says more and is what `has` asked for.  Containment is recorded
+    // first, and a pair is drawn once.
     for he in &graph.has_edges {
         record(he.parent(), he.child(), EdgeKind::Has);
+    }
+    for edge in &graph.edges {
+        record(edge.from(), edge.to(), EdgeKind::Ref);
     }
 
     // Top-level nodes: any source of an edge, plus any node that is not a
@@ -761,6 +766,54 @@ mod tests {
             md.contains("# Results\n`→` refers to, `▸` contains\n"),
             "{md}"
         );
+    }
+
+    /// A PAIR THAT CONTAINS IS DRAWN `▸`.
+    ///
+    /// A file contains its functions, and it holds the references to them
+    /// too -- every call between two of its functions is text of the file.
+    /// So the pair (file, function) arrives twice, as containment and as a
+    /// reference, and the reference used to be the one drawn:
+    /// `file("bt-bmc.c") has { func }` said "27 contains" and printed 25 of
+    /// them as `→`, which the legend now spells out as "refers to".
+    #[test]
+    fn a_pair_that_contains_is_drawn_as_containment() {
+        let (src, start, end) = body_source();
+        let function = |id: i64, label: &str| {
+            node(
+                id,
+                label,
+                vec![inst(
+                    "10",
+                    start,
+                    end,
+                    SymbolType::Function,
+                    InstanceType::Definition,
+                )],
+            )
+        };
+        let mut g = Graph::new();
+        obj(&mut g, "10", "/a.c");
+        g.add_node(function(1, "outer"));
+        g.add_node(function(2, "member"));
+        g.add_edge(crate::api::types::Edge::new(
+            SymbolId(1),
+            SymbolId(2),
+            1,
+            Vec::new(),
+        ));
+        g.add_has_edge(crate::api::types::HasEdge::new(
+            SymbolId(1),
+            SymbolId(2),
+            index::symbols::SymbolInstanceId::new(1),
+            index::symbols::SymbolInstanceId::new(2),
+        ));
+        let md = render_markdown("\"outer\" { }", &g, &src, Projection::Names);
+        assert!(md.contains("  ▸ member"), "{md}");
+        assert!(!md.contains("→"), "the one pair is containment:\n{md}");
+        // Drawn once, and the legend names only the mark that is drawn.
+        assert_eq!(md.matches("member").count(), 1, "{md}");
+        assert!(md.contains("# Results\n`▸` contains\n"), "{md}");
     }
 
     #[test]
