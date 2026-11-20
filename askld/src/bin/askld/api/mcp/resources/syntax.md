@@ -69,6 +69,10 @@ separate statements; a `{` must be on the same line as its verb to attach.
   a generating macro has an edge from **each** generated function that uses it:
   `KHASH_INIT(x, int, my_hash)` gives `kh_get_x -> my_hash` and
   `kh_put_x -> my_hash`, while `KHASH_INIT` itself is an edge from the file.
+- **`#include` inside a function or an initializer (C).** A dispatcher or
+  table built from a header of `__SYSCALL(0, sys_read)` lines refers to what
+  those lines name: `"x64_sys_call" { func }` lists the system calls.  The
+  header refers to them as well.
 - **A macro leads to what its invocations declared.** `DEFINE_MUTEX(lock)`
   gives `file -> DEFINE_MUTEX -> lock`, not `lock -> DEFINE_MUTEX`; a function
   written `PROFILE_FUNC(int, send, x) { … }` is reached from `PROFILE_FUNC`
