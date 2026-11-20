@@ -34,6 +34,11 @@ pub struct NodeSymbolInstance {
     pub instance_type: InstanceType,
     pub start_offset: i32,
     pub end_offset: i32,
+    /// The line `start_offset` is on, counted from 1: what the markdown report
+    /// prints after the path.  Set in the full JSON answer; absent where the
+    /// file's content is not stored, and in the paged listings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +53,15 @@ pub struct Node {
     #[serde(serialize_with = "symbolid_as_string")]
     id: SymbolId,
     label: String,
+    /// What the symbol is.  Every instance says it too, but a node can ship
+    /// none, and a reader should not have to open one to learn it.
+    #[serde(default)]
+    symbol_type: Option<SymbolType>,
+    /// Not listed by default: nobody wrote this symbol down in normal code
+    /// (a macro generated it for itself).  It is in the answer because the
+    /// query named it or asked for `unnest`.
+    #[serde(default)]
+    folded: bool,
     symbol_instances: Vec<NodeSymbolInstance>,
     query_statements: Vec<QueryStatement>,
     /// True when `symbol_instances` was capped by `instance_cap` — assembly
@@ -76,11 +90,21 @@ impl Node {
         Self {
             id,
             label,
+            symbol_type: symbol_instances.first().map(|i| i.symbol_type),
+            folded: false,
             symbol_instances,
             query_statements,
             instances_truncated,
             total_instances,
         }
+    }
+
+    /// What the symbol's own row says, where there is one: its type (known
+    /// even when no instance is shipped) and whether it is folded.
+    pub fn of_symbol(mut self, symbol_type: SymbolType, folded: bool) -> Self {
+        self.symbol_type = Some(symbol_type);
+        self.folded = folded;
+        self
     }
 
     pub fn id(&self) -> SymbolId {
@@ -95,6 +119,14 @@ impl Node {
         &self.symbol_instances
     }
 
+    pub fn instances_mut(&mut self) -> &mut [NodeSymbolInstance] {
+        &mut self.symbol_instances
+    }
+
+    pub fn folded(&self) -> bool {
+        self.folded
+    }
+
     pub fn query_statements(&self) -> &[QueryStatement] {
         &self.query_statements
     }
@@ -107,10 +139,10 @@ impl Node {
         self.instances_truncated
     }
 
-    /// The node's symbol type, taken from any instance (all instances of a
-    /// symbol share it).  `None` when the node has no instances.
+    /// The node's symbol type: the symbol row's, or any instance's (all
+    /// instances of a symbol share it).  `None` when neither is known.
     pub fn symbol_type(&self) -> Option<SymbolType> {
-        self.symbol_instances.first().map(|i| i.symbol_type)
+        self.symbol_type
     }
 }
 
