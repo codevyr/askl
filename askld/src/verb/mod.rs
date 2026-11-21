@@ -484,6 +484,12 @@ pub struct NotificationContext {
     /// The receiving statement is an echo (`{ }`): it shows what the
     /// notifier's rows relate to and originates nothing of its own.
     pub receiver_is_echo: bool,
+    /// What a probe found for the receiving statement, when one resolved it
+    /// (`ExecutionContext::probe_resolved`): every instance it can have.  A
+    /// statement with no predicate of its own is derived from a neighbour,
+    /// and derives WITHIN this, so it is bounded by what it is and not by
+    /// how much one neighbour reaches.
+    pub within: Option<Vec<i64>>,
 }
 
 /// What kind of anchor a verb contributes (see [`Verb::anchor_kind`]).
@@ -1371,6 +1377,7 @@ pub trait Selector: std::fmt::Debug + Verb {
                 notif_ctx.rel_type.contains(RelationshipType::REFS),
                 notif_ctx.rel_type.contains(RelationshipType::HAS),
                 &find_filter,
+                notif_ctx.within.as_deref(),
                 eph,
             )
             .await
@@ -1450,6 +1457,7 @@ pub trait Selector: std::fmt::Debug + Verb {
                 notif_ctx.rel_type.contains(RelationshipType::REFS),
                 notif_ctx.rel_type.contains(RelationshipType::HAS),
                 &CompositeFilter::and(find_parts),
+                notif_ctx.within.as_deref(),
                 eph,
             )
             .await

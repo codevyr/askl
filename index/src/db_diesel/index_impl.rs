@@ -322,6 +322,15 @@ fn refs_role_cte_body(
     }
 }
 
+/// An id list as an [`InstanceSet`], sorted and deduplicated: the binds are
+/// part of the SQL-cache key, so the same set must render the same way.
+fn canonical_instance_set(ids: &[i64]) -> InstanceSet {
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    InstanceSet::Ids(ids)
+}
+
 /// Resolve a CompositeFilter to instance IDs by running a CurrentQuery.
 ///
 /// Runs in Combined (legacy-visibility) mode through the SQL cache: the
@@ -2988,14 +2997,24 @@ impl Index {
     }
 
     /// Query child instance IDs directly from DB given parent instance IDs.
+    ///
+    /// `within` is what a probe already found for the statement being derived
+    /// (see `ExecutionContext::probe_resolved`): every instance the statement
+    /// can have, at most the cap of them.  The derive then answers "which of
+    /// THESE do the parents hold or refer to", in SQL, so it is bounded by
+    /// what the statement is and not by what one neighbour reaches.  `None`
+    /// when no probe resolved the statement: the read is the neighbour's
+    /// whole side, under the limit.
     pub async fn find_child_instance_ids(
         &self,
         parent_ids: &[i64],
         include_refs: bool,
         include_has: bool,
         filter: &CompositeFilter,
+        within: Option<&[i64]>,
         eph: &EphContext,
     ) -> Result<(Vec<crate::symbols::SymbolInstanceId>, bool)> {
+        let within: Option<InstanceSet> = within.map(canonical_instance_set);
         // Canonical binds: callers pass selection-order ids; the SQL cache
         // keys on rendered binds, so sort+dedup for run-stable keys.
         let mut canonical: Vec<i64> = parent_ids.to_vec();
@@ -3050,6 +3069,9 @@ impl Index {
                         if let Some(expr) = filter.compose_derive_has_children(vis) {
                             q = q.filter(expr);
                         }
+                        if let Some(within) = &within {
+                            q = q.filter(within.holds("contained_instances.id"));
+                        }
                         q.filter(vis.guard()).limit(read_limit)
                     })
                     .await
@@ -3058,10 +3080,13 @@ impl Index {
                     // Fast path: CTE-materialised source set (planner-hint fix).
                     self.cached_load_partitioned(eph, chain_dependent, |vis| {
                         let candidates = has_children_candidates(source_ids.clone(), vis);
-                        let children = build_has_children_query(
+                        let mut children = build_has_children_query(
                             &InstanceSet::Of(candidates.name().clone()),
                             vis,
                         );
+                        if let Some(within) = &within {
+                            children = children.filter(within.holds("contained_instances.id"));
+                        }
                         With::new(
                             vec![candidates],
                             children.filter(vis.guard()).limit(read_limit),
@@ -3130,6 +3155,12 @@ impl Index {
             if let Some(expr) = filter.compose_derive_child(&vis) {
                 references = references.filter(expr);
             }
+            // Both steps stay within what the probe found: the references
+            // read are those naming one of its symbols, so a parent that
+            // refers to everything does not spend the budget on the rest.
+            if let Some(within) = &within {
+                references = references.filter(children_in_scope(within, &vis));
+            }
             let referenced = Relation::new(
                 "referenced",
                 references.select(crate::schema_diesel::symbol_refs::to_symbol),
@@ -3145,6 +3176,9 @@ impl Index {
             if let Some(complete) = referenced.complete_sql() {
                 instances =
                     instances.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&complete));
+            }
+            if let Some(within) = &within {
+                instances = instances.filter(within.holds("symbol_instances.id"));
             }
             let results: std::sync::Arc<Vec<i64>> = self
                 .cached_load(
@@ -3182,8 +3216,12 @@ impl Index {
         include_refs: bool,
         include_has: bool,
         filter: &CompositeFilter,
+        within: Option<&[i64]>,
         eph: &EphContext,
     ) -> Result<(Vec<crate::symbols::SymbolInstanceId>, bool)> {
+        // See `find_child_instance_ids`: what a probe found for the statement
+        // being derived, when one did.
+        let within: Option<InstanceSet> = within.map(canonical_instance_set);
         // Canonical binds: callers pass selection-order ids; the SQL cache
         // keys on rendered binds, so sort+dedup for run-stable keys.
         let mut canonical: Vec<i64> = child_ids.to_vec();
@@ -3231,6 +3269,9 @@ impl Index {
                     if let Some(expr) = filter.compose_derive_parent(vis) {
                         q = q.filter(expr);
                     }
+                    if let Some(within) = &within {
+                        q = q.filter(within.holds("parent_decls.id"));
+                    }
                     q.filter(vis.guard()).limit(read_limit)
                 })
                 .await
@@ -3272,6 +3313,9 @@ impl Index {
                     // predicate (`container_symbols` alias).
                     if let Some(expr) = filter.compose_derive_has_parents(vis) {
                         q = q.filter(expr);
+                    }
+                    if let Some(within) = &within {
+                        q = q.filter(within.holds("container_instances.id"));
                     }
                     q.filter(vis.guard()).limit(read_limit)
                 })

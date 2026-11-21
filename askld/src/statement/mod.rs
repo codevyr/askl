@@ -820,8 +820,18 @@ impl Statement {
                         .all(|s| s.is_non_constraining_selector());
                     let pp = stmt.command().probe_predicate(&ctx.eph);
                     let sc = stmt.command().get_selector_composite_filter(&ctx.eph);
+                    // A statement with no predicate at all (a bare `{ }` with
+                    // no filter in force) admits everything, and is probed
+                    // with exactly that: its neighbours' roles are the whole
+                    // question.  It used to be skipped, so whether the middle
+                    // of `A { { C } }` was ever probed depended on a
+                    // `project(...)` having been written somewhere above it.
                     let cp = if all_non_constraining {
-                        stmt.command().constraint_predicate(&ctx.eph)
+                        Some(
+                            stmt.command()
+                                .constraint_predicate(&ctx.eph)
+                                .unwrap_or_else(|| CompositeFilter::and(vec![])),
+                        )
                     } else {
                         None
                     };
@@ -1887,6 +1897,13 @@ impl Statement {
                 whole_side: false,
             };
 
+            // What a probe found for the parent, if one resolved it: a
+            // derive stays within it (see `NotificationContext::within`).
+            let within: Option<Vec<i64>> = ctx
+                .probe_resolved
+                .get(&statement_key(&dependent.statement))
+                .cloned();
+
             // One constrain per participant.  The FIRST call may find the
             // parent without a selection and derive it from that child
             // alone; every later call sees a selection and constrains it, so
@@ -1909,6 +1926,7 @@ impl Statement {
                         parent_scope.clone(),
                         children_scope.clone(),
                         demands,
+                        within.as_deref(),
                     )
                     .await?;
 
@@ -1940,6 +1958,10 @@ impl Statement {
             rel_type,
             mode: dependent.statement.traversal_mode(),
             receiver_is_echo: is_echo(&dependent.statement),
+            within: ctx
+                .probe_resolved
+                .get(&statement_key(&dependent.statement))
+                .cloned(),
         };
         let parent_scope = build_parent_scope(&dependent.statement, ctx, &ctx.eph);
         let children_scope = build_children_scope(&dependent.statement, ctx, &ctx.eph);
