@@ -700,6 +700,7 @@ impl Command {
                         self.query_statement_span(),
                         notifier,
                         true,
+                        false,
                     )
                 });
             changed |= sel_changed;
@@ -774,8 +775,11 @@ impl Command {
             // carry the read's own signal.  (When the predicate does NOT shrink
             // it, M1's re-read of a cap+1 id set already re-trips the flag; this
             // carry is the case it misses.)
+            //
+            // And what is derived from a cut statement is cut: these are the
+            // parents of the rows the child happens to hold.
             let mut selection = selection;
-            if *derive_capped {
+            if *derive_capped || dependency.cut() {
                 selection.mark_cut();
             }
             // The Phase-R emission sites cannot warn for a derived selection —

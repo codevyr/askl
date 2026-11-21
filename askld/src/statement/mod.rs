@@ -1878,9 +1878,13 @@ impl Statement {
                 .collect();
             scope_ids.sort_unstable();
             scope_ids.dedup();
+            // Only the participants are in it; a sibling that has not
+            // spoken yet is not, so the families read here speak for these
+            // ids and no further.
             let children_scope = ScopeContext::Scope {
                 ids: scope_ids,
                 filter: None,
+                whole_side: false,
             };
 
             // One constrain per participant.  The FIRST call may find the
@@ -1935,6 +1939,7 @@ impl Statement {
             role: dependent.dependency_role.clone(),
             rel_type,
             mode: dependent.statement.traversal_mode(),
+            receiver_is_echo: is_echo(&dependent.statement),
         };
         let parent_scope = build_parent_scope(&dependent.statement, ctx, &ctx.eph);
         let children_scope = build_children_scope(&dependent.statement, ctx, &ctx.eph);

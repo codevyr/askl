@@ -7,7 +7,7 @@ use crate::{
 };
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use index::db_diesel::FamilyDemands;
+use index::db_diesel::{FamilyDemands, FamilyRead};
 use index::{
     db_diesel::{CompositeFilter, EphContext, Index, ParentReference, ScopeContext, Selection},
     models_diesel::SymbolRef,
@@ -278,6 +278,8 @@ impl Selector for UserVerb {
         }
 
         normal_selection.parents = fake_parent_references;
+        // Fabricated in full from the parent's rows, not read under a limit.
+        normal_selection.families.parents = FamilyRead::whole();
 
         Ok(Some(normal_selection))
     }
@@ -305,10 +307,19 @@ impl Selector for UserVerb {
         // For forced parent dependencies, we always derive fake selection.
         if !self.forced || notif_ctx.role != DependencyRole::Child {
             let mut changed = false;
+            let mut warnings = vec![];
+            let span = Span::from_pest(self.span(), notifier.command().span().input());
             let constrained = selector_state_with(registry, self, |state| {
                 if state.selection.is_some() {
-                    changed =
-                        state.constrain_selection(dependency, &notif_ctx.role, notif_ctx.rel_type);
+                    // A statement that becomes a subset here says so, as it
+                    // does on the default path.
+                    (changed, warnings) = state.constrain_saying_cut(
+                        dependency,
+                        &notif_ctx.role,
+                        notif_ctx.rel_type,
+                        span,
+                        notif_ctx.receiver_is_echo,
+                    );
                     true
                 } else {
                     false
@@ -316,7 +327,7 @@ impl Selector for UserVerb {
             });
 
             if constrained {
-                return Ok(ConstraintAction::Constrained(changed, vec![]));
+                return Ok(ConstraintAction::Constrained(changed, warnings));
             }
 
             if notif_ctx.role == DependencyRole::Child {

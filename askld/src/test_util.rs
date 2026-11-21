@@ -24,6 +24,8 @@ pub const TEST_INPUT_NESTED_FUNC: &'static str = index::db_diesel::Index::TEST_I
 pub const TEST_INPUT_TYPE_FILTER: &'static str = index::db_diesel::Index::TEST_INPUT_TYPE_FILTER;
 pub const TEST_INPUT_STRUCT_FIELDS: &'static str =
     index::db_diesel::Index::TEST_INPUT_STRUCT_FIELDS;
+pub const TEST_INPUT_NAME_IN_MANY_STRUCTS: &'static str =
+    index::db_diesel::Index::TEST_INPUT_NAME_IN_MANY_STRUCTS;
 pub const VERB_TEST: &'static str = index::db_diesel::Index::VERB_TEST;
 pub const TEST_INPUT_HIDDEN_CHILDREN: &'static str =
     index::db_diesel::Index::TEST_INPUT_HIDDEN_CHILDREN;
@@ -99,6 +101,7 @@ const ALL_FIXTURES: &[&str] = &[
     TEST_INPUT_NESTED_FUNC,
     TEST_INPUT_TYPE_FILTER,
     TEST_INPUT_STRUCT_FIELDS,
+    TEST_INPUT_NAME_IN_MANY_STRUCTS,
     VERB_TEST,
     TEST_INPUT_SEARCH,
     TEST_INPUT_MANY_REFS_ONE_TARGET,

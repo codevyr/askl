@@ -8,12 +8,12 @@ use crate::span::Span;
 use crate::statement::Statement;
 use anyhow::Result;
 use async_trait::async_trait;
-use index::db_diesel::FamilyDemands;
 use index::db_diesel::{
     CompositeFilter, DirectOnlyMixin, EphContext, EphScopedFut, EphTransaction, FoldedOnlyMixin,
     Index, OuterParentFilterMixin, RootLayer, RootShardRef, ScopeContext, Selection,
     SymbolInstanceIdMixin, TraversalMode,
 };
+use index::db_diesel::{FamilyDemands, FamilyRead};
 
 /// Root-shard populate callback used by [`LayerSpec`].  Called by the
 /// statement-execution layer inside [`Index::with_eph_layer`] — once PER
@@ -481,6 +481,9 @@ pub struct NotificationContext {
     pub role: DependencyRole,
     pub rel_type: RelationshipType,
     pub mode: TraversalMode,
+    /// The receiving statement is an echo (`{ }`): it shows what the
+    /// notifier's rows relate to and originates nothing of its own.
+    pub receiver_is_echo: bool,
 }
 
 /// What kind of anchor a verb contributes (see [`Verb::anchor_kind`]).
@@ -753,58 +756,102 @@ impl SelectorState {
         role: &DependencyRole,
         rel_type: RelationshipType,
     ) -> bool {
-        // A capped selection is not a participant in composition — the
-        // symmetric rule, enforced HERE because this is the one point every
-        // constrain path reaches (`Command::notify_from_selection` and
-        // `UserVerb` call it directly, bypassing `try_constrain_notification`).
-        //
-        //  * A capped DEPENDENCY is a truncated set; every arm below RETAINS
-        //    against it, so narrowing by it would drop nodes whose evidence sat
-        //    in the rows the limit never fetched.
-        //  * A capped SELF is equally a truncated set; narrowing IT runs
-        //    `retain` over a partial selection and then reports "matched
-        //    nothing" from data never fully read.
-        //
-        // Either way: do nothing and report no change.  Returning `false` means
-        // "nothing changed", NOT "derive instead" — `constrain_with_warning`'s
-        // first element is `selection.is_some()`, decided before this call.
-        // The capped statement keeps its (incomplete) rows and is reported to
-        // the user as an incomplete part of the graph, rather than silently
-        // narrowing or being narrowed into a wrong answer.
-        if dependency.capped {
-            return false;
+        self.narrow(dependency, role, rel_type, false).changed
+    }
+
+    /// [`Self::constrain_selection`], saying "incomplete" when the statement
+    /// was whole and comes out a subset.  For the callers that narrow without
+    /// the "none of them relate" note of [`Self::constrain_with_warning`].
+    pub(crate) fn constrain_saying_cut(
+        &mut self,
+        dependency: &Selection,
+        role: &DependencyRole,
+        rel_type: RelationshipType,
+        span: Span,
+        for_echo: bool,
+    ) -> (bool, Vec<Diagnostic>) {
+        let Narrowed { changed, newly_cut } = self.narrow(dependency, role, rel_type, for_echo);
+        let warnings = if newly_cut {
+            vec![Diagnostic::incomplete(span)]
+        } else {
+            vec![]
+        };
+        (changed, warnings)
+    }
+
+    /// Narrow this selection by a neighbour's.
+    ///
+    /// EVERYTHING A STATEMENT SHOWS HAS EVIDENCE WITH EVERY NEIGHBOUR THAT IS
+    /// NOT CUT.  The retain keeps exactly the rows some family ties to the
+    /// neighbour, read from either side.  A row a family holds is a true row
+    /// whether or not that family was read to its end, so keeping needs
+    /// nothing of the reads.  Dropping does: see `absence_is_proven`.
+    ///
+    ///  * A cut DEPENDENCY does not narrow.  It is a subset of what its
+    ///    statement means, so a row that relates only to the part never read
+    ///    would be dropped from a statement that is otherwise whole.  The one
+    ///    exception is an echo (`for_echo`): it shows what its parent's SHOWN
+    ///    rows relate to and has nothing of its own to lose, so it follows the
+    ///    parent down however that came to be narrowed.
+    ///  * A cut SELF is narrowed like any other.  It used not to be -- "a
+    ///    capped selection neither narrows nor is narrowed" -- on the grounds
+    ///    that the retain would then report "matched nothing" from data never
+    ///    fully read.  That is a reason not to SAY so, and nothing is said
+    ///    (`constrain_with_warning`); it is no reason to keep the rows.  Kept,
+    ///    they were an unrelated sample: `mod("amdgpu") { { "spinlock_t" } }`
+    ///    listed 687 users of `spinlock_t` from all over the kernel, none of
+    ///    them in amdgpu, under "incomplete".
+    ///
+    /// Returning unchanged means "nothing changed", NOT "derive instead" --
+    /// `constrain_with_warning`'s first element is `selection.is_some()`,
+    /// decided before this call.
+    fn narrow(
+        &mut self,
+        dependency: &Selection,
+        role: &DependencyRole,
+        rel_type: RelationshipType,
+        for_echo: bool,
+    ) -> Narrowed {
+        let unchanged = Narrowed {
+            changed: false,
+            newly_cut: false,
+        };
+        if dependency.capped && !for_echo {
+            return unchanged;
         }
+        let Some(own) = self.selection.as_deref() else {
+            return unchanged;
+        };
 
-        if self.selection.is_none() {
-            return false;
-        }
+        let len_before = own.nodes.len();
+        let was_cut = own.capped;
+        let proven = absence_is_proven(own, dependency, role, rel_type);
 
-        if self.selection.as_ref().unwrap().capped {
-            return false;
-        }
-
-        let len_before = self.selection.as_ref().unwrap().nodes.len();
-
-        if let Some(_) = &mut self.selection {
-            match role {
-                DependencyRole::Parent => {
-                    self.constrain_by_child(dependency, rel_type);
-                }
-                DependencyRole::Child => {
-                    self.constrain_by_parent(dependency, rel_type);
-                }
-                DependencyRole::User => {
-                    self.constrain_by_owner(dependency);
-                }
-                // PreSeed* edges carry no constraint data — pure
-                // ordering (with optional label-resolution as a
-                // side-effect at `compute_roots` time, not here).
-                DependencyRole::PreSeedSibling | DependencyRole::PreSeedLabel(_) => {}
+        match role {
+            DependencyRole::Parent => {
+                self.constrain_by_child(dependency, rel_type);
             }
+            DependencyRole::Child => {
+                self.constrain_by_parent(dependency, rel_type);
+            }
+            DependencyRole::User => {
+                self.constrain_by_owner(dependency);
+            }
+            // PreSeed* edges carry no constraint data — pure
+            // ordering (with optional label-resolution as a
+            // side-effect at `compute_roots` time, not here).
+            DependencyRole::PreSeedSibling | DependencyRole::PreSeedLabel(_) => {}
         }
 
-        let len_after = self.selection.as_ref().unwrap().nodes.len();
-        len_before != len_after
+        let changed = self.selection.as_ref().unwrap().nodes.len() != len_before;
+        // Rows went for want of evidence that no read ran far enough to rule
+        // out, or because the neighbour is itself cut: some of them may
+        // belong.  What is left is a subset, and says so.
+        let newly_cut = changed && !was_cut && (!proven || dependency.capped);
+        if newly_cut {
+            self.selection_mut().mark_cut();
+        }
+        Narrowed { changed, newly_cut }
     }
 
     fn constrain_by_parent(&mut self, parent: &Selection, rel_type: RelationshipType) {
@@ -935,15 +982,23 @@ impl SelectorState {
         own: &Span,
         neighbour: &Span,
         conjoined: bool,
+        for_echo: bool,
     ) -> (bool, bool, Vec<Diagnostic>) {
         if self.selection.is_none() {
             return (false, false, vec![]);
         }
-        let changed = self.constrain_selection(dependency, role, rel_type);
+        let Narrowed { changed, newly_cut } = self.narrow(dependency, role, rel_type, for_echo);
         let mut warnings = vec![];
+        if newly_cut {
+            warnings.push(Diagnostic::incomplete(span.clone()));
+        }
+        // "None of them relate" is a claim about every row the statement
+        // means.  A cut statement held only some of them, so it cannot make
+        // it; it is already said to be incomplete.
         if changed
             && !dependency.nodes.is_empty()
             && self.selection.as_ref().unwrap().nodes.is_empty()
+            && !self.selection.as_ref().unwrap().cut()
         {
             warnings.push(Diagnostic::note(
                 span,
@@ -967,6 +1022,61 @@ impl SelectorState {
                 .any(|o| o.symbol_instance.id == u.symbol_instance.id)
         });
     }
+}
+
+/// What [`SelectorState::narrow`] did.
+struct Narrowed {
+    /// Rows were dropped.
+    changed: bool,
+    /// The statement was whole before and is a subset now.
+    newly_cut: bool,
+}
+
+/// Whether a row of `own` that no family ties to `dependency` is thereby shown
+/// not to relate to it.
+///
+/// A LIMIT THAT CUT A READ DISQUALIFIES THAT READ AND NOTHING ELSE.  For each
+/// relation kind the edge accepts, the two ends each hold one family about it
+/// (`constrain_by_*` takes evidence from either).  Silence in a family proves
+/// absence only if that family was read to its end over a scope that held the
+/// other statement's rows.  One such family per kind is enough; with none, a
+/// dropped row may have had its evidence in the part that was not read:
+///
+///  * a family nobody read (`Deferred`, not demanded) is empty and says
+///    nothing -- it is not "read, and found none";
+///  * a family read against another neighbour's rows says nothing about this
+///    one (`X { "a" ; { } }`: X's references are read within `"a"`);
+///  * a bare scope accepts a reference OR containment, so references read in
+///    full cannot rule a row out while containment was cut.
+pub(crate) fn absence_is_proven(
+    own: &Selection,
+    dependency: &Selection,
+    role: &DependencyRole,
+    rel_type: RelationshipType,
+) -> bool {
+    let own_ids = own.get_instance_ids();
+    let dependency_ids = dependency.get_instance_ids();
+    let either = |ours: &FamilyRead, theirs: &FamilyRead| {
+        ours.proves_absence_for(&dependency_ids) || theirs.proves_absence_for(&own_ids)
+    };
+    let (refs, has) = match role {
+        // We are the parent: our children families, the child's parents ones.
+        DependencyRole::Parent => (
+            either(&own.families.children, &dependency.families.parents),
+            either(&own.families.has_children, &dependency.families.has_parents),
+        ),
+        // We are the child.
+        DependencyRole::Child => (
+            either(&own.families.parents, &dependency.families.children),
+            either(&own.families.has_parents, &dependency.families.has_children),
+        ),
+        // Membership in the owner's rows: no family is consulted.
+        DependencyRole::User | DependencyRole::PreSeedSibling | DependencyRole::PreSeedLabel(_) => {
+            return true;
+        }
+    };
+    (!rel_type.contains(RelationshipType::REFS) || refs)
+        && (!rel_type.contains(RelationshipType::HAS) || has)
 }
 
 pub type SelectorId = usize;
@@ -1096,6 +1206,7 @@ pub trait Selector: std::fmt::Debug + Verb {
                 own,
                 neighbour,
                 false,
+                notif_ctx.receiver_is_echo,
             )
         });
 
@@ -1279,7 +1390,12 @@ pub trait Selector: std::fmt::Debug + Verb {
         // incomplete regardless of what the by-id re-read (which a selector
         // predicate can shrink below the cap) reports.  M3 then keeps this
         // selection out of composition; M8 says it.
-        if derive_capped {
+        //
+        // And what is derived from a cut statement is cut: these are the
+        // children of the rows the parent happens to hold, not of the rows it
+        // means.  A derive that fit its own limit used to come out unflagged,
+        // and could then narrow others on that sample.
+        if derive_capped || parent_sel.cut() {
             selection.mark_cut();
         }
 
