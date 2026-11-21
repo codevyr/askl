@@ -501,6 +501,115 @@ impl Index {
         Ok(outcome)
     }
 
+    /// Probe a statement BETWEEN resolved neighbours: walk from one, test
+    /// the others.
+    ///
+    /// [`Self::probe_instance_ids`] binds every neighbour as a role, and each
+    /// role must fit its budget alone.  That is the right question for one
+    /// neighbour and the wrong one for two: `mod("amdgpu") { { "spinlock_t" } }`
+    /// has 134 rows between a module that holds 46,500 instances and a type
+    /// 15,000 declarations use, and neither side fits.  An intersection needs
+    /// ONE side enumerated.
+    ///
+    /// So `driver` is walked -- its points read under the budget, the
+    /// candidates they lead to kept if they pass `filter` -- and every
+    /// neighbour in `tested` is checked per candidate, in SQL.  Only the walk
+    /// is budgeted: a tested neighbour of any size cannot make the probe say
+    /// "too many".  The answer is `Resolved` when the walk was read whole and
+    /// the survivors fit the cap, `Capped` otherwise, never a partial set.
+    ///
+    /// Walking from a neighbour and testing against it are the same relation
+    /// (`ProbeNeighbour::walk` / `::test`); a test pins that they agree.
+    pub async fn probe_between(
+        &self,
+        filter: &CompositeFilter,
+        driver: &ProbeNeighbour,
+        tested: &[ProbeNeighbour],
+        cap: usize,
+        eph: &EphContext,
+    ) -> Result<ProbeOutcome> {
+        use super::cte::PROBE_OVERFLOW;
+
+        let _span = tracing::info_span!(
+            "probe_between",
+            cap,
+            driver = driver.len(),
+            tested = tested.len()
+        )
+        .entered();
+        let t0 = std::time::Instant::now();
+
+        let vis = EphVisibility::combined(eph);
+        let budget = (cap.max(1) * PROBE_ROLE_ROWS_PER_CAP) as i64;
+
+        // The walk, and the candidates it leads to: one arm per kind of
+        // relation the edge to the driver accepts.
+        let mut relations: Vec<Relation> = Vec::new();
+        let mut arms: Vec<Box<dyn diesel::query_builder::QueryFragment<Pg> + Send>> = Vec::new();
+        for (walk, admits) in driver.walk(budget, &vis) {
+            let mut arm = build_current_id_query(&vis);
+            if let Some(expr) = filter.compose_current(&vis) {
+                arm = arm.filter(expr);
+            }
+            arm = arm.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&admits));
+            for complete in walk.iter().filter_map(Relation::complete_sql) {
+                arm = arm.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&complete));
+            }
+            arms.push(Box::new(arm.select(diesel::dsl::sql::<(
+                diesel::sql_types::BigInt,
+                diesel::sql_types::BigInt,
+                diesel::sql_types::Integer,
+                diesel::sql_types::BigInt,
+                diesel::sql_types::BigInt,
+            )>(
+                "symbols.id AS symbol, symbol_instances.id AS id, \
+                 symbol_instances.object_id AS object_id, \
+                 symbol_instances.dfs_enter AS dfs_enter, \
+                 symbol_instances.dfs_exit AS dfs_exit",
+            ))));
+            relations.extend(walk);
+        }
+        anyhow::ensure!(
+            !arms.is_empty(),
+            "a probe walks from a neighbour it relates to"
+        );
+        let candidates = Relation::new("probe_candidates", super::relation::UnionOf::new(arms));
+        let candidates_name = candidates.name().clone();
+        relations.push(candidates);
+
+        let mut survivors = format!("SELECT c.id FROM {candidates_name} c");
+        for (k, neighbour) in tested.iter().enumerate() {
+            let (steps, test) = neighbour.test(k, &candidates_name, &vis);
+            relations.extend(steps);
+            survivors.push_str(if k == 0 { " WHERE " } else { " AND " });
+            survivors.push_str(&test);
+        }
+        survivors.push_str(&format!(" LIMIT {}", cap as i64 + 1));
+
+        let rows: std::sync::Arc<Vec<i64>> = self
+            .cached_load(
+                With::new(relations, ProbeSurvivors { sql: survivors })
+                    .or_overflow_row(format!("{PROBE_OVERFLOW}::bigint")),
+            )
+            .await?;
+
+        let outcome = if rows.len() > cap || rows.contains(&PROBE_OVERFLOW) {
+            ProbeOutcome::Capped
+        } else {
+            let mut ids = rows.as_ref().clone();
+            ids.sort_unstable();
+            ids.dedup();
+            ProbeOutcome::Resolved(ids)
+        };
+        tracing::info!(
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            rows = rows.len(),
+            capped = matches!(outcome, ProbeOutcome::Capped),
+            "probe between completed",
+        );
+        Ok(outcome)
+    }
+
     /// Resolve a container scope to the `(object_id, lo, hi)` byte-range of
     /// every instance in it.  Content verbs (`search`/`loc`) fuse an enclosing
     /// container into their scan with these: a match is kept iff it lies inside
@@ -966,6 +1075,255 @@ fn has_role_cte_body(
 /// Measured on the kernel, eight container/predicate shapes, warm.
 fn instance_member_sql(role: &RelationName) -> String {
     role.holds("(symbols.id, symbol_instances.id)", "symbol, id")
+}
+
+/// A resolved neighbour of the statement a probe is about, for
+/// [`Index::probe_between`]: its instances, which side of the statement it is
+/// on, and the kinds of relation the edge between them accepts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeNeighbour {
+    ids: Vec<i64>,
+    /// The neighbour is the statement's parent: the statement's rows are what
+    /// it holds or refers to.  Otherwise it is a child: the statement's rows
+    /// are what holds it or refers to it.
+    parent_side: bool,
+    refs: bool,
+    has: bool,
+}
+
+impl ProbeNeighbour {
+    /// The statement's parent, related by reference, containment or either.
+    pub fn parent(ids: Vec<i64>, refs: bool, has: bool) -> Self {
+        Self::new(ids, true, refs, has)
+    }
+
+    /// One of the statement's children.
+    pub fn child(ids: Vec<i64>, refs: bool, has: bool) -> Self {
+        Self::new(ids, false, refs, has)
+    }
+
+    fn new(mut ids: Vec<i64>, parent_side: bool, refs: bool, has: bool) -> Self {
+        // The binds are part of the SQL-cache key.
+        ids.sort_unstable();
+        ids.dedup();
+        Self {
+            ids,
+            parent_side,
+            refs,
+            has,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    fn seed(&self) -> InstanceSet {
+        InstanceSet::Ids(self.ids.clone())
+    }
+
+    /// WALKING FROM this neighbour: the relations that enumerate what it
+    /// leads to, each paired with the test that admits a row of the current
+    /// query (`symbols` / `symbol_instances`) by it.
+    ///
+    /// Only the first relation of each kind is budgeted, and it is budgeted
+    /// on what the walk READS: for "what refers to this", the references
+    /// themselves, before they fan out into every declaration around them
+    /// (`spinlock_t`: 5,001 references, 21,044 pairs).  Counted after the
+    /// fan-out, a name with a few thousand uses can never drive.
+    fn walk(&self, budget: i64, vis: &EphVisibility) -> Vec<(Vec<Relation>, String)> {
+        let seed = self.seed();
+        let mut kinds = Vec::new();
+        if self.refs && self.parent_side {
+            let referred =
+                Relation::new("probe_walk_referred", refs_role_cte_body(&seed, false, vis))
+                    .bounded(budget);
+            let admits = referred.name().holds("symbols.id", "symbol");
+            kinds.push((vec![referred], admits));
+        }
+        if self.refs && !self.parent_side {
+            let points = Relation::new(
+                "probe_walk_points",
+                EphSqlFragment::<diesel::sql_types::BigInt>::builder()
+                    .sql(
+                        "SELECT sr.from_object AS object_id, sr.dfs_enter AS dfs_enter \
+                         FROM index.symbol_refs sr WHERE ",
+                    )
+                    .eph_visibility("sr.layer", vis)
+                    .sql(
+                        " AND sr.to_symbol IN \
+                         (SELECT si.symbol FROM index.symbol_instances si WHERE ",
+                    )
+                    .eph_visibility("si.layer", vis)
+                    .sql(" AND ")
+                    .in_set("si.id", &seed)
+                    .sql(")")
+                    .build(),
+            )
+            .bounded(budget);
+            let around = Relation::new(
+                "probe_walk_referring",
+                EphSqlFragment::<diesel::sql_types::BigInt>::builder()
+                    .sql(format!(
+                        "SELECT pd.symbol AS symbol, pd.id AS id FROM {points} pt \
+                         JOIN index.symbol_instances pd ON pd.object_id = pt.object_id \
+                           AND pd.dfs_enter < pt.dfs_enter AND pt.dfs_enter < pd.dfs_exit \
+                         WHERE ",
+                        points = points.name()
+                    ))
+                    .eph_visibility("pd.layer", vis)
+                    .sql(format!(
+                        " AND {}",
+                        points.complete_sql().expect("the walk is bounded")
+                    ))
+                    .build(),
+            );
+            let admits = instance_member_sql(around.name());
+            kinds.push((vec![points, around], admits));
+        }
+        if self.has {
+            let name = if self.parent_side {
+                "probe_walk_held"
+            } else {
+                "probe_walk_holding"
+            };
+            let related = Relation::new(name, has_role_cte_body(&seed, self.parent_side, vis))
+                .bounded(budget);
+            let admits = instance_member_sql(related.name());
+            kinds.push((vec![related], admits));
+        }
+        kinds
+    }
+
+    /// TESTING AGAINST this neighbour: the relations that decide, for the
+    /// rows of `candidates` (`symbol, id, object_id, dfs_enter, dfs_exit`),
+    /// which of them relate to it, and the test on a candidate `c`.
+    ///
+    /// The spellings are the ones that planned well on the kernel
+    /// (`perf/PROBE_BASELINE.md`, "Walk and test"): the neighbour's extents
+    /// in a relation of their own; a reference test once per distinct
+    /// candidate symbol as `LATERAL (… LIMIT 1)`; containment as a join to
+    /// the extents.  A plain `EXISTS` hashed every reference the neighbour
+    /// makes (823,002 for a module), and a lateral over the base tables took
+    /// 6.5 s for a question this shape answers in 0.1 s.
+    fn test(
+        &self,
+        k: usize,
+        candidates: &RelationName,
+        vis: &EphVisibility,
+    ) -> (Vec<Relation>, String) {
+        let seed = self.seed();
+        let mut relations = Vec::new();
+        let mut tests: Vec<String> = Vec::new();
+
+        let extents = Relation::new(
+            format!("probe_test_{k}_extents"),
+            EphSqlFragment::<diesel::sql_types::BigInt>::builder()
+                .sql(
+                    "SELECT x.symbol AS symbol, x.object_id AS object_id, \
+                            x.dfs_enter AS dfs_enter, x.dfs_exit AS dfs_exit \
+                     FROM index.symbol_instances x WHERE ",
+                )
+                .eph_visibility("x.layer", vis)
+                .sql(" AND ")
+                .in_set("x.id", &seed)
+                .build(),
+        );
+        let extents_name = extents.name().clone();
+        relations.push(extents);
+
+        if self.has {
+            // Containment either way is a join of two sets of extents on the
+            // object they are in.
+            let (outer, inner) = if self.parent_side {
+                ("n", "c")
+            } else {
+                ("c", "n")
+            };
+            let held = Relation::new(
+                format!("probe_test_{k}_has"),
+                EphSqlFragment::<diesel::sql_types::BigInt>::builder()
+                    .sql(format!(
+                        "SELECT c.id AS id FROM {candidates} c JOIN {extents_name} n \
+                           ON n.object_id = c.object_id \
+                          AND {outer}.dfs_enter < {inner}.dfs_enter \
+                          AND {inner}.dfs_enter < {outer}.dfs_exit"
+                    ))
+                    .build(),
+            );
+            tests.push(held.name().holds("c.id", "id"));
+            relations.push(held);
+        }
+        if self.refs && self.parent_side {
+            // The neighbour refers to the candidate's SYMBOL: asked once per
+            // symbol, from the symbol (the one indexed way in).
+            let referred = Relation::new(
+                format!("probe_test_{k}_refs"),
+                EphSqlFragment::<diesel::sql_types::BigInt>::builder()
+                    .sql(format!(
+                        "SELECT d.symbol AS symbol FROM (SELECT DISTINCT symbol FROM {candidates}) d \
+                         CROSS JOIN LATERAL (SELECT 1 FROM index.symbol_refs sr JOIN {extents_name} n \
+                             ON n.object_id = sr.from_object \
+                            AND n.dfs_enter < sr.dfs_enter AND sr.dfs_enter < n.dfs_exit \
+                           WHERE "
+                    ))
+                    .eph_visibility("sr.layer", vis)
+                    .sql(" AND sr.to_symbol = d.symbol LIMIT 1) hit")
+                    .build(),
+            );
+            tests.push(referred.name().holds("c.symbol", "symbol"));
+            relations.push(referred);
+        }
+        if self.refs && !self.parent_side {
+            // The candidate INSTANCE encloses a reference to one of the
+            // neighbour's symbols: asked per candidate and symbol, which is
+            // one probe of the references' unique index.
+            let refers = Relation::new(
+                format!("probe_test_{k}_refs"),
+                EphSqlFragment::<diesel::sql_types::BigInt>::builder()
+                    .sql(format!(
+                        "SELECT c.id AS id FROM {candidates} c \
+                         CROSS JOIN (SELECT DISTINCT symbol FROM {extents_name}) n \
+                         CROSS JOIN LATERAL (SELECT 1 FROM index.symbol_refs sr WHERE "
+                    ))
+                    .eph_visibility("sr.layer", vis)
+                    .sql(
+                        " AND sr.to_symbol = n.symbol AND sr.from_object = c.object_id \
+                           AND c.dfs_enter < sr.dfs_enter AND sr.dfs_enter < c.dfs_exit \
+                         LIMIT 1) hit",
+                    )
+                    .build(),
+            );
+            tests.push(refers.name().holds("c.id", "id"));
+            relations.push(refers);
+        }
+        (relations, format!("({})", tests.join(" OR ")))
+    }
+}
+
+/// The last step of [`Index::probe_between`]: the candidates that pass every
+/// tested neighbour.  Raw SQL over the statement's relations; one id column.
+struct ProbeSurvivors {
+    sql: String,
+}
+
+impl diesel::query_builder::QueryId for ProbeSurvivors {
+    type QueryId = ();
+    const HAS_STATIC_QUERY_ID: bool = false;
+}
+
+impl diesel::query_builder::Query for ProbeSurvivors {
+    type SqlType = diesel::sql_types::BigInt;
+}
+
+impl diesel::query_builder::QueryFragment<Pg> for ProbeSurvivors {
+    fn walk_ast<'b>(
+        &'b self,
+        mut out: diesel::query_builder::AstPass<'_, 'b, Pg>,
+    ) -> diesel::QueryResult<()> {
+        out.push_sql(&self.sql);
+        Ok(())
+    }
 }
 
 /// A semi-join constraint a probe binds a resolved neighbour's instance
