@@ -123,12 +123,6 @@ type SymbolRefSymbolJoin = InnerJoinQuerySource<
     Eq<index_schema::symbol_refs::columns::to_symbol, index_schema::symbols::columns::id>,
 >;
 
-type SymbolRefSymbolInstanceJoin = InnerJoinQuerySource<
-    SymbolRefSymbolJoin,
-    index_schema::symbol_instances::table,
-    Eq<index_schema::symbols::columns::id, index_schema::symbol_instances::columns::symbol>,
->;
-
 type ParentDeclOn = Eq<
     AliasedField<ParentDeclsAlias, index_schema::symbol_instances::columns::object_id>,
     index_schema::symbol_refs::columns::from_object,
@@ -137,11 +131,20 @@ type ParentDeclOn = Eq<
 pub type ParentsQuery<'a> =
     BoxedSelectStatement<'a, ParentSelectionTuple, FromClause<ParentsJoinSource>, Pg>;
 
+/// The children query returns one row per *(reference site, enclosing
+/// declaration)*, with the symbol the reference names and nothing about that
+/// symbol's instances.
+///
+/// It used to carry the target `SymbolInstance` too, which joined every
+/// reference to every instance of the symbol it names: a row count multiplied
+/// by that instance count, under a limit that counted the rows.  A reference
+/// names a symbol, not one of its instances, so which instance it ends on is
+/// chosen after the read (`Index::reference_targets`), once per symbol.  The
+/// mirror of [`ParentSelectionTuple`].
 type ChildSelectionTuple = (
-    SymbolColumnsSqlType,
-    AsSelect<Symbol, Pg>,
-    AsSelect<SymbolInstance, Pg>,
-    SymbolInstanceColumnsSqlType,
+    SymbolColumnsSqlType,         // the enclosing declaration's symbol
+    AsSelect<Symbol, Pg>,         // the symbol referred to
+    SymbolInstanceColumnsSqlType, // the enclosing declaration
     AsSelect<SymbolRef, Pg>,
     AsSelect<Object, Pg>,
 );
@@ -156,11 +159,11 @@ type ParentObjectOn = Eq<
     AliasedField<ParentDeclsAlias, index_schema::symbol_instances::columns::object_id>,
 >;
 
-type SymbolRefSymbolInstanceParentInstanceJoin =
-    InnerJoinQuerySource<SymbolRefSymbolInstanceJoin, Alias<ParentDeclsAlias>, ParentDeclOn>;
+type SymbolRefSymbolParentInstanceJoin =
+    InnerJoinQuerySource<SymbolRefSymbolJoin, Alias<ParentDeclsAlias>, ParentDeclOn>;
 
-type SymbolRefSymbolInstanceParentInstanceParentSymbolJoin = InnerJoinQuerySource<
-    SymbolRefSymbolInstanceParentInstanceJoin,
+type SymbolRefSymbolParentInstanceParentSymbolJoin = InnerJoinQuerySource<
+    SymbolRefSymbolParentInstanceJoin,
     Alias<ParentSymbolsAlias>,
     ParentSymbolOn,
 >;
@@ -176,18 +179,19 @@ type SymbolRefParentInstanceJoin =
 type ParentsJoinSource =
     InnerJoinQuerySource<SymbolRefParentInstanceJoin, Alias<ParentSymbolsAlias>, ParentSymbolOn>;
 
-type SymbolRefSymbolInstanceParentInstanceParentSymbolObjectJoin = InnerJoinQuerySource<
-    SymbolRefSymbolInstanceParentInstanceParentSymbolJoin,
+/// `symbol_refs ⋈ symbols ⋈ parent_decls ⋈ parent_symbols ⋈ objects` — the
+/// children query's FROM clause.  `symbols` is the symbol referred to; its
+/// instances are deliberately absent (see [`ChildSelectionTuple`]), so a
+/// children filter can speak of the reference, of what encloses it and of the
+/// symbol it names, and of nothing else.
+type ChildrenJoinSource = InnerJoinQuerySource<
+    SymbolRefSymbolParentInstanceParentSymbolJoin,
     index_schema::objects::table,
     ParentObjectOn,
 >;
 
-pub type ChildrenQuery<'a> = BoxedSelectStatement<
-    'a,
-    ChildSelectionTuple,
-    FromClause<SymbolRefSymbolInstanceParentInstanceParentSymbolObjectJoin>,
-    Pg,
->;
+pub type ChildrenQuery<'a> =
+    BoxedSelectStatement<'a, ChildSelectionTuple, FromClause<ChildrenJoinSource>, Pg>;
 
 // ============================================================================
 // Containment query types (has_parents, has_children)
@@ -708,7 +712,7 @@ impl<ST: 'static + Send + diesel::sql_types::SingleValue, GB> ValidGrouping<GB>
 
 type CurrentQS = SymbolInstanceProjectObjectJoin;
 type ParentsQS = ParentsJoinSource;
-type ChildrenQS = SymbolRefSymbolInstanceParentInstanceParentSymbolObjectJoin;
+type ChildrenQS = ChildrenJoinSource;
 type HasParentsQS = HasParentsJoinSource;
 type HasChildrenQS = HasChildrenJoinSource;
 

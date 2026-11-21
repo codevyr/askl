@@ -1387,6 +1387,42 @@ fn an_incomplete_warning_quotes_its_statement() {
 }
 
 #[test]
+fn what_a_statement_lists_is_cut_by_instances_not_by_references() {
+    // `user` refers to `twin` four times and to `solo` once, and `twin` has
+    // three instances: `"user" { }` lists four instances.  Both reads behind
+    // it -- what the listing derives, and what `user` itself refers to --
+    // joined each reference to every instance of its target and limited the
+    // rows, thirteen here.  Under a cap of five the listing stopped inside
+    // `twin`, dropped `solo` and said it was incomplete, and `user` was called
+    // incomplete for its own five references.
+    let res = run_query_with_read_cap(
+        crate::test_util::TEST_INPUT_MANY_REFS_ONE_TARGET,
+        r#""user" { }"#,
+        5,
+    );
+    let (said, ids) = incomplete_and_ids(&res);
+    assert_eq!(
+        ids,
+        vec![10, 20, 21, 22, 30],
+        "user, the three twins and solo"
+    );
+    assert!(
+        said.is_empty(),
+        "five references to four instances fit a cap of five, got {:?}",
+        said
+    );
+
+    // Four instances do not fit a cap of three, and there it says so.
+    let res = run_query_with_read_cap(
+        crate::test_util::TEST_INPUT_MANY_REFS_ONE_TARGET,
+        r#""user" { }"#,
+        3,
+    );
+    let (said, _) = incomplete_and_ids(&res);
+    assert!(said.iter().any(|w| w.contains("`{ }`")), "got {:?}", said);
+}
+
+#[test]
 fn a_capped_derive_is_flagged_and_said() {
     // The derive path used to LAUNDER a capped read: `find_parent_instance_ids`
     // applies the safety LIMIT but returned bare ids, so a derivation built

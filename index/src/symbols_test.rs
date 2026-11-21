@@ -660,6 +660,159 @@ async fn a_reference_is_one_role_row_however_many_instances_its_target_has() -> 
     Ok(())
 }
 
+/// A reference is one row of the family that holds it, however many instances
+/// its target has, and it ends on one of them.
+///
+/// `user` refers five times: four to `twin` (three instances) and one to
+/// `solo`.  Its children family used to hold thirteen rows, one per reference
+/// AND per instance of the target, so a cap of five called `user` itself
+/// incomplete.  Kernel: `file("…/bt-bmc.c") { }` said "too many results in
+/// `file(…)`" for a file of 331 references.
+#[tokio::test(flavor = "current_thread")]
+async fn a_family_holds_a_reference_once() -> anyhow::Result<()> {
+    use crate::db_diesel::{EphContext, FamilyDemands, Index};
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+
+    let mut index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_MANY_REFS_ONE_TARGET)
+        .await?;
+    let mut eph = EphContext::rooted(index.load_root_layers().await?);
+    eph.set_read_cap(5);
+    let user = CompositeFilter::leaf(CompoundNameMixin::new("user"));
+    let ends = |selection: &crate::db_diesel::Selection| -> Vec<(i64, i64)> {
+        let mut ends: Vec<(i64, i64)> = selection
+            .children
+            .iter()
+            .map(|c| (c.symbol.id, c.symbol_instance.id))
+            .collect();
+        ends.sort_unstable();
+        ends
+    };
+
+    // No neighbour to choose among: each reference ends on the target's
+    // first instance (all three twins are definitions, so the lowest id).
+    let alone = index
+        .find_symbol(
+            &user,
+            ScopeContext::Unscoped,
+            ScopeContext::Unscoped,
+            FamilyDemands::default(),
+            &eph,
+        )
+        .await?
+        .into_inner();
+    assert_eq!(
+        ends(&alone),
+        vec![(2, 20), (2, 20), (2, 20), (2, 20), (3, 30)],
+        "five references, five rows"
+    );
+    assert!(!alone.capped, "five references fit a cap of five");
+
+    // A neighbour that holds two of the twins: the references to `twin` end
+    // on one of ITS instances, the lower.
+    let scoped = index
+        .find_symbol(
+            &user,
+            ScopeContext::Unscoped,
+            ScopeContext::Scope {
+                ids: vec![21, 22, 30],
+                filter: None,
+            },
+            FamilyDemands::default(),
+            &eph,
+        )
+        .await?
+        .into_inner();
+    assert_eq!(
+        ends(&scoped),
+        vec![(2, 21), (2, 21), (2, 21), (2, 21), (3, 30)]
+    );
+    assert!(!scoped.capped);
+
+    // A neighbour that holds no `solo`: its reference is not in the family.
+    let twins_only = index
+        .find_symbol(
+            &user,
+            ScopeContext::Unscoped,
+            ScopeContext::Scope {
+                ids: vec![22],
+                filter: None,
+            },
+            FamilyDemands::default(),
+            &eph,
+        )
+        .await?
+        .into_inner();
+    assert_eq!(ends(&twins_only), vec![(2, 22), (2, 22), (2, 22), (2, 22)]);
+
+    Ok(())
+}
+
+/// What a statement derives from its parents is INSTANCES, and its limit
+/// counts them.
+///
+/// `user` refers to `twin` four times and to `solo` once; `twin` has three
+/// instances.  The children of `user` are four instances.  The read joined
+/// each reference to every instance of its target, so it saw thirteen rows,
+/// and the limit counted rows: under a cap of five the four instances were
+/// "too many".  Kernel: `file("…/bt-bmc.c") { }` refers 331 times to symbols
+/// with 812 instances between them, read as 2,373 rows against a cap of 1,000.
+#[tokio::test(flavor = "current_thread")]
+async fn a_derive_read_counts_the_instances_it_finds() -> anyhow::Result<()> {
+    use crate::db_diesel::{EphContext, Index};
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+
+    let mut index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_MANY_REFS_ONE_TARGET)
+        .await?;
+    let mut eph = EphContext::rooted(index.load_root_layers().await?);
+    let any = CompositeFilter::and(vec![]);
+    let ids = |found: Vec<crate::symbols::SymbolInstanceId>| -> Vec<i64> {
+        found.into_iter().map(|i| i.into()).collect()
+    };
+
+    // Four instances, a cap of five: all of them, and nothing was cut.
+    eph.set_read_cap(5);
+    let (found, capped) = index
+        .find_child_instance_ids(&[10], true, false, &any, &eph)
+        .await?;
+    assert_eq!(ids(found), vec![20, 21, 22, 30]);
+    assert!(!capped, "four instances fit a cap of five");
+
+    // A cap of four still holds them.
+    eph.set_read_cap(4);
+    let (found, capped) = index
+        .find_child_instance_ids(&[10], true, false, &any, &eph)
+        .await?;
+    assert_eq!(ids(found), vec![20, 21, 22, 30]);
+    assert!(!capped, "four instances fit a cap of four");
+
+    // A cap of three does not, and the read says so.
+    eph.set_read_cap(3);
+    let (_, capped) = index
+        .find_child_instance_ids(&[10], true, false, &any, &eph)
+        .await?;
+    assert!(capped, "four instances do not fit a cap of three");
+
+    // The statement's own predicate is applied before anything is counted.
+    let solo = CompositeFilter::leaf(crate::db_diesel::ExactNameMixin::new("solo"));
+    let (found, capped) = index
+        .find_child_instance_ids(&[10], true, false, &solo, &eph)
+        .await?;
+    assert_eq!(ids(found), vec![30]);
+    assert!(!capped);
+
+    Ok(())
+}
+
 /// `find_edges_between` prunes the target side to two rows per symbol; this
 /// is the case that proves two is the floor, not one.
 ///
