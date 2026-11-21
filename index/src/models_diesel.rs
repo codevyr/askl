@@ -123,6 +123,12 @@ pub struct SymbolRef {
     /// FULL span of the referencing construct (`printk(foo)` where
     /// `from_offset_range` covers only `printk`).  Display only.
     pub from_full_range: Option<(Bound<i32>, Bound<i32>)>,
+    /// What the token does to its target, as a set of bits; zero states
+    /// nothing.  Read through [`crate::roles::Stated`].
+    pub roles: i16,
+    /// Zero for a reference; otherwise the fact between two symbols this row
+    /// is (see [`crate::roles::Relation`]).
+    pub relation: i16,
 }
 
 #[derive(Clone, Queryable, Selectable, Identifiable, Debug, PartialEq)]

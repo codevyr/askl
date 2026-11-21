@@ -1,6 +1,7 @@
 use askld::cfg::ControlFlowGraph;
 use askld::diagnostic::Diagnostic;
 use askld::parser::Rule;
+use index::roles::RefKind;
 use index::symbols::{InstanceType, SymbolId, SymbolInstanceId, SymbolType};
 use serde::{Deserialize, Serialize, Serializer};
 
@@ -165,6 +166,14 @@ pub struct Edge {
     /// the per-occurrence rows this replaced.  Goes away when the split moves
     /// server-side (which has the occurrences in memory already).
     from_objects: Vec<String>,
+    /// What the pair's references state about the target, taken together:
+    /// `calls`, `writes`, `takes` / `reads`, `declares`, `holds`, in that
+    /// order.  Computed here once (`index::roles::Stated::kinds`), so no
+    /// reader guesses a call from a callback out of the two symbol types.
+    /// Absent when nothing is stated, which is every edge of an index
+    /// written before references carried roles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    kinds: Vec<RefKind>,
 }
 
 impl Edge {
@@ -179,7 +188,18 @@ impl Edge {
             to,
             occurrence_count,
             from_objects,
+            kinds: Vec::new(),
         }
+    }
+
+    /// The edge, saying what its references state.
+    pub fn with_kinds(mut self, kinds: Vec<RefKind>) -> Self {
+        self.kinds = kinds;
+        self
+    }
+
+    pub fn kinds(&self) -> &[RefKind] {
+        &self.kinds
     }
 
     pub fn from(&self) -> SymbolId {
