@@ -188,24 +188,32 @@ fn build_current_id_query(vis: &EphVisibility) -> CurrentIdQuery<'static> {
     query
 }
 
+use super::attribution::belongs_to;
 use super::mixins::EphSqlFragment;
 use super::relation::{InstanceSet, Relation, RelationName, With};
 
 /// REFS semi-join: rows whose instance is a CHILD (callee) of any of the
-/// given parent instances.  Shared by scope resolution and probes.
+/// given parent instances.  Used by scope resolution.
+///
+/// What it yields is a SCOPE, a pre-filter for a side read that attributes
+/// each reference itself: a looser test here could widen that scope and not
+/// change an answer, which is why no test fails if this site alone forgets
+/// the relation rule.  It reads the shared definition all the same, so there
+/// is one.
 fn refs_children_of_expr(
     parents: &InstanceSet,
     vis: &EphVisibility,
 ) -> EphSqlFragment<diesel::sql_types::Bool> {
     EphSqlFragment::<diesel::sql_types::Bool>::builder()
-        .sql(
+        .sql(format!(
             "symbol_instances.id IN (\
                 SELECT si.id FROM index.symbol_refs sr \
                 JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
                 JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                  AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
+                  AND {} \
                 WHERE ",
-        )
+            belongs_to("sr", "pd")
+        ))
         .eph_visibility("sr.layer", vis)
         .sql(" AND ")
         .eph_visibility("si.layer", vis)
@@ -218,20 +226,22 @@ fn refs_children_of_expr(
 }
 
 /// REFS semi-join: rows whose instance is a PARENT (caller) of any of the
-/// given child instances.  Shared by scope resolution and probes.
+/// given child instances.  Used by scope resolution; a pre-filter, as
+/// [`refs_children_of_expr`] is.
 fn refs_parents_of_expr(
     children: &InstanceSet,
     vis: &EphVisibility,
 ) -> EphSqlFragment<diesel::sql_types::Bool> {
     EphSqlFragment::<diesel::sql_types::Bool>::builder()
-        .sql(
+        .sql(format!(
             "symbol_instances.id IN (\
                 SELECT pd.id FROM index.symbol_refs sr \
                 JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                  AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
+                  AND {} \
                 JOIN index.symbol_instances si ON si.symbol = sr.to_symbol \
                 WHERE ",
-        )
+            belongs_to("sr", "pd")
+        ))
         .eph_visibility("sr.layer", vis)
         .sql(" AND ")
         .eph_visibility("si.layer", vis)
@@ -284,12 +294,13 @@ fn refs_role_cte_body(
         // same reason.
         Box::new(
             builder
-                .sql(
+                .sql(format!(
                     "SELECT pd.symbol AS symbol, pd.id AS id FROM index.symbol_refs sr \
                      JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                       AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
+                       AND {} \
                      WHERE ",
-                )
+                    belongs_to("sr", "pd")
+                ))
                 .eph_visibility("sr.layer", vis)
                 .sql(" AND ")
                 .eph_visibility("pd.layer", vis)
@@ -306,12 +317,13 @@ fn refs_role_cte_body(
     } else {
         Box::new(
             builder
-                .sql(
+                .sql(format!(
                     "SELECT sr.to_symbol AS symbol FROM index.symbol_refs sr \
                      JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
-                       AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
+                       AND {} \
                      WHERE ",
-                )
+                    belongs_to("sr", "pd")
+                ))
                 .eph_visibility("sr.layer", vis)
                 .sql(" AND ")
                 .eph_visibility("pd.layer", vis)
@@ -561,11 +573,13 @@ impl Index {
                 diesel::sql_types::Integer,
                 diesel::sql_types::BigInt,
                 diesel::sql_types::BigInt,
+                diesel::sql_types::Integer,
             )>(
                 "symbols.id AS symbol, symbol_instances.id AS id, \
                  symbol_instances.object_id AS object_id, \
                  symbol_instances.dfs_enter AS dfs_enter, \
-                 symbol_instances.dfs_exit AS dfs_exit",
+                 symbol_instances.dfs_exit AS dfs_exit, \
+                 symbol_instances.nesting_level AS nesting_level",
             ))));
             relations.extend(walk);
         }
@@ -945,10 +959,10 @@ fn build_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ParentsQuer
         // ranges cannot order what a macro generates, since it all shares one
         // extent.  Both sides are already pinned to the same object above, and
         // the numbering is per object.
-        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
-            "parent_decls.dfs_enter < symbol_refs.dfs_enter \
-             AND symbol_refs.dfs_enter < parent_decls.dfs_exit",
-        ))
+        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&belongs_to(
+            "symbol_refs",
+            "parent_decls",
+        )))
         .filter(to_symbol_probe)
         // Ephemeral visibility — canonical and aliased tables, rendered by
         // the partition token (records columns for the eph-branch guard).
@@ -986,10 +1000,10 @@ fn build_children_query(parents: &InstanceSet, vis: &EphVisibility) -> ChildrenQ
         )
         // Descendants by DFS interval; ranges cannot order what a macro
         // generates, since it all shares one extent.
-        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
-            "parent_decls.dfs_enter < symbol_refs.dfs_enter \
-             AND symbol_refs.dfs_enter < parent_decls.dfs_exit",
-        ))
+        .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&belongs_to(
+            "symbol_refs",
+            "parent_decls",
+        )))
         .filter(parents.holds("parent_decls.id"))
         .inner_join(
             parent_symbols.on(parent_symbols
@@ -1268,7 +1282,8 @@ impl ProbeNeighbour {
                 "probe_walk_points",
                 EphSqlFragment::<diesel::sql_types::BigInt>::builder()
                     .sql(
-                        "SELECT sr.from_object AS object_id, sr.dfs_enter AS dfs_enter \
+                        "SELECT sr.from_object AS object_id, sr.dfs_enter AS dfs_enter, \
+                                sr.relation AS relation, sr.nesting_level AS nesting_level \
                          FROM index.symbol_refs sr WHERE ",
                     )
                     .eph_visibility("sr.layer", vis)
@@ -1289,9 +1304,10 @@ impl ProbeNeighbour {
                     .sql(format!(
                         "SELECT pd.symbol AS symbol, pd.id AS id FROM {points} pt \
                          JOIN index.symbol_instances pd ON pd.object_id = pt.object_id \
-                           AND pd.dfs_enter < pt.dfs_enter AND pt.dfs_enter < pd.dfs_exit \
+                           AND {inside} \
                          WHERE ",
-                        points = points.name()
+                        points = points.name(),
+                        inside = belongs_to("pt", "pd")
                     ))
                     .eph_visibility("pd.layer", vis)
                     .sql(format!(
@@ -1343,7 +1359,8 @@ impl ProbeNeighbour {
             EphSqlFragment::<diesel::sql_types::BigInt>::builder()
                 .sql(
                     "SELECT x.symbol AS symbol, x.object_id AS object_id, \
-                            x.dfs_enter AS dfs_enter, x.dfs_exit AS dfs_exit \
+                            x.dfs_enter AS dfs_enter, x.dfs_exit AS dfs_exit, \
+                            x.nesting_level AS nesting_level \
                      FROM index.symbol_instances x WHERE ",
                 )
                 .eph_visibility("x.layer", vis)
@@ -1386,8 +1403,9 @@ impl ProbeNeighbour {
                         "SELECT d.symbol AS symbol FROM (SELECT DISTINCT symbol FROM {candidates}) d \
                          CROSS JOIN LATERAL (SELECT 1 FROM index.symbol_refs sr JOIN {extents_name} n \
                              ON n.object_id = sr.from_object \
-                            AND n.dfs_enter < sr.dfs_enter AND sr.dfs_enter < n.dfs_exit \
-                           WHERE "
+                            AND {inside} \
+                           WHERE ",
+                        inside = belongs_to("sr", "n")
                     ))
                     .eph_visibility("sr.layer", vis)
                     .sql(" AND sr.to_symbol = d.symbol LIMIT 1) hit")
@@ -1409,11 +1427,12 @@ impl ProbeNeighbour {
                          CROSS JOIN LATERAL (SELECT 1 FROM index.symbol_refs sr WHERE "
                     ))
                     .eph_visibility("sr.layer", vis)
-                    .sql(
+                    .sql(format!(
                         " AND sr.to_symbol = n.symbol AND sr.from_object = c.object_id \
-                           AND c.dfs_enter < sr.dfs_enter AND sr.dfs_enter < c.dfs_exit \
+                           AND {} \
                          LIMIT 1) hit",
-                    )
+                        belongs_to("sr", "c")
+                    ))
                     .build(),
             );
             tests.push(refers.name().holds("c.id", "id"));
@@ -1582,7 +1601,8 @@ fn ask_statement(
             EphSqlFragment::<diesel::sql_types::BigInt>::builder()
                 .sql(
                     "SELECT x.id AS id, x.object_id AS object_id, \
-                            x.dfs_enter AS dfs_enter, x.dfs_exit AS dfs_exit \
+                            x.dfs_enter AS dfs_enter, x.dfs_exit AS dfs_exit, \
+                            x.nesting_level AS nesting_level \
                      FROM index.symbol_instances x WHERE ",
                 )
                 .eph_visibility("x.layer", vis)
@@ -1604,16 +1624,18 @@ fn ask_statement(
                 .build(),
         ),
     ];
-    // A reference inside a parent, or a child inside a parent.
-    const INSIDE: &str = "p.object_id = t.object_id \
-                          AND p.dfs_enter < t.dfs_enter AND t.dfs_enter < p.dfs_exit";
+    // A child inside a parent: containment between two instances.
+    const HELD: &str = "p.object_id = t.object_id \
+                        AND p.dfs_enter < t.dfs_enter AND t.dfs_enter < p.dfs_exit";
+    // A reference that belongs to a parent.
+    let referred = format!("p.object_id = t.object_id AND {}", belongs_to("t", "p"));
     let sql = match step {
         AskStep::Containment => {
             let wanted = match want {
                 AskSide::Parents => "p.id",
                 AskSide::Children => "t.id",
             };
-            format!("SELECT DISTINCT {wanted} FROM ask_parents p JOIN ask_children t ON {INSIDE}")
+            format!("SELECT DISTINCT {wanted} FROM ask_parents p JOIN ask_children t ON {HELD}")
         }
         AskStep::ReferencesToChildren => {
             let points = bounded(Relation::new(
@@ -1621,7 +1643,8 @@ fn ask_statement(
                 EphSqlFragment::<diesel::sql_types::BigInt>::builder()
                     .sql(
                         "SELECT sr.from_object AS object_id, sr.dfs_enter AS dfs_enter, \
-                                sr.to_symbol AS symbol \
+                                sr.to_symbol AS symbol, sr.relation AS relation, \
+                                sr.nesting_level AS nesting_level \
                          FROM index.symbol_refs sr WHERE ",
                     )
                     .eph_visibility("sr.layer", vis)
@@ -1635,12 +1658,12 @@ fn ask_statement(
             relations.push(points);
             match want {
                 AskSide::Parents => format!(
-                    "SELECT DISTINCT p.id FROM ask_points t JOIN ask_parents p ON {INSIDE} \
+                    "SELECT DISTINCT p.id FROM ask_points t JOIN ask_parents p ON {referred} \
                      WHERE TRUE{complete}"
                 ),
                 AskSide::Children => format!(
                     "SELECT y.id FROM ask_children y WHERE y.symbol IN \
-                       (SELECT t.symbol FROM ask_points t JOIN ask_parents p ON {INSIDE}){complete}"
+                       (SELECT t.symbol FROM ask_points t JOIN ask_parents p ON {referred}){complete}"
                 ),
             }
         }
@@ -1648,13 +1671,14 @@ fn ask_statement(
             let inside = bounded(Relation::new(
                 "ask_inside",
                 EphSqlFragment::<diesel::sql_types::BigInt>::builder()
-                    .sql(
+                    .sql(format!(
                         "SELECT p.id AS id, t.to_symbol AS symbol \
                          FROM ask_parents p JOIN index.symbol_refs t \
                            ON t.from_object = p.object_id \
-                          AND p.dfs_enter < t.dfs_enter AND t.dfs_enter < p.dfs_exit \
+                          AND {} \
                          WHERE ",
-                    )
+                        belongs_to("t", "p")
+                    ))
                     .eph_visibility("t.layer", vis)
                     .build(),
             ));
@@ -2579,6 +2603,7 @@ impl Index {
     pub const TEST_INPUT_NESTED_FUNC: &'static str = "test_input_nested_func.sql";
     pub const TEST_INPUT_TYPE_FILTER: &'static str = "test_input_type_filter.sql";
     pub const TEST_INPUT_REFERENCE_ROLES: &'static str = "test_input_reference_roles.sql";
+    pub const TEST_INPUT_RELATION_ROWS: &'static str = "test_input_relation_rows.sql";
     pub const TEST_INPUT_STRUCT_FIELDS: &'static str = "test_input_struct_fields.sql";
     pub const TEST_INPUT_NAME_IN_MANY_STRUCTS: &'static str = "test_input_name_in_many_structs.sql";
     pub const TEST_INPUT_MANY_OCCURRENCES_FEW_PAIRS: &'static str =
@@ -2671,6 +2696,10 @@ impl Index {
         (
             "test_input_reference_roles.sql",
             include_str!("../../../sql/test_input_reference_roles.sql"),
+        ),
+        (
+            "test_input_relation_rows.sql",
+            include_str!("../../../sql/test_input_relation_rows.sql"),
         ),
         (
             "test_input_search.sql",
