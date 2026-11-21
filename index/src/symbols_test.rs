@@ -1138,6 +1138,180 @@ async fn a_family_read_is_bounded_by_the_safety_cap() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A probe walks from one neighbour and tests the others.
+///
+/// `mod("modx") { refs { "lock" } }`, the middle statement: one function is
+/// inside modx AND calls lock.  Bound in as roles, neither neighbour fits a
+/// cap of one: what encloses a reference to `lock` is eleven rows (ten callers
+/// and the module around one of them) against a budget of ten, and modx holds
+/// ten functions.  Every role had to fit alone, so the probe answered "too
+/// many".  Walking from `lock` reads its ten references (the budget counts
+/// the POINTS walked, before they fan out into what encloses them), and each
+/// declaration reached is tested against modx: one passes.
+#[tokio::test(flavor = "current_thread")]
+async fn a_probe_walks_from_one_neighbour_and_tests_the_others() -> anyhow::Result<()> {
+    use crate::db_diesel::{Index, ProbeNeighbour, ProbeOutcome, ProbeRole};
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_ESCALATION).await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+    let any = CompositeFilter::and(vec![]);
+
+    let lock_refs = ProbeNeighbour::child(vec![3000], true, false);
+    let modx_holds = ProbeNeighbour::parent(vec![10], false, true);
+
+    // Premise: as roles, at a cap of one, each neighbour alone is too many
+    // and so are the two together.
+    for roles in [
+        vec![ProbeRole::RefsParentsOf(vec![3000])],
+        vec![ProbeRole::HasChildrenOf(vec![10])],
+        vec![
+            ProbeRole::RefsParentsOf(vec![3000]),
+            ProbeRole::HasChildrenOf(vec![10]),
+        ],
+    ] {
+        assert_eq!(
+            index.probe_instance_ids(&any, roles, 1, &eph).await?,
+            ProbeOutcome::Capped
+        );
+    }
+
+    // Walk from lock, test against modx.
+    assert_eq!(
+        index
+            .probe_between(&any, &lock_refs, &[modx_holds.clone()], 1, &eph)
+            .await?,
+        ProbeOutcome::Resolved(vec![1001])
+    );
+
+    // The walk is what is budgeted.  `lock`, `hot` and `t_1` are referred to
+    // 21 times between them, past the budget of ten: "too many", although
+    // one row would pass the test, and never a partial set.
+    let three_targets = ProbeNeighbour::child(vec![3000, 3001, 4101], true, false);
+    assert_eq!(
+        index
+            .probe_between(&any, &three_targets, &[modx_holds.clone()], 1, &eph)
+            .await?,
+        ProbeOutcome::Capped
+    );
+    // With room for them, the same walk resolves.
+    assert_eq!(
+        index
+            .probe_between(&any, &three_targets, &[modx_holds.clone()], 3, &eph)
+            .await?,
+        ProbeOutcome::Resolved(vec![1001])
+    );
+
+    // A result past the cap is "too many" as well: modx holds ten functions
+    // and nothing narrows them.
+    assert_eq!(
+        index.probe_between(&any, &modx_holds, &[], 5, &eph).await?,
+        ProbeOutcome::Capped
+    );
+    Ok(())
+}
+
+/// Walking from a neighbour and testing against it are one relation.
+///
+/// Each neighbour has two spellings in a probe: it is enumerated when it
+/// drives, and tested row by row when another one drives.  If the two
+/// disagreed, the answer would depend on which neighbour happened to be the
+/// smaller.  For every pair here, either order gives the rows both
+/// enumerations share.
+#[tokio::test(flavor = "current_thread")]
+async fn walking_from_a_neighbour_and_testing_against_it_agree() -> anyhow::Result<()> {
+    use crate::db_diesel::{Index, ProbeNeighbour, ProbeOutcome};
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_ESCALATION).await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+    let any = CompositeFilter::and(vec![]);
+
+    let neighbours = [
+        (
+            "what refers to lock",
+            ProbeNeighbour::child(vec![3000], true, false),
+        ),
+        (
+            "what holds in_1",
+            ProbeNeighbour::child(vec![1001], false, true),
+        ),
+        (
+            "what refers to or holds in_1",
+            ProbeNeighbour::child(vec![1001], true, true),
+        ),
+        (
+            "what modx holds",
+            ProbeNeighbour::parent(vec![10], false, true),
+        ),
+        (
+            "what modx refers to",
+            ProbeNeighbour::parent(vec![10], true, false),
+        ),
+        (
+            "what modx holds or refers to",
+            ProbeNeighbour::parent(vec![10], true, true),
+        ),
+        (
+            "what hub and in_1 refer to",
+            ProbeNeighbour::parent(vec![4001, 1001], true, false),
+        ),
+        (
+            "what refers to t_1",
+            ProbeNeighbour::child(vec![4101], true, false),
+        ),
+    ];
+
+    let mut alone: Vec<Vec<i64>> = Vec::new();
+    for (what, neighbour) in &neighbours {
+        match index
+            .probe_between(&any, neighbour, &[], 1000, &eph)
+            .await?
+        {
+            ProbeOutcome::Resolved(ids) => alone.push(ids),
+            ProbeOutcome::Capped => panic!("premise: {what} fits"),
+        }
+    }
+    assert_eq!(
+        alone[0],
+        vec![10, 1001, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009]
+    );
+    assert_eq!(alone[1], vec![10], "modx is the one thing around in_1");
+    assert_eq!(alone[3], (1001..=1010).collect::<Vec<i64>>());
+    assert_eq!(alone[4], vec![3000], "modx refers to lock through in_1");
+    assert_eq!(alone[7], vec![4001, 4002, 5001, 5002, 6001]);
+
+    let mut some_shared = 0;
+    for (i, (what_i, a)) in neighbours.iter().enumerate() {
+        for (j, (what_j, b)) in neighbours.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let shared: Vec<i64> = alone[i]
+                .iter()
+                .copied()
+                .filter(|id| alone[j].contains(id))
+                .collect();
+            some_shared += shared.len();
+            assert_eq!(
+                index
+                    .probe_between(&any, a, std::slice::from_ref(b), 1000, &eph)
+                    .await?,
+                ProbeOutcome::Resolved(shared),
+                "walking from {what_i}, tested against {what_j}"
+            );
+        }
+    }
+    assert!(some_shared > 0, "premise: some pair shares a row");
+    Ok(())
+}
+
 /// A derive within what a probe found reads only that.
 ///
 /// `lock` has ten callers and `modx` holds ten functions; at a read cap of
