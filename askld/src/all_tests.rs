@@ -6166,7 +6166,7 @@ fn incomplete_and_ids(res: &crate::statement::ExecutionResult) -> (Vec<String>, 
 
 #[test]
 fn an_edge_states_the_union_of_what_its_references_say() {
-    use index::roles::{RefKind, Stated};
+    use index::roles::RefKind;
     use index::symbols::SymbolType;
 
     // `caller` refers to `hook` (data, a function pointer) three times: it
@@ -6188,7 +6188,10 @@ fn an_edge_states_the_union_of_what_its_references_say() {
         .0
         .iter()
         .any(|(from, to, _)| from.symbol_id == caller && to.symbol_id == plain));
-    assert_eq!(res.edges.stated(caller, plain), Stated::default());
+    let nothing_said = res.edges.stated(caller, plain);
+    assert!(nothing_said.kinds(SymbolType::Function).is_empty());
+    assert!(nothing_said.refers(), "a token of caller names it");
+    assert!(res.edges.stated(caller, hook).refers());
 
     // A relation reaches the answer the same way: the slot holds `my_read`.
     let res = run_query(
@@ -6201,6 +6204,11 @@ fn an_edge_states_the_union_of_what_its_references_say() {
             .kinds(SymbolType::Function),
         vec![RefKind::Holds]
     );
+    // And nothing refers by that edge: no token of the slot names `my_read`.
+    assert!(!res
+        .edges
+        .stated(SymbolId::new(3), SymbolId::new(4))
+        .refers());
 }
 
 #[test]
