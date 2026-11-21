@@ -704,7 +704,12 @@ fn build_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ParentsQuer
         .into_boxed::<Pg>()
 }
 
-fn build_children_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ChildrenQuery<'static> {
+/// What the `parents` instances refer to: one row per reference and enclosing
+/// declaration (see `ChildSelectionTuple`).  Both readers of the relation go
+/// through it -- the children family in [`Index::find_symbol`] and the derive
+/// read in [`Index::find_child_instance_ids`] -- so what a statement derives
+/// and what it is narrowed by cannot disagree.
+fn build_children_query(parents: &InstanceSet, vis: &EphVisibility) -> ChildrenQuery<'static> {
     use crate::schema_diesel::*;
 
     let parent_decls = PARENT_DECLS_ALIAS;
@@ -712,10 +717,6 @@ fn build_children_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ChildrenQu
 
     symbol_refs::dsl::symbol_refs
         .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::id)))
-        .inner_join(
-            symbol_instances::dsl::symbol_instances
-                .on(symbols::dsl::id.eq(symbol_instances::symbol)),
-        )
         .inner_join(
             parent_decls.on(parent_decls
                 .field(symbol_instances::dsl::object_id)
@@ -727,11 +728,7 @@ fn build_children_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ChildrenQu
             "parent_decls.dfs_enter < symbol_refs.dfs_enter \
              AND symbol_refs.dfs_enter < parent_decls.dfs_exit",
         ))
-        .filter(
-            parent_decls
-                .field(symbol_instances::dsl::id)
-                .eq_any(source_ids),
-        )
+        .filter(parents.holds("parent_decls.id"))
         .inner_join(
             parent_symbols.on(parent_symbols
                 .field(symbols::dsl::id)
@@ -745,13 +742,11 @@ fn build_children_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ChildrenQu
         // the partition token (records columns for the eph-branch guard).
         .filter(vis.pred("symbol_refs.layer"))
         .filter(vis.pred("symbols.layer"))
-        .filter(vis.pred("symbol_instances.layer"))
         .filter(vis.pred("parent_decls.layer"))
         .filter(vis.pred("parent_symbols.layer"))
         .select((
             parent_symbols.fields(crate::schema_diesel::symbols::all_columns),
             Symbol::as_select(),
-            SymbolInstance::as_select(),
             parent_decls.fields(crate::schema_diesel::symbol_instances::all_columns),
             SymbolRef::as_select(),
             Object::as_select(),
@@ -759,25 +754,21 @@ fn build_children_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ChildrenQu
         .into_boxed::<Pg>()
 }
 
-/// The scope of a children read: the referenced symbol has an instance among
-/// `scope_ids`, and that instance is the row's.
+/// The scope of a children read: the referenced symbol has an instance in
+/// `scope`.
 ///
 /// A READ OF WHAT THE PARENTS REFERENCE STARTS FROM THE PARENTS.  Said plainly
-/// (`symbol_instances.id = ANY(scope)`), the scope is an index condition, and
-/// the planner starts from it: scope instance -> its symbol -> every reference
-/// to that symbol anywhere -> is it inside a parent?  That repeats each
-/// reference once per instance of its target.  `struct device` has 809
-/// instances and 20,906 references: 16.9 million rows hashed to keep 1001
-/// (12.9 s).  `"schedule" { }` reads every reference to `current` and `NULL`
-/// in the kernel to keep the 220 written in one function.
+/// (`symbol_refs.to_symbol IN (…)`), the scope is an index condition, and the
+/// planner starts from it: scope instance -> its symbol -> every reference to
+/// that symbol anywhere -> is it inside a parent?  `struct device` has 20,906
+/// references, and `"schedule" { }` read every reference to `current` and
+/// `NULL` in the kernel to keep the 220 written in one function.
 ///
-/// The `+ 0` makes both halves filters and nothing else, so the only place a
+/// The `+ 0` makes the test a filter and nothing else, so the only place a
 /// plan can start is the parents (at most the read cap, by primary key) and
-/// the work is bounded by what the parents contain.  The rows are the same.
-/// The first half is there to drop a reference before its target's instances
-/// are fetched, most of which the second half would then discard.
+/// the work is bounded by what the parents contain.
 ///
-/// Measured on the Linux index, same rows before and after: `{ "device" }`
+/// Measured on the Linux index when the hint was introduced: `{ "device" }`
 /// 12.9 s -> 25 ms, `macro { "task_struct" }` 89 ms -> 8 ms.
 fn children_in_scope(
     scope: &InstanceSet,
@@ -785,14 +776,12 @@ fn children_in_scope(
 ) -> EphSqlFragment<diesel::sql_types::Bool> {
     EphSqlFragment::<diesel::sql_types::Bool>::builder()
         .sql(
-            "(symbol_refs.to_symbol + 0 IN (\
+            "symbol_refs.to_symbol + 0 IN (\
                 SELECT si2.symbol FROM index.symbol_instances si2 WHERE ",
         )
         .eph_visibility("si2.layer", vis)
         .sql(" AND ")
         .in_set("si2.id", scope)
-        .sql(") AND ")
-        .in_set("symbol_instances.id + 0", scope)
         .sql(")")
         .build()
 }
@@ -1913,6 +1902,7 @@ impl Index {
     pub const TEST_INPUT_ONE_NAME_MANY_FILES: &'static str = "test_input_one_name_many_files.sql";
     pub const TEST_INPUT_RECURSIVE_MULTI_INSTANCE: &'static str =
         "test_input_recursive_multi_instance.sql";
+    pub const TEST_INPUT_MANY_REFS_ONE_TARGET: &'static str = "test_input_many_refs_one_target.sql";
     pub const VERB_TEST: &'static str = "verb_test.sql";
     pub const TEST_INPUT_SEARCH: &'static str = "test_input_search.sql";
 
@@ -1972,6 +1962,10 @@ impl Index {
         (
             "test_input_recursive_multi_instance.sql",
             include_str!("../../../sql/test_input_recursive_multi_instance.sql"),
+        ),
+        (
+            "test_input_many_refs_one_target.sql",
+            include_str!("../../../sql/test_input_many_refs_one_target.sql"),
         ),
         (
             "test_input_type_filter.sql",
@@ -2417,100 +2411,87 @@ impl Index {
             .listing
             .map(|mode| CompositeFilter::leaf(DirectOnlyMixin::new(mode)));
 
-        let children = match children_scope {
-            _ if !demands.children.refs => vec![],
-            ScopeContext::Absent | ScopeContext::Deferred => vec![],
-            ScopeContext::Unscoped => {
-                let _select_children: tracing::span::EnteredSpan = tracing::info_span!(
-                    "select_children",
-                    scope = "unscoped",
-                    source_count = current_instance_ids.len(),
-                    eph_count = eph_ids.len(),
-                )
-                .entered();
-                let t0 = std::time::Instant::now();
-                let rows: Vec<(
-                    Symbol,
-                    Symbol,
-                    SymbolInstance,
-                    SymbolInstance,
-                    SymbolRef,
-                    Object,
-                )> = self
-                    .cached_load_partitioned(eph, chain_dependent, |vis| {
-                        let mut q = build_children_query(current_instance_ids.clone(), vis);
-                        if let Some(expr) = filter.compose_children(vis) {
-                            q = q.filter(expr);
-                        }
-                        if let Some(expr) = children_listing
-                            .as_ref()
-                            .and_then(|l| l.compose_children(vis))
-                        {
-                            q = q.filter(expr);
-                        }
-                        q.filter(vis.guard()).limit(read_limit)
-                    })
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
-                tracing::info!(
-                    elapsed_ms = t0.elapsed().as_millis() as u64,
-                    result_rows = rows.len(),
-                    result_bytes = super::sql_cache::vec_weight(&rows),
-                    "select_children completed",
-                );
-                rows
-            }
+        // The neighbour the children family is read against: `None` when no
+        // one reads the family, `Some(None)` for every neighbour there is,
+        // `Some(Some(_))` for the instances a neighbour statement holds.
+        let children_within: Option<Option<InstanceSet>> = match &children_scope {
+            _ if !demands.children.refs => None,
+            ScopeContext::Absent | ScopeContext::Deferred => None,
+            ScopeContext::Unscoped => Some(None),
             ScopeContext::Scope {
-                ref ids,
-                filter: ref scope_filter,
+                ids,
+                filter: scope_filter,
             } => {
-                let _select_children: tracing::span::EnteredSpan = tracing::info_span!(
-                    "select_children",
-                    scope = "scoped",
-                    source_count = current_instance_ids.len(),
-                    eph_count = eph_ids.len(),
-                )
-                .entered();
-                let t0 = std::time::Instant::now();
-
                 let role = ScopeRole::Children(current_instance_ids.clone());
                 let scope_ids = self
                     .resolve_scope_ids(ids, scope_filter, Some(&role), eph)
                     .await?;
-
-                let rows: Vec<(
-                    Symbol,
-                    Symbol,
-                    SymbolInstance,
-                    SymbolInstance,
-                    SymbolRef,
-                    Object,
-                )> = self
-                    .cached_load_partitioned(eph, chain_dependent, |vis| {
-                        let mut q = build_children_query(current_instance_ids.clone(), vis);
-                        if let Some(expr) = filter.compose_children(vis) {
-                            q = q.filter(expr);
-                        }
-                        if let Some(expr) = children_listing
-                            .as_ref()
-                            .and_then(|l| l.compose_children(vis))
-                        {
-                            q = q.filter(expr);
-                        }
-                        // Always apply scope filter.
-                        q = q.filter(children_in_scope(&InstanceSet::Ids(scope_ids.clone()), vis));
-                        q.filter(vis.guard()).limit(read_limit)
-                    })
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
-                tracing::info!(
-                    elapsed_ms = t0.elapsed().as_millis() as u64,
-                    result_rows = rows.len(),
-                    result_bytes = super::sql_cache::vec_weight(&rows),
-                    "select_children completed",
-                );
-                rows
+                Some(Some(InstanceSet::Ids(scope_ids)))
             }
+        };
+
+        // One row per reference (see `ChildSelectionTuple`), so the limit
+        // counts what `current` refers to and not how many instances the
+        // symbols referred to happen to have.
+        let children: Vec<(Symbol, Symbol, SymbolInstance, SymbolRef, Object)> =
+            match &children_within {
+                None => vec![],
+                Some(within) => {
+                    let _select_children: tracing::span::EnteredSpan = tracing::info_span!(
+                        "select_children",
+                        scope = if within.is_some() {
+                            "scoped"
+                        } else {
+                            "unscoped"
+                        },
+                        source_count = current_instance_ids.len(),
+                        eph_count = eph_ids.len(),
+                    )
+                    .entered();
+                    let t0 = std::time::Instant::now();
+                    let sources = InstanceSet::Ids(current_instance_ids.clone());
+                    let rows = self
+                        .cached_load_partitioned(eph, chain_dependent, |vis| {
+                            let mut q = build_children_query(&sources, vis);
+                            if let Some(expr) = filter.compose_children(vis) {
+                                q = q.filter(expr);
+                            }
+                            if let Some(expr) = children_listing
+                                .as_ref()
+                                .and_then(|l| l.compose_children(vis))
+                            {
+                                q = q.filter(expr);
+                            }
+                            // A scope is always applied: an empty one
+                            // correctly returns zero rows (specified, and it
+                            // matched nothing).
+                            if let Some(scope) = within {
+                                q = q.filter(children_in_scope(scope, vis));
+                            }
+                            q.filter(vis.guard()).limit(read_limit)
+                        })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to load symbol references: {}", e))?;
+                    tracing::info!(
+                        elapsed_ms = t0.elapsed().as_millis() as u64,
+                        result_rows = rows.len(),
+                        result_bytes = super::sql_cache::vec_weight(&rows),
+                        "select_children completed",
+                    );
+                    rows
+                }
+            };
+
+        // The instance each of those references ends on.
+        let child_targets: HashMap<i64, SymbolInstance> = match &children_within {
+            Some(within) if !children.is_empty() => {
+                let mut referred: Vec<i64> = children.iter().map(|(_, sym, ..)| sym.id).collect();
+                referred.sort_unstable();
+                referred.dedup();
+                self.reference_targets(referred, within.as_ref(), eph)
+                    .await?
+            }
+            _ => HashMap::new(),
         };
 
         // Scope the containment families by an ids-only neighbour scope —
@@ -2762,18 +2743,22 @@ impl Index {
                 })
                 .collect();
 
+            // A reference whose symbol has no instance to end on (none
+            // visible, or none the neighbour holds) is not in the family, as
+            // it was not when the read joined the instances itself.
             let mut children: Vec<_> = children
                 .into_iter()
-                .map(
-                    |(parent_symbol, sym, instance, from_instance, sym_ref, from_object)| {
-                        ChildReference {
+                .filter_map(
+                    |(parent_symbol, sym, from_instance, sym_ref, from_object)| {
+                        let symbol_instance = child_targets.get(&sym.id)?.clone();
+                        Some(ChildReference {
                             parent_symbol,
                             symbol: sym,
-                            symbol_instance: instance,
+                            symbol_instance,
                             from_instance,
                             symbol_ref: sym_ref,
                             from_object,
-                        }
+                        })
                     },
                 )
                 .collect();
@@ -2831,6 +2816,62 @@ impl Index {
 
         // Checked::new runs has_eph_leak; bails with a uniform error on leak.
         super::selection::Checked::new(selection?, eph)
+    }
+
+    /// The instance a reference to each of `symbols` ends on: one per symbol.
+    ///
+    /// A reference names a symbol, and a symbol declared in five headers has
+    /// five instances, so which of them an edge is drawn to is a choice.  It
+    /// is made the way the parents side makes it in [`Self::find_symbol`]:
+    /// the definition if there is one, then the lowest id, so the same query
+    /// draws the same edge twice running.  `within` narrows the choice to the
+    /// instances a neighbour statement holds, which are the ones that can be
+    /// in the answer.
+    ///
+    /// One row per symbol comes back, however many instances it has.
+    async fn reference_targets(
+        &self,
+        symbols: Vec<i64>,
+        within: Option<&InstanceSet>,
+        eph: &EphContext,
+    ) -> Result<HashMap<i64, SymbolInstance>> {
+        use crate::schema_diesel::symbol_instances;
+
+        let _span = tracing::info_span!("reference_targets", symbols = symbols.len()).entered();
+        let t0 = std::time::Instant::now();
+
+        // One query for every visible layer: the choice is per symbol, and a
+        // persistent and an ephemeral branch would each make their own.
+        let vis = EphVisibility::combined(eph);
+        let mut query = symbol_instances::table
+            .filter(symbol_instances::symbol.eq_any(symbols))
+            .filter(vis.pred("symbol_instances.layer"))
+            .distinct_on(symbol_instances::symbol)
+            .order((
+                symbol_instances::symbol,
+                symbol_instances::instance_type
+                    .eq(INSTANCE_TYPE_DEFINITION)
+                    .desc(),
+                symbol_instances::id,
+            ))
+            .select(SymbolInstance::as_select())
+            .into_boxed::<Pg>();
+        if let Some(within) = within {
+            query = query.filter(within.holds("symbol_instances.id"));
+        }
+        let rows: std::sync::Arc<Vec<SymbolInstance>> = self
+            .cached_load(query)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to load reference targets: {}", e))?;
+        tracing::info!(
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            result_rows = rows.len(),
+            "reference_targets completed",
+        );
+        Ok(rows
+            .iter()
+            .map(|instance| (instance.symbol, instance.clone()))
+            .collect())
     }
 
     /// Query child instance IDs directly from DB given parent instance IDs.
@@ -2937,6 +2978,8 @@ impl Index {
         }
 
         if include_refs {
+            use super::cte::PROBE_OVERFLOW;
+
             let _span = tracing::info_span!(
                 "find_child_instance_ids_refs",
                 source_count = parent_ids.len(),
@@ -2944,51 +2987,68 @@ impl Index {
             )
             .entered();
             let t0 = std::time::Instant::now();
-            let results: Vec<(
-                Symbol,
-                Symbol,
-                SymbolInstance,
-                SymbolInstance,
-                SymbolRef,
-                Object,
-            )> = self
-                .cached_load_partitioned(eph, chain_dependent, |vis| {
-                    let mut q = build_children_query(source_ids.clone(), vis);
-                    if let Some(expr) = filter.compose_children(vis) {
-                        q = q.filter(expr);
-                    }
-                    // M4: restrict the derived (ref) children to the receiver's
-                    // own predicate (canonical `symbols` is the child here).
-                    if let Some(expr) = filter.compose_derive_child(vis) {
-                        q = q.filter(expr);
-                    }
-                    q.filter(vis.guard()).limit(read_limit)
-                })
+
+            // A REFERENCE IS READ ONCE, however many instances its target
+            // has.  What comes out of this read is instances, and its limit
+            // counts them: the references are read first, one row each (the
+            // `referenced` step, the query the children family reads), then
+            // the instances of the symbols they name, at most `read_limit`.
+            //
+            // It used to be one join, a row per reference AND per instance of
+            // its target, with the limit on those rows.  `file("…/bt-bmc.c")
+            // { }` refers 331 times to symbols with 812 instances between
+            // them: 2,373 rows against a limit of 1,001, so a complete answer
+            // was cut and called incomplete -- and which children survived
+            // the cut was up to the plan.
+            //
+            // This is a probe's question, "which instances do these parents
+            // refer to", asked with this statement's filters, and it is
+            // bounded the way a probe role is: the references read have a
+            // budget, and a read that ran past it says "capped" without
+            // looking further.  Combined visibility for the same reason as
+            // there: the two steps consult chain-visible rows.
+            let vis = EphVisibility::combined(eph);
+            let mut references = build_children_query(&InstanceSet::Ids(source_ids.clone()), &vis);
+            if let Some(expr) = filter.compose_children(&vis) {
+                references = references.filter(expr);
+            }
+            // M4: restrict the derived (ref) children to the receiver's own
+            // predicate (canonical `symbols` is the child here).
+            if let Some(expr) = filter.compose_derive_child(&vis) {
+                references = references.filter(expr);
+            }
+            let referenced = Relation::new(
+                "referenced",
+                references.select(crate::schema_diesel::symbol_refs::to_symbol),
+            );
+            let referenced = match eph.read_cap() {
+                0 => referenced,
+                cap => referenced.bounded((cap * PROBE_ROLE_ROWS_PER_CAP) as i64),
+            };
+            let mut instances =
+                build_current_id_query(&vis).filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
+                    &referenced.name().holds("symbols.id", "to_symbol"),
+                ));
+            if let Some(complete) = referenced.complete_sql() {
+                instances =
+                    instances.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&complete));
+            }
+            let results: std::sync::Arc<Vec<i64>> = self
+                .cached_load(
+                    With::new(vec![referenced], instances.limit(read_limit))
+                        .or_overflow_row(format!("{PROBE_OVERFLOW}::bigint")),
+                )
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to find ref-child instance IDs: {}", e))?;
+            let overflowed = results.contains(&PROBE_OVERFLOW);
             tracing::info!(
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 result_rows = results.len(),
-                result_bytes = super::sql_cache::vec_weight(&results),
+                overflowed,
                 "find_child_instance_ids (refs) completed",
             );
-            for (ps, cs, ci, fi, sr, _) in &results {
-                if is_eph_leak(ps.layer, eph_ids)
-                    || is_eph_leak(cs.layer, eph_ids)
-                    || is_eph_leak(ci.layer, eph_ids)
-                    || is_eph_leak(fi.layer, eph_ids)
-                    || is_eph_leak(sr.layer, eph_ids)
-                {
-                    tracing::error!(?eph_ids, "layer leak in find_child_instance_ids (refs)");
-                    anyhow::bail!("internal error: ephemeral layer isolation violation");
-                }
-            }
-            derive_capped |= results.len() as i64 >= read_limit;
-            all_ids.extend(
-                results
-                    .iter()
-                    .map(|(_, _, callee_inst, _, _, _)| callee_inst.id),
-            );
+            derive_capped |= overflowed || results.len() as i64 >= read_limit;
+            all_ids.extend(results.iter().copied().filter(|id| *id != PROBE_OVERFLOW));
         }
 
         all_ids.sort_unstable();

@@ -30,6 +30,8 @@ pub const TEST_INPUT_HIDDEN_CHILDREN: &'static str =
 pub const TEST_INPUT_ONE_NAME_MANY_FILES: &'static str =
     index::db_diesel::Index::TEST_INPUT_ONE_NAME_MANY_FILES;
 pub const TEST_INPUT_SEARCH: &'static str = index::db_diesel::Index::TEST_INPUT_SEARCH;
+pub const TEST_INPUT_MANY_REFS_ONE_TARGET: &'static str =
+    index::db_diesel::Index::TEST_INPUT_MANY_REFS_ONE_TARGET;
 
 pub fn format_edges(edges: EdgeList) -> Vec<String> {
     edges
@@ -99,6 +101,7 @@ const ALL_FIXTURES: &[&str] = &[
     TEST_INPUT_STRUCT_FIELDS,
     VERB_TEST,
     TEST_INPUT_SEARCH,
+    TEST_INPUT_MANY_REFS_ONE_TARGET,
     TEST_INPUT_HIDDEN_CHILDREN,
     TEST_INPUT_ONE_NAME_MANY_FILES,
 ];
