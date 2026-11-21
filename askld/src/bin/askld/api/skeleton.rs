@@ -19,6 +19,7 @@
 //! graph itself is untouched, so the markdown renderer and MCP's one-shot
 //! `detail=full` keep the inlined shape.
 
+use index::roles::RefKind;
 use index::symbols::SymbolType;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -65,6 +66,9 @@ pub struct SkeletonEdge {
     pub from_symbol: String,
     pub to_symbol: String,
     pub occurrence_count: usize,
+    /// What the edge states (see `Edge::kinds`); absent when nothing is.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<RefKind>,
 }
 
 #[derive(Debug, Serialize)]
@@ -257,6 +261,7 @@ pub fn to_skeleton(graph: Graph) -> SkeletonGraph {
             from_symbol: from_symbol.clone(),
             to_symbol: to_symbol.clone(),
             occurrence_count: edge.occurrence_count(),
+            kinds: edge.kinds().to_vec(),
         };
 
         match (from_splits, to_splits) {
@@ -471,6 +476,34 @@ mod tests {
         // Containment now points at the splits, not the bare symbol.
         assert_eq!(sk.has_edges.len(), 2);
         assert!(sk.has_edges.iter().all(|h| h.child.contains('\u{0}')));
+    }
+
+    #[test]
+    fn a_skeleton_edge_says_what_the_edge_states() {
+        use index::roles::RefKind;
+
+        let nodes = || {
+            vec![
+                node(3, "c", vec![inst("30", 3, "o1", SymbolType::Function)]),
+                node(4, "t", vec![inst("40", 4, "o3", SymbolType::Function)]),
+            ]
+        };
+        let said = Edge::new(SymbolId(3), SymbolId(4), 2, vec!["o1".to_string()])
+            .with_kinds(vec![RefKind::Calls, RefKind::Takes]);
+        let sk = to_skeleton(graph_of(nodes(), vec![], vec![said]));
+        assert_eq!(sk.edges[0].kinds, vec![RefKind::Calls, RefKind::Takes]);
+        assert_eq!(
+            serde_json::to_value(&sk.edges[0]).unwrap()["kinds"],
+            serde_json::json!(["calls", "takes"])
+        );
+
+        // Nothing stated: the edge is serialised as before, without the key.
+        let bare = Edge::new(SymbolId(3), SymbolId(4), 2, vec!["o1".to_string()]);
+        let sk = to_skeleton(graph_of(nodes(), vec![], vec![bare]));
+        assert!(serde_json::to_value(&sk.edges[0])
+            .unwrap()
+            .get("kinds")
+            .is_none());
     }
 
     #[test]

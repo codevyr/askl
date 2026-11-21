@@ -11,7 +11,10 @@
 //! eliminated.
 
 use actix_web::{get, web, HttpResponse, Responder};
+use index::db_diesel::{EdgeOccurrenceRow, SymbolReferenceRow};
 use index::offset_range::range_bounds_to_offsets;
+use index::roles::{RefKind, Stated};
+use index::symbols::SymbolType;
 use serde::{Deserialize, Serialize};
 
 use super::query::{narrow_roots, parse_project_list, QueryError};
@@ -51,6 +54,31 @@ pub struct ReferenceRowJson {
     pub project_id: Option<String>,
     pub start_offset: i32,
     pub end_offset: i32,
+    /// What this reference does to its target (see `Edge::kinds`); absent
+    /// when nothing is stated.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<RefKind>,
+}
+
+/// One reference as the listing returns it.  `None` for a self-reference,
+/// which has no other instance to open and which the engine would not draw
+/// either, and for a row whose range has no bounds.
+fn reference_json(row: SymbolReferenceRow) -> Option<ReferenceRowJson> {
+    let to_instance_id = row.to_instance_id?;
+    let (start_offset, end_offset) = range_bounds_to_offsets(&row.from_offset_range)?;
+    let kinds = Stated::of(row.roles, row.relation).kinds(SymbolType::from(row.to_symbol_type));
+    Some(ReferenceRowJson {
+        to_symbol: row.to_symbol.to_string(),
+        to_symbol_name: row.to_symbol_name,
+        to_instance_id: to_instance_id.to_string(),
+        from_instance_id: row.from_instance_id.to_string(),
+        object_id: row.from_object.to_string(),
+        path: row.path,
+        project_id: row.project_id,
+        start_offset,
+        end_offset,
+        kinds,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -176,29 +204,9 @@ pub async fn symbol_references(
                     .then(|| rows.last())
                     .flatten()
                     .map(|r| format_cursor(r.from_instance_id, r.ref_id));
-                let rows = rows
-                    .into_iter()
-                    .filter_map(|r| {
-                        // A `None` target is a self-reference the engine would
-                        // not draw either — dropped from the response but its
-                        // scan position was already consumed above, so `next`
-                        // stays honest.
-                        let to_instance_id = r.to_instance_id?;
-                        let (start_offset, end_offset) =
-                            range_bounds_to_offsets(&r.from_offset_range)?;
-                        Some(ReferenceRowJson {
-                            to_symbol: r.to_symbol.to_string(),
-                            to_symbol_name: r.to_symbol_name,
-                            to_instance_id: to_instance_id.to_string(),
-                            from_instance_id: r.from_instance_id.to_string(),
-                            object_id: r.from_object.to_string(),
-                            path: r.path,
-                            project_id: r.project_id,
-                            start_offset,
-                            end_offset,
-                        })
-                    })
-                    .collect();
+                // A dropped row's scan position was already consumed above,
+                // so `next` stays honest.
+                let rows = rows.into_iter().filter_map(reference_json).collect();
                 Ok(ReferencesResponse {
                     kind: kind.to_string(),
                     rows: ReferenceRows::Refs(rows),
@@ -405,6 +413,27 @@ pub struct EdgeOccurrenceRowJson {
     pub project_id: Option<String>,
     pub start_offset: i32,
     pub end_offset: i32,
+    /// What THIS occurrence does to the target (see `Edge::kinds`, which is
+    /// the union over the pair's occurrences); absent when nothing is stated.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<RefKind>,
+}
+
+/// One call site as the endpoint returns it; `None` for a row whose range
+/// has no bounds.
+fn edge_occurrence_json(row: EdgeOccurrenceRow) -> Option<EdgeOccurrenceRowJson> {
+    let (start_offset, end_offset) = range_bounds_to_offsets(&row.from_offset_range)?;
+    let kinds = Stated::of(row.roles, row.relation).kinds(SymbolType::from(row.to_symbol_type));
+    Some(EdgeOccurrenceRowJson {
+        ref_id: row.ref_id.to_string(),
+        from_instance_id: row.from_instance_id.to_string(),
+        object_id: row.from_object.to_string(),
+        path: row.path,
+        project_id: row.project_id,
+        start_offset,
+        end_offset,
+        kinds,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -459,21 +488,7 @@ pub async fn edge_occurrences(
             } else {
                 None
             };
-            let rows = rows
-                .into_iter()
-                .filter_map(|r| {
-                    let (start_offset, end_offset) = range_bounds_to_offsets(&r.from_offset_range)?;
-                    Some(EdgeOccurrenceRowJson {
-                        ref_id: r.ref_id.to_string(),
-                        from_instance_id: r.from_instance_id.to_string(),
-                        object_id: r.from_object.to_string(),
-                        path: r.path,
-                        project_id: r.project_id,
-                        start_offset,
-                        end_offset,
-                    })
-                })
-                .collect();
+            let rows = rows.into_iter().filter_map(edge_occurrence_json).collect();
             HttpResponse::Ok().json(EdgeOccurrencesResponse { rows, next })
         }
         Err(err) => {
@@ -485,6 +500,100 @@ pub async fn edge_occurrences(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn occurrence(roles: i16, relation: i16, to_symbol_type: i32) -> EdgeOccurrenceRow {
+        EdgeOccurrenceRow {
+            ref_id: 7,
+            from_instance_id: 10,
+            from_object: 1,
+            path: "/a.c".to_string(),
+            project_id: Some("1".to_string()),
+            from_offset_range: (
+                std::ops::Bound::Included(130),
+                std::ops::Bound::Excluded(134),
+            ),
+            roles,
+            relation,
+            to_symbol_type,
+        }
+    }
+
+    #[test]
+    fn an_occurrence_says_what_it_does_to_the_target() {
+        // `hook++` on a data symbol: written, and its value read.
+        let row = edge_occurrence_json(occurrence(6, 0, 6)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&row).unwrap()["kinds"],
+            serde_json::json!(["writes", "reads"])
+        );
+        // The same roles on a function: its value is taken, not read.
+        let row = edge_occurrence_json(occurrence(4, 0, 1)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&row).unwrap()["kinds"],
+            serde_json::json!(["takes"])
+        );
+        // A relation is not something the token says, and prints as itself.
+        let row = edge_occurrence_json(occurrence(0, 2, 1)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&row).unwrap()["kinds"],
+            serde_json::json!(["holds"])
+        );
+        // Nothing stated: the row is what it was, with no `kinds` key.
+        let row = edge_occurrence_json(occurrence(0, 0, 1)).unwrap();
+        assert_eq!(
+            serde_json::to_string(&row).unwrap(),
+            r#"{"ref_id":"7","from_instance_id":"10","object_id":"1","path":"/a.c","project_id":"1","start_offset":130,"end_offset":134}"#
+        );
+    }
+
+    fn listed(roles: i16, relation: i16, to_symbol_type: i32) -> SymbolReferenceRow {
+        SymbolReferenceRow {
+            ref_id: 7,
+            from_instance_id: 10,
+            to_symbol: 2,
+            to_symbol_name: "hook".to_string(),
+            to_instance_id: Some(20),
+            from_object: 1,
+            path: "/a.c".to_string(),
+            project_id: Some("1".to_string()),
+            from_offset_range: (
+                std::ops::Bound::Included(130),
+                std::ops::Bound::Excluded(134),
+            ),
+            roles,
+            relation,
+            to_symbol_type,
+        }
+    }
+
+    #[test]
+    fn a_listed_reference_says_what_it_does_to_the_target() {
+        let row = reference_json(listed(6, 0, 6)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&row).unwrap()["kinds"],
+            serde_json::json!(["writes", "reads"])
+        );
+        let row = reference_json(listed(1, 0, 1)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&row).unwrap()["kinds"],
+            serde_json::json!(["calls"])
+        );
+        let row = reference_json(listed(0, 1, 6)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&row).unwrap()["kinds"],
+            serde_json::json!(["declares"])
+        );
+        // Nothing stated: the row is what it was, with no `kinds` key.
+        let row = reference_json(listed(0, 0, 1)).unwrap();
+        assert_eq!(
+            serde_json::to_string(&row).unwrap(),
+            r#"{"to_symbol":"2","to_symbol_name":"hook","to_instance_id":"20","from_instance_id":"10","object_id":"1","path":"/a.c","project_id":"1","start_offset":130,"end_offset":134}"#
+        );
+        // A self-reference has no other instance to open: not listed.
+        let mut own = listed(1, 0, 1);
+        own.to_instance_id = None;
+        assert!(reference_json(own).is_none());
+    }
 
     #[test]
     fn cursor_round_trips_and_rejects_garbage() {

@@ -119,7 +119,7 @@ pub(super) fn has_children_candidates(source_ids: Vec<i64>, vis: &EphVisibility)
 // The edges between a set of instances (`find_edges_between`)
 // ============================================================================
 
-use diesel::sql_types::{BigInt, Int4range, Integer};
+use diesel::sql_types::{BigInt, Int4range, Integer, SmallInt};
 
 /// The two steps of `find_edges_between`, in order: `candidates`, the full
 /// `symbol_instances` rows (id + symbol + object_id + offset_range + layer +
@@ -177,6 +177,8 @@ pub(super) type FindEdgesRowSqlType = (
     BigInt,    // sr_layer
     BigInt,    // from_layer
     BigInt,    // to_layer
+    SmallInt,  // roles
+    SmallInt,  // relation
 );
 
 /// The instances an edge may end on: at most two per symbol of `candidates`.
@@ -253,7 +255,8 @@ impl QueryFragment<Pg> for EdgesBetween {
         if self.edge_limit.is_some() {
             out.push_sql(
                 "SELECT ref_id, to_symbol, from_object, from_offset_range, \
-                        to_instance_id, from_instance_id, sr_layer, from_layer, to_layer \
+                        to_instance_id, from_instance_id, sr_layer, from_layer, to_layer, \
+                        roles, relation \
                  FROM ( SELECT de.*, \
                           row_number() OVER (PARTITION BY de.from_instance_id \
                                              ORDER BY de.ref_id) AS edge_rn \
@@ -267,7 +270,8 @@ impl QueryFragment<Pg> for EdgesBetween {
                   from_inst.id AS from_instance_id, \
                   sr.layer AS sr_layer, \
                   from_inst.layer AS from_layer, \
-                  to_inst.layer AS to_layer \
+                  to_inst.layer AS to_layer, \
+                  sr.roles, sr.relation \
               FROM candidates from_inst \
               JOIN index.symbol_refs sr \
                   ON sr.from_object = from_inst.object_id \
