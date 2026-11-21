@@ -2032,6 +2032,173 @@ async fn one_token_read_in_two_declarations_is_an_edge_from_each_and_one_occurre
     Ok(())
 }
 
+/// A relation belongs to its source only, in every read that attributes a
+/// reference to a declaration.
+///
+/// Fixture: directory 500 and file 510 over /ops.h; struct `ops` 10 holding
+/// field `slot` 20; `my_read` 30, `plain` 40; macro `DEFINE_X` 60 and `lock`
+/// 70.  `slot` HOLDS my_read (a relation row on its declaration) and names
+/// `plain` in the ordinary way; `DEFINE_X` DECLARES lock and names `plain`.
+#[tokio::test(flavor = "current_thread")]
+async fn a_relation_row_is_attributed_to_the_declaration_it_sits_in() -> anyhow::Result<()> {
+    use crate::db_diesel::{
+        AskSide, EphContext, FamilyDemands, Index, ProbeNeighbour, ProbeOutcome, ProbeRole,
+    };
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_RELATION_ROWS)
+        .await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+    let any = CompositeFilter::and(vec![]);
+    const OPS: i64 = 1;
+    const SLOT: i64 = 2;
+    const MY_READ: i64 = 3;
+    const PLAIN: i64 = 4;
+    const LOCK: i64 = 6;
+
+    // The edges among a set of instances.
+    let (edges, _) = index
+        .find_edges_between(&[500, 510, 10, 20, 30, 40, 60, 70], &eph)
+        .await?;
+    let from = |to: i64| -> Vec<i64> {
+        let mut from: Vec<i64> = edges
+            .iter()
+            .filter(|e| e.to_symbol == to)
+            .map(|e| e.from_instance_id)
+            .collect();
+        from.sort_unstable();
+        from.dedup();
+        from
+    };
+    assert_eq!(from(MY_READ), vec![20], "held by the slot alone");
+    assert_eq!(from(LOCK), vec![60], "declared by the macro alone");
+    assert_eq!(
+        from(PLAIN),
+        vec![10, 20, 60, 500, 510],
+        "a reference belongs to everything around it"
+    );
+
+    // The families of a statement, both directions.
+    let named = |name: &'static str| CompositeFilter::leaf(CompoundNameMixin::new(name));
+    let ops = index
+        .find_symbol(
+            &named("ops"),
+            ScopeContext::Unscoped,
+            ScopeContext::Unscoped,
+            FamilyDemands::default(),
+            &eph,
+        )
+        .await?
+        .into_inner();
+    let mut referred: Vec<i64> = ops.children.iter().map(|c| c.symbol.id).collect();
+    referred.sort_unstable();
+    assert_eq!(referred, vec![PLAIN], "the struct does not hold my_read");
+    let my_read = index
+        .find_symbol(
+            &named("my_read"),
+            ScopeContext::Unscoped,
+            ScopeContext::Unscoped,
+            FamilyDemands::default(),
+            &eph,
+        )
+        .await?
+        .into_inner();
+    let mut referring: Vec<i64> = my_read.parents.iter().map(|p| p.from_instance.id).collect();
+    referring.sort_unstable();
+    assert_eq!(referring, vec![20]);
+
+    // The derive reads.
+    let (children, _) = index
+        .find_child_instance_ids(&[10], true, false, &any, None, &eph)
+        .await?;
+    let children: Vec<i64> = children.into_iter().map(Into::into).collect();
+    assert_eq!(children, vec![40], "what ops refers to");
+    let (parents, _) = index
+        .find_parent_instance_ids(&[30], true, false, &any, None, &eph)
+        .await?;
+    let mut parents: Vec<i64> = parents.into_iter().map(Into::into).collect();
+    parents.sort_unstable();
+    assert_eq!(parents, vec![20], "who refers to my_read");
+
+    // The probe's roles.
+    assert_eq!(
+        index
+            .probe_instance_ids(&any, vec![ProbeRole::RefsParentsOf(vec![30])], 100, &eph)
+            .await?,
+        ProbeOutcome::Resolved(vec![20])
+    );
+    assert_eq!(
+        index
+            .probe_instance_ids(&any, vec![ProbeRole::RefsChildrenOf(vec![10])], 100, &eph)
+            .await?,
+        ProbeOutcome::Resolved(vec![40])
+    );
+
+    // The probe that walks from one neighbour and tests another: what refers
+    // to my_read (walked) and is held by the file (tested) ...
+    let walk_my_read = ProbeNeighbour::child(vec![30], true, false);
+    let in_file = ProbeNeighbour::parent(vec![510], false, true);
+    assert_eq!(
+        index
+            .probe_between(&any, &walk_my_read, &[in_file.clone()], 100, &eph)
+            .await?,
+        ProbeOutcome::Resolved(vec![20])
+    );
+    // ... and with the reference as the TEST: what the file holds (walked)
+    // that refers to my_read, and what it holds that ops refers to.
+    let refers_to_my_read = ProbeNeighbour::child(vec![30], true, false);
+    assert_eq!(
+        index
+            .probe_between(&any, &in_file, &[refers_to_my_read], 100, &eph)
+            .await?,
+        ProbeOutcome::Resolved(vec![20])
+    );
+    let ops_refers = ProbeNeighbour::parent(vec![10], true, false);
+    assert_eq!(
+        index
+            .probe_between(&any, &in_file, &[ops_refers], 100, &eph)
+            .await?,
+        ProbeOutcome::Resolved(vec![40])
+    );
+
+    // The ask: of ops and slot, which refers to my_read; of my_read and
+    // plain, which ops refers to.
+    let asked = index
+        .which_relate(&[10, 20], &[30], AskSide::Parents, true, false, &eph)
+        .await?;
+    assert_eq!((asked.ids, asked.whole), (vec![20], true));
+    let asked = index
+        .which_relate(&[10], &[30, 40], AskSide::Children, true, false, &eph)
+        .await?;
+    assert_eq!((asked.ids, asked.whole), (vec![40], true));
+
+    // The listings: everything ops refers to, how many, and the occurrences
+    // of one pair.
+    let (listed, _) = index.find_symbol_references(OPS, None, 10, &eph).await?;
+    assert_eq!(
+        listed.iter().map(|r| r.to_symbol).collect::<Vec<_>>(),
+        vec![PLAIN]
+    );
+    assert_eq!(
+        index.count_symbol_references(OPS, 10, &eph).await?,
+        (1, false)
+    );
+    let (held_by_ops, _) = index
+        .find_edge_occurrences(OPS, MY_READ, None, 10, &eph)
+        .await?;
+    assert!(held_by_ops.is_empty(), "ops -> my_read has no occurrence");
+    let (held_by_slot, _) = index
+        .find_edge_occurrences(SLOT, MY_READ, None, 10, &eph)
+        .await?;
+    assert_eq!(held_by_slot.len(), 1);
+
+    Ok(())
+}
+
 /// A reference keeps what it says about its target through every read that
 /// carries it to an answer: the edges among a set of instances, the family of
 /// a statement, and the occurrences of one edge.
