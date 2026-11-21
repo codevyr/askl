@@ -6204,6 +6204,64 @@ fn an_edge_states_the_union_of_what_its_references_say() {
 }
 
 #[test]
+fn a_relation_belongs_to_its_source_only() {
+    // `slot` (a field of struct `ops`, in /ops.h, in directory /) HOLDS
+    // `my_read`: a relation row, placed on the field's declaration.  A
+    // reference belongs to every declaration around it, and the row used to
+    // be attributed the same way -- so the struct, the file and the directory
+    // each "referred to" `my_read`.  Kernel: `file_operations (type) ->
+    // bt_bmc_open`, an arrow nobody could read.
+    //
+    // ids: dir 500, file 510, ops 10, slot 20, my_read 30, plain 40,
+    //      DEFINE_X 60, lock 70.
+    let ids = |q: &str| -> Vec<i64> {
+        let res = run_query(crate::test_util::TEST_INPUT_RELATION_ROWS, q);
+        let mut ids: Vec<i64> = res.nodes.as_vec().iter().map(|i| (*i).into()).collect();
+        ids.sort();
+        ids
+    };
+
+    // The slot holds it.
+    assert_eq!(ids(r#"field("slot") { func }"#), vec![20, 30, 40]);
+    // The struct does not: only what a token inside it names.
+    assert_eq!(ids(r#"type("ops") refs { func }"#), vec![10, 40]);
+    // Asked from the other end: who refers to my_read is the slot alone ...
+    assert_eq!(ids(r#"refs { "my_read" }"#), vec![20, 30]);
+    // ... while an ordinary reference at the same place still belongs to
+    // everything around it (the macro body names `plain` too).
+    assert_eq!(ids(r#"refs { "plain" }"#), vec![10, 20, 40, 60, 500, 510]);
+
+    // The same for what a macro's invocation declared: the row sits on the
+    // `#define`, and the file around the `#define` declares nothing.
+    assert_eq!(ids(r#"refs { "lock" }"#), vec![60, 70]);
+    assert_eq!(ids(r#"macro("DEFINE_X") refs { }"#), vec![40, 60, 70]);
+
+    // And in the edges drawn among an answer's nodes: one edge to my_read.
+    let res = run_query(
+        crate::test_util::TEST_INPUT_RELATION_ROWS,
+        r#"file("/ops.h") ; type("ops") ; field("slot") ; "my_read" ; "plain""#,
+    );
+    let to = |target: i64| -> Vec<i64> {
+        let mut from: Vec<i64> = res
+            .edges
+            .0
+            .iter()
+            .filter(|(_, t, _)| t.symbol_id == SymbolId::new(target))
+            .map(|(f, _, _)| f.instance_id.into())
+            .collect();
+        from.sort();
+        from.dedup();
+        from
+    };
+    assert_eq!(to(3), vec![20], "my_read is held by the slot alone");
+    assert_eq!(
+        to(4),
+        vec![10, 20, 510],
+        "plain is referred to by all three"
+    );
+}
+
+#[test]
 fn hidden_children_are_not_an_incomplete_answer() {
     // `GEN` refers to `shown` and to twelve folded symbols.  `"GEN" { }` lists
     // `shown`, and that is the whole answer: the twelve are left out for what
