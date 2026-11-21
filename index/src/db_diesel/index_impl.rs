@@ -610,6 +610,128 @@ impl Index {
         Ok(outcome)
     }
 
+    /// Which rows of one statement relate to some row of its neighbour.
+    ///
+    /// WHEN THE LISTS CANNOT PROVE AN ABSENCE, THE ENGINE ASKS WHICH ROWS
+    /// RELATE.  Narrowing drops a row for want of evidence, and its evidence
+    /// is two lists, one from each side, each cut at the read limit.  When
+    /// both are cut the drop proves nothing.  But the question narrowing has
+    /// is not "list everything between these two statements" -- 12,903
+    /// reference occurrences between `mod("amdgpu")` and what in it uses
+    /// `spinlock_t` -- it is "which of these rows relate at all".  That set
+    /// is no larger than the statement asked about, which fits the cap by
+    /// construction, so it cannot overflow.
+    ///
+    /// `parents` and `children` are the instances of the two statements;
+    /// `want` says whose rows the answer names.  The relation is the one the
+    /// side reads carry: a reference belongs to the instance that encloses it
+    /// and names a symbol (every instance of that symbol is referred to);
+    /// containment is between instances.  No listing filter: the neighbour's
+    /// own side read never has one, so the union the lists form does not
+    /// either, and what a listing leaves out is absent from its rows already.
+    ///
+    /// The answer is bounded in rows, not in work: a container that refers to
+    /// none of the symbols has every reference inside it looked at.  So the
+    /// references are read from ONE side into a bounded step
+    /// ([`ASK_REFERENCES_PER_CAP`]) -- the side with fewer rows first, the
+    /// other if that ran out -- and joined to the other side's extents.  If
+    /// both ran out, `whole` is false: the ids are still true, and the caller
+    /// is where it was without asking.
+    pub async fn which_relate(
+        &self,
+        parents: &[i64],
+        children: &[i64],
+        want: AskSide,
+        refs: bool,
+        has: bool,
+        eph: &EphContext,
+    ) -> Result<Related> {
+        use super::cte::PROBE_OVERFLOW;
+
+        let canonical = |ids: &[i64]| {
+            let mut ids = ids.to_vec();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        let (parents, children) = (canonical(parents), canonical(children));
+        if parents.is_empty() || children.is_empty() {
+            return Ok(Related {
+                ids: vec![],
+                whole: true,
+            });
+        }
+        let _span = tracing::info_span!(
+            "which_relate",
+            parents = parents.len(),
+            children = children.len(),
+            refs,
+            has
+        )
+        .entered();
+        let t0 = std::time::Instant::now();
+        let vis = EphVisibility::combined(eph);
+        let budget: Option<i64> = match eph.read_cap() {
+            0 => None,
+            cap => Some((cap * ASK_REFERENCES_PER_CAP) as i64),
+        };
+
+        let mut ids: Vec<i64> = Vec::new();
+        let mut whole = true;
+        let mut walked = "";
+        if has {
+            let rows: std::sync::Arc<Vec<i64>> = self
+                .cached_load(ask_statement(
+                    &parents,
+                    &children,
+                    want,
+                    AskStep::Containment,
+                    None,
+                    &vis,
+                ))
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to ask which rows hold: {}", e))?;
+            ids.extend(rows.iter().copied());
+        }
+        if refs {
+            // Fewer rows first: one file against the thousand things it
+            // names is read from the file, a module against one hot type
+            // from the type.
+            let order = if children.len() <= parents.len() {
+                [AskStep::ReferencesToChildren, AskStep::ReferencesInParents]
+            } else {
+                [AskStep::ReferencesInParents, AskStep::ReferencesToChildren]
+            };
+            whole = false;
+            for step in order {
+                let rows: std::sync::Arc<Vec<i64>> = self
+                    .cached_load(ask_statement(&parents, &children, want, step, budget, &vis))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to ask which rows refer: {}", e))?;
+                if rows.contains(&PROBE_OVERFLOW) {
+                    continue;
+                }
+                ids.extend(rows.iter().copied());
+                whole = true;
+                walked = match step {
+                    AskStep::ReferencesToChildren => "children",
+                    _ => "parents",
+                };
+                break;
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        tracing::info!(
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            rows = ids.len(),
+            whole,
+            walked,
+            "which_relate completed",
+        );
+        Ok(Related { ids, whole })
+    }
+
     /// Resolve a container scope to the `(object_id, lo, hi)` byte-range of
     /// every instance in it.  Content verbs (`search`/`loc`) fuse an enclosing
     /// container into their scan with these: a match is kept iff it lies inside
@@ -1388,6 +1510,174 @@ impl ProbeRole {
 /// neighbour with some 3,000 references: beyond that it is too hot to refine
 /// by, and the statement is derived under the read cap instead.
 pub const PROBE_ROLE_ROWS_PER_CAP: usize = 10;
+
+/// Whose rows [`Index::which_relate`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskSide {
+    /// The parents that refer to, or hold, one of the children.
+    Parents,
+    /// The children that one of the parents refers to, or holds.
+    Children,
+}
+
+/// What [`Index::which_relate`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Related {
+    /// Rows that relate (sorted).  Every one is true whatever `whole` says.
+    pub ids: Vec<i64>,
+    /// These are all of them.  False when the references could not be read
+    /// within the budget from either side: the rest is not known.
+    pub whole: bool,
+}
+
+/// How many references [`Index::which_relate`] may read per row of the cap.
+///
+/// The ask reads the references on one side of the question -- those to the
+/// children's symbols, or those inside the parents -- and joins them to the
+/// other side.  Measured on the kernel, warm: 167,488 references to the 129
+/// symbols between `mod("amdgpu")` and `spinlock_t` in 70 ms, the 823,002
+/// inside the module in 212 ms.  Two hundred per cap row is 200,000 at the
+/// default cap: about 85 ms to read, and no more than twice that when the
+/// first side runs out and the second is tried.  Past it the ask answers
+/// "not known" and narrowing marks the statement incomplete, as it did
+/// before there was an ask.
+pub const ASK_REFERENCES_PER_CAP: usize = 200;
+
+/// One statement of [`Index::which_relate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AskStep {
+    /// Join the two sets of extents.
+    Containment,
+    /// Read the references to the children's symbols, find the parents
+    /// around them.
+    ReferencesToChildren,
+    /// Read the references inside the parents, keep those to the children's
+    /// symbols.
+    ReferencesInParents,
+}
+
+/// `WITH <the two statements' rows, the references read> <the rows wanted>`.
+///
+/// The spellings follow what planned well for the probe (see
+/// `ProbeNeighbour`): each side's rows in a materialised relation of their
+/// own, the one bounded read driven from an index (`to_symbol`, or
+/// `(from_object, dfs_enter)`), and a plain join after it.
+fn ask_statement(
+    parents: &[i64],
+    children: &[i64],
+    want: AskSide,
+    step: AskStep,
+    budget: Option<i64>,
+    vis: &EphVisibility,
+) -> With<ProbeSurvivors> {
+    let parent_set = InstanceSet::Ids(parents.to_vec());
+    let child_set = InstanceSet::Ids(children.to_vec());
+    let bounded = |relation: Relation| match budget {
+        Some(budget) => relation.bounded(budget),
+        None => relation,
+    };
+    let mut relations = vec![
+        Relation::new(
+            "ask_parents",
+            EphSqlFragment::<diesel::sql_types::BigInt>::builder()
+                .sql(
+                    "SELECT x.id AS id, x.object_id AS object_id, \
+                            x.dfs_enter AS dfs_enter, x.dfs_exit AS dfs_exit \
+                     FROM index.symbol_instances x WHERE ",
+                )
+                .eph_visibility("x.layer", vis)
+                .sql(" AND ")
+                .in_set("x.id", &parent_set)
+                .build(),
+        ),
+        Relation::new(
+            "ask_children",
+            EphSqlFragment::<diesel::sql_types::BigInt>::builder()
+                .sql(
+                    "SELECT y.id AS id, y.symbol AS symbol, y.object_id AS object_id, \
+                            y.dfs_enter AS dfs_enter \
+                     FROM index.symbol_instances y WHERE ",
+                )
+                .eph_visibility("y.layer", vis)
+                .sql(" AND ")
+                .in_set("y.id", &child_set)
+                .build(),
+        ),
+    ];
+    // A reference inside a parent, or a child inside a parent.
+    const INSIDE: &str = "p.object_id = t.object_id \
+                          AND p.dfs_enter < t.dfs_enter AND t.dfs_enter < p.dfs_exit";
+    let sql = match step {
+        AskStep::Containment => {
+            let wanted = match want {
+                AskSide::Parents => "p.id",
+                AskSide::Children => "t.id",
+            };
+            format!("SELECT DISTINCT {wanted} FROM ask_parents p JOIN ask_children t ON {INSIDE}")
+        }
+        AskStep::ReferencesToChildren => {
+            let points = bounded(Relation::new(
+                "ask_points",
+                EphSqlFragment::<diesel::sql_types::BigInt>::builder()
+                    .sql(
+                        "SELECT sr.from_object AS object_id, sr.dfs_enter AS dfs_enter, \
+                                sr.to_symbol AS symbol \
+                         FROM index.symbol_refs sr WHERE ",
+                    )
+                    .eph_visibility("sr.layer", vis)
+                    .sql(" AND sr.to_symbol IN (SELECT DISTINCT symbol FROM ask_children)")
+                    .build(),
+            ));
+            let complete = points
+                .complete_sql()
+                .map(|sql| format!(" AND {sql}"))
+                .unwrap_or_default();
+            relations.push(points);
+            match want {
+                AskSide::Parents => format!(
+                    "SELECT DISTINCT p.id FROM ask_points t JOIN ask_parents p ON {INSIDE} \
+                     WHERE TRUE{complete}"
+                ),
+                AskSide::Children => format!(
+                    "SELECT y.id FROM ask_children y WHERE y.symbol IN \
+                       (SELECT t.symbol FROM ask_points t JOIN ask_parents p ON {INSIDE}){complete}"
+                ),
+            }
+        }
+        AskStep::ReferencesInParents => {
+            let inside = bounded(Relation::new(
+                "ask_inside",
+                EphSqlFragment::<diesel::sql_types::BigInt>::builder()
+                    .sql(
+                        "SELECT p.id AS id, t.to_symbol AS symbol \
+                         FROM ask_parents p JOIN index.symbol_refs t \
+                           ON t.from_object = p.object_id \
+                          AND p.dfs_enter < t.dfs_enter AND t.dfs_enter < p.dfs_exit \
+                         WHERE ",
+                    )
+                    .eph_visibility("t.layer", vis)
+                    .build(),
+            ));
+            let complete = inside
+                .complete_sql()
+                .map(|sql| format!(" AND {sql}"))
+                .unwrap_or_default();
+            relations.push(inside);
+            match want {
+                AskSide::Parents => format!(
+                    "SELECT DISTINCT i.id FROM ask_inside i WHERE i.symbol IN \
+                       (SELECT symbol FROM ask_children){complete}"
+                ),
+                AskSide::Children => format!(
+                    "SELECT y.id FROM ask_children y WHERE y.symbol IN \
+                       (SELECT symbol FROM ask_inside){complete}"
+                ),
+            }
+        }
+    };
+    With::new(relations, ProbeSurvivors { sql })
+        .or_overflow_row(format!("{}::bigint", super::cte::PROBE_OVERFLOW))
+}
 
 /// What a capped cardinality probe learned.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2290,6 +2580,8 @@ impl Index {
     pub const TEST_INPUT_TYPE_FILTER: &'static str = "test_input_type_filter.sql";
     pub const TEST_INPUT_STRUCT_FIELDS: &'static str = "test_input_struct_fields.sql";
     pub const TEST_INPUT_NAME_IN_MANY_STRUCTS: &'static str = "test_input_name_in_many_structs.sql";
+    pub const TEST_INPUT_MANY_OCCURRENCES_FEW_PAIRS: &'static str =
+        "test_input_many_occurrences_few_pairs.sql";
     pub const TEST_INPUT_ESCALATION: &'static str = "test_input_escalation.sql";
     pub const TEST_INPUT_REF_IDENTITY: &'static str = "test_input_ref_identity.sql";
     pub const TEST_INPUT_HIDDEN_CHILDREN: &'static str = "test_input_hidden_children.sql";
@@ -2342,6 +2634,10 @@ impl Index {
         (
             "test_input_name_in_many_structs.sql",
             include_str!("../../../sql/test_input_name_in_many_structs.sql"),
+        ),
+        (
+            "test_input_many_occurrences_few_pairs.sql",
+            include_str!("../../../sql/test_input_many_occurrences_few_pairs.sql"),
         ),
         (
             "test_input_escalation.sql",
