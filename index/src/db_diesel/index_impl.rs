@@ -29,8 +29,8 @@ use super::mixins::{
     CONTAINER_TYPE_ALIAS, INSTANCE_TYPE_DEFINITION, PARENT_DECLS_ALIAS, PARENT_SYMBOLS_ALIAS,
 };
 use super::selection::{
-    is_eph_leak, ChildReference, EphContext, HasChildReference, HasParentReference,
-    ParentReference, RootLayer, Selection, SelectionNode,
+    is_eph_leak, ChildReference, EphContext, FamilyRead, FamilyReads, HasChildReference,
+    HasParentReference, ParentReference, RootLayer, Selection, SelectionNode, Within,
 };
 
 // ============================================================================
@@ -47,6 +47,14 @@ pub enum ScopeContext {
     Scope {
         ids: Vec<i64>,
         filter: Option<CompositeFilter>,
+        /// Every neighbour statement on this side is in the scope, by its
+        /// rows (`ids`) or by its predicate (`filter`).  A family read to its
+        /// end against such a scope is then silent about a row only if the
+        /// row relates to none of them.  False when some neighbour is left
+        /// out (a bare child that will be derived later, or a scope made of
+        /// the participants of one notification): the family then speaks
+        /// only for the rows in `ids`.
+        whole_side: bool,
     },
     /// No neighbour statement on this side at all, so nothing can consume
     /// this neighbourhood: not the display path, and not `constrain_by_*`,
@@ -320,7 +328,7 @@ impl Index {
         filter: &CompositeFilter,
         role: Option<&ScopeRole>,
         eph: &EphContext,
-    ) -> Result<Vec<i64>> {
+    ) -> Result<(Vec<i64>, bool)> {
         let _span =
             tracing::info_span!("resolve_filter_to_ids", has_chain = eph.has_chain()).entered();
         let t0 = std::time::Instant::now();
@@ -348,14 +356,18 @@ impl Index {
             _ => {}
         }
 
-        let query = query.limit(match eph.read_cap() {
+        let limit: i64 = match eph.read_cap() {
             0 => i64::MAX,
             c => c as i64 + 1,
-        });
+        };
+        let query = query.limit(limit);
         let results: std::sync::Arc<Vec<(Symbol, SymbolInstance, Object, Project)>> = self
             .cached_load(query)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to resolve filter to IDs: {}", e))?;
+        // A scope that filled its limit is not all of the neighbour: whatever
+        // is read against it cannot prove a row unrelated.  Say so.
+        let cut = results.len() as i64 >= limit;
         tracing::info!(
             elapsed_ms = t0.elapsed().as_millis() as u64,
             result_rows = results.len(),
@@ -365,24 +377,28 @@ impl Index {
         let mut ids: Vec<i64> = results.iter().map(|(_, inst, _, _)| inst.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        Ok(ids)
+        Ok((ids, cut))
     }
 
-    /// Resolve a Scope's fields into a set of instance IDs for filtering.
+    /// Resolve a Scope's fields into a set of instance IDs for filtering, and
+    /// whether the resolution was cut by the read limit.
     async fn resolve_scope_ids(
         &self,
         ids: &[i64],
         filter: &Option<CompositeFilter>,
         role: Option<&ScopeRole>,
         eph: &EphContext,
-    ) -> Result<Vec<i64>> {
+    ) -> Result<(Vec<i64>, bool)> {
         let mut all_ids = ids.to_vec();
+        let mut cut = false;
         if let Some(ref f) = filter {
-            all_ids.extend(self.resolve_filter_to_ids(f, role, eph).await?);
-            all_ids.sort_unstable();
-            all_ids.dedup();
+            let (resolved, resolved_cut) = self.resolve_filter_to_ids(f, role, eph).await?;
+            cut = resolved_cut;
+            all_ids.extend(resolved);
         }
-        Ok(all_ids)
+        all_ids.sort_unstable();
+        all_ids.dedup();
+        Ok((all_ids, cut))
     }
 
     /// Capped cardinality probe: fetch up to `cap + 1` instance ids
@@ -502,7 +518,7 @@ impl Index {
     ) -> Result<Option<Vec<(i32, i32, i32)>>> {
         use crate::schema_diesel::*;
         let (ids, filter) = match scope {
-            ScopeContext::Scope { ids, filter } => (ids.as_slice(), filter.as_ref()),
+            ScopeContext::Scope { ids, filter, .. } => (ids.as_slice(), filter.as_ref()),
             ScopeContext::Absent | ScopeContext::Deferred | ScopeContext::Unscoped => {
                 return Ok(None)
             }
@@ -1896,6 +1912,7 @@ impl Index {
     pub const TEST_INPUT_NESTED_FUNC: &'static str = "test_input_nested_func.sql";
     pub const TEST_INPUT_TYPE_FILTER: &'static str = "test_input_type_filter.sql";
     pub const TEST_INPUT_STRUCT_FIELDS: &'static str = "test_input_struct_fields.sql";
+    pub const TEST_INPUT_NAME_IN_MANY_STRUCTS: &'static str = "test_input_name_in_many_structs.sql";
     pub const TEST_INPUT_ESCALATION: &'static str = "test_input_escalation.sql";
     pub const TEST_INPUT_REF_IDENTITY: &'static str = "test_input_ref_identity.sql";
     pub const TEST_INPUT_HIDDEN_CHILDREN: &'static str = "test_input_hidden_children.sql";
@@ -1942,6 +1959,10 @@ impl Index {
         (
             "test_input_struct_fields.sql",
             include_str!("../../../sql/test_input_struct_fields.sql"),
+        ),
+        (
+            "test_input_name_in_many_structs.sql",
+            include_str!("../../../sql/test_input_name_in_many_structs.sql"),
         ),
         (
             "test_input_escalation.sql",
@@ -2328,6 +2349,10 @@ impl Index {
         current_instance_ids.sort_unstable();
         current_instance_ids.dedup();
 
+        // What each family was read against, and whether that scope was
+        // itself cut; `None` for a family nobody read.  Turned into the
+        // selection's `FamilyReads` once the row counts are known.
+        let mut parents_within: Option<(Within, bool)> = None;
         let parents = match parent_scope {
             _ if !demands.parent.refs => vec![],
             ScopeContext::Absent | ScopeContext::Deferred => vec![],
@@ -2356,11 +2381,13 @@ impl Index {
                     result_bytes = super::sql_cache::vec_weight(&rows),
                     "select_parents completed",
                 );
+                parents_within = Some((Within::Everything, false));
                 rows
             }
             ScopeContext::Scope {
                 ref ids,
                 filter: ref scope_filter,
+                whole_side,
             } => {
                 let _parents_span: tracing::span::EnteredSpan = tracing::info_span!(
                     "select_parents",
@@ -2372,9 +2399,17 @@ impl Index {
                 let t0 = std::time::Instant::now();
 
                 let role = ScopeRole::Parents(current_instance_ids.clone());
-                let scope_ids = self
+                let (scope_ids, scope_cut) = self
                     .resolve_scope_ids(ids, scope_filter, Some(&role), eph)
                     .await?;
+                parents_within = Some((
+                    if whole_side {
+                        Within::Everything
+                    } else {
+                        Within::Ids(scope_ids.clone())
+                    },
+                    scope_cut,
+                ));
 
                 let rows: Vec<(SymbolRef, SymbolInstance)> = self
                     .cached_load_partitioned(eph, chain_dependent, |vis| {
@@ -2414,6 +2449,14 @@ impl Index {
         // The neighbour the children family is read against: `None` when no
         // one reads the family, `Some(None)` for every neighbour there is,
         // `Some(Some(_))` for the instances a neighbour statement holds.
+        let mut children_scope_cut = false;
+        let children_whole_side = matches!(
+            children_scope,
+            ScopeContext::Scope {
+                whole_side: true,
+                ..
+            }
+        );
         let children_within: Option<Option<InstanceSet>> = match &children_scope {
             _ if !demands.children.refs => None,
             ScopeContext::Absent | ScopeContext::Deferred => None,
@@ -2421,11 +2464,13 @@ impl Index {
             ScopeContext::Scope {
                 ids,
                 filter: scope_filter,
+                ..
             } => {
                 let role = ScopeRole::Children(current_instance_ids.clone());
-                let scope_ids = self
+                let (scope_ids, scope_cut) = self
                     .resolve_scope_ids(ids, scope_filter, Some(&role), eph)
                     .await?;
+                children_scope_cut = scope_cut;
                 Some(Some(InstanceSet::Ids(scope_ids)))
             }
         };
@@ -2504,13 +2549,24 @@ impl Index {
         // deferring side cannot know the neighbour will produce the same
         // containment rows.
         let has_parent_scope_ids: Option<Vec<i64>> = match &parent_scope {
-            ScopeContext::Scope { ids, filter: None } => Some(ids.clone()),
+            ScopeContext::Scope {
+                ids, filter: None, ..
+            } => Some(ids.clone()),
             _ => None,
         };
         let has_children_scope_ids: Option<Vec<i64>> = match &children_scope {
-            ScopeContext::Scope { ids, filter: None } => Some(ids.clone()),
+            ScopeContext::Scope {
+                ids, filter: None, ..
+            } => Some(ids.clone()),
             _ => None,
         };
+        let parent_whole_side = matches!(
+            parent_scope,
+            ScopeContext::Scope {
+                whole_side: true,
+                ..
+            }
+        );
 
         // A containment family is read by exactly two things: `constrain_by_*`,
         // which needs a neighbour statement to constrain against, and -- until
@@ -2655,32 +2711,73 @@ impl Index {
         // out of a user's attention.
         let budget_bounded = leaf_limit.is_some_and(|l| current.len() >= l as usize);
 
-        // `capped` is the soundness flag, distinct from `budget_bounded` (the
-        // result-budget WARNING).  A selection is capped when ANY read that
-        // produced it hit the safety cap — `current` or any neighbourhood
-        // family — because a truncated read makes this selection unusable as a
-        // constraint in EITHER direction (you cannot `retain` soundly against
-        // a partial set, nor be retained by one).  The constrain path reads
-        // this to refuse participation; see `SelectorState::constrain_selection`.
+        // A LIMIT THAT CUT A READ DISQUALIFIES THAT READ AND NOTHING ELSE.
         //
-        // Uses `read_limit`, the effective bound actually applied, so it fires
-        // for both the safety cap (composed reads) and the budget (bare reads).
+        // `capped` says this statement's OWN rows were cut, and nothing more:
+        // the selection is then a subset of what the statement means, so it
+        // must not narrow a neighbour (see `SelectorState::constrain_selection`).
+        // It uses `read_limit`, the bound actually applied, so it fires for the
+        // safety cap (composed reads) and for the budget (bare reads) alike.
+        //
+        // A family that filled its limit is evidence that stops short.  It can
+        // still keep a row (a row it holds is a true row), but it can no
+        // longer prove one unrelated, and that is all it loses: the family is
+        // recorded `Cut` and the statement stays whole.  It used to make the
+        // statement capped, which reported a fully read name as "too many
+        // results" and left it un-narrowed.
         let hit = |n: usize| n as i64 >= read_limit;
-        let family_capped = hit(parents.len())
-            || hit(children.len())
-            || hit(has_parents.len())
-            || hit(has_children.len());
-        let capped = hit(current.len()) || family_capped;
+        let capped = hit(current.len());
 
-        // A refusal is not always a warning.  While the result budget is in
-        // force (`leaf_limit`) nobody reads this statement's families: every
-        // neighbour is an echo, which derives what it shows through a read of
-        // its own, with its own limit and its own warning.  A family that
-        // filled its limit there has cut nothing out of the answer.  The
-        // selection is still `capped` -- its rows must not be used as
-        // evidence -- but saying "incomplete" over a complete answer is how
-        // the warning gets ignored the day it is true.
-        let capped_family_unread = capped && !hit(current.len()) && leaf_limit.is_some();
+        let sorted = |mut ids: Vec<i64>| {
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        let read_of = |rows: usize, within: Option<(Within, bool)>| match within {
+            None => FamilyRead::Unread,
+            Some((_, true)) => FamilyRead::Cut,
+            Some((within, false)) => FamilyRead::of_read(rows, read_limit, within),
+        };
+        let has_within = |read: bool, scope_ids: &Option<Vec<i64>>, whole_side: bool| {
+            read.then(|| match scope_ids {
+                Some(ids) if !whole_side => (Within::Ids(sorted(ids.clone())), false),
+                _ => (Within::Everything, false),
+            })
+        };
+        let families = FamilyReads {
+            parents: read_of(
+                parents.len(),
+                parents_within.map(|(within, cut)| match within {
+                    Within::Ids(ids) => (Within::Ids(sorted(ids)), cut),
+                    everything => (everything, cut),
+                }),
+            ),
+            children: read_of(
+                children.len(),
+                children_within.as_ref().map(|within| match within {
+                    Some(InstanceSet::Ids(ids)) if !children_whole_side => {
+                        (Within::Ids(sorted(ids.clone())), children_scope_cut)
+                    }
+                    _ => (Within::Everything, children_scope_cut),
+                }),
+            ),
+            has_parents: read_of(
+                has_parents.len(),
+                has_within(
+                    demands.parent.has && !matches!(parent_scope, ScopeContext::Absent),
+                    &has_parent_scope_ids,
+                    parent_whole_side,
+                ),
+            ),
+            has_children: read_of(
+                has_children.len(),
+                has_within(
+                    demands.children.has && !matches!(children_scope, ScopeContext::Absent),
+                    &has_children_scope_ids,
+                    children_whole_side,
+                ),
+            ),
+        };
 
         let selection: Result<Selection> = {
             let _collect_span: tracing::span::EnteredSpan =
@@ -2810,7 +2907,7 @@ impl Index {
                 has_children,
                 budget_bounded,
                 capped,
-                capped_family_unread,
+                families,
             })
         };
 

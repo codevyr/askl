@@ -11,11 +11,11 @@ use crate::statement::Statement;
 use crate::verb::Args;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use index::db_diesel::FamilyDemands;
 use index::db_diesel::{
     CompositeFilter, CompoundNameMixin, EphContext, ExactNameMixin, Index, LeafNameMixin,
     ParentReference, ScopeContext, Selection, SymbolTypeMixin,
 };
+use index::db_diesel::{FamilyDemands, FamilyRead};
 use index::models_diesel::SymbolRef;
 use std::fmt::Display;
 use std::sync::{Arc, OnceLock};
@@ -302,6 +302,8 @@ impl Selector for ForcedVerb {
         }
 
         normal_selection.parents = fake_parent_references;
+        // Fabricated in full from the parent's rows, not read under a limit.
+        normal_selection.families.parents = FamilyRead::whole();
 
         Ok(Some(normal_selection))
     }
