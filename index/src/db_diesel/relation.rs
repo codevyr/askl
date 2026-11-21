@@ -122,6 +122,29 @@ impl InstanceSet {
     }
 }
 
+/// `(a) UNION (b) UNION …`: the rows of several queries of one shape, each
+/// once.  A relation body; the arms are walked as they are.
+pub(crate) struct UnionOf {
+    arms: Vec<Box<dyn QueryFragment<Pg> + Send>>,
+}
+
+impl UnionOf {
+    pub(crate) fn new(arms: Vec<Box<dyn QueryFragment<Pg> + Send>>) -> Self {
+        Self { arms }
+    }
+}
+
+impl QueryFragment<Pg> for UnionOf {
+    fn walk_ast<'b>(&'b self, mut out: AstPass<'_, 'b, Pg>) -> diesel::QueryResult<()> {
+        for (i, arm) in self.arms.iter().enumerate() {
+            out.push_sql(if i == 0 { "(" } else { " UNION (" });
+            arm.walk_ast(out.reborrow())?;
+            out.push_sql(")");
+        }
+        Ok(())
+    }
+}
+
 /// `WITH <relations> <outer>`.
 ///
 /// The relations are written in the order given, so one may read those
@@ -259,6 +282,14 @@ mod tests {
             rendered(&statement),
             "WITH role AS MATERIALIZED (SELECT 1 LIMIT 11) SELECT 2 -- binds: []"
         );
+    }
+
+    #[test]
+    fn a_union_takes_each_arm_in_parentheses() {
+        let one = UnionOf::new(vec![Box::new(sql("SELECT 1"))]);
+        assert_eq!(rendered(&one), "(SELECT 1) -- binds: []");
+        let two = UnionOf::new(vec![Box::new(sql("SELECT 1")), Box::new(sql("SELECT 2"))]);
+        assert_eq!(rendered(&two), "(SELECT 1) UNION (SELECT 2) -- binds: []");
     }
 
     #[test]
