@@ -670,6 +670,7 @@ impl Command {
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
         demands: FamilyDemands,
+        within: Option<&[i64]>,
     ) -> Result<NotificationResult, pest::error::Error<Rule>> {
         let mut changed = false;
         let mut warnings = vec![];
@@ -736,6 +737,7 @@ impl Command {
                             rel_type.contains(RelationshipType::REFS),
                             rel_type.contains(RelationshipType::HAS),
                             &find_filter,
+                            within,
                             &ctx.eph,
                         )
                         .await
@@ -819,6 +821,7 @@ impl Command {
                         rel_type.contains(RelationshipType::REFS),
                         rel_type.contains(RelationshipType::HAS),
                         &CompositeFilter::and(find_parts),
+                        within,
                         &ctx.eph,
                     )
                     .await
