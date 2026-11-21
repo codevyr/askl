@@ -97,6 +97,21 @@ pub enum RefKind {
     Holds,
 }
 
+impl RefKind {
+    /// The word as an answer prints it.  The JSON spelling and the report's
+    /// are one: both come from here.
+    pub fn word(self) -> &'static str {
+        match self {
+            RefKind::Calls => "calls",
+            RefKind::Writes => "writes",
+            RefKind::Takes => "takes",
+            RefKind::Reads => "reads",
+            RefKind::Declares => "declares",
+            RefKind::Holds => "holds",
+        }
+    }
+}
+
 /// What is stated about a reference, or about a pair of symbols: the union
 /// over the pair's references.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -162,6 +177,23 @@ impl Stated {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_report_and_the_json_spell_a_kind_the_same_way() {
+        for kind in [
+            RefKind::Calls,
+            RefKind::Writes,
+            RefKind::Takes,
+            RefKind::Reads,
+            RefKind::Declares,
+            RefKind::Holds,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&kind).unwrap(),
+                format!("\"{}\"", kind.word())
+            );
+        }
+    }
 
     const CALL: i16 = 1;
     const WRITE: i16 = 2;

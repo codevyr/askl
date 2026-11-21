@@ -153,6 +153,19 @@ separate statements; a `{` must be on the same line as its verb to attach.
 - Every statement must contain at least one selector at some nesting level.
 - A scope only yields results if the relationship actually exists in the code.
 
+## Reading an edge
+- A pair is drawn once, with one mark, and the report's legend names the
+  marks it used: `▸` contains; `↦` declares (the source's invocation declared
+  the target: `DEFINE_MUTEX ↦ lock`); `⇢` holds (a slot and a function stored
+  in it, an interface method and an implementation); `→` refers to.
+- Words after the type say what the text does to the target, where the index
+  states it: `→ handler  (func, takes)`.  `calls`: it is the callee of a
+  call.  `writes`: it is assigned or initialised.  `takes`: a function's
+  address is passed, stored or returned.  `reads`: the value of data or of a
+  field is used.  JSON carries the same words as `kinds` on an edge.
+- **No word means nothing is stated**, not "not called": an older index and a
+  name in a `#define` body say nothing about what they do.
+
 ## Recipes — the short list (more in the `askl://cookbook` resource)
 - Find a symbol by fuzzy name:   `g"*color*"`  (prefer over `search()` for names)
 - Who calls X:                   `func { "vfs_read" }`
