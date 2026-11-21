@@ -154,10 +154,13 @@ separate statements; a `{` must be on the same line as its verb to attach.
 - A scope only yields results if the relationship actually exists in the code.
 
 ## Reading an edge
-- A pair is drawn once, with one mark, and the report's legend names the
-  marks it used: `▸` contains; `↦` declares (the source's invocation declared
-  the target: `DEFINE_MUTEX ↦ lock`); `⇢` holds (a slot and a function stored
-  in it, an interface method and an implementation); `→` refers to.
+- A pair is drawn once, with EVERY relationship it has, one mark each:
+  `▸` contains; `→` refers to (a token of the source names the target); `↦`
+  declares (the source's invocation declared the target: `DEFINE_MUTEX ↦
+  lock`); `⇢` holds (a slot and a function stored in it, an interface method
+  and an implementation).  `▸,→ bt_inb` under a file: the file contains
+  `bt_inb` and something in it refers to `bt_inb`.  The report does not pick
+  one; its legend names the marks it used.
 - Words after the type say what the text does to the target, where the index
   states it: `→ handler  (func, takes)`.  `calls`: it is the callee of a
   call.  `writes`: it is assigned or initialised.  `takes`: a function's
