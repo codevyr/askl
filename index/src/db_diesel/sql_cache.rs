@@ -241,20 +241,14 @@ impl RowKey for (SymbolRef, SymbolInstance) {
     }
 }
 
-/// select_children rows.
-impl RowKey
-    for (
-        Symbol,
-        Symbol,
-        SymbolInstance,
-        SymbolInstance,
-        SymbolRef,
-        Object,
-    )
-{
-    type Key = (i64, i64, i64);
+/// select_children rows: (parent symbol, symbol referred to, enclosing
+/// declaration, reference, object).  One row per reference and enclosing
+/// declaration, as for select_parents: the target's instances are not read
+/// here, `find_symbol` picks the one a reference ends on afterwards.
+impl RowKey for (Symbol, Symbol, SymbolInstance, SymbolRef, Object) {
+    type Key = (i64, i64);
     fn row_key(&self) -> Self::Key {
-        (self.4.id, self.2.id, self.3.id)
+        (self.3.id, self.2.id)
     }
 }
 
