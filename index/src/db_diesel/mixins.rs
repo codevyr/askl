@@ -499,6 +499,20 @@ impl<ST> EphSqlBuilder<ST> {
         self
     }
 
+    /// `column` is the id of an instance in `set`: by array for ids already
+    /// held, by subquery for a relation of the same statement (see
+    /// [`InstanceSet`](super::relation::InstanceSet)).
+    pub(crate) fn in_set(self, column: &str, set: &super::relation::InstanceSet) -> Self {
+        use super::relation::InstanceSet;
+        match set {
+            InstanceSet::Ids(ids) => self
+                .sql(format!("{column} = ANY("))
+                .bind(ids.clone())
+                .sql(")"),
+            InstanceSet::Of(relation) => self.sql(relation.holds(column, "id")),
+        }
+    }
+
     pub(crate) fn build(self) -> EphSqlFragment<ST> {
         EphSqlFragment {
             parts: self.parts,
@@ -617,7 +631,7 @@ impl EphVisibility {
     /// wrappers) that render visibility inside `walk_ast`.  Taking a
     /// snapshot TRANSFERS guard responsibility: the consuming `walk_ast`
     /// must render the eph-branch disjointness guard itself (see
-    /// `CteFindEdgesBetween`), so the loader's guard assertion is
+    /// `EdgesBetween`), so the loader's guard assertion is
     /// satisfied here.
     pub(crate) fn snapshot(&self) -> VisibilitySpec {
         self.guard_taken.set(true);
