@@ -1533,6 +1533,40 @@ fn a_cut_statement_is_a_subset_of_the_answer() {
 }
 
 #[test]
+fn a_statement_the_probe_resolved_is_derived_within_what_the_probe_found() {
+    // `mod("modx") { { "lock" } }`: the middle statement has no predicate of
+    // its own.  The probe resolves it between its two neighbours to the one
+    // function that is inside modx AND calls lock.  A statement like that
+    // never read its own probe result: it was derived again from whichever
+    // neighbour spoke first, under the row limit -- here from `lock`, whose
+    // ten callers do not fit a cap of five -- so the answer was a cut sample
+    // of one side although the probe already held the exact set.
+    let query = r#"mod("modx") { { "lock" } }"#;
+    let (_, acts) = run_query_probe_traced(TEST_INPUT_ESCALATION, query, 5);
+    assert_eq!(
+        acts.iter()
+            .filter(|a| a.query_statement.trim() == r#"{ "lock" }"#)
+            .last()
+            .map(|a| a.resolved),
+        Some(Some(1)),
+        "premise: the probe resolves the middle to one instance: {acts:?}"
+    );
+
+    let res = run_query_with_read_cap(TEST_INPUT_ESCALATION, query, 5);
+    let (said, ids) = incomplete_and_ids(&res);
+    assert_eq!(ids, vec![10, 1001, 3000], "modx, in_1 and lock");
+    assert!(said.is_empty(), "nothing was cut, got {:?}", said);
+
+    // With a filter in force the middle was probed before this change, and
+    // resolved -- and was still derived from `lock` alone and cut.
+    let filtered = r#"project("test_project") mod("modx") { { "lock" } }"#;
+    let res = run_query_with_read_cap(TEST_INPUT_ESCALATION, filtered, 5);
+    let (said, ids) = incomplete_and_ids(&res);
+    assert_eq!(ids, vec![10, 1001, 3000]);
+    assert!(said.is_empty(), "nothing was cut, got {:?}", said);
+}
+
+#[test]
 fn an_echo_follows_its_cut_parent_down() {
     // Four functions; two of them call `lock`, the other two call `hot`.
     // `X { { } ; "lock" }` keeps the two, and the echo lists what THEY refer
@@ -10001,8 +10035,19 @@ fn probe_resolves_and_matches_predicate_emission() {
     // stays predicate-driven.  Both paths must produce identical output.
     const QUERY: &str = r#""a" {}"#;
     let (probed, acts) = run_query_probe_traced(TEST_INPUT_A, QUERY, 1000);
-    assert_eq!(acts.len(), 1, "one anchored fusable statement probes");
-    assert_eq!(acts[0].resolved, Some(1), "\"a\" is exactly one instance");
+    let wave_0: Vec<_> = acts.iter().filter(|a| a.round == 0).collect();
+    assert_eq!(
+        wave_0.len(),
+        1,
+        "one anchored fusable statement probes alone"
+    );
+    assert_eq!(wave_0[0].resolved, Some(1), "\"a\" is exactly one instance");
+    // The `{}` has no predicate of its own, so it is probed only once a
+    // neighbour resolved, with that neighbour bound in.
+    assert!(
+        acts.iter().any(|a| a.round == 1 && a.resolved.is_some()),
+        "the listing is probed with \"a\" bound in: {acts:?}"
+    );
 
     let (fallback, acts0) = run_query_probe_traced(TEST_INPUT_A, QUERY, 0);
     assert!(
