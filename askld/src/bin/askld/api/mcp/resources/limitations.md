@@ -16,6 +16,9 @@
   `(1 of 47 definitions)`. That is exact when a definition is in the file
   that refers to it and a guess otherwise, and a path through such a node
   (`a -> DEVICE_NAME -> b`) may join two unrelated files.
+  What REFERS is one instance, though: `"main" { "print_version" }` keeps the
+  `main` that makes the call, not every program's `main`, and a header
+  declaration is not a caller.
 - **`search()` is literal.** No regex — the query matches an exact byte sequence.
 - **A `search()` match has one place.** Text inside a macro invocation that
   generated several declarations is reported under one of them. Scope by the

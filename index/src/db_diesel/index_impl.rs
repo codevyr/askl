@@ -243,15 +243,21 @@ fn refs_parents_of_expr(
         .build()
 }
 
-/// The REFS probe roles as CTE BODIES, selecting the symbol ids the role
-/// admits.  `probe_instance_ids` wraps each in `WITH … AS MATERIALIZED` and
-/// references it as `symbols.id IN (SELECT symbol FROM probe_role_N)`.
+/// The REFS probe roles as CTE BODIES.  `probe_instance_ids` wraps each in a
+/// bounded relation and tests its rows against it (see `ProbeRole::admits`).
 ///
-/// `parents = true` -> symbols that ENCLOSE a call site of any of the given
-/// child instances' symbols; `false` -> symbols CALLED from within any of the
-/// given parent instances.  Symbol-level, because the worklist's constrain
-/// accepts evidence per symbol: every instance of an evidenced symbol
-/// survives, so a probe role must not drop co-instances.
+/// A reference has two ends of different kinds.  Its SOURCE is the instance
+/// that encloses it; its TARGET is a symbol, because a reference names a
+/// symbol and not one of its instances.  So:
+///
+/// * `parents = true` -> the INSTANCES that enclose a call site of any of the
+///   given child instances' symbols, as `(symbol, id)`;
+/// * `false` -> the SYMBOLS called from within any of the given parent
+///   instances (every instance of each is then admitted).
+///
+/// Both match what narrowing keeps (`constrain_by_parent` /
+/// `constrain_by_child`), so a probe-resolved set is exactly what those would
+/// leave and never drops a row they would have kept.
 ///
 /// MATERIALIZED for the same reason the containment roles are, and after the
 /// same failure.  `si.id = ANY($ids)` tells the planner nothing about how long
@@ -279,7 +285,7 @@ fn refs_role_cte_body(
         Box::new(
             builder
                 .sql(
-                    "SELECT pd.symbol AS symbol FROM index.symbol_refs sr \
+                    "SELECT pd.symbol AS symbol, pd.id AS id FROM index.symbol_refs sr \
                      JOIN index.symbol_instances pd ON pd.object_id = sr.from_object \
                        AND pd.dfs_enter < sr.dfs_enter AND sr.dfs_enter < pd.dfs_exit \
                      WHERE ",
@@ -859,7 +865,7 @@ fn build_has_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> HasPare
 /// offset range covers the row's, container's type level ≥ the row's).
 /// `seed_container` picks which side the bound ids constrain; the returned
 /// query selects the OTHER side's instances, as `(symbol, id)` (see
-/// `has_role_member_sql`).  Emitted only inside a
+/// `instance_member_sql`).  Emitted only inside a
 /// materialised relation (see `Relation`) — as a plain IN-subquery the planner
 /// mis-drives this shape (perf/PROBE_BASELINE.md, S6/S7).
 fn has_role_cte_body(
@@ -925,9 +931,15 @@ fn has_role_cte_body(
     }
 }
 
-/// The outer query's membership test for a containment role.
+/// The outer query's membership test for a role that hands over instances:
+/// the containment roles, and "what refers to these".
 ///
-/// WHAT A CONTAINER HOLDS IS INSTANCES.  The worklist narrows containment per
+/// WHAT A CONTAINER HOLDS IS INSTANCES, AND WHAT REFERS IS AN INSTANCE.  The
+/// second is the same mistake found later: one of the 359 instances of
+/// `struct device` holds a `spinlock_t`, the role handed over the symbol, and
+/// all 359 came out as referring to it.
+///
+/// The worklist narrows containment per
 /// instance (`constrain_by_parent`: the child instance the has-edge names), so
 /// the probe does too.  Matching the symbol instead kept every instance of
 /// each symbol found in the container, and one name can have thousands: on the
@@ -943,7 +955,7 @@ fn has_role_cte_body(
 /// pair keeps the plan the symbol-only test had -- role, then symbols by
 /// primary key -- and lets the instance id filter the instances it reaches.
 /// Measured on the kernel, eight container/predicate shapes, warm.
-fn has_role_member_sql(role: &RelationName) -> String {
+fn instance_member_sql(role: &RelationName) -> String {
     role.holds("(symbols.id, symbol_instances.id)", "symbol, id")
 }
 
@@ -951,17 +963,17 @@ fn has_role_member_sql(role: &RelationName) -> String {
 /// ids into (see [`Index::probe_instance_ids`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeRole {
-    /// Probe rows' SYMBOLS must be REFS children (callees) of these
-    /// instances.  A reference names a symbol, so the REFS roles match at
-    /// SYMBOL level, as the worklist's reference evidence does: every
-    /// instance of a matched symbol is kept, so a probe-resolved set never
-    /// drops a co-instance the constrain step would have retained.
+    /// Probe rows' SYMBOLS must be referred to from within these instances.
+    /// What a reference names is a symbol, so this role matches at SYMBOL
+    /// level, as narrowing does: every instance of a symbol referred to is
+    /// kept.
     RefsChildrenOf(Vec<i64>),
-    /// Probe rows' symbols must be REFS parents (callers) of these instances.
+    /// Probe rows must enclose a reference to one of these instances'
+    /// symbols.  What refers is the instance around the reference, so this
+    /// role matches at INSTANCE level (see `instance_member_sql`).
     RefsParentsOf(Vec<i64>),
     /// Probe rows must be contained in these instances.  Containment is
-    /// between instances, so the HAS roles match at INSTANCE level, as the
-    /// worklist's containment evidence does (see `has_role_member_sql`).
+    /// between instances, so the HAS roles match at INSTANCE level too.
     HasChildrenOf(Vec<i64>),
     /// Probe rows must contain these instances.
     HasParentsOf(Vec<i64>),
@@ -983,15 +995,13 @@ impl ProbeRole {
     }
 
     /// The test a probe row passes to be admitted by the role's relation: by
-    /// symbol for a reference role, by instance for a containment one.
+    /// symbol for what is referred to, by instance for everything else.
     fn admits(&self, relation: &RelationName) -> String {
         match self {
-            ProbeRole::RefsChildrenOf(_) | ProbeRole::RefsParentsOf(_) => {
-                relation.holds("symbols.id", "symbol")
-            }
-            ProbeRole::HasChildrenOf(_) | ProbeRole::HasParentsOf(_) => {
-                has_role_member_sql(relation)
-            }
+            ProbeRole::RefsChildrenOf(_) => relation.holds("symbols.id", "symbol"),
+            ProbeRole::RefsParentsOf(_)
+            | ProbeRole::HasChildrenOf(_)
+            | ProbeRole::HasParentsOf(_) => instance_member_sql(relation),
         }
     }
 }
@@ -1922,6 +1932,8 @@ impl Index {
     pub const TEST_INPUT_MANY_REFS_ONE_TARGET: &'static str = "test_input_many_refs_one_target.sql";
     pub const VERB_TEST: &'static str = "verb_test.sql";
     pub const TEST_INPUT_SEARCH: &'static str = "test_input_search.sql";
+    pub const TEST_INPUT_ONE_NAME_TWO_PROGRAMS: &'static str =
+        "test_input_one_name_two_programs.sql";
 
     /// Lookup table of test-fixture file name → embedded SQL.  Kept here so
     /// each new fixture only needs to land its file under `askl/sql/` and add
@@ -1995,6 +2007,10 @@ impl Index {
         (
             "test_input_search.sql",
             include_str!("../../../sql/test_input_search.sql"),
+        ),
+        (
+            "test_input_one_name_two_programs.sql",
+            include_str!("../../../sql/test_input_one_name_two_programs.sql"),
         ),
     ];
 
