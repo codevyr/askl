@@ -1471,16 +1471,17 @@ fn a_statement_read_in_full_is_not_called_cut_for_a_side_read() {
 }
 
 #[test]
-fn a_side_read_that_was_cut_still_narrows_by_what_it_holds() {
+fn an_absence_the_lists_cannot_prove_is_asked_for() {
     // `busy` refers to `S1.lockf` 41 times and to no other `lockf`.  Under a
     // cap of eight both statements are read in full, and both lists of the
-    // references between them are cut.  That used to mark both as cut and
-    // narrow nothing: all eight fields were shown under `busy`.
+    // references between them are cut.  A row a cut list holds is still a
+    // true row, so the one field `busy` refers to is kept.  The seven others
+    // have no evidence in lists that were not read to their end, which proves
+    // nothing -- so the engine asks: which of these seven does `busy` refer
+    // to?  None.  They go, and the answer is whole.
     //
-    // A row a cut list holds is still a true row, so the one field `busy`
-    // refers to is kept.  The seven others go -- for want of evidence, in
-    // lists that were not read to their end, so the statement says it may be
-    // short.  Nothing unrelated is shown.
+    // Before the ask they went all the same and the statement was called
+    // incomplete, over an exact answer.
     let query = r#""busy" { "lockf" }"#;
     let whole =
         run_query_with_read_cap(crate::test_util::TEST_INPUT_NAME_IN_MANY_STRUCTS, query, 0);
@@ -1490,11 +1491,94 @@ fn a_side_read_that_was_cut_still_narrows_by_what_it_holds() {
     let res = run_query_with_read_cap(crate::test_util::TEST_INPUT_NAME_IN_MANY_STRUCTS, query, 8);
     let (said, ids) = incomplete_and_ids(&res);
     assert_eq!(ids, truth, "only what busy refers to");
+    assert!(said.is_empty(), "the answer is exact, got {:?}", said);
+}
+
+#[test]
+fn asking_keeps_a_row_the_cut_lists_never_reached() {
+    // `flood` refers to `knob` 250 times, `quiet` once.  Two functions over
+    // two variables, with 251 reference occurrences between them: a list cut
+    // at nine rows is `flood -> knob` nine times, from either side.  `quiet`
+    // then has no evidence and used to be DROPPED, a true row, with the
+    // statement marked incomplete.  Asked, it relates.  `spare`, which
+    // nothing refers to, is asked about too, and goes.
+    let query = r#""flood" "quiet" { "knob" "spare" }"#;
+    let fixture = crate::test_util::TEST_INPUT_MANY_OCCURRENCES_FEW_PAIRS;
+    let (_, truth) = incomplete_and_ids(&run_query_with_read_cap(fixture, query, 0));
+    assert_eq!(
+        truth,
+        vec![10, 20, 110],
+        "premise: both functions, and knob"
+    );
+
+    let (said, ids) = incomplete_and_ids(&run_query_with_read_cap(fixture, query, 8));
+    assert_eq!(ids, truth);
     assert!(
-        said.iter().all(|w| w.contains(r#"`"lockf"`"#)),
-        "busy was read in full and narrowed by nothing: {:?}",
+        said.is_empty(),
+        "every row was accounted for, got {:?}",
         said
     );
+    let notes: Vec<String> = run_query_with_read_cap(fixture, query, 8)
+        .warnings
+        .iter()
+        .map(|w| w.message.clone())
+        .collect();
+    assert!(notes.is_empty(), "nothing to say at all, got {:?}", notes);
+}
+
+#[test]
+fn an_ask_that_cannot_be_answered_leaves_the_statement_incomplete() {
+    // `brook` makes 1,700 references, none of them to `knob`, and `knob` is
+    // referred to 1,951 times.  At a cap of eight an ask may read 1,600
+    // references, so neither side of "does brook refer to knob" can be read.
+    // The engine does not know, and says what it said before there was an
+    // ask: the statement is a subset.
+    let query = r#""flood" "brook" { "knob" "spare" }"#;
+    let fixture = crate::test_util::TEST_INPUT_MANY_OCCURRENCES_FEW_PAIRS;
+    let (_, truth) = incomplete_and_ids(&run_query_with_read_cap(fixture, query, 0));
+    assert_eq!(truth, vec![10, 110], "premise: flood and knob");
+
+    let (said, ids) = incomplete_and_ids(&run_query_with_read_cap(fixture, query, 8));
+    assert_eq!(ids, truth, "nothing unrelated is shown");
+    // The two names are one statement, read once and narrowed once per
+    // name, so it is said once per name; nothing is said of the variables,
+    // whose question could be answered.
+    assert!(
+        !said.is_empty()
+            && said
+                .iter()
+                .all(|w| w.contains(r#"`"flood"`"#) || w.contains(r#"`"brook"`"#)),
+        "the functions could not be accounted for, and only they: {:?}",
+        said
+    );
+}
+
+#[test]
+fn an_ask_is_about_the_rows_a_statement_holds() {
+    // What counts as related is decided by the rows asked about, not by the
+    // ask.  A NAMED folded symbol is found behind the fold, by the lists and
+    // by the ask alike: `flood` refers to `hid` once, after 250 references to
+    // `knob` that fill both lists.
+    let fixture = crate::test_util::TEST_INPUT_MANY_OCCURRENCES_FEW_PAIRS;
+    let query = r#""flood" "quiet" { "hid" "knob" }"#;
+    let (_, truth) = incomplete_and_ids(&run_query_with_read_cap(fixture, query, 0));
+    assert_eq!(truth, vec![10, 20, 110, 150], "premise: hid is found");
+    let (said, ids) = incomplete_and_ids(&run_query_with_read_cap(fixture, query, 8));
+    assert_eq!(ids, truth);
+    assert!(said.is_empty(), "got {:?}", said);
+
+    // A LISTING leaves a folded symbol out, and no ask can put it back: an
+    // ask only ever keeps rows the statement already has.  The listing here
+    // is derived from both functions; `"dial"` narrows them to `flood`, and
+    // the listing shows what `flood` refers to, without `hid` and without
+    // `only_q`.  (This half held before the ask too; it pins that asking did
+    // not change what a listing is.)
+    let query = r#""flood" "quiet" { { } ; "dial" }"#;
+    let (_, truth) = incomplete_and_ids(&run_query_with_read_cap(fixture, query, 0));
+    assert_eq!(truth, vec![10, 110, 120], "premise: flood, knob and dial");
+    let (said, ids) = incomplete_and_ids(&run_query_with_read_cap(fixture, query, 30));
+    assert_eq!(ids, truth);
+    assert!(said.is_empty(), "got {:?}", said);
 }
 
 #[test]
