@@ -1533,6 +1533,38 @@ fn a_cut_statement_is_a_subset_of_the_answer() {
 }
 
 #[test]
+fn a_probe_walks_from_one_neighbour_and_tests_the_other() {
+    // `mod("modx") { refs { "lock" } }`: what modx holds or refers to, and
+    // which refers to lock.  One function, `in_1`.
+    //
+    // At a cap of one a role may read ten rows.  As roles neither neighbour
+    // fits: what encloses a reference to `lock` is eleven rows, and modx holds
+    // ten functions, more than the cap.  Every role had to fit alone, so
+    // composing the two answered "too many" as well, and the statement was
+    // left cut.  Walking from `lock` reads its ten references, and each
+    // declaration reached is tested against modx.
+    const QUERY: &str = r#"mod("modx") { refs { "lock" } }"#;
+    let (res, acts) = run_query_probe_traced(TEST_INPUT_ESCALATION, QUERY, 1);
+    let middle: Vec<_> = acts
+        .iter()
+        .filter(|a| a.query_statement.trim() == r#"refs { "lock" }"#)
+        .collect();
+    assert!(
+        middle.iter().any(|a| a.round == 1 && a.resolved.is_none()),
+        "premise: one neighbour alone does not bound it: {acts:?}"
+    );
+    assert_eq!(
+        middle.last().map(|a| a.resolved),
+        Some(Some(1)),
+        "walking from one neighbour and testing the other bounds it: {acts:?}"
+    );
+
+    let (said, ids) = incomplete_and_ids(&res);
+    assert_eq!(ids, vec![10, 1001, 3000], "modx, in_1 and lock");
+    assert!(said.is_empty(), "nothing was cut, got {:?}", said);
+}
+
+#[test]
 fn a_statement_the_probe_resolved_is_derived_within_what_the_probe_found() {
     // `mod("modx") { { "lock" } }`: the middle statement has no predicate of
     // its own.  The probe resolves it between its two neighbours to the one
