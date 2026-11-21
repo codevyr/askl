@@ -69,6 +69,14 @@ pub struct SkeletonEdge {
     /// What the edge states (see `Edge::kinds`); absent when nothing is.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub kinds: Vec<RefKind>,
+    /// Some token of the source names the target (see `Edge::refers`);
+    /// absent when true.
+    #[serde(skip_serializing_if = "is_yes")]
+    pub refers: bool,
+}
+
+fn is_yes(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Debug, Serialize)]
@@ -262,6 +270,7 @@ pub fn to_skeleton(graph: Graph) -> SkeletonGraph {
             to_symbol: to_symbol.clone(),
             occurrence_count: edge.occurrence_count(),
             kinds: edge.kinds().to_vec(),
+            refers: edge.refers(),
         };
 
         match (from_splits, to_splits) {
@@ -500,10 +509,19 @@ mod tests {
         // Nothing stated: the edge is serialised as before, without the key.
         let bare = Edge::new(SymbolId(3), SymbolId(4), 2, vec!["o1".to_string()]);
         let sk = to_skeleton(graph_of(nodes(), vec![], vec![bare]));
-        assert!(serde_json::to_value(&sk.edges[0])
-            .unwrap()
-            .get("kinds")
-            .is_none());
+        let json = serde_json::to_value(&sk.edges[0]).unwrap();
+        assert!(json.get("kinds").is_none());
+        assert!(json.get("refers").is_none(), "an edge refers unless said");
+
+        // A pair that has only relation rows is an edge nothing refers by.
+        let held = Edge::new(SymbolId(3), SymbolId(4), 1, vec!["o1".to_string()])
+            .with_kinds(vec![RefKind::Holds])
+            .with_refers(false);
+        let sk = to_skeleton(graph_of(nodes(), vec![], vec![held]));
+        assert_eq!(
+            serde_json::to_value(&sk.edges[0]).unwrap()["refers"],
+            serde_json::json!(false)
+        );
     }
 
     #[test]
