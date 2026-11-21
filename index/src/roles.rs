@@ -117,6 +117,8 @@ impl RefKind {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Stated {
     roles: Roles,
+    /// Some row is an ordinary reference: a token that names the target.
+    plain: bool,
     declares: bool,
     holds: bool,
 }
@@ -127,6 +129,9 @@ impl Stated {
         let relation = Relation::from_stored(relation);
         Stated {
             roles: Roles::from_bits(roles),
+            // A relation this engine does not know is not printed as one, so
+            // its row reads as what every row is underneath: a reference.
+            plain: relation.is_none(),
             declares: relation == Some(Relation::Declares),
             holds: relation == Some(Relation::Holds),
         }
@@ -135,12 +140,24 @@ impl Stated {
     /// Sightings merge by union: no fact is ever dropped for another.
     pub fn add(&mut self, other: Stated) {
         self.roles = self.roles | other.roles;
+        self.plain |= other.plain;
         self.declares |= other.declares;
         self.holds |= other.holds;
     }
 
     pub fn roles(&self) -> Roles {
         self.roles
+    }
+
+    /// The pair REFERS: some token of the source names the target.
+    ///
+    /// A relation row is not such a token (the macro declared it, the slot
+    /// holds it, and nothing where the row sits spells the target), so a pair
+    /// that has only relation rows does not refer.  Every other pair does,
+    /// including one nothing was recorded about: an edge exists because a
+    /// reference does.
+    pub fn refers(&self) -> bool {
+        self.plain || !(self.declares || self.holds)
     }
 
     /// The words for what is stated, in the order of [`RefKind`]; empty when
@@ -205,7 +222,33 @@ mod tests {
         for target in [SymbolType::Function, SymbolType::Type, SymbolType::Macro] {
             assert!(Stated::of(0, 0).kinds(target).is_empty());
         }
-        assert_eq!(Stated::of(0, 0), Stated::default());
+        assert!(Stated::default().kinds(SymbolType::Function).is_empty());
+    }
+
+    #[test]
+    fn a_pair_refers_unless_all_it_has_is_relation_rows() {
+        // An ordinary reference, whatever it states, and a pair nothing was
+        // recorded about: an edge exists because a reference does.
+        assert!(Stated::of(0, 0).refers());
+        assert!(Stated::of(CALL, 0).refers());
+        assert!(Stated::default().refers());
+        // The slot holds it, the macro declared it: no token names the target.
+        assert!(!Stated::of(0, 2).refers());
+        assert!(!Stated::of(0, 1).refers());
+        // Both kinds of row between one pair, in either order.
+        for rows in [[(0, 2), (TAKE, 0)], [(TAKE, 0), (0, 2)]] {
+            let mut pair = Stated::default();
+            for (roles, relation) in rows {
+                pair.add(Stated::of(roles, relation));
+            }
+            assert!(pair.refers());
+            assert_eq!(
+                pair.kinds(SymbolType::Function),
+                vec![RefKind::Takes, RefKind::Holds]
+            );
+        }
+        // A relation this engine does not know reads as a reference.
+        assert!(Stated::of(0, 77).refers());
     }
 
     #[test]
