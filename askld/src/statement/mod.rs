@@ -17,6 +17,7 @@ use crate::verb::{
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::{CompositeFilter, EphContext, ScopeContext, Selection, TraversalMode};
+use index::roles::Stated;
 use index::symbols::{FileId, Occurrence, SymbolId, SymbolInstanceId};
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
@@ -1353,6 +1354,11 @@ impl Statement {
     /// 3. **Implicit edges**: discovered via DB query between all selected instances.
     ///
     /// Deduplication key: (from_instance_id, to_instance_id, symbol_ref_id).
+    ///
+    /// What each reference SAYS about its target (see `index::roles`) is
+    /// recorded per symbol pair before that deduplication, so a reference
+    /// whose occurrence was already drawn from another source still adds what
+    /// it states.
     /// Returns the reference edges among the answer's nodes and, second, the
     /// SYMBOLS whose implicit out-edge list hit the per-node `edge_cap`
     /// (assembly capping: paginable via fetch-more, never a warning).
@@ -1398,6 +1404,11 @@ impl Statement {
                 let from_inst = SymbolInstanceId::new(parent.from_instance.id);
                 let to_inst = SymbolInstanceId::new(parent.to_instance.id);
                 let to_sym = SymbolId::new(parent.to_symbol.id);
+                all_references.state(
+                    SymbolId::new(parent.from_instance.symbol),
+                    to_sym.clone(),
+                    Stated::of(parent.symbol_ref.roles, parent.symbol_ref.relation),
+                );
                 let edge_key = (from_inst, to_sym.clone(), Some(occurrence.clone()));
                 if !seen_edges.insert(edge_key) {
                     continue;
@@ -1440,6 +1451,11 @@ impl Statement {
                 let from_inst = SymbolInstanceId::new(child.from_instance.id);
                 let to_inst = SymbolInstanceId::new(child.symbol_instance.id);
                 let to_sym = SymbolId::new(child.symbol_ref.to_symbol);
+                all_references.state(
+                    SymbolId::new(child.parent_symbol.id),
+                    to_sym.clone(),
+                    Stated::of(child.symbol_ref.roles, child.symbol_ref.relation),
+                );
                 let edge_key = (from_inst, to_sym.clone(), Some(occurrence.clone()));
                 if !seen_edges.insert(edge_key) {
                     continue;
@@ -1477,6 +1493,11 @@ impl Statement {
                 let from_inst = SymbolInstanceId::new(parent.from_instance.id);
                 let to_inst = SymbolInstanceId::new(parent.to_instance.id);
                 let to_sym = SymbolId::new(parent.to_symbol.id);
+                all_references.state(
+                    SymbolId::new(parent.from_instance.symbol),
+                    to_sym.clone(),
+                    Stated::of(parent.symbol_ref.roles, parent.symbol_ref.relation),
+                );
                 let edge_key = (from_inst, to_sym.clone(), Some(occurrence.clone()));
                 if !seen_edges.insert(edge_key) {
                     continue;
@@ -1552,6 +1573,11 @@ impl Statement {
                         };
 
                         let to_symbol = SymbolId::new(edge.to_symbol);
+                        all_references.state(
+                            from_sym.clone(),
+                            to_symbol.clone(),
+                            Stated::of(edge.roles, edge.relation),
+                        );
                         let edge_key = (*from_inst, to_symbol.clone(), Some(occurrence.clone()));
                         if !seen_edges.insert(edge_key) {
                             continue; // Already seen from explicit/forced

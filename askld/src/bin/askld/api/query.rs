@@ -458,13 +458,32 @@ pub async fn build_result_graph(
     }
     let mut pairs: Vec<((i64, i64), (usize, BTreeSet<String>))> = pair_counts.into_iter().collect();
     pairs.sort_unstable_by_key(|((f, t), _)| (*f, *t));
+    // What each pair's references state, as the words every output prints.
+    // One word depends on what the target is, so the types of the answer's
+    // symbols are gathered once.
+    let symbol_types: HashMap<i64, SymbolType> = res
+        .nodes
+        .0
+        .iter()
+        .map(|node| (node.symbol.id, SymbolType::from(node.symbol.symbol_type)))
+        .collect();
     for ((from, to), (count, objects)) in pairs {
-        result_graph.add_edge(Edge::new(
-            SymbolId(from),
-            SymbolId(to),
-            count,
-            objects.into_iter().collect(),
-        ));
+        let kinds = match symbol_types.get(&to) {
+            Some(target) => res
+                .edges
+                .stated(SymbolId(from), SymbolId(to))
+                .kinds(*target),
+            None => Vec::new(),
+        };
+        result_graph.add_edge(
+            Edge::new(
+                SymbolId(from),
+                SymbolId(to),
+                count,
+                objects.into_iter().collect(),
+            )
+            .with_kinds(kinds),
+        );
     }
     result_graph.edges_truncated.sort_unstable();
     result_graph.edges_truncated.dedup();
@@ -811,6 +830,28 @@ mod tests {
     /// ...and what each symbol is: its type, which was only on its instances
     /// (and so unknown for a node that shipped none), and whether it is
     /// folded, which was nowhere.
+    #[test]
+    fn an_edge_says_what_its_references_state() {
+        use index::roles::RefKind;
+
+        // The words are the engine's, computed once: no reader of the answer
+        // guesses a call from a callback out of the two symbol types.
+        let said = Edge::new(SymbolId(1), SymbolId(2), 3, vec!["7".to_string()])
+            .with_kinds(vec![RefKind::Calls, RefKind::Reads]);
+        assert_eq!(
+            serde_json::to_string(&said).unwrap(),
+            r#"{"from":"1","to":"2","occurrence_count":3,"from_objects":["7"],"kinds":["calls","reads"]}"#
+        );
+
+        // An edge with nothing stated (every edge of an index without roles)
+        // is exactly what it was.
+        let bare = Edge::new(SymbolId(1), SymbolId(2), 3, vec!["7".to_string()]);
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"from":"1","to":"2","occurrence_count":3,"from_objects":["7"]}"#
+        );
+    }
+
     #[test]
     fn a_node_says_its_type_and_whether_it_is_folded() {
         use index::symbols::InstanceType::Definition;

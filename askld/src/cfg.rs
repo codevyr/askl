@@ -1,6 +1,10 @@
-use std::{collections::HashSet, iter::Iterator};
+use std::{
+    collections::{HashMap, HashSet},
+    iter::Iterator,
+};
 
 use index::db_diesel::{Index, SelectionNode};
+use index::roles::Stated;
 use index::symbols::Occurrence;
 use index::symbols::{SymbolId, SymbolInstanceId};
 
@@ -37,12 +41,34 @@ pub struct SymbolNodeId {
     pub instance_id: SymbolInstanceId,
 }
 
+/// The reference edges of an answer: one entry per occurrence, and beside
+/// them what the references of each symbol PAIR state about it.
+///
+/// What is stated is kept per pair because that is what an answer's edge is,
+/// and because it is a union: every reference between the two symbols adds
+/// to it, including one whose occurrence was already drawn from another
+/// source.
 #[derive(Debug, Clone)]
-pub struct EdgeList(pub HashSet<(SymbolNodeId, SymbolNodeId, Option<Occurrence>)>);
+pub struct EdgeList(
+    pub HashSet<(SymbolNodeId, SymbolNodeId, Option<Occurrence>)>,
+    HashMap<(SymbolId, SymbolId), Stated>,
+);
 
 impl EdgeList {
     pub fn new() -> Self {
-        Self(HashSet::new())
+        Self(HashSet::new(), HashMap::new())
+    }
+
+    /// One more reference from `from` to `to` says this.
+    pub fn state(&mut self, from: SymbolId, to: SymbolId, said: Stated) {
+        if said != Stated::default() {
+            self.1.entry((from, to)).or_default().add(said);
+        }
+    }
+
+    /// What the references from `from` to `to` state, taken together.
+    pub fn stated(&self, from: SymbolId, to: SymbolId) -> Stated {
+        self.1.get(&(from, to)).copied().unwrap_or_default()
     }
 
     pub fn add_reference(

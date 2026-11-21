@@ -2032,6 +2032,138 @@ async fn one_token_read_in_two_declarations_is_an_edge_from_each_and_one_occurre
     Ok(())
 }
 
+/// A reference keeps what it says about its target through every read that
+/// carries it to an answer: the edges among a set of instances, the family of
+/// a statement, and the occurrences of one edge.
+///
+/// `caller` refers to `hook` three times (it calls it, takes its value, and
+/// increments it) and to `plain` with nothing stated; `slot` HOLDS `my_read`,
+/// which is a relation and not something a token says.
+#[tokio::test(flavor = "current_thread")]
+async fn a_reference_keeps_what_it_says() -> anyhow::Result<()> {
+    use crate::db_diesel::{EphContext, FamilyDemands, Index};
+    use crate::roles::{RefKind, Stated};
+    use crate::symbols::SymbolType;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_REFERENCE_ROLES)
+        .await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+    const CALLER: i64 = 1;
+    const HOOK: i64 = 2;
+    const SLOT: i64 = 3;
+    const MY_READ: i64 = 4;
+    const PLAIN: i64 = 5;
+    let said = |rows: Vec<(i16, i16)>| -> Vec<(i16, i16)> {
+        let mut rows = rows;
+        rows.sort_unstable();
+        rows
+    };
+
+    // The edges among the answer's instances.
+    let (edges, _) = index
+        .find_edges_between(&[10, 20, 30, 40, 50], &eph)
+        .await?;
+    let between = |from: i64, to: i64| -> Vec<(i16, i16)> {
+        said(
+            edges
+                .iter()
+                .filter(|e| e.from_instance_id == from && e.to_symbol == to)
+                .map(|e| (e.roles, e.relation))
+                .collect(),
+        )
+    };
+    assert_eq!(between(10, HOOK), vec![(1, 0), (4, 0), (6, 0)]);
+    assert_eq!(between(10, PLAIN), vec![(0, 0)], "nothing stated");
+    assert_eq!(between(30, MY_READ), vec![(0, 2)], "the slot holds it");
+
+    // The family of a statement.
+    let caller = index
+        .find_symbol(
+            &CompositeFilter::leaf(CompoundNameMixin::new("caller")),
+            ScopeContext::Unscoped,
+            ScopeContext::Unscoped,
+            FamilyDemands::default(),
+            &eph,
+        )
+        .await?
+        .into_inner();
+    assert_eq!(
+        said(
+            caller
+                .children
+                .iter()
+                .filter(|c| c.symbol.id == HOOK)
+                .map(|c| (c.symbol_ref.roles, c.symbol_ref.relation))
+                .collect()
+        ),
+        vec![(1, 0), (4, 0), (6, 0)]
+    );
+
+    // The occurrences of one edge, each with what it says, and enough to
+    // print it: the target's type.
+    let (occurrences, more) = index
+        .find_edge_occurrences(CALLER, HOOK, None, 10, &eph)
+        .await?;
+    assert!(!more);
+    let kinds: Vec<Vec<RefKind>> = occurrences
+        .iter()
+        .map(|o| Stated::of(o.roles, o.relation).kinds(SymbolType::from(o.to_symbol_type)))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            vec![RefKind::Calls],
+            vec![RefKind::Reads],
+            vec![RefKind::Writes, RefKind::Reads],
+        ],
+        "in the order they are written; `hook` is data, so a value taken reads"
+    );
+    let (held, _) = index
+        .find_edge_occurrences(SLOT, MY_READ, None, 10, &eph)
+        .await?;
+    assert_eq!(held.len(), 1);
+    assert_eq!(
+        Stated::of(held[0].roles, held[0].relation).kinds(SymbolType::from(held[0].to_symbol_type)),
+        vec![RefKind::Holds]
+    );
+
+    // The listing of everything one symbol refers to says the same of each
+    // row, in the order they are written.
+    let (listed, more) = index.find_symbol_references(CALLER, None, 10, &eph).await?;
+    assert!(!more);
+    let listed: Vec<(i64, Vec<RefKind>)> = listed
+        .iter()
+        .map(|r| {
+            (
+                r.to_symbol,
+                Stated::of(r.roles, r.relation).kinds(SymbolType::from(r.to_symbol_type)),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            (HOOK, vec![RefKind::Calls]),
+            (HOOK, vec![RefKind::Reads]),
+            (HOOK, vec![RefKind::Writes, RefKind::Reads]),
+            (PLAIN, vec![]),
+        ]
+    );
+    let (listed, _) = index.find_symbol_references(SLOT, None, 10, &eph).await?;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        Stated::of(listed[0].roles, listed[0].relation)
+            .kinds(SymbolType::from(listed[0].to_symbol_type)),
+        vec![RefKind::Holds]
+    );
+    Ok(())
+}
+
 /// F2 has-kind: the contained-instances listing pages the same way.  `modx`
 /// (symbol 1) contains the ten in_* function instances.
 #[tokio::test(flavor = "current_thread")]

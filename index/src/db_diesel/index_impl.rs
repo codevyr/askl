@@ -2578,6 +2578,7 @@ impl Index {
     pub const TEST_INPUT_TREE_BROWSER: &'static str = "test_input_tree_browser.sql";
     pub const TEST_INPUT_NESTED_FUNC: &'static str = "test_input_nested_func.sql";
     pub const TEST_INPUT_TYPE_FILTER: &'static str = "test_input_type_filter.sql";
+    pub const TEST_INPUT_REFERENCE_ROLES: &'static str = "test_input_reference_roles.sql";
     pub const TEST_INPUT_STRUCT_FIELDS: &'static str = "test_input_struct_fields.sql";
     pub const TEST_INPUT_NAME_IN_MANY_STRUCTS: &'static str = "test_input_name_in_many_structs.sql";
     pub const TEST_INPUT_MANY_OCCURRENCES_FEW_PAIRS: &'static str =
@@ -2666,6 +2667,10 @@ impl Index {
         (
             "test_input_type_filter.sql",
             include_str!("../../../sql/test_input_type_filter.sql"),
+        ),
+        (
+            "test_input_reference_roles.sql",
+            include_str!("../../../sql/test_input_reference_roles.sql"),
         ),
         (
             "test_input_search.sql",
@@ -5424,6 +5429,12 @@ pub struct ImplicitEdge {
     pub from_layer: i64,
     #[diesel(sql_type = diesel::sql_types::BigInt)]
     pub to_layer: i64,
+    /// What the reference says about its target (`symbol_refs.roles`,
+    /// `symbol_refs.relation`); read through [`crate::roles::Stated`].
+    #[diesel(sql_type = diesel::sql_types::SmallInt)]
+    pub roles: i16,
+    #[diesel(sql_type = diesel::sql_types::SmallInt)]
+    pub relation: i16,
 }
 
 /// Holds a pooled connection with an open transaction for atomic ephemeral layer
