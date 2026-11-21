@@ -265,6 +265,10 @@ impl Selector for UserVerb {
                         // depth above.  In-memory only; never stored.
                         dfs_enter: parent_node.symbol_instance.dfs_enter + 1,
                         from_full_range: None,
+                        // A forced edge is drawn by the query, not read from
+                        // the text, so it states nothing about its target.
+                        roles: 0,
+                        relation: 0,
                         // Synthetic in-memory ref: the layer follows the
                         // FROM side like real refs' does (from_object/
                         // from_offset_range come from the parent).  The

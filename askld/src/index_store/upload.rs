@@ -981,6 +981,22 @@ fn build_symbol_refs(
         let object_id = resolve_object_id(object_map, object.local_id)?;
         for reference in &object.refs {
             let symbol_id = compute_symbol_id(project_id, reference.to_symbol_local_id)?;
+            // What the reference says is stored as the producer wrote it: a
+            // bit or a relation this engine does not know is kept, and simply
+            // not printed (see `index::roles`).  Only a value the columns
+            // cannot hold is refused.
+            let roles = i16::try_from(reference.roles).map_err(|_| {
+                UploadError::Invalid(format!(
+                    "reference roles {:#x} do not fit the roles column",
+                    reference.roles
+                ))
+            })?;
+            let relation = i16::try_from(reference.relation).map_err(|_| {
+                UploadError::Invalid(format!(
+                    "reference relation {} does not fit the relation column",
+                    reference.relation
+                ))
+            })?;
             rows.push(NewSymbolRef {
                 to_symbol: symbol_id,
                 from_object: object_id,
@@ -989,6 +1005,8 @@ fn build_symbol_refs(
                 nesting_level: reference.nesting_level,
                 dfs_enter: reference.dfs_enter,
                 from_full_range: span_to_range(reference.full.as_ref(), "ref full")?,
+                roles,
+                relation,
             });
         }
     }
@@ -1397,6 +1415,46 @@ mod tests {
             from_offset_end: from_end,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_reference_is_stored_with_what_it_says() {
+        // `n++` (WRITE|TAKE), and a row that is a relation (HOLDS).
+        let object = UploadObject {
+            local_id: 1,
+            refs: vec![
+                SymbolRef {
+                    roles: 6,
+                    ..sref(10, 5, 15)
+                },
+                SymbolRef {
+                    relation: 2,
+                    ..sref(11, 20, 30)
+                },
+                sref(12, 40, 50),
+            ],
+            ..Default::default()
+        };
+        let obj_map = HashMap::from([(1i64, 1i32)]);
+        let rows = build_symbol_refs(1, 1000001, &[object], &obj_map).unwrap();
+        let said: Vec<(i16, i16)> = rows.iter().map(|r| (r.roles, r.relation)).collect();
+        assert_eq!(said, vec![(6, 0), (0, 2), (0, 0)]);
+    }
+
+    #[test]
+    fn a_reference_whose_roles_cannot_be_stored_is_refused() {
+        // The column is a SMALLINT.  A producer that sets a bit past it is
+        // refused, not stored with the bit silently gone.
+        let object = UploadObject {
+            local_id: 1,
+            refs: vec![SymbolRef {
+                roles: 1 << 20,
+                ..sref(10, 5, 15)
+            }],
+            ..Default::default()
+        };
+        let obj_map = HashMap::from([(1i64, 1i32)]);
+        assert!(build_symbol_refs(1, 1000001, &[object], &obj_map).is_err());
     }
 
     #[test]

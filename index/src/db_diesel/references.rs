@@ -24,7 +24,7 @@
 //! partition-cache treatment (acceptable: results are not SQL-cached).
 
 use anyhow::Result;
-use diesel::sql_types::{Array, BigInt, Int4range, Integer, Nullable, Text};
+use diesel::sql_types::{Array, BigInt, Int4range, Integer, Nullable, SmallInt, Text};
 use diesel_async::RunQueryDsl;
 
 use super::index_impl::Index;
@@ -57,6 +57,16 @@ pub struct SymbolReferenceRow {
     pub project_id: Option<String>,
     #[diesel(sql_type = Int4range)]
     pub from_offset_range: (std::ops::Bound<i32>, std::ops::Bound<i32>),
+    /// What this occurrence says about the target, and the target's symbol
+    /// type, which is what [`crate::roles::Stated::kinds`] needs to print it.
+    /// An occurrence can be several stored references (see
+    /// `find_symbol_references`); it says the union of what they say.
+    #[diesel(sql_type = SmallInt)]
+    pub roles: i16,
+    #[diesel(sql_type = SmallInt)]
+    pub relation: i16,
+    #[diesel(sql_type = Integer)]
+    pub to_symbol_type: i32,
 }
 
 /// One instance contained by the queried symbol (the has-kind page row).
@@ -124,6 +134,15 @@ pub struct EdgeOccurrenceRow {
     pub project_id: Option<String>,
     #[diesel(sql_type = Int4range)]
     pub from_offset_range: (std::ops::Bound<i32>, std::ops::Bound<i32>),
+    /// What this occurrence says about the target (`symbol_refs.roles`,
+    /// `symbol_refs.relation`), and the target's symbol type, which is what
+    /// [`crate::roles::Stated::kinds`] needs to print it.
+    #[diesel(sql_type = SmallInt)]
+    pub roles: i16,
+    #[diesel(sql_type = SmallInt)]
+    pub relation: i16,
+    #[diesel(sql_type = Integer)]
+    pub to_symbol_type: i32,
 }
 
 impl EdgeOccurrenceRow {
@@ -200,10 +219,12 @@ impl Index {
             "SELECT page.ref_id, page.from_instance_id, page.to_symbol, \
                     ts.name AS to_symbol_name, ti.id AS to_instance_id, \
                     page.from_object, o.filesystem_path AS path, \
-                    o.project_id::text AS project_id, page.from_offset_range \
+                    o.project_id::text AS project_id, page.from_offset_range, \
+                    page.roles, page.relation, ts.symbol_type AS to_symbol_type \
              FROM ( \
                SELECT sr.id AS ref_id, sr.to_symbol, sr.from_object, \
-                      sr.from_offset_range, from_inst.id AS from_instance_id \
+                      sr.from_offset_range, from_inst.id AS from_instance_id, \
+                      sr.roles, sr.relation \
                FROM ( \
                  SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit \
                  FROM index.symbol_instances si \
@@ -211,7 +232,8 @@ impl Index {
                  ORDER BY si.id \
                ) from_inst \
                CROSS JOIN LATERAL ( \
-                 SELECT min(sr.id) AS id, sr.to_symbol, sr.from_object, sr.from_offset_range \
+                 SELECT min(sr.id) AS id, sr.to_symbol, sr.from_object, sr.from_offset_range, \
+                        bit_or(sr.roles) AS roles, max(sr.relation) AS relation \
                  FROM index.symbol_refs sr \
                  WHERE sr.from_object = from_inst.object_id \
                    AND from_inst.dfs_enter < sr.dfs_enter \
@@ -504,18 +526,19 @@ impl Index {
         let mut rows: Vec<EdgeOccurrenceRow> = diesel::sql_query(
             "SELECT occ.ref_id, occ.from_instance_id, \
                     occ.from_object, o.filesystem_path AS path, \
-                    o.project_id::text AS project_id, occ.from_offset_range \
+                    o.project_id::text AS project_id, occ.from_offset_range, \
+                    occ.roles, occ.relation, target.symbol_type AS to_symbol_type \
              FROM ( \
                SELECT DISTINCT ON (sr.from_object, sr.from_offset_range) \
                       sr.id AS ref_id, from_inst.id AS from_instance_id, \
-                      sr.from_object, sr.from_offset_range \
+                      sr.from_object, sr.from_offset_range, sr.roles, sr.relation \
                FROM ( \
                  SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit \
                  FROM index.symbol_instances si \
                  WHERE si.symbol = $1 AND si.layer = ANY($2) \
                ) from_inst \
                CROSS JOIN LATERAL ( \
-                 SELECT sr.id, sr.from_object, sr.from_offset_range \
+                 SELECT sr.id, sr.from_object, sr.from_offset_range, sr.roles, sr.relation \
                  FROM index.symbol_refs sr \
                  WHERE sr.from_object = from_inst.object_id \
                    AND from_inst.dfs_enter < sr.dfs_enter \
@@ -526,6 +549,7 @@ impl Index {
                ORDER BY sr.from_object, sr.from_offset_range, sr.id \
              ) occ \
              JOIN index.objects o ON o.id = occ.from_object \
+             JOIN index.symbols target ON target.id = $3 \
              WHERE (occ.from_object, lower(occ.from_offset_range), occ.ref_id) > ($4, $5, $6) \
              ORDER BY occ.from_object, lower(occ.from_offset_range), occ.ref_id \
              LIMIT $7",
