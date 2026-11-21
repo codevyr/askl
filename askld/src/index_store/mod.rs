@@ -232,6 +232,8 @@ struct NewSymbolRef {
     nesting_level: i32,
     dfs_enter: i64,
     from_full_range: Option<std::ops::Range<i32>>,
+    roles: i16,
+    relation: i16,
 }
 
 #[derive(Debug, QueryableByName)]
