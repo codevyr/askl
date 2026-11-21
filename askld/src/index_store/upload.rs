@@ -917,6 +917,10 @@ fn validate_object_tree(object: &UploadObject) -> Result<(), UploadError> {
             )));
         }
         // Its depth has to agree with the instance its NUMBER puts it in.
+        // This is also what a RELATION row rests on: it belongs to the one
+        // declaration exactly one level above it (`attribution::belongs_to`),
+        // and this check is what makes that declaration exist and be the
+        // innermost one around the row.
         // These come from different places in a producer -- the clang indexer
         // takes an expansion-site ref's position from the macro it landed in
         // but its level from whatever scope was open -- so they can silently
