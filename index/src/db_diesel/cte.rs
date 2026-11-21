@@ -138,7 +138,16 @@ fn find_edges_candidates(
     vis: &EphVisibility,
 ) -> BoxedSelectStatement<
     'static,
-    (BigInt, BigInt, Integer, Int4range, BigInt, BigInt, BigInt),
+    (
+        BigInt,
+        BigInt,
+        Integer,
+        Int4range,
+        BigInt,
+        BigInt,
+        BigInt,
+        Integer,
+    ),
     FromClause<crate::schema_diesel::symbol_instances::table>,
     Pg,
 > {
@@ -161,6 +170,9 @@ fn find_edges_candidates(
             // from_inst.dfs_enter and the query returned no edges at all.
             symbol_instances::dfs_enter,
             symbol_instances::dfs_exit,
+            // A relation row belongs to the candidate one level above it
+            // (`attribution::belongs_to`), so the level comes along as well.
+            symbol_instances::nesting_level,
         ))
         .into_boxed::<Pg>()
 }
@@ -275,8 +287,11 @@ impl QueryFragment<Pg> for EdgesBetween {
               FROM candidates from_inst \
               JOIN index.symbol_refs sr \
                   ON sr.from_object = from_inst.object_id \
-                  AND from_inst.dfs_enter < sr.dfs_enter \
-                  AND sr.dfs_enter < from_inst.dfs_exit \
+                  AND ",
+        );
+        out.push_sql(&super::attribution::belongs_to("sr", "from_inst"));
+        out.push_sql(
+            " \
               JOIN targets to_inst \
                   ON to_inst.symbol = sr.to_symbol \
               WHERE from_inst.id != to_inst.id \

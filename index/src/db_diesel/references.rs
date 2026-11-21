@@ -27,6 +27,7 @@ use anyhow::Result;
 use diesel::sql_types::{Array, BigInt, Int4range, Integer, Nullable, SmallInt, Text};
 use diesel_async::RunQueryDsl;
 
+use super::attribution::belongs_to;
 use super::index_impl::Index;
 use super::selection::EphContext;
 
@@ -215,7 +216,7 @@ impl Index {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
-        let mut rows: Vec<SymbolReferenceRow> = diesel::sql_query(
+        let mut rows: Vec<SymbolReferenceRow> = diesel::sql_query(format!(
             "SELECT page.ref_id, page.from_instance_id, page.to_symbol, \
                     ts.name AS to_symbol_name, ti.id AS to_instance_id, \
                     page.from_object, o.filesystem_path AS path, \
@@ -226,7 +227,8 @@ impl Index {
                       sr.from_offset_range, from_inst.id AS from_instance_id, \
                       sr.roles, sr.relation \
                FROM ( \
-                 SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit \
+                 SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit, \
+                        si.nesting_level \
                  FROM index.symbol_instances si \
                  WHERE si.symbol = $1 AND si.layer = ANY($2) AND si.id >= $3 \
                  ORDER BY si.id \
@@ -236,8 +238,7 @@ impl Index {
                         bit_or(sr.roles) AS roles, max(sr.relation) AS relation \
                  FROM index.symbol_refs sr \
                  WHERE sr.from_object = from_inst.object_id \
-                   AND from_inst.dfs_enter < sr.dfs_enter \
-                   AND sr.dfs_enter < from_inst.dfs_exit \
+                   AND {inside} \
                    AND sr.layer = ANY($2) \
                  GROUP BY sr.to_symbol, sr.from_object, sr.from_offset_range \
                  HAVING from_inst.id > $3 OR min(sr.id) > $4 \
@@ -255,7 +256,8 @@ impl Index {
              JOIN index.symbols ts ON ts.id = page.to_symbol AND ts.layer = ANY($2) \
              JOIN index.objects o ON o.id = page.from_object \
              ORDER BY page.from_instance_id, page.ref_id",
-        )
+            inside = belongs_to("sr", "from_inst"),
+        ))
         .bind::<BigInt, _>(symbol_id)
         .bind::<Array<BigInt>, _>(&vis)
         .bind::<BigInt, _>(af)
@@ -359,11 +361,12 @@ impl Index {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
-        let row: CountRow = diesel::sql_query(
+        let row: CountRow = diesel::sql_query(format!(
             "SELECT count(*) AS n FROM ( \
                SELECT 1 \
                FROM ( \
-                 SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit \
+                 SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit, \
+                        si.nesting_level \
                  FROM index.symbol_instances si \
                  WHERE si.symbol = $1 AND si.layer = ANY($2) \
                  ORDER BY si.id \
@@ -372,13 +375,13 @@ impl Index {
                  SELECT DISTINCT sr.to_symbol, sr.from_offset_range \
                  FROM index.symbol_refs sr \
                  WHERE sr.from_object = from_inst.object_id \
-                   AND from_inst.dfs_enter < sr.dfs_enter \
-                   AND sr.dfs_enter < from_inst.dfs_exit \
+                   AND {inside} \
                    AND sr.layer = ANY($2) \
                ) sr \
                LIMIT $3 \
              ) c",
-        )
+            inside = belongs_to("sr", "from_inst"),
+        ))
         .bind::<BigInt, _>(symbol_id)
         .bind::<Array<BigInt>, _>(&vis)
         .bind::<BigInt, _>(cap as i64 + 1)
@@ -523,7 +526,7 @@ impl Index {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to get connection: {}", e))?;
 
-        let mut rows: Vec<EdgeOccurrenceRow> = diesel::sql_query(
+        let mut rows: Vec<EdgeOccurrenceRow> = diesel::sql_query(format!(
             "SELECT occ.ref_id, occ.from_instance_id, \
                     occ.from_object, o.filesystem_path AS path, \
                     o.project_id::text AS project_id, occ.from_offset_range, \
@@ -533,7 +536,8 @@ impl Index {
                       sr.id AS ref_id, from_inst.id AS from_instance_id, \
                       sr.from_object, sr.from_offset_range, sr.roles, sr.relation \
                FROM ( \
-                 SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit \
+                 SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit, \
+                        si.nesting_level \
                  FROM index.symbol_instances si \
                  WHERE si.symbol = $1 AND si.layer = ANY($2) \
                ) from_inst \
@@ -541,8 +545,7 @@ impl Index {
                  SELECT sr.id, sr.from_object, sr.from_offset_range, sr.roles, sr.relation \
                  FROM index.symbol_refs sr \
                  WHERE sr.from_object = from_inst.object_id \
-                   AND from_inst.dfs_enter < sr.dfs_enter \
-                   AND sr.dfs_enter < from_inst.dfs_exit \
+                   AND {inside} \
                    AND sr.layer = ANY($2) \
                    AND sr.to_symbol = $3 \
                ) sr \
@@ -553,7 +556,8 @@ impl Index {
              WHERE (occ.from_object, lower(occ.from_offset_range), occ.ref_id) > ($4, $5, $6) \
              ORDER BY occ.from_object, lower(occ.from_offset_range), occ.ref_id \
              LIMIT $7",
-        )
+            inside = belongs_to("sr", "from_inst"),
+        ))
         .bind::<BigInt, _>(from_symbol)
         .bind::<Array<BigInt>, _>(&vis)
         .bind::<BigInt, _>(to_symbol)

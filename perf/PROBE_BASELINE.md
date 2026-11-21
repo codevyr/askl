@@ -275,3 +275,41 @@ holds or refers to), before they fan out into the declarations around them.
 Counted after, `spinlock_t` (5,001 references, 21,044 pairs) could never drive.
 Only the walk is budgeted; the tested side has no bound of its own (the largest
 seen read 655,129 reference rows in 110–170 ms).
+
+## A relation belongs to its source (`attribution::belongs_to`)
+
+Every read that attributes a reference to a declaration tests two more columns
+of the reference, `relation` and `nesting_level`.  A read that enters
+`symbol_refs` from inside its owners (by `(from_object, dfs_enter)`) fetched
+the row already.  A read that enters by TARGET was index-only on
+`symbol_refs_layer_uq`, which carried neither column.
+
+Kernel index, warm, third run, the statements the engine emits for one request
+each, on the same binds:
+
+| Statement | Before | Columns in the table only | Columns in the index (`INCLUDE`) |
+|---|---|---|---|
+| children side read, `"vfs_read" { }` | 2.4 ms | 2.4 ms | 2.4 ms |
+| parents side read, same | 0.2 ms | 0.2 ms | 0.2 ms |
+| `find_edges_between`, `file(core.c) { }` | 36 ms | 37 ms | 37 ms |
+| reference role, `func { "kfree_sensitive" }` | 4.9 ms, 9,120 buffers | 5.2 ms, 9,357 buffers, plan moved to `symbol_refs_to_symbol_idx` | 4.9 ms, 9,119 buffers |
+| walk and test, amdgpu / `spinlock_t` | 253 ms, 276,004 buffers | **460 ms**, 509,098 buffers | 251 ms, 275,874 buffers |
+| ask (which module rows refer), same query | 86 ms, 7,123 buffers | **162 ms**, 82,331 buffers | 92 ms, 6,464 buffers |
+| ask (which middle rows are referred to) | 11 ms | 23 ms | 12 ms |
+| derive read, `file(bt-bmc.c) { }` | 2.9 ms | 2.8 ms | 2.3 ms |
+| edge occurrences, references listing, its count | under 0.4 ms | same | same |
+
+With the columns only in the table, every reference a by-target read visits
+costs a row fetch: about 6 µs each warm, one random page each cold.  That
+doubled the walk and would add about 60 ms to each read of 10,001 references
+from a hot name, three times over in `macro { "task_struct" }`.  Hence
+migration `2026-11-22-000001`: the index is rebuilt with
+`INCLUDE (relation, nesting_level, roles)`.  On this index that took 8.4 s
+(boot to serving: 11 s) and the index went from 2.74 GB to 2.00 GB.
+
+The one statement left slower is the first ask (86 -> 92 ms): its bounded
+relation of 167,488 points is two columns wider.
+
+The planner needs statistics for `relation` (all zero today): without them
+`relation = 0` is estimated at 0.5% and every attribution join is
+under-estimated 200x.  The boot-time statistics refresh provides them.
