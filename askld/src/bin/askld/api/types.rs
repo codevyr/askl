@@ -174,6 +174,21 @@ pub struct Edge {
     /// written before references carried roles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     kinds: Vec<RefKind>,
+    /// Some token of `from` names `to`.  False only for a pair whose every
+    /// row is a relation (the slot holds it, the macro declared it) and
+    /// nothing else: such a pair is in `edges` without being referred to.
+    /// Absent when true, which is every edge of an index written before
+    /// relations existed.
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    refers: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_yes(value: &bool) -> bool {
+    *value
 }
 
 impl Edge {
@@ -189,6 +204,7 @@ impl Edge {
             occurrence_count,
             from_objects,
             kinds: Vec::new(),
+            refers: true,
         }
     }
 
@@ -200,6 +216,17 @@ impl Edge {
 
     pub fn kinds(&self) -> &[RefKind] {
         &self.kinds
+    }
+
+    /// The edge, saying whether any token of its source names its target
+    /// (see the `refers` field).
+    pub fn with_refers(mut self, refers: bool) -> Self {
+        self.refers = refers;
+        self
+    }
+
+    pub fn refers(&self) -> bool {
+        self.refers
     }
 
     pub fn from(&self) -> SymbolId {
