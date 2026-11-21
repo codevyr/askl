@@ -10,6 +10,12 @@
 - **Static edges.** Call/reference edges come from static analysis. Indirect
   calls (function pointers, virtual dispatch) may be missing; `field`/`method`
   and `!forced` help model dispatch, but coverage is not guaranteed.
+- **A word on an edge is what the text does, not what runs.** `calls` is a
+  literal fact.  It does not follow a slot to what the slot holds:
+  `"vfs_read" { }` calls `file_operations.read`, and the functions are one
+  hop further (`⇢`).  `fn = s->cb; fn()` is a call through no callee the
+  index can name, and `*p = x` a write to no field it can name.  Invoking a
+  function-like macro is not a call.  An edge without a word states nothing.
 - **One name is one symbol (C).** Every driver's `DEVICE_NAME` and every
   module's `init_module` is the same node. The report shows such a symbol at
   the definition nearest to whoever led to it and marks the choice:
