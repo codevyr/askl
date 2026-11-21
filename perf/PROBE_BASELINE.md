@@ -241,3 +241,37 @@ now 157 ms. `queries.txt` carries the two amdgpu queries for `run.py`.
 The guard is end-to-end on purpose. S4 was correct SQL measured with the wrong
 input size; a hand-copied shape can drift (S1–S13 did). The engine's own log
 line cannot.
+
+## Walk and test (`Index::probe_between`)
+
+A statement between two resolved neighbours used to bind each as a role and
+intersect them, so each role had to fit the budget alone.  It now walks from
+one neighbour and tests the others per row.  Measured on the kernel index,
+warm, PG 16.14; the statements are the ones the engine emits, captured from the
+server log and run under `EXPLAIN (ANALYZE, BUFFERS)`.
+
+| Query (middle statement) | Rows | Time | Note |
+|---|---|---|---|
+| `mod("amdgpu") { { "spinlock_t" } }` | 134 | 304 ms | 5,001 points -> 21,044 enclosing pairs -> 15,356 candidates; matches the database (129 symbols) |
+| `mod("btrfs") { { "wait_queue_head_t" } }` | 55 | 96 ms | matches the database (50 symbols) |
+| `dir("/linux/drivers") { { "spinlock_t" } }` | 398 | 265 ms | |
+| `mod("amdgpu") { { "u32" } }`, u32 walks | too many | 42 ms | the walk stops at 10,001 points; JIT fires |
+| same, amdgpu walks | too many | 26 ms | |
+| `mod("amdgpu") { { "sock" } }`, either walks | too many | 47 / 58 ms | |
+
+What decides the plan, and went wrong when written otherwise (hand-written
+variants, same index):
+
+| Spelling of the test | Time |
+|---|---|
+| reference test once per DISTINCT candidate symbol, `LATERAL (… LIMIT 1)` against the neighbour's extents in a MATERIALIZED relation; containment as a join to the same relation (**used**) | 50–110 ms |
+| plain `EXISTS` on base tables, tested ids as an array | 368 ms: hashes all 823,002 references amdgpu makes |
+| `LATERAL … LIMIT 1` on base tables (`id = ANY`) | 6,565 ms |
+| `EXISTS` against the extents relation (semi-join) | 2,030 ms |
+| containment as a correlated `EXISTS` over the relation | 426 ms |
+
+The budget counts the POINTS walked (references to the neighbour, or what it
+holds or refers to), before they fan out into the declarations around them.
+Counted after, `spinlock_t` (5,001 references, 21,044 pairs) could never drive.
+Only the walk is budgeted; the tested side has no bound of its own (the largest
+seen read 655,129 reference rows in 110–170 ms).

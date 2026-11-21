@@ -317,6 +317,20 @@ fn prepare_materialise(
     }
 }
 
+/// How one probe of a statement is asked (see the refinement rounds in
+/// `compute_roots`).
+enum ProbePlan {
+    /// The statement's predicate, alone or with one neighbour bound in as a
+    /// role.
+    Roles(Vec<index::db_diesel::ProbeRole>),
+    /// Between several resolved neighbours: one is walked, the others are
+    /// tested per row.
+    Between {
+        driver: index::db_diesel::ProbeNeighbour,
+        tested: Vec<index::db_diesel::ProbeNeighbour>,
+    },
+}
+
 /// True when a statement may re-probe in a refinement round: every
 /// selector is either fusable (its emission is the shared statement
 /// query) or non-constraining (unit verbs, bare filter-only type
@@ -668,22 +682,27 @@ impl Statement {
             // instead of a condition the index would have to materialise —
             // this is what keeps a broad container from resolving a bare
             // type predicate to millions of ids).
-            let run_probe_wave = |entries: Vec<(
-                Rc<Statement>,
-                CompositeFilter,
-                Vec<index::db_diesel::ProbeRole>,
-            )>,
+            let run_probe_wave = |entries: Vec<(Rc<Statement>, CompositeFilter, ProbePlan)>,
                                   cap: usize,
                                   eph: EphContext| {
                 async move {
                     let mut futs = Vec::new();
                     let mut probed = Vec::new();
-                    for (stmt, predicate, roles) in entries {
+                    for (stmt, predicate, plan) in entries {
                         let eph = eph.clone();
                         let index = &cfg.index;
                         probed.push(stmt);
                         futs.push(async move {
-                            index.probe_instance_ids(&predicate, roles, cap, &eph).await
+                            match plan {
+                                ProbePlan::Roles(roles) => {
+                                    index.probe_instance_ids(&predicate, roles, cap, &eph).await
+                                }
+                                ProbePlan::Between { driver, tested } => {
+                                    index
+                                        .probe_between(&predicate, &driver, &tested, cap, &eph)
+                                        .await
+                                }
+                            }
                         });
                     }
                     let results = futures::future::join_all(futs).await;
@@ -760,39 +779,52 @@ impl Statement {
             };
 
             // Wave 0.
-            let mut wave: Vec<(
-                Rc<Statement>,
-                CompositeFilter,
-                Vec<index::db_diesel::ProbeRole>,
-            )> = Vec::new();
+            let mut wave: Vec<(Rc<Statement>, CompositeFilter, ProbePlan)> = Vec::new();
             for m in &staged {
                 let Some(predicate) = m.statement.command().probe_predicate(&ctx.eph) else {
                     continue;
                 };
-                wave.push((m.statement.clone(), predicate, vec![]));
+                wave.push((m.statement.clone(), predicate, ProbePlan::Roles(vec![])));
             }
             let outcomes = run_probe_wave(wave, ctx.probe_cap, ctx.eph.clone()).await?;
             settle(outcomes, ctx, 0);
 
-            // Refinement rounds, to fixpoint.  A candidate re-probes only
-            // when a NEW neighbour resolved since its last attempt.
-            const MAX_ROLE_BRANCHES: usize = 4;
-            // Per candidate: the binding set its last derivation was built
-            // from, as sorted (neighbour, size) pairs.  Memoising the INPUT
-            // rather than the trigger is what stops a capped statement
-            // re-running an identical query every time any neighbour moves.
-            // Per candidate: the composition its last probe actually used, as
-            // sorted (neighbour, size) pairs, and how many neighbours that was.
-            // Retrying is worth it only when the next attempt would be strictly
-            // more restrictive than what is recorded here.
-            let mut last_used: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
-            let mut attempts: HashMap<usize, usize> = HashMap::new();
-            for round in 1..=staged.len() {
-                let mut wave: Vec<(
-                    Rc<Statement>,
-                    CompositeFilter,
-                    Vec<index::db_diesel::ProbeRole>,
-                )> = Vec::new();
+            // Refinement rounds, to fixpoint.
+            //
+            // A statement still unresolved is probed again with resolved
+            // neighbours, tightest first, and widened only after an attempt
+            // has actually capped:
+            //
+            //   1. the tightest neighbour alone, bound as a role (one probe
+            //      per kind of relation the edge accepts).  This is the
+            //      common case, and one neighbour is usually enough;
+            //   2. the two tightest: one is walked, the other tested per row
+            //      (`Index::probe_between`), then the other way round;
+            //   3. the three tightest, each walking in turn; and so on.
+            //
+            // Composition is on demand because it only pays when one
+            // neighbour cannot bound the statement: `mod("x") { { "spinlock_t" } }`
+            // has too many children one way and too many parents the other.
+            // It used to bind every neighbour as a role and intersect them,
+            // which needed EACH role to fit its budget alone -- so exactly
+            // that query stayed unresolved (amdgpu holds 46,500 instances,
+            // 15,000 declarations use spinlock_t, 134 are both).  An
+            // intersection needs one side enumerated; the others are tests,
+            // and a test of any size cannot make the answer "too many".
+            //
+            // Sound for the same reason as before: a role or a test is at
+            // least as permissive as the evidence the worklist later narrows
+            // by, and a neighbour's resolved set is a superset of its final
+            // selection, so what a probe resolves is a superset of the
+            // statement's final rows.  A capped neighbour is absent by
+            // construction: it is not in `probe_resolved`.
+            //
+            // `tried` memoises each attempt by its INPUT (which neighbours,
+            // how many rows each, who walked), so an attempt is repeated only
+            // when a neighbour it did not have has resolved since.
+            let mut tried: HashSet<(usize, String)> = HashSet::new();
+            for round in 1..=(staged.len() * 8 + 8) {
+                let mut wave: Vec<(Rc<Statement>, CompositeFilter, ProbePlan)> = Vec::new();
                 for m in &staged {
                     let stmt = &m.statement;
                     let key = statement_key(stmt);
@@ -838,54 +870,47 @@ impl Statement {
                     let Some(predicate) = pp.or(sc).or(cp) else {
                         continue;
                     };
-                    // Compose ONE query from every resolved neighbour, rather
-                    // than picking a method and hoping it narrows.  The
-                    // conjunction is contained in each single-neighbour
-                    // derivation, so it resolves whenever any of them would --
-                    // and where none of them does:
-                    //
-                    //     "a" { { "b" } }
-                    //
-                    // `a` has too many children to bound the middle statement
-                    // and `b` too many parents; each derivation caps, while
-                    // "children of a AND parents of b" is small.  Trying
-                    // methods one at a time cannot reach that.
-                    //
-                    // A capped neighbour is absent by construction: it is not
-                    // in `probe_resolved`, and it constrains nothing anyway.
-                    // That is the same law that stops us narrowing BY a capped
-                    // selection, applied to composing one into a query.
-                    //
-                    // Cost note: `dc495ef` went the other way, binding only the
-                    // smallest, because ANDing a broad neighbour cost 2.7 s and
-                    // narrowed nothing.  The trade-off inverted -- failing to
-                    // bind used to mean a slow success via the predicate path,
-                    // and now means the statement stays capped.
-                    use index::db_diesel::ProbeRole;
-                    let mut neighbours: Vec<(usize, usize, Vec<ProbeRole>)> = Vec::new();
-                    let mut consider = |neighbour: usize,
+                    use index::db_diesel::{ProbeNeighbour, ProbeRole};
+                    struct Resolved {
+                        statement: usize,
+                        roles: Vec<ProbeRole>,
+                        between: ProbeNeighbour,
+                    }
+                    let mut neighbours: Vec<Resolved> = Vec::new();
+                    let mut consider = |statement: usize,
                                         ids: &Vec<i64>,
                                         rel: RelationshipType,
                                         parent_side: bool| {
-                        let mut branches = Vec::new();
-                        if rel.contains(RelationshipType::REFS) {
-                            branches.push(if parent_side {
+                        let refs = rel.contains(RelationshipType::REFS);
+                        let has = rel.contains(RelationshipType::HAS);
+                        if !refs && !has {
+                            return; // EMPTY relationship: no constraint
+                        }
+                        let mut roles = Vec::new();
+                        if refs {
+                            roles.push(if parent_side {
                                 ProbeRole::RefsChildrenOf(ids.clone())
                             } else {
                                 ProbeRole::RefsParentsOf(ids.clone())
                             });
                         }
-                        if rel.contains(RelationshipType::HAS) {
-                            branches.push(if parent_side {
+                        if has {
+                            roles.push(if parent_side {
                                 ProbeRole::HasChildrenOf(ids.clone())
                             } else {
                                 ProbeRole::HasParentsOf(ids.clone())
                             });
                         }
-                        if branches.is_empty() {
-                            return; // EMPTY relationship: no constraint
-                        }
-                        neighbours.push((neighbour, ids.len(), branches));
+                        let between = if parent_side {
+                            ProbeNeighbour::parent(ids.clone(), refs, has)
+                        } else {
+                            ProbeNeighbour::child(ids.clone(), refs, has)
+                        };
+                        neighbours.push(Resolved {
+                            statement,
+                            roles,
+                            between,
+                        });
                     };
                     if let Some(parent) = stmt.parent().and_then(|p| p.upgrade()) {
                         let neighbour = statement_key(&parent);
@@ -902,98 +927,49 @@ impl Statement {
                     if neighbours.is_empty() {
                         continue;
                     }
+                    neighbours.sort_by_key(|n| n.between.len());
 
-                    // Re-derive only when the INPUTS improved: a neighbour
-                    // resolved that had not, or one of them narrowed.  Keyed on
-                    // the whole binding set rather than on what notified us,
-                    // because with one composed query there is no "which
-                    // method" to track -- only whether the composition can now
-                    // be tighter than the one already tried.
-                    // ONE method, retried only when the new attempt is
-                    // strictly MORE RESTRICTIVE than the last one -- either
-                    // because it composes a neighbour that was not in it, or
-                    // because a neighbour it already had has narrowed.  Both
-                    // are the same question, so they are one test rather than
-                    // two rules that have to agree.
-                    //
-                    // Reaching here at all means the statement is still
-                    // unresolved, so the previous attempt capped; that is what
-                    // licenses widening by one.
-                    let neighbour_count = neighbours.len();
-                    let level = (attempts.get(&key).copied().unwrap_or(0) + 1).min(neighbour_count);
-                    neighbours.sort_by_key(|(_, len, _)| *len);
-                    let used: Vec<(usize, usize)> = neighbours
-                        .iter()
-                        .take(level)
-                        .map(|(n, len, _)| (*n, *len))
-                        .collect();
-                    let more_restrictive = match last_used.get(&key) {
-                        None => true,
-                        Some(prev) => used.iter().any(|(n, len)| {
-                            match prev.iter().find(|(pn, _)| pn == n) {
-                                None => true,                  // composed in anew
-                                Some((_, plen)) => len < plen, // narrowed
+                    // The first attempt not made yet, in the order above.
+                    let mut next: Option<(usize, usize, String)> = None;
+                    'attempts: for level in 1..=neighbours.len() {
+                        let inputs: Vec<(usize, usize)> = neighbours[..level]
+                            .iter()
+                            .map(|n| (n.statement, n.between.len()))
+                            .collect();
+                        let walkers = if level == 1 { 1 } else { level };
+                        for walker in 0..walkers {
+                            let attempt = format!("{walker} of {inputs:?}");
+                            if !tried.contains(&(key, attempt.clone())) {
+                                next = Some((level, walker, attempt));
+                                break 'attempts;
                             }
-                        }),
+                        }
+                    }
+                    let Some((level, walker, attempt)) = next else {
+                        continue;
                     };
-                    if !more_restrictive {
-                        continue;
-                    }
-                    last_used.insert(key, used);
-                    attempts.insert(key, level);
+                    tried.insert((key, attempt));
 
-                    // Compose on DEMAND, tightest neighbour first.
-                    //
-                    // Composition only pays when one neighbour cannot bound the
-                    // statement.  When one can -- the common case -- ANDing a
-                    // broad neighbour buys no resolving power and costs a great
-                    // deal: on the corpus `mod("amdgpu") { func {
-                    // "drm_dev_enter" } }` went 400 ms -> 2.7 s when every
-                    // neighbour was composed unconditionally, because a probe
-                    // that took 3-51 ms with one neighbour took 1240 ms and
-                    // 2353 ms with two.  That is `dc495ef`'s 2.7 s, and it does
-                    // not go away because the alternative got worse.
-                    //
-                    // So start with the tightest neighbour alone and widen only
-                    // after a level has actually capped.  Cheap queries never
-                    // pay for composition; the ones that need it --
-                    // `mod("x") { { "spinlock_t" } }`, too many children one way
-                    // and too many parents the other -- escalate until they
-                    // resolve or the neighbours run out.
-                    //
-                    // Within a level the probe count is the product of the
-                    // per-neighbour branch counts (`{ }` contributes REFS and
-                    // HAS), so `MAX_ROLE_BRANCHES` bounds it.
-                    let mut branch_sets: Vec<Vec<ProbeRole>> = Vec::new();
-                    let mut product = 1usize;
-                    for (_, _, branches) in neighbours.into_iter().take(level) {
-                        let next = product.saturating_mul(branches.len());
-                        if next > MAX_ROLE_BRANCHES {
-                            break;
+                    if level == 1 {
+                        // One neighbour, one probe per kind: the statement
+                        // resolves iff every kind does, and the union of the
+                        // results is exact under the either-edge semantics.
+                        for role in neighbours.swap_remove(0).roles {
+                            wave.push((
+                                stmt.clone(),
+                                predicate.clone(),
+                                ProbePlan::Roles(vec![role]),
+                            ));
                         }
-                        product = next;
-                        branch_sets.push(branches);
-                    }
-                    if branch_sets.is_empty() {
-                        continue;
-                    }
-
-                    // Cartesian product of the branch sets: one probe per
-                    // combination, ANDing one branch per neighbour.
-                    let mut combos: Vec<Vec<ProbeRole>> = vec![Vec::new()];
-                    for set in &branch_sets {
-                        let mut next = Vec::new();
-                        for combo in &combos {
-                            for role in set {
-                                let mut c = combo.clone();
-                                c.push(role.clone());
-                                next.push(c);
-                            }
-                        }
-                        combos = next;
-                    }
-                    for combo in combos {
-                        wave.push((stmt.clone(), predicate.clone(), combo));
+                    } else {
+                        neighbours.truncate(level);
+                        let driver = neighbours.remove(walker).between;
+                        let tested = neighbours.into_iter().map(|n| n.between).collect();
+                        wave.push((
+                            stmt.clone(),
+                            predicate.clone(),
+                            ProbePlan::Between { driver, tested },
+                        ));
                     }
                 }
                 if wave.is_empty() {
@@ -1001,11 +977,10 @@ impl Statement {
                 }
                 let outcomes = run_probe_wave(wave, ctx.probe_cap, ctx.eph.clone()).await?;
                 // Deliberately NOT `if !settle(..) { break }`.  A round that
-                // resolves nothing is exactly when a wider composition is worth
-                // trying -- breaking there is what stopped escalation from ever
-                // happening.  Emptiness of the next wave is the real fixpoint:
-                // the more-restrictive test refuses to repeat a composition, and
-                // levels are bounded by the neighbour count, so the loop ends.
+                // resolves nothing is exactly when the next attempt is worth
+                // making.  Emptiness of the next wave is the real fixpoint:
+                // no attempt is repeated on the same inputs, and there are
+                // finitely many, so the loop ends.
                 settle(outcomes, ctx, round);
             }
 
