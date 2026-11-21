@@ -691,6 +691,25 @@ impl Command {
             }
 
             let span = Span::from_pest(selector.span(), self.span().input());
+            // Rows the lists would drop without proving anything: ask.
+            let unproven = selector_state_with(&mut ctx.registry, selector, |state| {
+                state.unproven(dependency, &role, rel_type)
+            });
+            let asked = match unproven {
+                Some(unproven) => Some(
+                    crate::verb::ask_which_relate(index, &unproven, dependency, &role, &ctx.eph)
+                        .await
+                        .map_err(|e| {
+                            pest::error::Error::new_from_span(
+                                pest::error::ErrorVariant::CustomError {
+                                    message: format!("Failed to ask which rows relate: {}", e),
+                                },
+                                selector.span(),
+                            )
+                        })?,
+                ),
+                None => None,
+            };
             let (constrained, sel_changed, sel_warnings) =
                 selector_state_with(&mut ctx.registry, selector, |state| {
                     state.constrain_with_warning(
@@ -702,6 +721,7 @@ impl Command {
                         notifier,
                         true,
                         false,
+                        asked.as_ref(),
                     )
                 });
             changed |= sel_changed;
@@ -887,12 +907,47 @@ impl Command {
                 }
             }
 
+            // Rows the lists would drop without proving anything: ask.  Only
+            // where the notification will narrow at all (a weak notifier
+            // narrows nothing that has rows), and never for an echo following
+            // a cut parent down, which is a subset whatever the answer.
+            let unproven = selector_state_with(&mut ctx.registry, selector, |state| {
+                if crate::verb::weak_notifier_blocks(
+                    notifier.get_state().weak,
+                    state.selection.is_some(),
+                ) {
+                    return None;
+                }
+                state.unproven(&dependency, &notif_ctx.role, notif_ctx.rel_type)
+            });
+            let asked = match unproven {
+                Some(unproven) => Some(
+                    crate::verb::ask_which_relate(
+                        index,
+                        &unproven,
+                        &dependency,
+                        &notif_ctx.role,
+                        &ctx.eph,
+                    )
+                    .await
+                    .map_err(|e| {
+                        pest::error::Error::new_from_span(
+                            pest::error::ErrorVariant::CustomError {
+                                message: format!("Failed to ask which rows relate: {}", e),
+                            },
+                            selector.span(),
+                        )
+                    })?,
+                ),
+                None => None,
+            };
             match selector.try_constrain_notification(
                 &mut ctx.registry,
                 &dependency,
                 &notif_ctx,
                 notifier,
                 self.query_statement_span(),
+                asked.as_ref(),
             )? {
                 ConstraintAction::Skip => continue,
                 ConstraintAction::Constrained(sel_changed, sel_warnings) => {

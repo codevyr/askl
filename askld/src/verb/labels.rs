@@ -294,6 +294,7 @@ impl Selector for UserVerb {
         notif_ctx: &NotificationContext,
         notifier: &Statement,
         _own: &Span,
+        _asked: Option<&index::db_diesel::Related>,
     ) -> Result<ConstraintAction, pest::error::Error<Rule>> {
         // The weakness rule holds here as well: a weak provider or parent may
         // seed this selector, but must not narrow one that has already
