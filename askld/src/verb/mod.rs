@@ -854,19 +854,24 @@ impl SelectorState {
         Narrowed { changed, newly_cut }
     }
 
+    /// Narrow a child by its parent.
+    ///
+    /// THE SOURCE OF A REFERENCE IS THE INSTANCE THAT ENCLOSES IT.  A
+    /// reference is written in one place, so it is evidence for the instance
+    /// around that place and for no other instance of the same symbol, and
+    /// only while that instance is still one of the parent's rows.  The
+    /// TARGET stays a symbol: a reference names a symbol, not one of its
+    /// instances, so every instance of what is referred to is kept.
+    ///
+    /// Kept per symbol, "some `main` calls it" stood for every `main`.  C has
+    /// one symbol per name, so `file("…/ucx_profiling.c") { func("main")
+    /// { "print_version" } }` returned `print_version` on the strength of
+    /// another program's `main`, with no edge to show for it.
     fn constrain_by_parent(&mut self, parent: &Selection, rel_type: RelationshipType) {
         let check_refs = rel_type.contains(RelationshipType::REFS);
         let check_has = rel_type.contains(RelationshipType::HAS);
-        let parent_symbol_ids: std::collections::HashSet<_> = if check_refs {
-            parent.nodes.iter().map(|n| n.symbol.id).collect()
-        } else {
-            Default::default()
-        };
-        let parent_instance_ids: std::collections::HashSet<_> = if check_has {
-            parent.nodes.iter().map(|n| n.symbol_instance.id).collect()
-        } else {
-            Default::default()
-        };
+        let parent_instance_ids: std::collections::HashSet<_> =
+            parent.nodes.iter().map(|n| n.symbol_instance.id).collect();
         let selection = self.selection_mut();
         // A relationship is accepted on evidence from EITHER side's edge
         // lists.  The parent's children/has_children are computed when the
@@ -880,7 +885,7 @@ impl SelectorState {
             selection
                 .parents
                 .iter()
-                .filter(|r| parent_symbol_ids.contains(&r.from_instance.symbol))
+                .filter(|r| parent_instance_ids.contains(&r.from_instance.id))
                 .map(|r| r.to_symbol.id)
                 .collect()
         } else {
@@ -899,7 +904,7 @@ impl SelectorState {
         selection.nodes.retain(|s| {
             (check_refs
                 && (parent.children.iter().any(|r| {
-                    r.symbol.id == s.symbol.id && parent_symbol_ids.contains(&r.parent_symbol.id)
+                    r.symbol.id == s.symbol.id && parent_instance_ids.contains(&r.from_instance.id)
                 }) || own_ref_evidence.contains(&s.symbol.id)))
                 || (check_has
                     && (parent.has_children.iter().any(|r| {
@@ -909,6 +914,9 @@ impl SelectorState {
         });
     }
 
+    /// Narrow a parent by its child: a parent row is kept when ITS instance
+    /// encloses a reference to one of the child's symbols (see
+    /// `constrain_by_parent` for the law), or holds one of its instances.
     fn constrain_by_child(&mut self, child: &Selection, rel_type: RelationshipType) {
         let check_refs = rel_type.contains(RelationshipType::REFS);
         let check_has = rel_type.contains(RelationshipType::HAS);
@@ -933,7 +941,7 @@ impl SelectorState {
                 .children
                 .iter()
                 .filter(|r| child_symbol_ids.contains(&r.symbol.id))
-                .map(|r| r.parent_symbol.id)
+                .map(|r| r.from_instance.id)
                 .collect()
         } else {
             Default::default()
@@ -951,9 +959,9 @@ impl SelectorState {
         selection.nodes.retain(|s| {
             (check_refs
                 && (child.parents.iter().any(|r| {
-                    r.from_instance.symbol == s.symbol.id
+                    r.from_instance.id == s.symbol_instance.id
                         && child_symbol_ids.contains(&r.to_symbol.id)
-                }) || own_ref_evidence.contains(&s.symbol.id)))
+                }) || own_ref_evidence.contains(&s.symbol_instance.id)))
                 || (check_has
                     && (child.has_parents.iter().any(|r| {
                         r.parent_instance.id == s.symbol_instance.id

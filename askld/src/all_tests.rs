@@ -4209,20 +4209,23 @@ fn label_forced_with_scoped_derivation() {
 }
 
 // ============================================================================
-// Multi-instance symbol constraint tests — verify that REFS constraints use
-// symbol-level matching so that a symbol with declaration + definition
-// instances retains both when constrained by children/parents.
+// Multi-instance symbol constraint tests.
 //
-// Symbol f (id=6) has two instances: 86 (bar.c) and 96 (main.c).
-// Only instance 86 (bar.c) references h.  With instance-level matching
-// the child constraint would remove instance 96; symbol-level matching
-// keeps both.
+// Symbol f (id=6) has two instances: 86 (bar.c) and 96 (main.c).  Only
+// instance 86 (bar.c) references h.
+//
+// THE SOURCE OF A REFERENCE IS THE INSTANCE THAT ENCLOSES IT, so narrowing f
+// by what it refers to keeps 86 and drops 96.  This test used to pin the
+// opposite ("symbol-level matching keeps both"): one instance referring
+// stood for the whole symbol, which is what let another program's `main`
+// vouch for a call it never makes.  What d refers to is still the SYMBOL f,
+// so d's narrowing is untouched.
 // ============================================================================
 
 #[test]
-fn multi_instance_nested_retains_both() {
+fn multi_instance_nested_keeps_the_instance_that_refers() {
     // d -> {e, f} and f(bar.c) -> h.
-    // "d" { "f" { "h" } } must retain both f instances (86 and 96).
+    // "d" { "f" { "h" } } keeps the f that calls h (86), not the other (96).
     const QUERY: &str = r#""d" { "f" { "h" } }"#;
     let res = run_query(TEST_INPUT_B, QUERY);
 
@@ -4239,8 +4242,8 @@ fn multi_instance_nested_retains_both() {
         "f (bar.c) should be in results"
     );
     assert!(
-        nodes.contains(&SymbolInstanceId::new(96)),
-        "f (main.c) should be retained by symbol-level matching"
+        !nodes.contains(&SymbolInstanceId::new(96)),
+        "f (main.c) does not refer to h"
     );
     assert!(
         nodes.contains(&SymbolInstanceId::new(88)),
@@ -6060,6 +6063,66 @@ fn hidden_children_are_not_an_incomplete_answer() {
         3,
     ));
     assert!(!said.is_empty(), "thirteen children, a cap of three");
+}
+
+fn node_ids(res: &crate::statement::ExecutionResult) -> Vec<i64> {
+    let mut ids: Vec<i64> = res.nodes.as_vec().iter().map(|i| (*i).into()).collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn a_reference_comes_from_the_instance_that_encloses_it() {
+    // `main` is one symbol with an instance in /a.c and one in /b.c.  Only
+    // the one in /a.c calls `print_version`.  Evidence used to be kept per
+    // SYMBOL: "some `main` refers to it" stood for every `main`.
+    //
+    // Narrowing the caller: both instances were kept.
+    let res = run_query(
+        crate::test_util::TEST_INPUT_ONE_NAME_TWO_PROGRAMS,
+        r#""main" { "print_version" }"#,
+    );
+    assert_eq!(
+        node_ids(&res),
+        vec![10, 30],
+        "the main that makes the call, and what it calls"
+    );
+
+    // Narrowing the callee: the main of /b.c is the only caller left, and it
+    // does not call `print_version`.  Kernel-sized case, ucx:
+    // `file("…/ucx_profiling.c") { func("main") { "print_version" } }`
+    // returned `print_version` with no edge, on the strength of another
+    // program's `main`.
+    let res = run_query(
+        crate::test_util::TEST_INPUT_ONE_NAME_TWO_PROGRAMS,
+        r#"file("/b.c") { func("main") { "print_version" } }"#,
+    );
+    assert_eq!(
+        node_ids(&res),
+        Vec::<i64>::new(),
+        "nothing in /b.c calls it"
+    );
+
+    // The same file and the call its `main` does make.
+    let res = run_query(
+        crate::test_util::TEST_INPUT_ONE_NAME_TWO_PROGRAMS,
+        r#"file("/b.c") { func("main") { "helper" } }"#,
+    );
+    assert_eq!(node_ids(&res), vec![20, 40, 1002]);
+
+    // A name asked for with nothing below it still has every instance.
+    let res = run_query(
+        crate::test_util::TEST_INPUT_ONE_NAME_TWO_PROGRAMS,
+        r#""main""#,
+    );
+    assert_eq!(node_ids(&res), vec![10, 20]);
+
+    // What a statement refers to is still a symbol: both callers reach it.
+    let res = run_query(
+        crate::test_util::TEST_INPUT_ONE_NAME_TWO_PROGRAMS,
+        r#""main" { }"#,
+    );
+    assert_eq!(node_ids(&res), vec![10, 20, 30, 40]);
 }
 
 #[test]
@@ -9987,9 +10050,9 @@ fn refinement_resolves_capped_statement() {
     // cap=5: `select` (11 instances) caps in wave 0; `"b"` resolves.  Round 1
     // re-probes the outer statement under the child's refs+has role
     // branches (the `{ }` default relationship counts either edge kind)
-    // and unions the branch results: the caller SYMBOLS of b (a, main,
-    // file, directory — with the directory's second instance riding along,
-    // symbol-level like the worklist's constrain) plus b's containers.
+    // and unions the branch results: the INSTANCES around the calls of b (a,
+    // main, the file, and the directory's instance in that file -- not the
+    // directory's other instance, which encloses no call) plus b's containers.
     const QUERY: &str = r#"select { "b" }"#;
     let (refined, acts) = run_query_probe_traced(TEST_INPUT_A, QUERY, 5);
 
@@ -10002,8 +10065,8 @@ fn refinement_resolves_capped_statement() {
     assert_eq!(outer[0].round, 0);
     assert_eq!(
         outer[1].resolved,
-        Some(5),
-        "callers of b at symbol level: a, main, file, dir (both instances)"
+        Some(4),
+        "what encloses a call of b: a, main, the file, and the dir instance in it"
     );
     assert_eq!(outer[1].round, 1);
     let child = acts
@@ -10054,8 +10117,8 @@ fn refinement_cascades_through_unanchored_middle() {
         .expect("outer must resolve in round 2, after the middle");
     assert_eq!(
         outer_refined.resolved,
-        Some(4),
-        "caller symbols of f (d, file, dir) ∪ f's containers"
+        Some(3),
+        "what encloses a call of f (d, file, dir) ∪ f's containers"
     );
 
     // Identical across probe regimes.
@@ -10176,9 +10239,10 @@ fn sibling_children_conjoin_while_sibling_selectors_disjoin() {
     let (nodes, edges) = conj(0);
     assert_eq!(
         nodes,
-        vec![92, 95, 1001, 1002, 1003],
+        vec![92, 95, 1001, 1003],
         "the conjunction keeps b, e and the containers of both — not a \
-         (91), main (942) or d (94)",
+         (91), main (942) or d (94), nor the directory's other instance \
+         (1002), which encloses neither call",
     );
     assert!(
         !nodes.contains(&94),
@@ -10199,9 +10263,10 @@ fn sibling_children_conjoin_while_sibling_selectors_disjoin() {
         disj.sort_unstable();
         assert_eq!(
             disj,
-            vec![91, 92, 94, 95, 942, 1001, 1002, 1003],
+            vec![91, 92, 94, 95, 942, 1001, 1003],
             "`{OR}` is one command with two selectors — a disjunction, so \
-             every caller of either survives (cap {cap})",
+             every caller of either survives (cap {cap}); the directory's \
+             other instance (1002) encloses no call",
         );
     }
 
@@ -10227,7 +10292,7 @@ fn sibling_children_conjoin_while_sibling_selectors_disjoin() {
     split_nodes.sort_unstable();
     assert_eq!(
         split_nodes,
-        vec![91, 92, 94, 95, 942, 1001, 1002, 1003],
+        vec![91, 92, 94, 95, 942, 1001, 1003],
         "a top-level `;` separates statements and unions their answers",
     );
 }
@@ -10281,9 +10346,9 @@ fn refinement_starts_with_one_participant_of_the_conjunction() {
     assert_eq!(outer[0].resolved, None, "select's 11 instances cap at 6");
     assert_eq!(
         outer[1].resolved,
-        Some(5),
+        Some(4),
         "the tightest child alone — a superset of the conjunction, which the \
-         worklist narrows to the 3 containers: {acts:?}",
+         worklist narrows to the 2 containers: {acts:?}",
     );
 
     // The refined regime must still answer like the unprobed one.
@@ -10315,7 +10380,7 @@ fn refinement_binds_a_participant_with_an_unresolved_sibling() {
         .collect();
     assert_eq!(
         outer.last().and_then(|a| a.resolved),
-        Some(4),
+        Some(3),
         "the outer binds the one resolved participant rather than waiting \
          for its sibling: {acts:?}",
     );
