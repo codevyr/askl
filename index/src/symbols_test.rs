@@ -850,7 +850,7 @@ async fn a_derive_read_counts_the_instances_it_finds() -> anyhow::Result<()> {
     // Four instances, a cap of five: all of them, and nothing was cut.
     eph.set_read_cap(5);
     let (found, capped) = index
-        .find_child_instance_ids(&[10], true, false, &any, &eph)
+        .find_child_instance_ids(&[10], true, false, &any, None, &eph)
         .await?;
     assert_eq!(ids(found), vec![20, 21, 22, 30]);
     assert!(!capped, "four instances fit a cap of five");
@@ -858,7 +858,7 @@ async fn a_derive_read_counts_the_instances_it_finds() -> anyhow::Result<()> {
     // A cap of four still holds them.
     eph.set_read_cap(4);
     let (found, capped) = index
-        .find_child_instance_ids(&[10], true, false, &any, &eph)
+        .find_child_instance_ids(&[10], true, false, &any, None, &eph)
         .await?;
     assert_eq!(ids(found), vec![20, 21, 22, 30]);
     assert!(!capped, "four instances fit a cap of four");
@@ -866,14 +866,14 @@ async fn a_derive_read_counts_the_instances_it_finds() -> anyhow::Result<()> {
     // A cap of three does not, and the read says so.
     eph.set_read_cap(3);
     let (_, capped) = index
-        .find_child_instance_ids(&[10], true, false, &any, &eph)
+        .find_child_instance_ids(&[10], true, false, &any, None, &eph)
         .await?;
     assert!(capped, "four instances do not fit a cap of three");
 
     // The statement's own predicate is applied before anything is counted.
     let solo = CompositeFilter::leaf(crate::db_diesel::ExactNameMixin::new("solo"));
     let (found, capped) = index
-        .find_child_instance_ids(&[10], true, false, &solo, &eph)
+        .find_child_instance_ids(&[10], true, false, &solo, None, &eph)
         .await?;
     assert_eq!(ids(found), vec![30]);
     assert!(!capped);
@@ -1075,7 +1075,7 @@ async fn deriving_and_constraining_agree_on_the_same_relation() -> anyhow::Resul
 
     // What DERIVE would produce from the same sources.
     let (derived_ids, _capped) = index
-        .find_child_instance_ids(&source_ids, true, true, &identity, &eph)
+        .find_child_instance_ids(&source_ids, true, true, &identity, None, &eph)
         .await?;
     let mut from_derive: Vec<i64> = derived_ids.into_iter().map(Into::into).collect();
     from_derive.sort_unstable();
@@ -1110,7 +1110,7 @@ async fn a_family_read_is_bounded_by_the_safety_cap() -> anyhow::Result<()> {
 
     // `lock` (symbol 2) is defined at instance 3000 and has ten callers.
     let (uncapped, uncapped_flag) = index
-        .find_parent_instance_ids(&[3000], true, false, &identity, &eph)
+        .find_parent_instance_ids(&[3000], true, false, &identity, None, &eph)
         .await?;
     assert!(
         uncapped.len() >= 10,
@@ -1124,7 +1124,7 @@ async fn a_family_read_is_bounded_by_the_safety_cap() -> anyhow::Result<()> {
 
     eph.set_read_cap(3);
     let (capped, capped_flag) = index
-        .find_parent_instance_ids(&[3000], true, false, &identity, &eph)
+        .find_parent_instance_ids(&[3000], true, false, &identity, None, &eph)
         .await?;
     assert!(
         capped.len() <= 4,
@@ -1135,6 +1135,57 @@ async fn a_family_read_is_bounded_by_the_safety_cap() -> anyhow::Result<()> {
         capped_flag,
         "the read hit the cap (ten callers, limit four), so it must report          truncation — this is the signal the derive path carries so a filtered          re-read cannot launder the incompleteness"
     );
+    Ok(())
+}
+
+/// A derive within what a probe found reads only that.
+///
+/// `lock` has ten callers and `modx` holds ten functions; at a read cap of
+/// three either derive overflows.  A probe that resolved the statement to
+/// `in_1` (instance 1001) already knows every instance it can have, so the
+/// derive asks "which of THESE", and one row answers it: nothing is cut.
+#[tokio::test(flavor = "current_thread")]
+async fn a_derive_within_what_the_probe_found_reads_only_that() -> anyhow::Result<()> {
+    use crate::db_diesel::Index;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_ESCALATION).await?;
+    let mut eph = EphContext::rooted(index.load_root_layers().await?);
+    eph.set_read_cap(3);
+    let identity = CompositeFilter::and(vec![]);
+    let ids = |found: Vec<crate::symbols::SymbolInstanceId>| -> Vec<i64> {
+        found.into_iter().map(|i| i.into()).collect()
+    };
+
+    // Callers of `lock` (instance 3000), by reference.
+    let (found, cut) = index
+        .find_parent_instance_ids(&[3000], true, false, &identity, Some(&[1001]), &eph)
+        .await?;
+    assert_eq!(ids(found), vec![1001]);
+    assert!(!cut, "one caller among the one instance asked about");
+
+    // What `modx` (instance 10) holds, by containment.
+    let (found, cut) = index
+        .find_child_instance_ids(&[10], false, true, &identity, Some(&[1001, 1002]), &eph)
+        .await?;
+    assert_eq!(ids(found), vec![1001, 1002]);
+    assert!(!cut);
+
+    // What `in_1` (instance 1001) refers to, among `lock` and a stranger.
+    let (found, cut) = index
+        .find_child_instance_ids(&[1001], true, false, &identity, Some(&[3000, 2001]), &eph)
+        .await?;
+    assert_eq!(ids(found), vec![3000], "in_1 calls lock, not out_1");
+    assert!(!cut);
+
+    // An instance the neighbour does not relate to is not found.
+    let (found, _) = index
+        .find_parent_instance_ids(&[3000], true, false, &identity, Some(&[1002]), &eph)
+        .await?;
+    assert!(ids(found).is_empty(), "in_2 does not call lock");
     Ok(())
 }
 
