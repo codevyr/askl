@@ -5408,6 +5408,8 @@ fn canary_leak_in_each_relationship_field_detected() {
             nesting_level: 0,
             dfs_enter: 0,
             from_full_range: None,
+            roles: 0,
+            relation: 0,
         }
     }
 
@@ -6160,6 +6162,45 @@ fn incomplete_and_ids(res: &crate::statement::ExecutionResult) -> (Vec<String>, 
     let mut ids: Vec<i64> = res.nodes.as_vec().iter().map(|i| (*i).into()).collect();
     ids.sort();
     (said, ids)
+}
+
+#[test]
+fn an_edge_states_the_union_of_what_its_references_say() {
+    use index::roles::{RefKind, Stated};
+    use index::symbols::SymbolType;
+
+    // `caller` refers to `hook` (data, a function pointer) three times: it
+    // calls it, takes its value, and increments it.  The answer has ONE edge
+    // for the pair, and what it says is all three.
+    let res = run_query(
+        crate::test_util::TEST_INPUT_REFERENCE_ROLES,
+        r#""caller" { }"#,
+    );
+    let (caller, hook, plain) = (SymbolId::new(1), SymbolId::new(2), SymbolId::new(5));
+    assert_eq!(
+        res.edges.stated(caller, hook).kinds(SymbolType::Data),
+        vec![RefKind::Calls, RefKind::Writes, RefKind::Reads]
+    );
+    // `plain` is referred to with nothing stated: the edge is there and says
+    // nothing, as every edge of an index without roles does.
+    assert!(res
+        .edges
+        .0
+        .iter()
+        .any(|(from, to, _)| from.symbol_id == caller && to.symbol_id == plain));
+    assert_eq!(res.edges.stated(caller, plain), Stated::default());
+
+    // A relation reaches the answer the same way: the slot holds `my_read`.
+    let res = run_query(
+        crate::test_util::TEST_INPUT_REFERENCE_ROLES,
+        r#""slot" { }"#,
+    );
+    assert_eq!(
+        res.edges
+            .stated(SymbolId::new(3), SymbolId::new(4))
+            .kinds(SymbolType::Function),
+        vec![RefKind::Holds]
+    );
 }
 
 #[test]

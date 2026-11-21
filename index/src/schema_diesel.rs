@@ -107,6 +107,8 @@ diesel::table! {
         nesting_level -> Integer,
         dfs_enter -> BigInt,
         from_full_range -> Nullable<Int4range>,
+        roles -> SmallInt,
+        relation -> SmallInt,
     }
 }
 
