@@ -468,11 +468,9 @@ pub async fn build_result_graph(
         .map(|node| (node.symbol.id, SymbolType::from(node.symbol.symbol_type)))
         .collect();
     for ((from, to), (count, objects)) in pairs {
+        let stated = res.edges.stated(SymbolId(from), SymbolId(to));
         let kinds = match symbol_types.get(&to) {
-            Some(target) => res
-                .edges
-                .stated(SymbolId(from), SymbolId(to))
-                .kinds(*target),
+            Some(target) => stated.kinds(*target),
             None => Vec::new(),
         };
         result_graph.add_edge(
@@ -482,7 +480,8 @@ pub async fn build_result_graph(
                 count,
                 objects.into_iter().collect(),
             )
-            .with_kinds(kinds),
+            .with_kinds(kinds)
+            .with_refers(stated.refers()),
         );
     }
     result_graph.edges_truncated.sort_unstable();
@@ -849,6 +848,16 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&bare).unwrap(),
             r#"{"from":"1","to":"2","occurrence_count":3,"from_objects":["7"]}"#
+        );
+
+        // A pair whose every row is a relation: an edge, and nothing refers
+        // by it.  That is said; an edge that refers says nothing about it.
+        let held = Edge::new(SymbolId(1), SymbolId(2), 1, vec!["7".to_string()])
+            .with_kinds(vec![RefKind::Holds])
+            .with_refers(false);
+        assert_eq!(
+            serde_json::to_string(&held).unwrap(),
+            r#"{"from":"1","to":"2","occurrence_count":1,"from_objects":["7"],"kinds":["holds"],"refers":false}"#
         );
     }
 
