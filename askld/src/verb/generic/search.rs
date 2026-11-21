@@ -227,7 +227,7 @@ impl Selector for SearchSelector {
             ScopeContext::Absent | ScopeContext::Deferred | ScopeContext::Unscoped => {
                 hasher.update(b"scope:none")
             }
-            ScopeContext::Scope { ids, filter } => {
+            ScopeContext::Scope { ids, filter, .. } => {
                 hasher.update(b"scope-cond:");
                 match filter {
                     Some(f) => {

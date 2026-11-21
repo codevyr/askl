@@ -37,9 +37,10 @@ pub use references::{
     SymbolReferenceRow,
 };
 pub use selection::{
-    Checked, ChildReference, EphContext, HasChildReference, HasEphLeak, HasParentReference,
-    ObjectFullDiesel, ParentReference, QueryStatementRange, ReferenceFullDiesel, ReferenceResult,
-    ResultBudget, RootLayer, Selection, SelectionNode, SymbolInstanceFullDiesel, CANARY_LAYER_ID,
+    Checked, ChildReference, EphContext, FamilyRead, FamilyReads, HasChildReference, HasEphLeak,
+    HasParentReference, ObjectFullDiesel, ParentReference, QueryStatementRange,
+    ReferenceFullDiesel, ReferenceResult, ResultBudget, RootLayer, Selection, SelectionNode,
+    SymbolInstanceFullDiesel, Within, CANARY_LAYER_ID,
 };
 pub use sql_cache::{
     vec_weight, CacheKey, CacheStats, CacheWeight, ClearOnDrop, RowKey, SqlResultCache,

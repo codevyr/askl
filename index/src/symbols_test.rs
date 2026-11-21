@@ -721,6 +721,7 @@ async fn a_family_holds_a_reference_once() -> anyhow::Result<()> {
             ScopeContext::Scope {
                 ids: vec![21, 22, 30],
                 filter: None,
+                whole_side: false,
             },
             FamilyDemands::default(),
             &eph,
@@ -741,6 +742,7 @@ async fn a_family_holds_a_reference_once() -> anyhow::Result<()> {
             ScopeContext::Scope {
                 ids: vec![22],
                 filter: None,
+                whole_side: false,
             },
             FamilyDemands::default(),
             &eph,

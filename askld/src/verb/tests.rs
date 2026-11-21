@@ -510,3 +510,84 @@ fn slot_cascade_type_write_keeps_layer_backed_anchors() {
     );
     assert_eq!(cmd.filters().count(), 1);
 }
+
+/// The three ways a row could be dropped on evidence nobody read; see
+/// `absence_is_proven`.
+mod absence {
+    use crate::execution_state::{DependencyRole, RelationshipType};
+    use crate::verb::absence_is_proven;
+    use index::db_diesel::{FamilyRead, Selection, Within};
+
+    fn whole_within(ids: &[i64]) -> FamilyRead {
+        FamilyRead::Whole(Within::Ids(ids.to_vec()))
+    }
+
+    #[test]
+    fn a_family_nobody_read_is_not_a_family_read_and_found_empty() {
+        // Neither side read the references between the two statements: one
+        // deferred to the other, the other was cut.
+        let mut own = Selection::new();
+        own.families.parents = FamilyRead::Unread;
+        let mut parent = Selection::new();
+        parent.families.children = FamilyRead::Cut;
+        assert!(!absence_is_proven(
+            &own,
+            &parent,
+            &DependencyRole::Child,
+            RelationshipType::REFS
+        ));
+
+        // One side read them in full, with no scope: that is proof.
+        own.families.parents = FamilyRead::whole();
+        assert!(absence_is_proven(
+            &own,
+            &parent,
+            &DependencyRole::Child,
+            RelationshipType::REFS
+        ));
+    }
+
+    #[test]
+    fn a_family_read_against_another_neighbour_says_nothing_about_this_one() {
+        // `X { "a" ; { } }`: X's references were read within the rows of
+        // `"a"` (instance 7).  They are whole, and silent about instance 9.
+        let mut x = Selection::new();
+        x.families.children = whole_within(&[7]);
+        assert!(x.families.children.proves_absence_for(&[7]));
+        assert!(!x.families.children.proves_absence_for(&[9]));
+        assert!(!x.families.children.proves_absence_for(&[7, 9]));
+    }
+
+    #[test]
+    fn a_bare_scope_needs_both_kinds_ruled_out() {
+        // References read in full, containment cut: a row with no reference
+        // may still be contained.
+        let mut own = Selection::new();
+        own.families.parents = FamilyRead::whole();
+        own.families.has_parents = FamilyRead::Cut;
+        let parent = Selection::new();
+        let both = RelationshipType::REFS | RelationshipType::HAS;
+        assert!(!absence_is_proven(
+            &own,
+            &parent,
+            &DependencyRole::Child,
+            both
+        ));
+        assert!(absence_is_proven(
+            &own,
+            &parent,
+            &DependencyRole::Child,
+            RelationshipType::REFS
+        ));
+
+        // Either end may hold the proof: the parent read what it contains.
+        let mut parent = Selection::new();
+        parent.families.has_children = FamilyRead::whole();
+        assert!(absence_is_proven(
+            &own,
+            &parent,
+            &DependencyRole::Child,
+            both
+        ));
+    }
+}

@@ -403,6 +403,104 @@ pub struct HasParentReference {
     pub parent_instance: SymbolInstance,
 }
 
+/// What a family read was read against.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Within {
+    /// Every neighbour statement on that side: the read had no scope, or its
+    /// scope held all of them (`ScopeContext::Scope::whole_side`).
+    Everything,
+    /// The neighbours with these instance ids (sorted).
+    Ids(Vec<i64>),
+}
+
+/// How far one neighbourhood family of a [`Selection`] was read.
+///
+/// A family is evidence: `constrain_by_*` keeps a row for the rows a family
+/// holds, and drops a row for the rows it does not hold.  The first needs
+/// nothing of the read.  The second is a claim about ABSENCE, and only a read
+/// that ran to its end, over a scope that held the neighbour, can make it.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub enum FamilyRead {
+    /// Not read: nothing demanded it, or the neighbour reads the relation
+    /// from its own side.  An empty family of this kind says nothing.
+    #[default]
+    Unread,
+    /// Read to the end.
+    Whole(Within),
+    /// Stopped by a limit, or read against a scope that was itself cut.
+    Cut,
+}
+
+impl FamilyRead {
+    /// A family built by hand, or read without a scope, that ran to its end.
+    pub fn whole() -> Self {
+        FamilyRead::Whole(Within::Everything)
+    }
+
+    /// The state of a read that returned `rows` rows under `limit`, against
+    /// `within`.
+    pub fn of_read(rows: usize, limit: i64, within: Within) -> Self {
+        if rows as i64 >= limit {
+            FamilyRead::Cut
+        } else {
+            FamilyRead::Whole(within)
+        }
+    }
+
+    /// Whether a row this family does NOT hold is thereby shown not to relate
+    /// to any of `neighbours`.
+    pub fn proves_absence_for(&self, neighbours: &[i64]) -> bool {
+        match self {
+            FamilyRead::Unread | FamilyRead::Cut => false,
+            FamilyRead::Whole(Within::Everything) => true,
+            FamilyRead::Whole(Within::Ids(ids)) => {
+                neighbours.iter().all(|id| ids.binary_search(id).is_ok())
+            }
+        }
+    }
+
+    /// The state of the union of two families, each read for its own rows.
+    fn union(self, other: FamilyRead) -> FamilyRead {
+        match (self, other) {
+            (FamilyRead::Cut, _) | (_, FamilyRead::Cut) => FamilyRead::Cut,
+            (FamilyRead::Unread, _) | (_, FamilyRead::Unread) => FamilyRead::Unread,
+            (FamilyRead::Whole(Within::Everything), FamilyRead::Whole(within))
+            | (FamilyRead::Whole(within), FamilyRead::Whole(Within::Everything)) => {
+                FamilyRead::Whole(within)
+            }
+            (FamilyRead::Whole(Within::Ids(a)), FamilyRead::Whole(Within::Ids(b))) => {
+                // Only what BOTH reads were made against is covered for every
+                // row of the union.
+                FamilyRead::Whole(Within::Ids(
+                    a.into_iter()
+                        .filter(|id| b.binary_search(id).is_ok())
+                        .collect(),
+                ))
+            }
+        }
+    }
+}
+
+/// The four families of a [`Selection`], each with how far it was read.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct FamilyReads {
+    pub parents: FamilyRead,
+    pub children: FamilyRead,
+    pub has_parents: FamilyRead,
+    pub has_children: FamilyRead,
+}
+
+impl FamilyReads {
+    fn union(self, other: FamilyReads) -> FamilyReads {
+        FamilyReads {
+            parents: self.parents.union(other.parents),
+            children: self.children.union(other.children),
+            has_parents: self.has_parents.union(other.has_parents),
+            has_children: self.has_children.union(other.has_children),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq)]
 pub struct Selection {
     pub nodes: Vec<SelectionNode>,
@@ -417,17 +515,22 @@ pub struct Selection {
     /// surface this as a truncation warning on the owning command; it must
     /// never be silently dropped.
     pub budget_bounded: bool,
-    /// Soundness flag, distinct from `budget_bounded`: true when any read that
-    /// produced this selection hit the safety cap and so is INCOMPLETE.  A
-    /// capped selection is not a participant in composition — it may neither
-    /// narrow another selection nor be narrowed by one, because `retain` over a
-    /// truncated set drops rows whose evidence sat in the part never read.
-    /// `budget_bounded` drives a warning; this drives a refusal.
+    /// True when THIS STATEMENT'S OWN ROWS are not all there: the read of
+    /// `nodes` hit its limit, the derive that produced them did, they were
+    /// derived from a statement that was itself cut, or rows were dropped for
+    /// want of evidence that no read ran far enough to rule out.  Such a
+    /// selection is a SUBSET of what the statement means, so it must not
+    /// narrow a neighbour: absence from it proves nothing.
+    ///
+    /// A LIMIT THAT CUT A READ DISQUALIFIES THAT READ AND NOTHING ELSE.  A
+    /// family that hit its limit is recorded in `families` and stops being
+    /// proof of absence; it does not make the statement cut.  It used to, and
+    /// a name read in full (570 instances of `mutex`) was reported "too many
+    /// results" and left un-narrowed because the list of everything that
+    /// contains those instances ran to 1,001 rows.
     pub capped: bool,
-    /// True when `capped` is owed only to a neighbourhood family that nobody
-    /// reads (see `find_symbol`).  The refusal stands and nothing is said:
-    /// what the answer shows was not cut.  Read through [`Selection::cut`].
-    pub capped_family_unread: bool,
+    /// How far each family was read; see [`FamilyRead`].
+    pub families: FamilyReads,
 }
 
 impl Selection {
@@ -440,20 +543,19 @@ impl Selection {
             has_children: Vec::new(),
             budget_bounded: false,
             capped: false,
-            capped_family_unread: false,
+            families: FamilyReads::default(),
         }
     }
 
     /// Whether a limit cut something out of what this selection shows -- the
     /// condition for telling the user the graph is incomplete.
     pub fn cut(&self) -> bool {
-        self.capped && !self.capped_family_unread
+        self.capped
     }
 
-    /// Record that the read which produced these nodes was truncated.
+    /// Record that these nodes are not all of what the statement means.
     pub fn mark_cut(&mut self) {
         self.capped = true;
-        self.capped_family_unread = false;
     }
 
     /// Set-union merge: `extend` is idempotent, so a selection stored under
@@ -468,6 +570,13 @@ impl Selection {
     /// identity (id + occurrence offsets), so two distinct call sites between
     /// the same instances remain two rows.
     pub fn extend(&mut self, other: Selection) {
+        // A selection with no rows makes no claim about any row, so it is the
+        // identity of the union: the other side's reads stand as they are.
+        self.families = match (self.nodes.is_empty(), other.nodes.is_empty()) {
+            (true, _) => other.families.clone(),
+            (false, true) => std::mem::take(&mut self.families),
+            (false, false) => std::mem::take(&mut self.families).union(other.families.clone()),
+        };
         let mut by_instance: HashMap<i64, usize> = self
             .nodes
             .iter()
@@ -518,9 +627,7 @@ impl Selection {
             (hc.parent_instance.id, hc.child_instance.id)
         });
         self.budget_bounded |= other.budget_bounded;
-        let cut = self.cut() || (other.capped && !other.capped_family_unread);
         self.capped |= other.capped;
-        self.capped_family_unread = self.capped && !cut;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -945,6 +1052,54 @@ mod tests {
         b.budget_bounded = true;
         a.extend(b);
         assert!(a.budget_bounded);
+    }
+
+    /// A family that was not read, or was cut, proves nothing by its silence;
+    /// one read to its end proves it for the neighbours it was read against.
+    #[test]
+    fn silence_is_proof_only_of_what_was_read_to_the_end() {
+        assert!(!FamilyRead::Unread.proves_absence_for(&[1]));
+        assert!(!FamilyRead::Cut.proves_absence_for(&[1]));
+        assert!(FamilyRead::whole().proves_absence_for(&[1, 2]));
+        let within = FamilyRead::Whole(Within::Ids(vec![1, 3]));
+        assert!(within.proves_absence_for(&[1, 3]));
+        assert!(!within.proves_absence_for(&[1, 2]));
+        // Under its limit: whole.  At its limit: cut.
+        assert_eq!(
+            FamilyRead::of_read(3, 4, Within::Everything),
+            FamilyRead::whole()
+        );
+        assert_eq!(
+            FamilyRead::of_read(4, 4, Within::Everything),
+            FamilyRead::Cut
+        );
+    }
+
+    /// A union of two selections is read as far as its weaker half, except
+    /// that a selection with no rows claims nothing.
+    #[test]
+    fn extend_keeps_what_both_families_were_read_against() {
+        let mut empty = Selection::new();
+        let mut read = selection_with_node(1, 1);
+        read.families.parents = FamilyRead::Whole(Within::Ids(vec![1, 2]));
+        empty.extend(read.clone());
+        assert_eq!(empty.families.parents, read.families.parents);
+
+        let mut other = selection_with_node(1, 1);
+        other.nodes[0].symbol_instance.id += 1;
+        other.families.parents = FamilyRead::Whole(Within::Ids(vec![2, 3]));
+        let mut both = read.clone();
+        both.extend(other);
+        assert_eq!(
+            both.families.parents,
+            FamilyRead::Whole(Within::Ids(vec![2]))
+        );
+
+        let mut cut = selection_with_node(1, 1);
+        cut.nodes[0].symbol_instance.id += 2;
+        cut.families.parents = FamilyRead::Cut;
+        both.extend(cut);
+        assert_eq!(both.families.parents, FamilyRead::Cut);
     }
 
     /// Mirror of `extend_ors_budget_bounded` for the discovery-capping flag:

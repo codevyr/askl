@@ -1423,6 +1423,165 @@ fn what_a_statement_lists_is_cut_by_instances_not_by_references() {
 }
 
 #[test]
+fn a_read_that_was_cut_does_not_cut_the_statement() {
+    // A LIMIT THAT CUT A READ DISQUALIFIES THAT READ AND NOTHING ELSE.
+    //
+    // `user` refers five times, to four instances.  At a cap of four the
+    // listing fits; the list of `user`'s five references does not, and
+    // neither does the list of what refers to the four.  Both statements were
+    // read in full and both used to be reported "too many results", for a
+    // side read nobody needed whole.
+    let res = run_query_with_read_cap(
+        crate::test_util::TEST_INPUT_MANY_REFS_ONE_TARGET,
+        r#""user" { }"#,
+        4,
+    );
+    let (said, ids) = incomplete_and_ids(&res);
+    assert_eq!(ids, vec![10, 20, 21, 22, 30]);
+    assert!(said.is_empty(), "nothing was cut, got {:?}", said);
+}
+
+#[test]
+fn a_statement_read_in_full_is_not_called_cut_for_a_side_read() {
+    // Kernel: `data { "mutex" }`.  The name has 570 instances, read in full.
+    // Everything that contains them ran to 1,001 rows, and that marked the
+    // NAME as cut: "too many results in `"mutex"`", "198 of at least 699".
+    //
+    // Here: eight fields named `lockf`; what contains the eight is sixteen
+    // rows, over a cap of eight.  (A bare type word does not narrow the name
+    // it is asked about, so all eight are the answer at any cap.)
+    let query = r#"data { "lockf" }"#;
+    let whole =
+        run_query_with_read_cap(crate::test_util::TEST_INPUT_NAME_IN_MANY_STRUCTS, query, 0);
+    let (_, truth) = incomplete_and_ids(&whole);
+    assert_eq!(
+        truth,
+        vec![201, 202, 203, 204, 205, 206, 207, 208, 300],
+        "premise: the eight fields and guard"
+    );
+
+    let res = run_query_with_read_cap(crate::test_util::TEST_INPUT_NAME_IN_MANY_STRUCTS, query, 8);
+    let (said, ids) = incomplete_and_ids(&res);
+    assert_eq!(ids, truth);
+    assert!(
+        said.is_empty(),
+        "both statements were read in full: {:?}",
+        said
+    );
+}
+
+#[test]
+fn a_side_read_that_was_cut_still_narrows_by_what_it_holds() {
+    // `busy` refers to `S1.lockf` 41 times and to no other `lockf`.  Under a
+    // cap of eight both statements are read in full, and both lists of the
+    // references between them are cut.  That used to mark both as cut and
+    // narrow nothing: all eight fields were shown under `busy`.
+    //
+    // A row a cut list holds is still a true row, so the one field `busy`
+    // refers to is kept.  The seven others go -- for want of evidence, in
+    // lists that were not read to their end, so the statement says it may be
+    // short.  Nothing unrelated is shown.
+    let query = r#""busy" { "lockf" }"#;
+    let whole =
+        run_query_with_read_cap(crate::test_util::TEST_INPUT_NAME_IN_MANY_STRUCTS, query, 0);
+    let (_, truth) = incomplete_and_ids(&whole);
+    assert_eq!(truth, vec![201, 400], "premise: S1.lockf and busy");
+
+    let res = run_query_with_read_cap(crate::test_util::TEST_INPUT_NAME_IN_MANY_STRUCTS, query, 8);
+    let (said, ids) = incomplete_and_ids(&res);
+    assert_eq!(ids, truth, "only what busy refers to");
+    assert!(
+        said.iter().all(|w| w.contains(r#"`"lockf"`"#)),
+        "busy was read in full and narrowed by nothing: {:?}",
+        said
+    );
+}
+
+#[test]
+fn a_cut_statement_is_a_subset_of_the_answer() {
+    // `mod("modx") { { "lock" } }`: one function inside modx calls lock.
+    // When the middle statement cannot be resolved it is derived from one
+    // neighbour and cut.  What it then showed was a sample of that
+    // neighbour's side alone -- callers of `lock` from outside the module --
+    // because a cut statement was not narrowed.  Kernel:
+    // `mod("amdgpu") { { "spinlock_t" } }` listed 687 symbols, none of them
+    // in amdgpu.
+    let query = r#"mod("modx") { { "lock" } }"#;
+    let whole = run_query_with_read_cap(TEST_INPUT_ESCALATION, query, 0);
+    let (_, truth) = incomplete_and_ids(&whole);
+    assert_eq!(truth, vec![10, 1001, 3000], "premise: modx, in_1, lock");
+
+    for cap in [1usize, 2, 3] {
+        let res = run_query_with_read_cap(TEST_INPUT_ESCALATION, query, cap);
+        let (said, ids) = incomplete_and_ids(&res);
+        assert!(
+            ids.iter().all(|id| truth.contains(id)),
+            "cap {cap}: every row shown is part of the answer, got {ids:?}"
+        );
+        assert!(
+            ids == truth || !said.is_empty(),
+            "cap {cap}: a short answer says so, got {ids:?}"
+        );
+        assert!(
+            !res.warnings
+                .iter()
+                .any(|w| w.message.contains("none of them")),
+            "cap {cap}: {:?}",
+            res.warnings
+        );
+    }
+}
+
+#[test]
+fn an_echo_follows_its_cut_parent_down() {
+    // Four functions; two of them call `lock`, the other two call `hot`.
+    // `X { { } ; "lock" }` keeps the two, and the echo lists what THEY refer
+    // to: `lock`.
+    //
+    // At a small cap X is cut.  The echo is derived from X's rows as they
+    // were read, `hot` among their children, and X is then narrowed by
+    // `"lock"`.  A cut statement narrows no statement with rows of its own to
+    // lose -- but an echo has none: it shows what its parent's shown rows
+    // refer to, so it follows the parent down.  Otherwise `hot` stays listed
+    // under functions that are no longer in the answer.
+    let query = r#""in_1" "out_1" "f_1" "d_1" { { } ; "lock" }"#;
+    let whole = run_query_with_read_cap(TEST_INPUT_ESCALATION, query, 0);
+    let (_, truth) = incomplete_and_ids(&whole);
+    assert_eq!(
+        truth,
+        vec![1001, 2001, 3000],
+        "premise: in_1, out_1 and lock"
+    );
+
+    let mut any_cut = false;
+    for cap in [1usize, 2, 3] {
+        let res = run_query_with_read_cap(TEST_INPUT_ESCALATION, query, cap);
+        let (said, ids) = incomplete_and_ids(&res);
+        any_cut |= !said.is_empty();
+        assert!(
+            ids.iter().all(|id| truth.contains(id)),
+            "cap {cap}: every row shown is part of the answer, got {ids:?}"
+        );
+    }
+    assert!(any_cut, "premise: four rows do not fit the smallest caps");
+}
+
+#[test]
+fn what_is_derived_from_a_cut_statement_is_cut() {
+    // `func` lists ten functions of modx and is cut at a cap of three.  The
+    // echo below it lists what THOSE rows refer to: it fits its own limit and
+    // used to say nothing, though it is the listing of a sample.
+    let res = run_query_with_read_cap(TEST_INPUT_ESCALATION, r#"mod("modx") { func { } }"#, 3);
+    let (said, _) = incomplete_and_ids(&res);
+    assert!(
+        said.iter()
+            .any(|w| w.starts_with("too many results in `{ }`")),
+        "the listing of a cut statement is cut, got {:?}",
+        said
+    );
+}
+
+#[test]
 fn a_capped_derive_is_flagged_and_said() {
     // The derive path used to LAUNDER a capped read: `find_parent_instance_ids`
     // applies the safety LIMIT but returned bare ids, so a derivation built
@@ -1590,13 +1749,9 @@ fn a_capped_composed_statement_warns_the_graph_is_incomplete() {
 }
 
 #[test]
-fn a_capped_selection_is_not_narrowed_by_a_neighbour() {
-    // The symmetric non-participant rule: a capped selection neither narrows a
-    // neighbour nor is narrowed by one.
-    //
+fn a_cut_statement_shows_only_what_its_neighbour_confirms() {
     // `search("foo") { "fn_basic" }`.  Uncapped, the answer is EMPTY: none of
-    // the search hits contains `fn_basic`, so the composition rules everything
-    // out.  That is the correct, complete answer.
+    // the search hits contains `fn_basic`.
     let complete =
         run_query_with_read_cap(TEST_INPUT_SEARCH, r#"search("foo") { "fn_basic" }"#, 1000);
     assert!(
@@ -1605,24 +1760,28 @@ fn a_capped_selection_is_not_narrowed_by_a_neighbour() {
         complete.nodes.as_vec()
     );
 
-    // At read_cap = 2 the search read caps at three rows.  A capped `search` is
-    // an INCOMPLETE set: it read three of its hits, not all of them, so it
-    // cannot prove `fn_basic` unrelated — narrowing by it would assert "matched
-    // nothing" from data never fully read.  The rule refuses that: the capped
-    // search's rows are kept and `fn_basic` survives, four nodes, flagged
-    // incomplete rather than silently emptied.
+    // At read_cap = 2 the search read stops at three of its hits.  The two
+    // halves of the old rule ("a capped selection neither narrows nor is
+    // narrowed") part ways here.
     //
-    // Without the rule this returns zero — the capped search wrongly rules
-    // everything out, a confident wrong answer from a partial read.  That is
-    // the difference the two guards in `constrain_selection` make, and it is
-    // why they must be there: 4 with the rule, 0 without.
+    //  * The cut search does not narrow `fn_basic`: it holds some of its
+    //    hits, so it cannot show that none contains it.  `fn_basic` stays.
+    //  * The cut search IS narrowed by `fn_basic`, which was read in full:
+    //    a hit that does not contain it is no part of the answer whichever
+    //    hits were read.  The three used to be kept, and shown.
+    //
+    // And nothing claims "none of them relate": only some were looked at.
     let capped = run_query_with_read_cap(TEST_INPUT_SEARCH, r#"search("foo") { "fn_basic" }"#, 2);
-    assert_eq!(
-        capped.nodes.as_vec().len(),
-        4,
-        "a capped search must not narrow the composition to a confident empty; \
-         got {:?}",
-        capped.nodes.as_vec()
+    let (said, ids) = incomplete_and_ids(&capped);
+    assert_eq!(ids, vec![110], "fn_basic alone; no search hit is confirmed");
+    assert_eq!(said.len(), 1, "the search says it was cut: {:?}", said);
+    assert!(
+        !capped
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("none of them")),
+        "a cut statement cannot say none of its rows relate: {:?}",
+        capped.warnings
     );
 }
 
@@ -10773,11 +10932,12 @@ fn caps_never_silently_change_a_resolved_answer() {
     // would drop), so this compares each non-capped run to cap=0, never one cap
     // to another.
     let queries = [
-        r#"func { "hot" }"#,           // resolves at every cap (2 <= 3)
-        r#"func { "lock" }"#,          // caps at 3/5, resolves at 1000/0
-        r#"{ "lock" }"#,               // anonymous derive; caps at 3/5
-        r#"mod("modx") has { func }"#, // has-derive caps at 3/5
-        r#"g"in_*""#,                  // self-resolve; caps at 3/5
+        r#"func { "hot" }"#,             // resolves at every cap (2 <= 3)
+        r#"func { "lock" }"#,            // caps at 3/5, resolves at 1000/0
+        r#"{ "lock" }"#,                 // anonymous derive; caps at 3/5
+        r#"mod("modx") has { func }"#,   // has-derive caps at 3/5
+        r#"g"in_*""#,                    // self-resolve; caps at 3/5
+        r#"mod("modx") { { "lock" } }"#, // the middle is cut at 1/2
     ];
     let mut any_capped = false;
     for q in queries {
@@ -10791,15 +10951,22 @@ fn caps_never_silently_change_a_resolved_answer() {
         ref_nodes.sort_unstable();
         let ref_edges = reference.edges.0.len();
 
-        for cap in [3usize, 5, 1000, 0] {
+        for cap in [1usize, 2, 3, 5, 1000, 0] {
             let r = run_query_with_read_cap(TEST_INPUT_ESCALATION, q, cap);
             let warned = r.warnings.iter().any(|w| w.message.contains("incomplete"));
             any_capped |= warned;
-            if warned {
-                continue; // a capped run is allowed to differ — it said so
-            }
             let mut nodes: Vec<i64> = r.nodes.as_vec().iter().map(|id| (*id).into()).collect();
             nodes.sort_unstable();
+            if warned {
+                // A capped run may differ, and it said so.  What it shows
+                // is still part of the answer: "incomplete" means a subset.
+                assert!(
+                    nodes.iter().all(|id| ref_nodes.contains(id)),
+                    "{q} at read_cap={cap}: warned, so its nodes must be a subset of the \
+                     cap=0 answer, got {nodes:?} against {ref_nodes:?}"
+                );
+                continue;
+            }
             assert_eq!(
                 nodes, ref_nodes,
                 "{q} at read_cap={cap}: did not warn, so its nodes must equal the cap=0 answer"

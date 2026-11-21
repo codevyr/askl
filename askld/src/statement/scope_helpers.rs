@@ -70,6 +70,7 @@ pub(super) fn build_parent_scope(
                     Some(sel) => ScopeContext::Scope {
                         ids: sel.get_instance_ids(),
                         filter: None,
+                        whole_side: true,
                     },
                     // None = parent has no opinion (filter-only, unit, or no selectors).
                     // Run unscoped — the parent is transparent.
@@ -87,6 +88,7 @@ pub(super) fn build_parent_scope(
                     return ScopeContext::Scope {
                         ids: ids.clone(),
                         filter: None,
+                        whole_side: true,
                     };
                 }
                 // Parent not yet computed — fall back to filter-based scoping.
@@ -102,6 +104,7 @@ pub(super) fn build_parent_scope(
                     Some(f) => ScopeContext::Scope {
                         ids: vec![],
                         filter: Some(f),
+                        whole_side: true,
                     },
                     None => {
                         let self_conditioned = statement
@@ -144,6 +147,9 @@ pub(super) fn build_children_scope(
     let mut any_transparent = false;
     let mut any_display_uncomputed = false;
     let mut any_probe_resolved = false;
+    // A child that puts neither rows nor a predicate into the scope: the
+    // family read against the scope then says nothing about it.
+    let mut any_left_out = false;
     let mut selected_ids: Vec<i64> = Vec::new();
     let mut unselected_filters: Vec<CompositeFilter> = Vec::new();
 
@@ -152,7 +158,10 @@ pub(super) fn build_children_scope(
         if child.is_computed(ctx) {
             match child.get_selection(ctx) {
                 Some(sel) => selected_ids.extend(sel.get_instance_ids()),
-                None => any_transparent = true,
+                None => {
+                    any_transparent = true;
+                    any_left_out = true;
+                }
             }
         } else {
             if !originates_data(&child) {
@@ -171,6 +180,8 @@ pub(super) fn build_children_scope(
                 selected_ids.extend(ids.iter().copied());
             } else if let Some(f) = child.command().get_selector_composite_filter(eph) {
                 unselected_filters.push(f);
+            } else {
+                any_left_out = true;
             }
         }
     }
@@ -206,6 +217,7 @@ pub(super) fn build_children_scope(
         ScopeContext::Scope {
             ids: selected_ids,
             filter: combined_filter,
+            whole_side: !any_left_out,
         }
     }
 }
