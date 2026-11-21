@@ -411,13 +411,10 @@ async fn test_probe_instance_ids() -> anyhow::Result<()> {
             &eph,
         )
         .await?;
-    // Symbol-level: the directory symbol is evidenced via instance 1003,
-    // so its other instance (1002) is kept too — mirroring the worklist's
-    // per-symbol constrain.
-    assert_eq!(
-        outcome,
-        ProbeOutcome::Resolved(vec![91, 942, 1001, 1002, 1003])
-    );
+    // Instance-level: the directory's instance in this file (1003) encloses
+    // the sites; its other instance (1002) encloses none and is not a
+    // caller, as narrowing agrees (`constrain_by_child`).
+    assert_eq!(outcome, ProbeOutcome::Resolved(vec![91, 942, 1001, 1003]));
 
     // RefsChildrenOf: callees referenced from within main(942).
     let outcome = index
@@ -548,6 +545,75 @@ async fn a_probe_role_past_its_budget_is_capped() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What refers is an instance, too.
+///
+/// `main` has an instance in /a.c (10) and one in /b.c (20); the reference to
+/// `print_version` (30) is written inside 10.  The role "what refers to
+/// these" handed over the SYMBOLS around the references and the probe
+/// returned every instance of each, so the `main` of /b.c came out as a
+/// caller of something it never mentions.  Kernel: one of the 359 instances
+/// of `struct device` holds a `spinlock_t`, so all 359 counted, and
+/// `mod("amdgpu") { { "spinlock_t" } }` had 1,495 candidates where 134 refer.
+#[tokio::test(flavor = "current_thread")]
+async fn a_reference_role_binds_the_instances_that_refer() -> anyhow::Result<()> {
+    use crate::db_diesel::{EphContext, Index, ProbeOutcome, ProbeRole};
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+
+    let mut index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_ONE_NAME_TWO_PROGRAMS)
+        .await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+
+    let main = CompositeFilter::leaf(CompoundNameMixin::new("main"));
+    assert_eq!(
+        index
+            .probe_instance_ids(&main, vec![ProbeRole::RefsParentsOf(vec![30])], 10, &eph)
+            .await?,
+        ProbeOutcome::Resolved(vec![10]),
+        "the main that calls print_version"
+    );
+    assert_eq!(
+        index
+            .probe_instance_ids(&main, vec![ProbeRole::RefsParentsOf(vec![40])], 10, &eph)
+            .await?,
+        ProbeOutcome::Resolved(vec![20]),
+        "the main that calls helper"
+    );
+
+    // Everything around the reference refers: the function and its file.
+    let anything = CompositeFilter::and(vec![]);
+    assert_eq!(
+        index
+            .probe_instance_ids(
+                &anything,
+                vec![ProbeRole::RefsParentsOf(vec![30])],
+                10,
+                &eph
+            )
+            .await?,
+        ProbeOutcome::Resolved(vec![10, 1001])
+    );
+
+    // What is referred to stays a symbol: both mains reach their callees.
+    assert_eq!(
+        index
+            .probe_instance_ids(
+                &anything,
+                vec![ProbeRole::RefsChildrenOf(vec![10, 20])],
+                10,
+                &eph
+            )
+            .await?,
+        ProbeOutcome::Resolved(vec![30, 40])
+    );
+
+    Ok(())
+}
+
 /// What a container holds is instances, not symbols.
 ///
 /// `init_module` is one symbol with an instance in each of twelve files.  A
@@ -653,7 +719,7 @@ async fn a_reference_is_one_role_row_however_many_instances_its_target_has() -> 
         .await?;
     assert_eq!(
         outcome,
-        ProbeOutcome::Resolved(vec![91, 942, 1001, 1002, 1003]),
+        ProbeOutcome::Resolved(vec![91, 942, 1001, 1003]),
         "41 instances of the target, {} role rows allowed",
         cap * PROBE_ROLE_ROWS_PER_CAP
     );
