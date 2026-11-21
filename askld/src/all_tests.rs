@@ -3,7 +3,8 @@ use crate::test_util::{
     run_query_probe_traced, run_query_traced, run_query_with_budget, run_query_with_edge_cap,
     run_query_with_read_cap, TEST_INPUT_A, TEST_INPUT_B, TEST_INPUT_CONTAINMENT,
     TEST_INPUT_ESCALATION, TEST_INPUT_HIDDEN_CHILDREN, TEST_INPUT_MODULES, TEST_INPUT_NESTED_FUNC,
-    TEST_INPUT_SEARCH, TEST_INPUT_STRUCT_FIELDS, TEST_INPUT_TREE_BROWSER, VERB_TEST,
+    TEST_INPUT_ONE_NAME_MANY_FILES, TEST_INPUT_SEARCH, TEST_INPUT_STRUCT_FIELDS,
+    TEST_INPUT_TREE_BROWSER, VERB_TEST,
 };
 use index::db_diesel::FamilyDemands;
 use index::symbols::{SymbolId, SymbolInstanceId};
@@ -5864,6 +5865,62 @@ fn hidden_children_are_not_an_incomplete_answer() {
         3,
     ));
     assert!(!said.is_empty(), "thirteen children, a cap of three");
+}
+
+#[test]
+fn a_container_narrows_a_name_written_in_many_places() {
+    // `init_module` is one symbol with an instance in each of twelve files.
+    // Asked for inside one file it has one answer.  The file used to narrow
+    // the SYMBOL only: the refinement probe returned all twelve instances,
+    // capped (5 here), and a capped statement is not narrowed -- so the answer
+    // was the file, some `init_module` from elsewhere, no edge between them
+    // and "this part of the graph is incomplete".  Kernel:
+    // `file("…/bt-bmc.c") has { func("init_module") }`, 9,714 instances.
+    let res = run_query_with_read_cap(
+        TEST_INPUT_ONE_NAME_MANY_FILES,
+        r#"file("/drv_3.c") has { "init_module" }"#,
+        5,
+    );
+    let (said, ids) = incomplete_and_ids(&res);
+    assert!(said.is_empty(), "the file bounds the name, got {:?}", said);
+    assert_eq!(ids, vec![103, 203], "the file and the instance in it");
+    let held: Vec<(i64, i64)> = res
+        .has_edges
+        .0
+        .iter()
+        .map(|e| (e.parent_instance.into(), e.child_instance.into()))
+        .collect();
+    assert_eq!(held, vec![(103, 203)]);
+
+    // A bare scope accepts containment as well, and the file refers to
+    // nothing, so the answer is the same.
+    let res = run_query_with_read_cap(
+        TEST_INPUT_ONE_NAME_MANY_FILES,
+        r#"file("/drv_3.c") { "init_module" }"#,
+        5,
+    );
+    let (said, ids) = incomplete_and_ids(&res);
+    assert!(said.is_empty(), "the file bounds the name, got {:?}", said);
+    assert_eq!(ids, vec![103, 203]);
+
+    // The mirror: the module `drivers` has an instance in every file, and
+    // one of them holds `probe_3`.
+    let res = run_query_with_read_cap(
+        TEST_INPUT_ONE_NAME_MANY_FILES,
+        r#"mod("drivers") has { "probe_3" }"#,
+        5,
+    );
+    let (said, ids) = incomplete_and_ids(&res);
+    assert!(
+        said.is_empty(),
+        "the child bounds the module, got {:?}",
+        said
+    );
+    assert_eq!(
+        ids,
+        vec![303, 503],
+        "probe_3 and the module instance over it"
+    );
 }
 
 #[test]

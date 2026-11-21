@@ -431,7 +431,9 @@ async fn test_probe_instance_ids() -> anyhow::Result<()> {
     assert_eq!(outcome, ProbeOutcome::Resolved(vec![91, 92]));
 
     // HasParentsOf: containers of a(91) — file 1001 (level 3 >= 2) and
-    // directory 1003 (level 5 >= 2).
+    // directory 1003 (level 5 >= 2).  Instance-level: the directory's other
+    // instance (1002) holds something else and is not one of them, unlike
+    // under RefsParentsOf above.
     let outcome = index
         .probe_instance_ids(
             &unconstrained,
@@ -440,7 +442,7 @@ async fn test_probe_instance_ids() -> anyhow::Result<()> {
             &eph,
         )
         .await?;
-    assert_eq!(outcome, ProbeOutcome::Resolved(vec![1001, 1002, 1003]));
+    assert_eq!(outcome, ProbeOutcome::Resolved(vec![1001, 1003]));
 
     // HasChildrenOf: rows contained in file 1001 — the eight function
     // instances (directory 1003 is excluded by the level rule).
@@ -542,6 +544,66 @@ async fn a_probe_role_past_its_budget_is_capped() -> anyhow::Result<()> {
             ProbeOutcome::Capped
         );
     }
+
+    Ok(())
+}
+
+/// What a container holds is instances, not symbols.
+///
+/// `init_module` is one symbol with an instance in each of twelve files.  A
+/// probe for the name inside ONE file has one answer.  The role used to hand
+/// over the SYMBOLS found in the container, and the probe then returned every
+/// instance of each -- so the file narrowed nothing, the probe answered
+/// `Capped`, and on the kernel `file("…/bt-bmc.c") has { func("init_module") }`
+/// (9,714 instances, one in that file) said "incomplete" with no result.
+#[tokio::test(flavor = "current_thread")]
+async fn a_containment_role_binds_the_instances_that_are_contained() -> anyhow::Result<()> {
+    use crate::db_diesel::{EphContext, Index, ProbeOutcome, ProbeRole};
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+
+    let mut index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_ONE_NAME_MANY_FILES)
+        .await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+
+    // The name alone: twelve instances, more than the cap of five.
+    let init_module = CompositeFilter::leaf(CompoundNameMixin::new("init_module"));
+    assert_eq!(
+        index
+            .probe_instance_ids(&init_module, vec![], 5, &eph)
+            .await?,
+        ProbeOutcome::Capped
+    );
+    // Inside `/drv_3.c` (instance 103): the one written there.
+    assert_eq!(
+        index
+            .probe_instance_ids(
+                &init_module,
+                vec![ProbeRole::HasChildrenOf(vec![103])],
+                5,
+                &eph
+            )
+            .await?,
+        ProbeOutcome::Resolved(vec![203])
+    );
+
+    // The mirror.  The module `drivers` has an instance in every file; the
+    // one that holds `probe_3` (instance 303) is the one in `/drv_3.c`.
+    let drivers = CompositeFilter::leaf(CompoundNameMixin::new("drivers"));
+    assert_eq!(
+        index.probe_instance_ids(&drivers, vec![], 5, &eph).await?,
+        ProbeOutcome::Capped
+    );
+    assert_eq!(
+        index
+            .probe_instance_ids(&drivers, vec![ProbeRole::HasParentsOf(vec![303])], 5, &eph)
+            .await?,
+        ProbeOutcome::Resolved(vec![503])
+    );
 
     Ok(())
 }

@@ -454,9 +454,9 @@ impl Index {
                         PROBE_ROLE_CTE_NAMES.len(),
                     );
                     let name = PROBE_ROLE_CTE_NAMES[cte_bodies.len()];
-                    query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&format!(
-                        "symbols.id IN (SELECT symbol FROM {name})"
-                    )));
+                    query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
+                        &has_role_member_sql(name),
+                    ));
                     cte_bodies.push(has_role_cte_body(ids, true, &vis));
                 }
                 ProbeRole::HasParentsOf(ids) => {
@@ -466,9 +466,9 @@ impl Index {
                         PROBE_ROLE_CTE_NAMES.len(),
                     );
                     let name = PROBE_ROLE_CTE_NAMES[cte_bodies.len()];
-                    query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&format!(
-                        "symbols.id IN (SELECT symbol FROM {name})"
-                    )));
+                    query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
+                        &has_role_member_sql(name),
+                    ));
                     cte_bodies.push(has_role_cte_body(ids, false, &vis));
                 }
             }
@@ -896,7 +896,8 @@ fn build_has_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> HasPare
 /// `container_*` aliases the containing side (same object, container's
 /// offset range covers the row's, container's type level ≥ the row's).
 /// `seed_container` picks which side the bound ids constrain; the returned
-/// query selects the OTHER side's instance ids.  Emitted only inside a
+/// query selects the OTHER side's instances, as `(symbol, id)` (see
+/// `has_role_member_sql`).  Emitted only inside a
 /// MATERIALIZED CTE (see `ProbeCtes`) — as a plain IN-subquery the planner
 /// mis-drives this shape (perf/PROBE_BASELINE.md, S6/S7).
 fn has_role_cte_body(
@@ -943,25 +944,49 @@ fn has_role_cte_body(
         .filter(vis.subquery_pred("container_instances.layer"));
 
     if seed_container {
-        // HasChildrenOf: containers are bound, contained SYMBOLS come out
-        // (symbol-level, mirroring the worklist's per-symbol evidence).
+        // HasChildrenOf: containers are bound, the contained INSTANCES come out.
         Box::new(
             base.filter(
                 container_instance
                     .field(symbol_instances::dsl::id)
                     .eq_any(ids),
             )
-            .select(symbol_instances::dsl::symbol)
+            .select((symbol_instances::dsl::symbol, symbol_instances::dsl::id))
             .into_boxed::<Pg>(),
         )
     } else {
-        // HasParentsOf: contained rows are bound, container SYMBOLS come out.
+        // HasParentsOf: contained rows are bound, the container INSTANCES come out.
         Box::new(
             base.filter(symbol_instances::dsl::id.eq_any(ids))
-                .select(container_instance.field(symbol_instances::dsl::symbol))
+                .select((
+                    container_instance.field(symbol_instances::dsl::symbol),
+                    container_instance.field(symbol_instances::dsl::id),
+                ))
                 .into_boxed::<Pg>(),
         )
     }
+}
+
+/// The outer query's membership test for a containment role.
+///
+/// WHAT A CONTAINER HOLDS IS INSTANCES.  The worklist narrows containment per
+/// instance (`constrain_by_parent`: the child instance the has-edge names), so
+/// the probe does too.  Matching the symbol instead kept every instance of
+/// each symbol found in the container, and one name can have thousands: on the
+/// kernel `init_module` has 9,714, one per driver, so
+/// `file("…/bt-bmc.c") has { func("init_module") }` probed to "too many" with
+/// the file bound, and the statement stayed capped with no result.
+///
+/// Spelled as a pair with the symbol on purpose.  The instance id alone is the
+/// same set, and plans badly: as `symbol_instances.id IN (SELECT id …)` the
+/// planner crossed the role with the name's symbols before looking at an
+/// instance (140 ms for `schedule` in a 9,900-instance header, against 21 ms),
+/// and with a separate `symbols.id IN (…)` beside it one probe took 76 s.  The
+/// pair keeps the plan the symbol-only test had -- role, then symbols by
+/// primary key -- and lets the instance id filter the instances it reaches.
+/// Measured on the kernel, eight container/predicate shapes, warm.
+fn has_role_member_sql(role: &str) -> String {
+    format!("(symbols.id, symbol_instances.id) IN (SELECT symbol, id FROM {role})")
 }
 
 /// A semi-join constraint a probe binds a resolved neighbour's instance
@@ -969,16 +994,18 @@ fn has_role_cte_body(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProbeRole {
     /// Probe rows' SYMBOLS must be REFS children (callees) of these
-    /// instances.  All roles match at SYMBOL level, mirroring the
-    /// worklist's per-symbol evidence: every instance of a matched symbol
-    /// is kept, so a probe-resolved set never drops a co-instance the
-    /// constrain step would have retained.
+    /// instances.  A reference names a symbol, so the REFS roles match at
+    /// SYMBOL level, as the worklist's reference evidence does: every
+    /// instance of a matched symbol is kept, so a probe-resolved set never
+    /// drops a co-instance the constrain step would have retained.
     RefsChildrenOf(Vec<i64>),
     /// Probe rows' symbols must be REFS parents (callers) of these instances.
     RefsParentsOf(Vec<i64>),
-    /// Probe rows' symbols must be contained in these instances.
+    /// Probe rows must be contained in these instances.  Containment is
+    /// between instances, so the HAS roles match at INSTANCE level, as the
+    /// worklist's containment evidence does (see `has_role_member_sql`).
     HasChildrenOf(Vec<i64>),
-    /// Probe rows' symbols must contain these instances.
+    /// Probe rows must contain these instances.
     HasParentsOf(Vec<i64>),
 }
 
@@ -1901,6 +1928,7 @@ impl Index {
     pub const TEST_INPUT_ESCALATION: &'static str = "test_input_escalation.sql";
     pub const TEST_INPUT_REF_IDENTITY: &'static str = "test_input_ref_identity.sql";
     pub const TEST_INPUT_HIDDEN_CHILDREN: &'static str = "test_input_hidden_children.sql";
+    pub const TEST_INPUT_ONE_NAME_MANY_FILES: &'static str = "test_input_one_name_many_files.sql";
     pub const TEST_INPUT_RECURSIVE_MULTI_INSTANCE: &'static str =
         "test_input_recursive_multi_instance.sql";
     pub const VERB_TEST: &'static str = "verb_test.sql";
@@ -1954,6 +1982,10 @@ impl Index {
         (
             "test_input_hidden_children.sql",
             include_str!("../../../sql/test_input_hidden_children.sql"),
+        ),
+        (
+            "test_input_one_name_many_files.sql",
+            include_str!("../../../sql/test_input_one_name_many_files.sql"),
         ),
         (
             "test_input_recursive_multi_instance.sql",
