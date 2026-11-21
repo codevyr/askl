@@ -61,9 +61,7 @@ impl EdgeList {
 
     /// One more reference from `from` to `to` says this.
     pub fn state(&mut self, from: SymbolId, to: SymbolId, said: Stated) {
-        if said != Stated::default() {
-            self.1.entry((from, to)).or_default().add(said);
-        }
+        self.1.entry((from, to)).or_default().add(said);
     }
 
     /// What the references from `from` to `to` state, taken together.

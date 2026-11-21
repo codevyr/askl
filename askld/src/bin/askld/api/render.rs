@@ -11,10 +11,13 @@
 //! intent (caller vs. callee) from a flat graph.  The report states the
 //! convention itself, in one line under `# Results`, for the marks it uses.
 //!
-//! What an edge DOES is said in words after the target's type, where the
-//! index states it: `→ handler  (func, takes)`.  A relation that no token
-//! spells has a mark of its own, `↦` declares and `⇢` holds.  The words are
-//! the engine's (`Edge::kinds`), not worked out again here.
+//! A PAIR IS DRAWN ONCE, WITH EVERY RELATIONSHIP IT HAS: one mark for each,
+//! `▸` contains, `→` refers to, `↦` declares, `⇢` holds, as in `▸,→ member`.
+//! The report does not choose which of them matters.  What the pair's
+//! references DO is said in words after the target's type, where the index
+//! states it: `→ handler  (func, takes)`.  Marks and words are the engine's
+//! (`Edge::kinds`, `Edge::refers`, the containment edges), not worked out
+//! again here.
 
 use askld::line_index::LineIndex;
 use index::roles::RefKind;
@@ -51,72 +54,118 @@ impl Projection {
 /// stringified `object_id` (matching [`NodeSymbolInstance::object_id`]).
 pub type SourceMap = HashMap<String, Vec<u8>>;
 
-/// The mark a pair of symbols is drawn with.
-///
-/// ONE MARK PER PAIR, the strongest thing the pair states: it contains, then
-/// it declares, then it holds, then it refers to.  Whatever else the pair
-/// states follows the target's type as words (`RenderCtx::said`), so choosing
-/// a mark never drops a fact.
+/// A relationship a pair of symbols can have, and the mark it is drawn with.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum EdgeKind {
-    /// A reference: rendered `→`.
-    Ref,
-    /// The source's invocation declared the target: rendered `↦`.
+enum Mark {
+    /// The source contains the target: `▸`.
+    Contains,
+    /// Some token of the source names the target: `→`.
+    Refers,
+    /// The source's invocation declared the target: `↦`.
     Declares,
-    /// The source is a dispatch point and the target is stored in it:
-    /// rendered `⇢`.
+    /// The source is a dispatch point and the target is stored in it: `⇢`.
     Holds,
-    /// A containment relationship: rendered `▸`.
-    Has,
 }
 
-impl EdgeKind {
-    /// Every mark, in the order the legend names them.
-    const LEGEND: [EdgeKind; 4] = [
-        EdgeKind::Ref,
-        EdgeKind::Has,
-        EdgeKind::Declares,
-        EdgeKind::Holds,
-    ];
+impl Mark {
+    /// Every mark, in the ONE order they are written: on a line and in the
+    /// legend.
+    const ALL: [Mark; 4] = [Mark::Contains, Mark::Refers, Mark::Declares, Mark::Holds];
 
     fn arrow(self) -> char {
         match self {
-            EdgeKind::Ref => '→',
-            EdgeKind::Declares => '↦',
-            EdgeKind::Holds => '⇢',
-            EdgeKind::Has => '▸',
+            Mark::Contains => '▸',
+            Mark::Refers => '→',
+            Mark::Declares => '↦',
+            Mark::Holds => '⇢',
         }
     }
 
     fn legend(self) -> &'static str {
         match self {
-            EdgeKind::Ref => "`→` refers to",
-            EdgeKind::Declares => "`↦` declares",
-            EdgeKind::Holds => "`⇢` holds",
-            EdgeKind::Has => "`▸` contains",
+            Mark::Contains => "`▸` contains",
+            Mark::Refers => "`→` refers to",
+            Mark::Declares => "`↦` declares",
+            Mark::Holds => "`⇢` holds",
         }
     }
 
-    /// The mark of a pair that does not contain, from what its edge states.
-    /// A pair stating both relations is drawn `↦` and says `holds` in words:
-    /// that something was declared by the source is the rarer, stronger fact.
-    fn of_edge(kinds: &[RefKind]) -> EdgeKind {
-        if kinds.contains(&RefKind::Declares) {
-            EdgeKind::Declares
-        } else if kinds.contains(&RefKind::Holds) {
-            EdgeKind::Holds
-        } else {
-            EdgeKind::Ref
-        }
-    }
-
-    /// The word this mark already says, which is then not repeated.
-    fn says(self) -> Option<RefKind> {
+    fn bit(self) -> u8 {
         match self {
-            EdgeKind::Declares => Some(RefKind::Declares),
-            EdgeKind::Holds => Some(RefKind::Holds),
-            EdgeKind::Ref | EdgeKind::Has => None,
+            Mark::Contains => 1,
+            Mark::Refers => 2,
+            Mark::Declares => 4,
+            Mark::Holds => 8,
         }
+    }
+
+    /// Where a line with this mark goes among a symbol's child lines: what
+    /// it refers to, what it declares, what it holds, what it contains.
+    fn rank(self) -> u8 {
+        match self {
+            Mark::Refers => 0,
+            Mark::Declares => 1,
+            Mark::Holds => 2,
+            Mark::Contains => 3,
+        }
+    }
+}
+
+/// The relationships of one pair of symbols.
+///
+/// EVERY ONE OF THEM IS DRAWN.  A file contains a function and refers to it
+/// wherever another of its functions calls it; a slot can hold a function a
+/// token of it also names.  Each is a fact about the pair, and which of them
+/// the reader is after is the reader's business: a rule that picked one (as
+/// "a pair that contains is drawn `▸`" did) hid the others.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct Marks(u8);
+
+impl Marks {
+    fn add(&mut self, mark: Mark) {
+        self.0 |= mark.bit();
+    }
+
+    fn has(self, mark: Mark) -> bool {
+        self.0 & mark.bit() != 0
+    }
+
+    fn iter(self) -> impl Iterator<Item = Mark> {
+        Mark::ALL.into_iter().filter(move |mark| self.has(*mark))
+    }
+
+    /// The relationships an edge of the answer stands for.  A relation is
+    /// what its kind says and nothing else; an edge refers when the engine
+    /// says a token names the target, and an edge that states no relation at
+    /// all is a reference whatever it says.
+    fn of_edge(edge: &super::types::Edge) -> Marks {
+        let mut marks = Marks::default();
+        if edge.kinds().contains(&RefKind::Declares) {
+            marks.add(Mark::Declares);
+        }
+        if edge.kinds().contains(&RefKind::Holds) {
+            marks.add(Mark::Holds);
+        }
+        if edge.refers() || marks == Marks::default() {
+            marks.add(Mark::Refers);
+        }
+        marks
+    }
+
+    /// As drawn at the head of a line: `▸,→`.
+    fn drawn(self) -> String {
+        let arrows: Vec<String> = self.iter().map(|mark| mark.arrow().to_string()).collect();
+        arrows.join(",")
+    }
+
+    /// The order of a symbol's child lines: by what the pair has, mark by
+    /// mark in the order of [`Mark::rank`].  So what a symbol only refers to
+    /// comes first, what it only contains last, and what it does both to in
+    /// between.
+    fn rank(self) -> Vec<u8> {
+        let mut ranks: Vec<u8> = self.iter().map(Mark::rank).collect();
+        ranks.sort_unstable();
+        ranks
     }
 }
 
@@ -177,28 +226,29 @@ pub fn render_markdown(
         return out;
     }
 
-    // Adjacency: source symbol -> ordered, de-duplicated (target, kind).
-    let mut children: HashMap<SymbolId, Vec<(SymbolId, EdgeKind)>> = HashMap::new();
-    let mut seen_pair: HashSet<(SymbolId, SymbolId)> = HashSet::new();
+    // Adjacency: source symbol -> its targets, each once, and beside it what
+    // every pair has.  A pair arrives once per relationship (as a containment
+    // edge, as a reference edge) and is one line.
+    let mut children: HashMap<SymbolId, Vec<SymbolId>> = HashMap::new();
+    let mut pair_marks: HashMap<(SymbolId, SymbolId), Marks> = HashMap::new();
     let mut is_source: HashSet<SymbolId> = HashSet::new();
     let mut is_target: HashSet<SymbolId> = HashSet::new();
-    let mut record = |from: SymbolId, to: SymbolId, kind: EdgeKind| {
+    let mut record = |from: SymbolId, to: SymbolId, marks: Marks| {
         is_source.insert(from);
         is_target.insert(to);
-        if seen_pair.insert((from, to)) {
-            children.entry(from).or_default().push((to, kind));
-        }
+        let pair = pair_marks.entry((from, to)).or_insert_with(|| {
+            children.entry(from).or_default().push(to);
+            Marks::default()
+        });
+        pair.0 |= marks.0;
     };
-    // A PAIR THAT CONTAINS IS DRAWN `▸`, whatever else relates it.  A
-    // container holds the text of every reference made inside it, so it
-    // "refers to" each member another member uses; that it contains the
-    // member says more and is what `has` asked for.  Containment is recorded
-    // first, and a pair is drawn once.
     for he in &graph.has_edges {
-        record(he.parent(), he.child(), EdgeKind::Has);
+        let mut contains = Marks::default();
+        contains.add(Mark::Contains);
+        record(he.parent(), he.child(), contains);
     }
     for edge in &graph.edges {
-        record(edge.from(), edge.to(), EdgeKind::of_edge(edge.kinds()));
+        record(edge.from(), edge.to(), Marks::of_edge(edge));
     }
 
     // Top-level nodes: any source of an edge, plus any node that is not a
@@ -218,11 +268,11 @@ pub fn render_markdown(
     // THE REPORT SAYS WHAT ITS MARKS MEAN: the ones it uses, once, before the
     // first of them.  Two marks hang under a symbol, and nothing in the
     // answer told a call from a member.
-    let drawn = |kind: EdgeKind| children.values().flatten().any(|(_, k)| *k == kind);
-    let legend: Vec<&str> = EdgeKind::LEGEND
+    let drawn = |mark: Mark| pair_marks.values().any(|marks| marks.has(mark));
+    let legend: Vec<&str> = Mark::ALL
         .into_iter()
-        .filter(|kind| drawn(*kind))
-        .map(EdgeKind::legend)
+        .filter(|mark| drawn(*mark))
+        .map(Mark::legend)
         .collect();
     if !legend.is_empty() {
         out.push_str(&legend.join(", "));
@@ -240,15 +290,16 @@ pub fn render_markdown(
         out.push('\n');
 
         if let Some(kids) = children.get(&id) {
+            let marks_of = |target: SymbolId| pair_marks[&(id, target)];
             let mut kids = kids.clone();
-            kids.sort_by(|(a, ka), (b, kb)| {
-                kind_rank(*ka).cmp(&kind_rank(*kb)).then_with(|| {
+            kids.sort_by(|a, b| {
+                marks_of(*a).rank().cmp(&marks_of(*b).rank()).then_with(|| {
                     ctx.target_sort_key(id, *a)
                         .cmp(&ctx.target_sort_key(id, *b))
                 })
             });
-            for (target, kind) in kids {
-                out.push_str(&ctx.child_line(id, target, kind));
+            for target in kids {
+                out.push_str(&ctx.child_line(id, target, marks_of(target)));
                 out.push('\n');
             }
         }
@@ -377,15 +428,17 @@ impl<'a> RenderCtx<'a> {
         }
     }
 
-    /// What follows the target's type on a child line: the words the pair's
-    /// edge states, minus the one its mark already says.  Empty when the
-    /// index states nothing, which leaves the line as it always was.
-    fn said(&self, parent: SymbolId, target: SymbolId, mark: EdgeKind) -> String {
+    /// What follows the target's type on a child line: what the pair's
+    /// references DO, in the engine's words and order.  A relation is not
+    /// among them: it is a relationship of the pair, and a relationship is
+    /// said by its mark, once.  Empty when the index states nothing, which
+    /// leaves the line as it always was.
+    fn said(&self, parent: SymbolId, target: SymbolId) -> String {
         self.pair_kinds
             .get(&(parent, target))
             .into_iter()
             .flat_map(|kinds| kinds.iter())
-            .filter(|kind| Some(**kind) != mark.says())
+            .filter(|kind| !matches!(kind, RefKind::Declares | RefKind::Holds))
             .map(|kind| format!(", {}", kind.word()))
             .collect()
     }
@@ -671,7 +724,7 @@ impl<'a> RenderCtx<'a> {
         (!body.is_empty()).then_some((lang, body))
     }
 
-    fn child_line(&self, parent: SymbolId, target: SymbolId, kind: EdgeKind) -> String {
+    fn child_line(&self, parent: SymbolId, target: SymbolId, marks: Marks) -> String {
         match self.nodes_by_id.get(&target) {
             Some(node) => {
                 let (ty, loc) = match self.shown(node, self.pair_lead.get(&(parent, target))) {
@@ -684,10 +737,10 @@ impl<'a> RenderCtx<'a> {
                     }
                     None => ("?", String::new()),
                 };
-                let said = self.said(parent, target, kind);
+                let said = self.said(parent, target);
                 format!(
                     "  {} {}  ({}{})  {}",
-                    kind.arrow(),
+                    marks.drawn(),
                     node.label(),
                     ty,
                     said,
@@ -696,7 +749,7 @@ impl<'a> RenderCtx<'a> {
                 .trim_end()
                 .to_string()
             }
-            None => format!("  {} #{}", kind.arrow(), target.0),
+            None => format!("  {} #{}", marks.drawn(), target.0),
         }
     }
 
@@ -752,17 +805,6 @@ fn warning_bullet(w: &ErrorResponse) -> String {
         );
     }
     out
-}
-
-/// The order of a symbol's child lines: what it refers to, what it declares,
-/// what it holds, what it contains.
-fn kind_rank(kind: EdgeKind) -> u8 {
-    match kind {
-        EdgeKind::Ref => 0,
-        EdgeKind::Declares => 1,
-        EdgeKind::Holds => 2,
-        EdgeKind::Has => 3,
-    }
 }
 
 fn type_abbr(t: SymbolType) -> &'static str {
@@ -1031,21 +1073,22 @@ mod tests {
         ));
         let md = render_markdown("\"f\" { }", &refs, &src, Projection::Names);
         assert!(
-            md.contains("# Results\n`→` refers to, `▸` contains\n"),
+            md.contains("# Results\n`▸` contains, `→` refers to\n"),
             "{md}"
         );
     }
 
-    /// A PAIR THAT CONTAINS IS DRAWN `▸`.
+    /// A PAIR IS DRAWN ONCE, WITH EVERY RELATIONSHIP IT HAS.
     ///
     /// A file contains its functions, and it holds the references to them
     /// too -- every call between two of its functions is text of the file.
     /// So the pair (file, function) arrives twice, as containment and as a
-    /// reference, and the reference used to be the one drawn:
-    /// `file("bt-bmc.c") has { func }` said "27 contains" and printed 25 of
-    /// them as `→`, which the legend now spells out as "refers to".
+    /// reference.  `file("bt-bmc.c") has { func }` said "27 contains" and
+    /// printed 25 of them as `→`; then containment won and the 25 were drawn
+    /// `▸`, which hid that the file refers to them.  Both are true of the
+    /// pair, and the report does not choose: `▸,→`.
     #[test]
-    fn a_pair_that_contains_is_drawn_as_containment() {
+    fn a_pair_that_contains_and_refers_is_drawn_with_both_marks() {
         let (src, start, end) = body_source();
         let function = |id: i64, label: &str| {
             node(
@@ -1077,11 +1120,13 @@ mod tests {
             index::symbols::SymbolInstanceId::new(2),
         ));
         let md = render_markdown("\"outer\" { }", &g, &src, Projection::Names);
-        assert!(md.contains("  ▸ member"), "{md}");
-        assert!(!md.contains("→"), "the one pair is containment:\n{md}");
-        // Drawn once, and the legend names only the mark that is drawn.
+        assert!(md.contains("  ▸,→ member"), "{md}");
+        // Drawn once, and the legend names both marks the line carries.
         assert_eq!(md.matches("member").count(), 1, "{md}");
-        assert!(md.contains("# Results\n`▸` contains\n"), "{md}");
+        assert!(
+            md.contains("# Results\n`▸` contains, `→` refers to\n"),
+            "{md}"
+        );
     }
 
     /// A graph of one object, built for the tests of what an edge says.
@@ -1112,6 +1157,16 @@ mod tests {
             self.graph.add_edge(
                 crate::api::types::Edge::new(SymbolId(from), SymbolId(to), 1, Vec::new())
                     .with_kinds(kinds),
+            );
+            self
+        }
+
+        /// An edge whose every row is a relation: nothing refers by it.
+        fn relation(mut self, from: i64, to: i64, kinds: Vec<RefKind>) -> Self {
+            self.graph.add_edge(
+                crate::api::types::Edge::new(SymbolId(from), SymbolId(to), 1, Vec::new())
+                    .with_kinds(kinds)
+                    .with_refers(false),
             );
             self
         }
@@ -1167,16 +1222,17 @@ mod tests {
     }
 
     /// A RELATION HAS ITS OWN MARK.  "The macro declares it" and "the slot
-    /// holds it" are not things a token says where the arrow starts, so they
-    /// are not drawn as a reference: `↦` declares, `⇢` holds.  The mark says
-    /// the relation, so its word is not repeated after the type.
+    /// holds it" are not things a token says where the arrow starts, so a
+    /// pair that has only that is not drawn as a reference: `↦` declares, `⇢`
+    /// holds.  The mark is how a relationship is said; the words after the
+    /// type are what the references do.
     #[test]
     fn a_relation_has_its_own_mark() {
         use RefKind::*;
         let declares = Said::new()
             .symbol(1, "DEFINE_MUTEX", SymbolType::Macro)
             .symbol(2, "lock", SymbolType::Data)
-            .edge(1, 2, vec![Declares]);
+            .relation(1, 2, vec![Declares]);
         let md = declares.report();
         assert!(md.contains("  ↦ lock  (data)  /a.c:1"), "{md}");
         assert!(md.contains("# Results\n`↦` declares\n"), "{md}");
@@ -1185,14 +1241,15 @@ mod tests {
         let holds = Said::new()
             .symbol(1, "ops.read", SymbolType::Field)
             .symbol(2, "my_read", SymbolType::Function)
-            .edge(1, 2, vec![Holds]);
+            .relation(1, 2, vec![Holds]);
         let md = holds.report();
         assert!(md.contains("  ⇢ my_read  (func)  /a.c:1"), "{md}");
         assert!(md.contains("# Results\n`⇢` holds\n"), "{md}");
         assert!(!md.contains("→") && !md.contains("↦"), "{md}");
     }
 
-    /// The legend names the marks drawn, each once, in one order.
+    /// The legend names the marks drawn, each once, in the order they are
+    /// written on a line.
     #[test]
     fn the_legend_names_every_mark_drawn_and_no_other() {
         use RefKind::*;
@@ -1204,60 +1261,106 @@ mod tests {
             .symbol(5, "e", SymbolType::Function)
             .edge(1, 2, vec![Calls])
             .holding(1, 3)
-            .edge(1, 4, vec![Declares])
-            .edge(1, 5, vec![Holds]);
+            .relation(1, 4, vec![Declares])
+            .relation(1, 5, vec![Holds]);
         let md = all.report();
         assert!(
-            md.contains("# Results\n`→` refers to, `▸` contains, `↦` declares, `⇢` holds\n"),
+            md.contains("# Results\n`▸` contains, `→` refers to, `↦` declares, `⇢` holds\n"),
             "{md}"
         );
-        // Under one symbol: references, then relations, then what it contains.
-        let marks: Vec<char> = md
+        // Under one symbol: what it refers to, declares, holds, contains.
+        let marks: Vec<&str> = md
             .lines()
             .filter(|l| l.starts_with("  "))
-            .filter_map(|l| l.trim_start().chars().next())
+            .filter_map(|l| l.split_whitespace().next())
             .collect();
-        assert_eq!(marks, vec!['→', '↦', '⇢', '▸'], "{md}");
+        assert_eq!(marks, vec!["→", "↦", "⇢", "▸"], "{md}");
+
+        // A mark that only ever appears beside another is in the legend too.
+        let md = Said::new()
+            .symbol(1, "file", SymbolType::File)
+            .symbol(2, "member", SymbolType::Function)
+            .edge(1, 2, vec![])
+            .holding(1, 2)
+            .report();
+        assert!(
+            md.contains("# Results\n`▸` contains, `→` refers to\n"),
+            "{md}"
+        );
     }
 
-    /// ONE MARK PER PAIR: contains, then declares, then holds, then refers to.
-    /// The mark is the strongest thing the pair states; everything else it
-    /// states follows the type as a word, so nothing is dropped.
+    /// EVERY RELATIONSHIP OF A PAIR IS DRAWN, as one mark each, in one order:
+    /// contains, refers to, declares, holds.  The report does not pick the
+    /// one that matters.  The words after the type are what the pair's
+    /// references do, and a mark never takes one away.
     #[test]
-    fn a_pair_is_drawn_with_one_mark_and_says_the_rest_in_words() {
+    fn a_pair_is_drawn_with_every_relationship_it_has() {
         use RefKind::*;
-        // A relation and roles: the relation's mark, the roles as words.
+        let md = Said::new()
+            .symbol(1, "file", SymbolType::File)
+            .symbol(2, "held_only", SymbolType::Function)
+            .symbol(3, "used_only", SymbolType::Function)
+            .symbol(4, "both", SymbolType::Function)
+            .holding(1, 2)
+            .edge(1, 3, vec![])
+            .edge(1, 4, vec![Calls])
+            .holding(1, 4)
+            .report();
+        assert!(md.contains("  ▸ held_only  (func)  /a.c:1"), "{md}");
+        assert!(md.contains("  → used_only  (func)  /a.c:1"), "{md}");
+        assert!(md.contains("  ▸,→ both  (func, calls)  /a.c:1"), "{md}");
+        // What it refers to first, then what it also contains, then what it
+        // only contains.
+        let lines: Vec<&str> = md
+            .lines()
+            .filter(|l| l.starts_with("  "))
+            .filter_map(|l| l.split_whitespace().nth(1))
+            .collect();
+        assert_eq!(lines, vec!["used_only", "both", "held_only"], "{md}");
+
+        // A relation beside an ordinary reference: both marks, and the
+        // reference's words.  The relation is said by its mark, once.
         let md = Said::new()
             .symbol(1, "ops.read", SymbolType::Field)
             .symbol(2, "my_read", SymbolType::Function)
             .edge(1, 2, vec![Takes, Holds])
             .report();
-        assert!(md.contains("  ⇢ my_read  (func, takes)  /a.c:1"), "{md}");
-        assert!(!md.contains("→"), "{md}");
+        assert!(md.contains("  →,⇢ my_read  (func, takes)  /a.c:1"), "{md}");
+        assert!(md.contains("# Results\n`→` refers to, `⇢` holds\n"), "{md}");
+        assert!(!md.contains("holds)"), "the mark says it:\n{md}");
 
-        // Both relations: `↦` is drawn and `holds` is said.
+        // Both relations and nothing else.
         let md = Said::new()
             .symbol(1, "m", SymbolType::Macro)
             .symbol(2, "f", SymbolType::Function)
-            .edge(1, 2, vec![Declares, Holds])
+            .relation(1, 2, vec![Declares, Holds])
             .report();
-        assert!(md.contains("  ↦ f  (func, holds)  /a.c:1"), "{md}");
-        assert!(md.contains("# Results\n`↦` declares\n"), "{md}");
+        assert!(md.contains("  ↦,⇢ f  (func)  /a.c:1"), "{md}");
+        assert!(md.contains("# Results\n`↦` declares, `⇢` holds\n"), "{md}");
 
-        // A pair that contains is drawn `▸` (#92), and still says what else
-        // it states: the mark is not a reason to lose a fact.
+        // All four.
         let md = Said::new()
-            .symbol(1, "file", SymbolType::File)
-            .symbol(2, "member", SymbolType::Function)
-            .symbol(3, "made", SymbolType::Data)
-            .edge(1, 2, vec![Calls])
+            .symbol(1, "outer", SymbolType::Macro)
+            .symbol(2, "inner", SymbolType::Data)
+            .edge(1, 2, vec![Writes, Reads, Declares, Holds])
             .holding(1, 2)
-            .edge(1, 3, vec![Declares])
-            .holding(1, 3)
             .report();
-        assert!(md.contains("  ▸ member  (func, calls)  /a.c:1"), "{md}");
-        assert!(md.contains("  ▸ made  (data, declares)  /a.c:1"), "{md}");
-        assert!(md.contains("# Results\n`▸` contains\n"), "{md}");
+        assert!(
+            md.contains("  ▸,→,↦,⇢ inner  (data, writes, reads)  /a.c:1"),
+            "{md}"
+        );
+        assert!(
+            md.contains("# Results\n`▸` contains, `→` refers to, `↦` declares, `⇢` holds\n"),
+            "{md}"
+        );
+
+        // An edge that says nothing at all is still a reference.
+        let md = Said::new()
+            .symbol(1, "a", SymbolType::Function)
+            .symbol(2, "b", SymbolType::Function)
+            .relation(1, 2, vec![])
+            .report();
+        assert!(md.contains("  → b  (func)  /a.c:1"), "{md}");
     }
 
     #[test]
