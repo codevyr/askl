@@ -1,6 +1,7 @@
 pub mod db;
 pub mod ltree;
 pub mod offset_range;
+pub mod roles;
 pub mod symbols;
 
 // Diesel modules

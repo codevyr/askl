@@ -950,6 +950,8 @@ mod tests {
             nesting_level: 0,
             dfs_enter: 0,
             from_full_range: None,
+            roles: 0,
+            relation: 0,
         }
     }
 
