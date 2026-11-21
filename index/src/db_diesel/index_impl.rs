@@ -21,8 +21,7 @@ use std::time::Duration;
 pub type EphScopedFut<'b, R> = Pin<Box<dyn Future<Output = Result<R>> + 'b>>;
 
 use super::cte::{
-    build_find_edges_cte_body, build_has_children_cte_body, build_has_children_query,
-    build_has_children_query_against_cte, CteFindEdgesBetween, CteHasChildren,
+    build_has_children_query, find_edges_relations, has_children_candidates, EdgesBetween,
 };
 use super::mixins::{
     ChildrenQuery, CompositeFilter, CurrentIdQuery, CurrentQuery, DirectOnlyMixin, EphVisibility,
@@ -182,11 +181,12 @@ fn build_current_id_query(vis: &EphVisibility) -> CurrentIdQuery<'static> {
 }
 
 use super::mixins::EphSqlFragment;
+use super::relation::{InstanceSet, Relation, RelationName, With};
 
 /// REFS semi-join: rows whose instance is a CHILD (callee) of any of the
 /// given parent instances.  Shared by scope resolution and probes.
 fn refs_children_of_expr(
-    parent_ids: Vec<i64>,
+    parents: &InstanceSet,
     vis: &EphVisibility,
 ) -> EphSqlFragment<diesel::sql_types::Bool> {
     EphSqlFragment::<diesel::sql_types::Bool>::builder()
@@ -203,16 +203,16 @@ fn refs_children_of_expr(
         .eph_visibility("si.layer", vis)
         .sql(" AND ")
         .eph_visibility("pd.layer", vis)
-        .sql(" AND pd.id = ANY(")
-        .bind(parent_ids)
-        .sql("))")
+        .sql(" AND ")
+        .in_set("pd.id", parents)
+        .sql(")")
         .build()
 }
 
 /// REFS semi-join: rows whose instance is a PARENT (caller) of any of the
 /// given child instances.  Shared by scope resolution and probes.
 fn refs_parents_of_expr(
-    child_ids: Vec<i64>,
+    children: &InstanceSet,
     vis: &EphVisibility,
 ) -> EphSqlFragment<diesel::sql_types::Bool> {
     EphSqlFragment::<diesel::sql_types::Bool>::builder()
@@ -229,9 +229,9 @@ fn refs_parents_of_expr(
         .eph_visibility("si.layer", vis)
         .sql(" AND ")
         .eph_visibility("pd.layer", vis)
-        .sql(" AND si.id = ANY(")
-        .bind(child_ids)
-        .sql("))")
+        .sql(" AND ")
+        .in_set("si.id", children)
+        .sql(")")
         .build()
 }
 
@@ -257,7 +257,7 @@ fn refs_parents_of_expr(
 /// roles with a handful of ids (S4, callers-of one function, 0.9 ms), which is
 /// why this shape looked safe.
 fn refs_role_cte_body(
-    ids: Vec<i64>,
+    seed: &InstanceSet,
     parents: bool,
     vis: &EphVisibility,
 ) -> Box<dyn diesel::query_builder::QueryFragment<Pg> + Send> {
@@ -284,9 +284,9 @@ fn refs_role_cte_body(
                      (SELECT si.symbol FROM index.symbol_instances si WHERE ",
                 )
                 .eph_visibility("si.layer", vis)
-                .sql(" AND si.id = ANY(")
-                .bind(ids)
-                .sql("))")
+                .sql(" AND ")
+                .in_set("si.id", seed)
+                .sql(")")
                 .build(),
         )
     } else {
@@ -301,9 +301,8 @@ fn refs_role_cte_body(
                 .eph_visibility("sr.layer", vis)
                 .sql(" AND ")
                 .eph_visibility("pd.layer", vis)
-                .sql(" AND pd.id = ANY(")
-                .bind(ids)
-                .sql(")")
+                .sql(" AND ")
+                .in_set("pd.id", seed)
                 .build(),
         )
     }
@@ -335,10 +334,16 @@ impl Index {
         // Add reference-based constraint when resolving scoped filters.
         match role {
             Some(ScopeRole::Children(parent_ids)) if !parent_ids.is_empty() => {
-                query = query.filter(refs_children_of_expr(parent_ids.clone(), &vis));
+                query = query.filter(refs_children_of_expr(
+                    &InstanceSet::Ids(parent_ids.clone()),
+                    &vis,
+                ));
             }
             Some(ScopeRole::Parents(child_ids)) if !child_ids.is_empty() => {
-                query = query.filter(refs_parents_of_expr(child_ids.clone(), &vis));
+                query = query.filter(refs_parents_of_expr(
+                    &InstanceSet::Ids(child_ids.clone()),
+                    &vis,
+                ));
             }
             _ => {}
         }
@@ -408,7 +413,7 @@ impl Index {
         cap: usize,
         eph: &EphContext,
     ) -> Result<ProbeOutcome> {
-        use super::cte::{probe_role_budget_sql, ProbeCtes, PROBE_OVERFLOW, PROBE_ROLE_CTE_NAMES};
+        use super::cte::PROBE_OVERFLOW;
 
         let _span = tracing::info_span!("probe_instance_ids", cap, roles = roles.len()).entered();
         let t0 = std::time::Instant::now();
@@ -419,82 +424,34 @@ impl Index {
             query = query.filter(expr);
         }
 
-        let mut cte_bodies: Vec<Box<dyn diesel::query_builder::QueryFragment<Pg> + Send>> =
-            Vec::new();
+        // Each role is one bounded relation, and the probe's rows are those
+        // the role admits: by symbol for a reference role, by instance for a
+        // containment one (see `ProbeRole`).
+        let role_budget = (cap.max(1) * PROBE_ROLE_ROWS_PER_CAP) as i64;
+        let mut relations: Vec<Relation> = Vec::new();
         for role in roles {
-            match role {
-                ProbeRole::RefsChildrenOf(ids) => {
-                    anyhow::ensure!(
-                        cte_bodies.len() < PROBE_ROLE_CTE_NAMES.len(),
-                        "probe supports at most {} roles",
-                        PROBE_ROLE_CTE_NAMES.len(),
-                    );
-                    let name = PROBE_ROLE_CTE_NAMES[cte_bodies.len()];
-                    query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&format!(
-                        "symbols.id IN (SELECT symbol FROM {name})"
-                    )));
-                    cte_bodies.push(refs_role_cte_body(ids, false, &vis));
-                }
-                ProbeRole::RefsParentsOf(ids) => {
-                    anyhow::ensure!(
-                        cte_bodies.len() < PROBE_ROLE_CTE_NAMES.len(),
-                        "probe supports at most {} roles",
-                        PROBE_ROLE_CTE_NAMES.len(),
-                    );
-                    let name = PROBE_ROLE_CTE_NAMES[cte_bodies.len()];
-                    query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&format!(
-                        "symbols.id IN (SELECT symbol FROM {name})"
-                    )));
-                    cte_bodies.push(refs_role_cte_body(ids, true, &vis));
-                }
-                ProbeRole::HasChildrenOf(ids) => {
-                    anyhow::ensure!(
-                        cte_bodies.len() < PROBE_ROLE_CTE_NAMES.len(),
-                        "probe supports at most {} roles",
-                        PROBE_ROLE_CTE_NAMES.len(),
-                    );
-                    let name = PROBE_ROLE_CTE_NAMES[cte_bodies.len()];
-                    query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
-                        &has_role_member_sql(name),
-                    ));
-                    cte_bodies.push(has_role_cte_body(ids, true, &vis));
-                }
-                ProbeRole::HasParentsOf(ids) => {
-                    anyhow::ensure!(
-                        cte_bodies.len() < PROBE_ROLE_CTE_NAMES.len(),
-                        "probe supports at most {} roles",
-                        PROBE_ROLE_CTE_NAMES.len(),
-                    );
-                    let name = PROBE_ROLE_CTE_NAMES[cte_bodies.len()];
-                    query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
-                        &has_role_member_sql(name),
-                    ));
-                    cte_bodies.push(has_role_cte_body(ids, false, &vis));
-                }
-            }
+            let relation =
+                Relation::new(format!("probe_role_{}", relations.len()), role.body(&vis))
+                    .bounded(role_budget);
+            query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
+                &role.admits(relation.name()),
+            ));
+            relations.push(relation);
         }
 
         // A role that overflowed its budget is not all there, so nothing read
         // through it is an answer: skip the outer query for such a probe.
-        // The overflow row `ProbeCtes` appends is what reports it.
-        let role_budget = (cap.max(1) * PROBE_ROLE_ROWS_PER_CAP) as i64;
-        for role in 0..cte_bodies.len() {
-            query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
-                &probe_role_budget_sql(role, "<=", role_budget),
-            ));
+        // The overflow row the statement appends is what reports it.
+        for complete in relations.iter().filter_map(Relation::complete_sql) {
+            query = query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&complete));
         }
 
-        let query = query.limit(cap as i64 + 1);
-        let rows: std::sync::Arc<Vec<i64>> = if cte_bodies.is_empty() {
-            self.cached_load(query).await?
-        } else {
-            self.cached_load(ProbeCtes {
-                bodies: cte_bodies,
-                outer: query,
-                role_budget,
-            })
-            .await?
-        };
+        let rows: std::sync::Arc<Vec<i64>> = self
+            .cached_load(
+                With::new(relations, query.limit(cap as i64 + 1))
+                    .or_overflow_row(format!("{PROBE_OVERFLOW}::bigint")),
+            )
+            .await?;
 
         let outcome = if rows.len() > cap || rows.contains(&PROBE_OVERFLOW) {
             ProbeOutcome::Capped
@@ -823,7 +780,7 @@ fn build_children_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ChildrenQu
 /// Measured on the Linux index, same rows before and after: `{ "device" }`
 /// 12.9 s -> 25 ms, `macro { "task_struct" }` 89 ms -> 8 ms.
 fn children_in_scope(
-    scope_ids: Vec<i64>,
+    scope: &InstanceSet,
     vis: &EphVisibility,
 ) -> EphSqlFragment<diesel::sql_types::Bool> {
     EphSqlFragment::<diesel::sql_types::Bool>::builder()
@@ -832,11 +789,11 @@ fn children_in_scope(
                 SELECT si2.symbol FROM index.symbol_instances si2 WHERE ",
         )
         .eph_visibility("si2.layer", vis)
-        .sql(" AND si2.id = ANY(")
-        .bind(scope_ids.clone())
-        .sql(")) AND symbol_instances.id + 0 = ANY(")
-        .bind(scope_ids)
-        .sql("))")
+        .sql(" AND ")
+        .in_set("si2.id", scope)
+        .sql(") AND ")
+        .in_set("symbol_instances.id + 0", scope)
+        .sql(")")
         .build()
 }
 
@@ -898,10 +855,10 @@ fn build_has_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> HasPare
 /// `seed_container` picks which side the bound ids constrain; the returned
 /// query selects the OTHER side's instances, as `(symbol, id)` (see
 /// `has_role_member_sql`).  Emitted only inside a
-/// MATERIALIZED CTE (see `ProbeCtes`) — as a plain IN-subquery the planner
+/// materialised relation (see `Relation`) — as a plain IN-subquery the planner
 /// mis-drives this shape (perf/PROBE_BASELINE.md, S6/S7).
 fn has_role_cte_body(
-    ids: Vec<i64>,
+    seed: &InstanceSet,
     seed_container: bool,
     vis: &EphVisibility,
 ) -> Box<dyn diesel::query_builder::QueryFragment<Pg> + Send> {
@@ -946,18 +903,14 @@ fn has_role_cte_body(
     if seed_container {
         // HasChildrenOf: containers are bound, the contained INSTANCES come out.
         Box::new(
-            base.filter(
-                container_instance
-                    .field(symbol_instances::dsl::id)
-                    .eq_any(ids),
-            )
-            .select((symbol_instances::dsl::symbol, symbol_instances::dsl::id))
-            .into_boxed::<Pg>(),
+            base.filter(seed.holds("container_instances.id"))
+                .select((symbol_instances::dsl::symbol, symbol_instances::dsl::id))
+                .into_boxed::<Pg>(),
         )
     } else {
         // HasParentsOf: contained rows are bound, the container INSTANCES come out.
         Box::new(
-            base.filter(symbol_instances::dsl::id.eq_any(ids))
+            base.filter(seed.holds("symbol_instances.id"))
                 .select((
                     container_instance.field(symbol_instances::dsl::symbol),
                     container_instance.field(symbol_instances::dsl::id),
@@ -985,8 +938,8 @@ fn has_role_cte_body(
 /// pair keeps the plan the symbol-only test had -- role, then symbols by
 /// primary key -- and lets the instance id filter the instances it reaches.
 /// Measured on the kernel, eight container/predicate shapes, warm.
-fn has_role_member_sql(role: &str) -> String {
-    format!("(symbols.id, symbol_instances.id) IN (SELECT symbol, id FROM {role})")
+fn has_role_member_sql(role: &RelationName) -> String {
+    role.holds("(symbols.id, symbol_instances.id)", "symbol, id")
 }
 
 /// A semi-join constraint a probe binds a resolved neighbour's instance
@@ -1009,13 +962,42 @@ pub enum ProbeRole {
     HasParentsOf(Vec<i64>),
 }
 
+impl ProbeRole {
+    /// The role as the body of a relation: what the bound instances lead to.
+    fn body(
+        &self,
+        vis: &EphVisibility,
+    ) -> Box<dyn diesel::query_builder::QueryFragment<Pg> + Send> {
+        let ids = |ids: &Vec<i64>| InstanceSet::Ids(ids.clone());
+        match self {
+            ProbeRole::RefsChildrenOf(seed) => refs_role_cte_body(&ids(seed), false, vis),
+            ProbeRole::RefsParentsOf(seed) => refs_role_cte_body(&ids(seed), true, vis),
+            ProbeRole::HasChildrenOf(seed) => has_role_cte_body(&ids(seed), true, vis),
+            ProbeRole::HasParentsOf(seed) => has_role_cte_body(&ids(seed), false, vis),
+        }
+    }
+
+    /// The test a probe row passes to be admitted by the role's relation: by
+    /// symbol for a reference role, by instance for a containment one.
+    fn admits(&self, relation: &RelationName) -> String {
+        match self {
+            ProbeRole::RefsChildrenOf(_) | ProbeRole::RefsParentsOf(_) => {
+                relation.holds("symbols.id", "symbol")
+            }
+            ProbeRole::HasChildrenOf(_) | ProbeRole::HasParentsOf(_) => {
+                has_role_member_sql(relation)
+            }
+        }
+    }
+}
+
 /// How many role rows a probe may read per row of its cap.
 ///
 /// A probe resolves a statement to at most `cap` instances, and it gets there
 /// through its roles: every (reference, container) pair of the neighbours it
 /// is refined by.  A role costs what it reads, so it reads at most
 /// `cap * PROBE_ROLE_ROWS_PER_CAP` rows; past that the probe answers
-/// `Capped` without looking further (see `ProbeCtes`).
+/// `Capped` without looking further (see `Relation::bounded`).
 ///
 /// Ten, measured on the kernel at the default cap of 1000: reading 10,001
 /// role rows takes 40-300 ms for the hottest names there are (`device`,
@@ -2516,7 +2498,7 @@ impl Index {
                             q = q.filter(expr);
                         }
                         // Always apply scope filter.
-                        q = q.filter(children_in_scope(scope_ids.clone(), vis));
+                        q = q.filter(children_in_scope(&InstanceSet::Ids(scope_ids.clone()), vis));
                         q.filter(vis.guard()).limit(read_limit)
                     })
                     .await
@@ -2631,7 +2613,10 @@ impl Index {
             let rows: Vec<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)> =
                 if has_children_filtered {
                     self.cached_load_partitioned(eph, chain_dependent, |vis| {
-                        let mut q = build_has_children_query(current_instance_ids.clone(), vis);
+                        let mut q = build_has_children_query(
+                            &InstanceSet::Ids(current_instance_ids.clone()),
+                            vis,
+                        );
                         if let Some(expr) = filter.compose_has_children(vis) {
                             q = q.filter(expr);
                         }
@@ -2647,11 +2632,18 @@ impl Index {
                     .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?
                 } else {
                     // Fast path: CTE-materialised source set (planner-hint fix).
-                    self.cached_load_partitioned(eph, chain_dependent, |vis| CteHasChildren {
-                        cte_body: build_has_children_cte_body(current_instance_ids.clone(), vis),
-                        outer: contained_scope(build_has_children_query_against_cte(vis))
-                            .filter(vis.guard())
-                            .limit(read_limit),
+                    self.cached_load_partitioned(eph, chain_dependent, |vis| {
+                        let candidates = has_children_candidates(current_instance_ids.clone(), vis);
+                        let children = build_has_children_query(
+                            &InstanceSet::Of(candidates.name().clone()),
+                            vis,
+                        );
+                        With::new(
+                            vec![candidates],
+                            contained_scope(children)
+                                .filter(vis.guard())
+                                .limit(read_limit),
+                        )
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to load containment children: {}", e))?
@@ -2894,7 +2886,8 @@ impl Index {
             let results: Vec<(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)> =
                 if has_children_filtered {
                     self.cached_load_partitioned(eph, chain_dependent, |vis| {
-                        let mut q = build_has_children_query(source_ids.clone(), vis);
+                        let mut q =
+                            build_has_children_query(&InstanceSet::Ids(source_ids.clone()), vis);
                         if let Some(expr) = filter.compose_has_children(vis) {
                             q = q.filter(expr);
                         }
@@ -2909,11 +2902,16 @@ impl Index {
                     .map_err(|e| anyhow::anyhow!("Failed to find has-child instance IDs: {}", e))?
                 } else {
                     // Fast path: CTE-materialised source set (planner-hint fix).
-                    self.cached_load_partitioned(eph, chain_dependent, |vis| CteHasChildren {
-                        cte_body: build_has_children_cte_body(source_ids.clone(), vis),
-                        outer: build_has_children_query_against_cte(vis)
-                            .filter(vis.guard())
-                            .limit(read_limit),
+                    self.cached_load_partitioned(eph, chain_dependent, |vis| {
+                        let candidates = has_children_candidates(source_ids.clone(), vis);
+                        let children = build_has_children_query(
+                            &InstanceSet::Of(candidates.name().clone()),
+                            vis,
+                        );
+                        With::new(
+                            vec![candidates],
+                            children.filter(vis.guard()).limit(read_limit),
+                        )
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to find has-child instance IDs: {}", e))?
@@ -3192,17 +3190,21 @@ impl Index {
         // The CTE body is built via typed Diesel DSL so it tracks
         // `symbol_instances` schema changes automatically.  The outer
         // SELECT's projection is bespoke (DISTINCT ON + custom column
-        // aliases) and stays as raw SQL inside `CteFindEdgesBetween`;
+        // aliases) and stays as raw SQL inside `EdgesBetween`;
         // its single bind (eph_ids for `sr.layer`) goes through
         // `push_bind_param` so the final query has only typed binds.
         // No composite filter reaches this query, so it always partitions.
-        // The eph branch's guard is rendered inside CteFindEdgesBetween's
+        // The eph branch's guard is rendered inside `EdgesBetween`'s
         // walk_ast (raw outer SQL) from the token snapshot.
         let mut results: Vec<ImplicitEdge> = self
-            .cached_load_partitioned(eph, false, |vis| CteFindEdgesBetween {
-                cte_body: build_find_edges_cte_body(instance_ids.to_vec(), vis),
-                vis: vis.snapshot(),
-                edge_limit,
+            .cached_load_partitioned(eph, false, |vis| {
+                With::new(
+                    find_edges_relations(instance_ids.to_vec(), vis),
+                    EdgesBetween {
+                        vis: vis.snapshot(),
+                        edge_limit,
+                    },
+                )
             })
             .await
             .map_err(|e| anyhow::anyhow!("Failed to find edges between instances: {}", e))?;
@@ -3322,19 +3324,19 @@ impl Index {
             .cached_load_partitioned(eph, false, |vis| {
                 use crate::schema_diesel::symbol_instances;
                 let contained_instance = super::mixins::CONTAINED_INSTANCE_ALIAS;
-                CteHasChildren {
-                    cte_body: build_has_children_cte_body(ids.clone(), vis),
-                    // Both ENDS bound: the container side by the CTE, the
-                    // contained side here.  That is the whole point — an
-                    // unbounded contained side is the 178,807-row fetch.
-                    outer: build_has_children_query_against_cte(vis)
+                let candidates = has_children_candidates(ids.clone(), vis);
+                // Both ENDS bound: the container side by the candidates, the
+                // contained side here.  That is the whole point — an
+                // unbounded contained side is the 178,807-row fetch.
+                let between =
+                    build_has_children_query(&InstanceSet::Of(candidates.name().clone()), vis)
                         .filter(
                             contained_instance
                                 .field(symbol_instances::dsl::id)
                                 .eq_any(ids.clone()),
                         )
-                        .filter(vis.guard()),
-                }
+                        .filter(vis.guard());
+                With::new(vec![candidates], between)
             })
             .await
             .map_err(|e| anyhow::anyhow!("Failed to find containment between instances: {}", e))?;
@@ -4529,7 +4531,7 @@ pub struct ContainmentEdge {
 /// Edge discovered between two selected instances via DB query.
 ///
 /// Derives both `QueryableByName` (for legacy raw `sql_query` callers)
-/// and `Queryable` (for the typed `CteFindEdgesBetween` wrapper that
+/// and `Queryable` (for the typed `EdgesBetween` query that
 /// loads positionally from a tuple `SqlType`).
 #[derive(diesel::QueryableByName, diesel::Queryable, Debug, Clone)]
 pub struct ImplicitEdge {

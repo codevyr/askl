@@ -1,33 +1,25 @@
-//! CTE-materialised variant of the `has_children` containment query.
+//! The bodies and outer queries of the reads that are written in steps (see
+//! [`super::relation`]): containment children and the edges between a set of
+//! instances.
 //!
-//! PG's planner picks a pathological nested-loop join order for the
-//! `has_children` query when its `id = ANY($source_ids)` filter is
+//! Why `has_children` has a step at all.  PG's planner picks a pathological
+//! nested-loop join order for it when its `id = ANY($source_ids)` filter is
 //! parameterised and the `eph` array is empty: it underestimates the
-//! candidate set's cardinality and drives the join from the wrong
-//! side, GIST-scanning the 27M-row `symbol_instances` table.
+//! candidate set's cardinality and drives the join from the wrong side,
+//! GIST-scanning the 27M-row `symbol_instances` table.  Materialising the
+//! source rows first ([`has_children_candidates`]) gives the planner an exact
+//! row count, so it picks a from-candidates-driven plan with index lookups.
+//! On the user's reference query, the worst-case `select_has_children` call
+//! drops from ~42 ms to ~20 ms in PG.
 //!
-//! The fix wraps the source-row filter in
-//! `WITH candidates AS MATERIALIZED (…)`.  Materialisation gives the
-//! planner an exact row count for the CTE, so it picks a
-//! from-candidates-driven plan with index lookups.  On the user's
-//! reference query, the worst-case `select_has_children` call drops
-//! from ~42 ms to ~20 ms in PG.
+//! The outer query stays a typed Diesel query either way, so results load
+//! into the natural tuple `(Symbol, SymbolInstance, Symbol, SymbolInstance,
+//! Object)` via the existing `Queryable` impls; only how its source rows are
+//! named differs, and that is an [`InstanceSet`].
 //!
-//! The pattern follows the `walk_ast`-delegates-to-typed-subqueries
-//! technique from
-//! <https://github.com/diesel-rs/diesel/discussions/4817#discussioncomment-14676297>:
-//! [`CteHasChildren`] emits only the CTE prelude as raw SQL and then
-//! walks two typed Diesel queries (the inner `cte_body` and the
-//! `outer` select).  No flat `QueryableByName` row struct; results
-//! still load into the natural tuple
-//! `(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)` via
-//! the existing `Queryable` impls.
-//!
-//! Used only when the caller's filter has no `compose_has_children()`
-//! expression (the common case).  When a filter is present, the
-//! caller falls back to [`build_has_children_query`]'s plain DSL form
-//! because the mixin filter SQL fragments reference unaliased table
-//! names that the DSL emits.
+//! The step is used only when the caller's filter has no
+//! `compose_has_children()` expression (the common case).  When a filter is
+//! present, the caller binds the ids directly.
 
 use diesel::pg::Pg;
 use diesel::prelude::*;
@@ -36,32 +28,25 @@ use diesel::query_builder::{
 };
 
 use super::mixins::{
-    EphVisibility, HasChildrenBoolExpr, HasChildrenQuery, CONTAINED_INSTANCE_ALIAS,
-    CONTAINED_SYMBOL_ALIAS, CONTAINED_TYPE_ALIAS,
+    EphVisibility, HasChildrenQuery, CONTAINED_INSTANCE_ALIAS, CONTAINED_SYMBOL_ALIAS,
+    CONTAINED_TYPE_ALIAS,
 };
+use super::relation::{InstanceSet, Relation};
 use crate::models_diesel::{Object, Symbol, SymbolInstance};
 
-/// Build the `has_children` query with `source_filter` as the
-/// predicate that selects which source `symbol_instances` rows
-/// participate in the containment join.  The rest of the joins,
-/// eph_visibility filters, and projection are fixed.
+/// The `has_children` query: what the `source` instances contain.
 ///
-/// Two callers parameterise this:
-///   * [`build_has_children_query`] — filter is
-///     `symbol_instances.id = ANY(source_ids)` (the plain form).
-///   * [`build_has_children_query_against_cte`] — filter is
-///     `symbol_instances.id IN (SELECT id FROM candidates)`,
-///     pairing with the `WITH candidates AS MATERIALIZED (…)` CTE
-///     emitted by [`CteHasChildren`].
+/// `source` says which `symbol_instances` rows take part in the containment
+/// join: ids bound directly, or the rows of [`has_children_candidates`]
+/// materialised in the same statement.  The joins, the eph-visibility
+/// filters and the projection are the same either way.
 ///
 /// Diesel accumulates `.filter(...)` calls into a single WHERE clause
-/// (ANDed together) regardless of their position relative to the
-/// joins, so applying `source_filter` after all the joins produces
-/// the same SQL as inlining it mid-construction in the original
-/// builder.
-fn build_has_children_inner(
+/// (ANDed together) regardless of their position relative to the joins, so
+/// where the source test is applied does not change the SQL's meaning.
+pub(super) fn build_has_children_query(
+    source: &InstanceSet,
     vis: &EphVisibility,
-    source_filter: HasChildrenBoolExpr,
 ) -> HasChildrenQuery<'static> {
     use crate::schema_diesel::*;
 
@@ -90,7 +75,7 @@ fn build_has_children_inner(
                 .field(symbol_types::dsl::id)
                 .eq(contained_symbol.field(symbols::dsl::symbol_type))),
         )
-        .filter(source_filter)
+        .filter(source.holds("symbol_instances.id"))
         // Descendants by DFS interval; see DirectOnlyMixin for why ranges
         // cannot answer this.
         .filter(diesel::dsl::sql::<diesel::sql_types::Bool>(
@@ -114,108 +99,47 @@ fn build_has_children_inner(
         .into_boxed::<Pg>()
 }
 
-/// Plain `has_children` query.  Used when a mixin filter on
-/// `contained_instances` rules out the CTE form.
-pub(super) fn build_has_children_query(
-    source_ids: Vec<i64>,
-    vis: &EphVisibility,
-) -> HasChildrenQuery<'static> {
+/// The source instances of a `has_children` read as a step of their own:
+/// the visible ones among `source_ids`, by id.  Typed Diesel so the binds
+/// (`source_ids`, `eph_ids`) are emitted via the normal DSL mechanism.
+pub(super) fn has_children_candidates(source_ids: Vec<i64>, vis: &EphVisibility) -> Relation {
     use crate::schema_diesel::symbol_instances;
-    let source_filter: HasChildrenBoolExpr = Box::new(symbol_instances::dsl::id.eq_any(source_ids));
-    build_has_children_inner(vis, source_filter)
+    Relation::new(
+        "candidates",
+        symbol_instances::table
+            .filter(symbol_instances::id.eq_any(source_ids))
+            // Subquery position: candidate-set membership, not a selected row.
+            .filter(vis.subquery_pred("symbol_instances.layer"))
+            .select(symbol_instances::id)
+            .into_boxed::<Pg>(),
+    )
 }
-
-/// Variant of [`build_has_children_query`] whose source-row filter is
-/// `symbol_instances.id IN (SELECT id FROM candidates)`, where
-/// `candidates` is a CTE supplied by an enclosing [`CteHasChildren`]
-/// wrapper.  Result shape and joins are identical to
-/// `build_has_children_query`; rows still deserialise as the natural
-/// tuple `(Symbol, SymbolInstance, Symbol, SymbolInstance, Object)`.
-pub(super) fn build_has_children_query_against_cte(
-    vis: &EphVisibility,
-) -> HasChildrenQuery<'static> {
-    let source_filter: HasChildrenBoolExpr = Box::new(diesel::dsl::sql::<diesel::sql_types::Bool>(
-        "symbol_instances.id IN (SELECT id FROM candidates)",
-    ));
-    build_has_children_inner(vis, source_filter)
-}
-
-/// Build the inner CTE body: the source-row filter, projected to just
-/// `id`.  Typed Diesel so the binds (`source_ids`, `eph_ids`) are
-/// emitted via the normal DSL mechanism.
-pub(super) fn build_has_children_cte_body(
-    source_ids: Vec<i64>,
-    vis: &EphVisibility,
-) -> BoxedSelectStatement<
-    'static,
-    diesel::sql_types::BigInt,
-    FromClause<crate::schema_diesel::symbol_instances::table>,
-    Pg,
-> {
-    use crate::schema_diesel::symbol_instances;
-    symbol_instances::table
-        .filter(symbol_instances::id.eq_any(source_ids))
-        // Subquery position: candidate-set membership, not a selected row.
-        .filter(vis.subquery_pred("symbol_instances.layer"))
-        .select(symbol_instances::id)
-        .into_boxed::<Pg>()
-}
-
-/// Custom Diesel query that wraps the typed `HasChildrenQuery` with
-/// `WITH candidates AS MATERIALIZED (…)`.  See the module-level docs
-/// for the why; see `walk_ast` for the structural how.
-pub(super) struct CteHasChildren<CteBody, Outer> {
-    pub cte_body: CteBody,
-    pub outer: Outer,
-}
-
-impl<CteBody, Outer> QueryId for CteHasChildren<CteBody, Outer> {
-    type QueryId = ();
-    const HAS_STATIC_QUERY_ID: bool = false;
-}
-
-impl<CteBody, Outer> Query for CteHasChildren<CteBody, Outer>
-where
-    Outer: Query,
-{
-    type SqlType = Outer::SqlType;
-}
-
-impl<CteBody, Outer> QueryFragment<Pg> for CteHasChildren<CteBody, Outer>
-where
-    CteBody: QueryFragment<Pg>,
-    Outer: QueryFragment<Pg>,
-{
-    fn walk_ast<'b>(&'b self, mut out: AstPass<'_, 'b, Pg>) -> diesel::QueryResult<()> {
-        out.push_sql("WITH candidates AS MATERIALIZED (");
-        self.cte_body.walk_ast(out.reborrow())?;
-        out.push_sql(") ");
-        self.outer.walk_ast(out.reborrow())?;
-        Ok(())
-    }
-}
-
-// `diesel_async` provides a blanket `impl<T, Conn> RunQueryDsl<Conn> for T`,
-// so no explicit `RunQueryDsl` impl is needed here.
 
 // ============================================================================
-// CteFindEdgesBetween — typed wrapper around `find_edges_between`'s CTE form
+// The edges between a set of instances (`find_edges_between`)
 // ============================================================================
 
 use diesel::sql_types::{BigInt, Int4range, Integer};
 
-/// Build the inner CTE body for `find_edges_between`: select the full
-/// candidate `symbol_instances` row set (id + symbol + object_id +
-/// offset_range + layer) for the given source IDs, with the
-/// ephemeral-visibility predicate applied.  All binds are typed
-/// Diesel.
-pub(super) fn build_find_edges_cte_body(
+/// The two steps of `find_edges_between`, in order: `candidates`, the full
+/// `symbol_instances` rows (id + symbol + object_id + offset_range + layer +
+/// DFS interval) of the given instances with the ephemeral-visibility
+/// predicate applied, and `targets`, the instances an edge may end on (see
+/// [`EdgeTargets`]).  The candidates' binds are typed Diesel.
+pub(super) fn find_edges_relations(source_ids: Vec<i64>, vis: &EphVisibility) -> Vec<Relation> {
+    vec![
+        Relation::new("candidates", find_edges_candidates(source_ids, vis)),
+        Relation::new("targets", EdgeTargets),
+    ]
+}
+
+fn find_edges_candidates(
     source_ids: Vec<i64>,
     vis: &EphVisibility,
-) -> diesel::query_builder::BoxedSelectStatement<
+) -> BoxedSelectStatement<
     'static,
     (BigInt, BigInt, Integer, Int4range, BigInt, BigInt, BigInt),
-    diesel::query_builder::FromClause<crate::schema_diesel::symbol_instances::table>,
+    FromClause<crate::schema_diesel::symbol_instances::table>,
     Pg,
 > {
     use crate::schema_diesel::symbol_instances;
@@ -241,7 +165,7 @@ pub(super) fn build_find_edges_cte_body(
         .into_boxed::<Pg>()
 }
 
-/// Result-row `SqlType` for `CteFindEdgesBetween`'s outer SELECT.
+/// Result-row `SqlType` for [`EdgesBetween`].
 /// Matches the column order in `ImplicitEdge`.
 pub(super) type FindEdgesRowSqlType = (
     BigInt,    // ref_id
@@ -255,21 +179,49 @@ pub(super) type FindEdgesRowSqlType = (
     BigInt,    // to_layer
 );
 
-/// Typed wrapper around `find_edges_between`'s CTE-form query.
+/// The instances an edge may end on: at most two per symbol of `candidates`.
 ///
-/// Same pattern as [`CteHasChildren`]: emits a `WITH … AS
-/// MATERIALIZED` prelude, walks the typed `cte_body` Diesel
-/// query for the candidate set, then emits the bespoke outer
-/// SELECT as raw SQL (no Diesel model matches its projection, so
-/// the outer body stays a string).  The outer SQL's reference to
-/// the eph-IDs array is bound via `push_bind_param` so all binds
-/// in the final query are typed.
+/// `to_inst` contributes only its id (as the edge's target instance) and its
+/// layer; `DISTINCT ON (from_inst.id, sr.id)` then throws away every row but
+/// the one with the smallest `to_inst.id`.  Joining ALL co-instances of the
+/// target symbol to discard all but one is quadratic in exactly the shape
+/// this codebase produces: a module symbol with 931 instances made this an
+/// 865,830-row self-join and 3.4M buffer hits to return 191 edges.
 ///
-/// Result loads as `Vec<ImplicitEdge>` via the positional
-/// `Queryable` derive on `ImplicitEdge`; the `SqlType` is
-/// [`FindEdgesRowSqlType`].
-pub(super) struct CteFindEdgesBetween<CteBody> {
-    pub cte_body: CteBody,
+/// Two rows per symbol are provably enough to pick that winner:
+///   * `from_inst.id != to_inst.id` can eliminate at most ONE row
+///     (`from_inst` is a single row), so the winner is the smallest id or the
+///     second smallest;
+///   * the eph branch's disjointness guard eliminates only ROOT to_insts, and
+///     root ids are positive while eph ids are negative -- so roots sort
+///     last, and if the two smallest are roots then every later row is a root
+///     as well and is eliminated with them.
+/// Either way the surviving minimum is within `rn <= 2`.
+struct EdgeTargets;
+
+impl QueryFragment<Pg> for EdgeTargets {
+    fn walk_ast<'b>(&'b self, mut out: AstPass<'_, 'b, Pg>) -> diesel::QueryResult<()> {
+        out.push_sql(
+            "SELECT symbol, id, layer FROM ( \
+                 SELECT symbol, id, layer, \
+                        row_number() OVER (PARTITION BY symbol ORDER BY id) AS rn \
+                 FROM candidates \
+             ) ranked WHERE rn <= 2",
+        );
+        Ok(())
+    }
+}
+
+/// The outer query of `find_edges_between`, over the relations of
+/// [`find_edges_relations`].
+///
+/// Raw SQL: no Diesel model matches its projection (DISTINCT ON + custom
+/// column aliases).  Its reference to the eph-IDs array is bound via
+/// `push_bind_param` so all binds in the final query are typed.
+///
+/// Result loads as `Vec<ImplicitEdge>` via the positional `Queryable` derive
+/// on `ImplicitEdge`; the `SqlType` is [`FindEdgesRowSqlType`].
+pub(super) struct EdgesBetween {
     /// Branch snapshot from the partition token (see `EphVisibility`):
     /// controls the outer `sr.layer` visibility and, for the eph
     /// branch, the disjointness guard over (sr, from_inst, to_inst).
@@ -282,50 +234,19 @@ pub(super) struct CteFindEdgesBetween<CteBody> {
     pub edge_limit: Option<i64>,
 }
 
-impl<CteBody> QueryId for CteFindEdgesBetween<CteBody> {
+impl QueryId for EdgesBetween {
     type QueryId = ();
     const HAS_STATIC_QUERY_ID: bool = false;
 }
 
-impl<CteBody> Query for CteFindEdgesBetween<CteBody> {
+impl Query for EdgesBetween {
     type SqlType = FindEdgesRowSqlType;
 }
 
-impl<CteBody> QueryFragment<Pg> for CteFindEdgesBetween<CteBody>
-where
-    CteBody: QueryFragment<Pg>,
-{
+impl QueryFragment<Pg> for EdgesBetween {
     fn walk_ast<'b>(&'b self, mut out: AstPass<'_, 'b, Pg>) -> diesel::QueryResult<()> {
         use super::mixins::VisibilitySpec;
         use diesel::sql_types::Array;
-        out.push_sql("WITH candidates AS MATERIALIZED (");
-        self.cte_body.walk_ast(out.reborrow())?;
-        // `to_inst` contributes only its id (as the edge's target instance)
-        // and its layer; `DISTINCT ON (from_inst.id, sr.id)` then throws away
-        // every row but the one with the smallest `to_inst.id`.  Joining ALL
-        // co-instances of the target symbol to discard all but one is
-        // quadratic in exactly the shape this codebase produces: a module
-        // symbol with 931 instances made this an 865,830-row self-join and
-        // 3.4M buffer hits to return 191 edges.
-        //
-        // Two rows per symbol are provably enough to pick that winner:
-        //   * `from_inst.id != to_inst.id` can eliminate at most ONE row
-        //     (`from_inst` is a single row), so the winner is the smallest id
-        //     or the second smallest;
-        //   * the eph branch's disjointness guard eliminates only ROOT
-        //     to_insts, and root ids are positive while eph ids are negative
-        //     -- so roots sort last, and if the two smallest are roots then
-        //     every later row is a root as well and is eliminated with them.
-        // Either way the surviving minimum is within `rn <= 2`.
-        out.push_sql(
-            "), targets AS MATERIALIZED ( \
-                 SELECT symbol, id, layer FROM ( \
-                     SELECT symbol, id, layer, \
-                            row_number() OVER (PARTITION BY symbol ORDER BY id) AS rn \
-                     FROM candidates \
-                 ) ranked WHERE rn <= 2 \
-             ) ",
-        );
         // E1: when a per-node edge cap is active, bracket the DISTINCT ON below
         // in an outer row_number() partition so each source node keeps at most
         // `edge_cap + 1` edges.  When disabled the query is unchanged.
@@ -394,111 +315,10 @@ where
 }
 
 // ============================================================================
-// ProbeCtes — MATERIALIZED role CTEs for `probe_instance_ids`
+// Probes
 // ============================================================================
-
-/// CTE names for probe roles, in declaration order.  Bounded so the outer
-/// query's membership filters can reference them as static SQL.
-/// Every probe role becomes one MATERIALIZED CTE -- containment AND
-/// reference roles alike, since both degrade the same way as IN-subqueries on
-/// a large bound id array (see `refs_role_cte_body`).  Eight slots because the
-/// REFS roles joined the pool and a statement can carry one role per
-/// relationship branch; the `ensure!` in `probe_instance_ids` is the backstop.
-pub(super) const PROBE_ROLE_CTE_NAMES: [&str; 8] = [
-    "probe_role_0",
-    "probe_role_1",
-    "probe_role_2",
-    "probe_role_3",
-    "probe_role_4",
-    "probe_role_5",
-    "probe_role_6",
-    "probe_role_7",
-];
-
-/// `WITH probe_role_0 AS MATERIALIZED (…), … <outer>` — the probe roles,
-/// containment and reference alike.  Same planner-hint rationale as [`CteHasChildren`]:
-/// as a plain IN-subquery the planner refuses to drive the probe side from
-/// the tiny role set (measured 1.8–10.6 s against a full 14.8M-row scan);
-/// materialised first, the outer query runs id-driven through the pkey
-/// (0.5–6.9 ms).  See perf/PROBE_BASELINE.md.
-///
-/// **Each role is bounded.**  A materialised role is computed in full before
-/// the outer `LIMIT` can stop anything, so a role with a huge fan-out (every
-/// container of every reference to `struct task_struct`: 980,880 rows, 16.5 s)
-/// made "too big" the most expensive answer a probe could give.  So a role
-/// reads at most `role_budget + 1` rows.  One that reads that many did not
-/// see everything, and the probe says so with [`PROBE_OVERFLOW`]: a row no
-/// instance can have, emitted when any role overflowed.  The caller turns it
-/// into `ProbeOutcome::Capped`, which is always a safe answer -- "I do not
-/// know this set" -- and the outer query is skipped for such a probe (see the
-/// budget guard `probe_instance_ids` adds to it).
-///
-/// The bound is on ROWS READ, not on distinct symbols, because rows are what
-/// cost: a role can hold a million rows naming two hundred symbols.  Which
-/// rows a `LIMIT` without an order returns is arbitrary, but whether there
-/// are more than the budget is not, so the outcome stays deterministic.
-pub(super) struct ProbeCtes<Outer> {
-    pub bodies: Vec<Box<dyn QueryFragment<Pg> + Send>>,
-    pub outer: Outer,
-    pub role_budget: i64,
-}
 
 /// The id a probe returns when one of its roles overflowed its budget.
 /// Persistent ids are positive and ephemeral ones negative, so no instance
 /// has it.
 pub(super) const PROBE_OVERFLOW: i64 = 0;
-
-/// `(SELECT count(*) FROM probe_role_<i>) <cmp> <budget>` -- the one place the
-/// overflow test is spelled, for the outer query's guard (`<=`) and the
-/// overflow row (`>`).
-pub(super) fn probe_role_budget_sql(role: usize, cmp: &str, role_budget: i64) -> String {
-    format!(
-        "(SELECT count(*) FROM {}) {cmp} {role_budget}",
-        PROBE_ROLE_CTE_NAMES[role]
-    )
-}
-
-impl<Outer> QueryId for ProbeCtes<Outer> {
-    type QueryId = ();
-    const HAS_STATIC_QUERY_ID: bool = false;
-}
-
-impl<Outer> Query for ProbeCtes<Outer>
-where
-    Outer: Query,
-{
-    type SqlType = Outer::SqlType;
-}
-
-impl<Outer> QueryFragment<Pg> for ProbeCtes<Outer>
-where
-    Outer: QueryFragment<Pg>,
-{
-    fn walk_ast<'b>(&'b self, mut out: AstPass<'_, 'b, Pg>) -> diesel::QueryResult<()> {
-        if !self.bodies.is_empty() {
-            out.push_sql("WITH ");
-            for (i, body) in self.bodies.iter().enumerate() {
-                if i > 0 {
-                    out.push_sql(", ");
-                }
-                out.push_sql(PROBE_ROLE_CTE_NAMES[i]);
-                out.push_sql(" AS MATERIALIZED (");
-                body.walk_ast(out.reborrow())?;
-                out.push_sql(&format!(" LIMIT {}) ", self.role_budget + 1));
-            }
-        }
-        out.push_sql("(");
-        self.outer.walk_ast(out.reborrow())?;
-        out.push_sql(")");
-        if !self.bodies.is_empty() {
-            let overflowed: Vec<String> = (0..self.bodies.len())
-                .map(|i| probe_role_budget_sql(i, ">", self.role_budget))
-                .collect();
-            out.push_sql(&format!(
-                " UNION ALL (SELECT {PROBE_OVERFLOW}::bigint WHERE {})",
-                overflowed.join(" OR ")
-            ));
-        }
-        Ok(())
-    }
-}

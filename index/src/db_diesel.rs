@@ -7,6 +7,7 @@ mod cte;
 mod index_impl;
 pub(crate) mod mixins;
 mod references;
+mod relation;
 mod selection;
 mod sql_cache;
 pub mod stats;
