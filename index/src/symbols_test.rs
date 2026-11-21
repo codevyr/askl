@@ -820,6 +820,179 @@ async fn a_family_holds_a_reference_once() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// When the lists cannot prove an absence, the engine asks which rows relate.
+///
+/// The four questions [`Index::which_relate`] answers, each against what the
+/// side reads say when nothing cuts them: the parents that refer to a child,
+/// the parents that hold one, the children referred to, the children held.
+#[tokio::test(flavor = "current_thread")]
+async fn asking_which_rows_relate_agrees_with_the_whole_lists() -> anyhow::Result<()> {
+    use crate::db_diesel::{AskSide, EphContext, FamilyDemands, Index, SymbolInstanceIdMixin};
+    use crate::symbols::SymbolInstanceId;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+
+    let mut index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_MANY_OCCURRENCES_FEW_PAIRS)
+        .await?;
+    let mut eph = EphContext::rooted(index.load_root_layers().await?);
+    eph.set_read_cap(0);
+
+    // The file and four functions, over every variable (one of them folded,
+    // one nothing refers to).
+    let parents: Vec<i64> = vec![510, 10, 20, 30, 40];
+    let children: Vec<i64> = vec![110, 120, 130, 140, 150];
+
+    // The oracle: the parents' two children families, read whole and within
+    // the children.
+    let ids = |v: &[i64]| -> Vec<SymbolInstanceId> {
+        v.iter().copied().map(SymbolInstanceId::new).collect()
+    };
+    let whole = index
+        .find_symbol(
+            &CompositeFilter::leaf(SymbolInstanceIdMixin::new(&ids(&parents))),
+            ScopeContext::Unscoped,
+            ScopeContext::Scope {
+                ids: children.clone(),
+                filter: None,
+                whole_side: true,
+            },
+            FamilyDemands::default(),
+            &eph,
+        )
+        .await?
+        .into_inner();
+    let sorted = |mut v: Vec<i64>| {
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let referring = sorted(whole.children.iter().map(|c| c.from_instance.id).collect());
+    let referred_symbols: std::collections::HashSet<i64> =
+        whole.children.iter().map(|c| c.symbol.id).collect();
+    let holding = sorted(
+        whole
+            .has_children
+            .iter()
+            .map(|h| h.parent_instance.id)
+            .collect(),
+    );
+    let held = sorted(
+        whole
+            .has_children
+            .iter()
+            .map(|h| h.child_instance.id)
+            .collect(),
+    );
+    assert_eq!(referring, vec![10, 20, 30, 40, 510], "premise: all refer");
+    assert_eq!(holding, vec![510], "premise: only the file holds");
+
+    let ask = |want: AskSide, refs: bool, has: bool| {
+        let (index, eph, parents, children) = (&index, &eph, &parents, &children);
+        async move {
+            index
+                .which_relate(parents, children, want, refs, has, eph)
+                .await
+        }
+    };
+
+    // a: the parents that refer to a child.
+    let a = ask(AskSide::Parents, true, false).await?;
+    assert!(a.whole);
+    assert_eq!(a.ids, referring);
+    // b: the parents that hold one.
+    let b = ask(AskSide::Parents, false, true).await?;
+    assert!(b.whole);
+    assert_eq!(b.ids, holding);
+    // c: the children a parent refers to -- every instance of a symbol
+    // referred to, the folded one included: what a listing leaves out is
+    // decided by the rows it is asked about, not by the ask.
+    let c = ask(AskSide::Children, true, false).await?;
+    assert!(c.whole);
+    assert_eq!(c.ids, vec![110, 120, 140, 150], "nothing refers to spare");
+    let expected: Vec<i64> = sorted(
+        whole
+            .children
+            .iter()
+            .filter(|c| referred_symbols.contains(&c.symbol.id))
+            .map(|c| c.symbol_instance.id)
+            .collect(),
+    );
+    assert_eq!(c.ids, expected);
+    // d: the children a parent holds.
+    let d = ask(AskSide::Children, false, true).await?;
+    assert!(d.whole);
+    assert_eq!(d.ids, held);
+
+    // Only the rows asked about count: `quiet` refers to `knob` and `only_q`,
+    // and to neither `dial` nor `spare`.
+    let narrow = index
+        .which_relate(&[10, 20], &[120, 130], AskSide::Parents, true, true, &eph)
+        .await?;
+    assert_eq!(narrow.ids, vec![10], "flood refers to dial; quiet does not");
+    assert!(narrow.whole);
+
+    Ok(())
+}
+
+/// An ask reads the references on one side of its question, and no more than
+/// its budget of them.  When neither side fits, it does not know, and says
+/// so; what it did find is still true.
+#[tokio::test(flavor = "current_thread")]
+async fn an_ask_that_runs_out_of_references_does_not_know() -> anyhow::Result<()> {
+    use crate::db_diesel::{AskSide, EphContext, Index, ASK_REFERENCES_PER_CAP};
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+
+    let mut index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_MANY_OCCURRENCES_FEW_PAIRS)
+        .await?;
+    let mut eph = EphContext::rooted(index.load_root_layers().await?);
+
+    // A cap of one: the ask may read ASK_REFERENCES_PER_CAP references.
+    eph.set_read_cap(1);
+    assert!(ASK_REFERENCES_PER_CAP < 250, "premise: flood alone is over");
+
+    // `brook` (1,700 references, none to knob) against `knob` (1,951
+    // references to it): neither side fits.
+    let unknown = index
+        .which_relate(&[40], &[110], AskSide::Parents, true, false, &eph)
+        .await?;
+    assert!(!unknown.whole, "neither side could be read");
+    assert!(unknown.ids.is_empty());
+
+    // `quiet` makes two references: read from its side, the answer is whole
+    // although the references to `knob` are not.
+    let from_parent = index
+        .which_relate(&[20], &[110], AskSide::Parents, true, false, &eph)
+        .await?;
+    assert!(from_parent.whole);
+    assert_eq!(from_parent.ids, vec![20]);
+
+    // `only_q` has one reference to it: read from its side, whole although
+    // `brook` is not.
+    let from_child = index
+        .which_relate(&[40], &[140], AskSide::Parents, true, false, &eph)
+        .await?;
+    assert!(from_child.whole);
+    assert!(from_child.ids.is_empty(), "brook does not refer to only_q");
+
+    // Containment needs no reading of references and is always whole.
+    let held = index
+        .which_relate(&[510], &[110, 130], AskSide::Children, false, true, &eph)
+        .await?;
+    assert!(held.whole);
+    assert_eq!(held.ids, vec![110, 130]);
+
+    Ok(())
+}
+
 /// What a statement derives from its parents is INSTANCES, and its limit
 /// counts them.
 ///

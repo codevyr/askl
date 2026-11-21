@@ -8,12 +8,12 @@ use crate::span::Span;
 use crate::statement::Statement;
 use anyhow::Result;
 use async_trait::async_trait;
+use index::db_diesel::{AskSide, FamilyDemands, FamilyRead, Related};
 use index::db_diesel::{
     CompositeFilter, DirectOnlyMixin, EphContext, EphScopedFut, EphTransaction, FoldedOnlyMixin,
     Index, OuterParentFilterMixin, RootLayer, RootShardRef, ScopeContext, Selection,
     SymbolInstanceIdMixin, TraversalMode,
 };
-use index::db_diesel::{FamilyDemands, FamilyRead};
 
 /// Root-shard populate callback used by [`LayerSpec`].  Called by the
 /// statement-execution layer inside [`Index::with_eph_layer`] — once PER
@@ -762,7 +762,7 @@ impl SelectorState {
         role: &DependencyRole,
         rel_type: RelationshipType,
     ) -> bool {
-        self.narrow(dependency, role, rel_type, false).changed
+        self.narrow(dependency, role, rel_type, false, None).changed
     }
 
     /// [`Self::constrain_selection`], saying "incomplete" when the statement
@@ -776,7 +776,8 @@ impl SelectorState {
         span: Span,
         for_echo: bool,
     ) -> (bool, Vec<Diagnostic>) {
-        let Narrowed { changed, newly_cut } = self.narrow(dependency, role, rel_type, for_echo);
+        let Narrowed { changed, newly_cut } =
+            self.narrow(dependency, role, rel_type, for_echo, None);
         let warnings = if newly_cut {
             vec![Diagnostic::incomplete(span)]
         } else {
@@ -817,6 +818,7 @@ impl SelectorState {
         role: &DependencyRole,
         rel_type: RelationshipType,
         for_echo: bool,
+        asked: Option<&Related>,
     ) -> Narrowed {
         let unchanged = Narrowed {
             changed: false,
@@ -831,23 +833,20 @@ impl SelectorState {
 
         let len_before = own.nodes.len();
         let was_cut = own.capped;
-        let proven = absence_is_proven(own, dependency, role, rel_type);
-
-        match role {
-            DependencyRole::Parent => {
-                self.constrain_by_child(dependency, rel_type);
-            }
-            DependencyRole::Child => {
-                self.constrain_by_parent(dependency, rel_type);
-            }
-            DependencyRole::User => {
-                self.constrain_by_owner(dependency);
-            }
-            // PreSeed* edges carry no constraint data — pure
-            // ordering (with optional label-resolution as a
-            // side-effect at `compute_roots` time, not here).
-            DependencyRole::PreSeedSibling | DependencyRole::PreSeedLabel(_) => {}
+        // The lists prove the absence, or the database was asked and knew
+        // (`Self::unproven` asks about exactly the kinds the lists leave open).
+        let proven = absence_is_proven(own, dependency, role, rel_type)
+            || asked.is_some_and(|asked| asked.whole);
+        let Some(mut evidenced) = evidenced(own, dependency, role, rel_type) else {
+            return unchanged;
+        };
+        // What an ask names is a true row whether or not it knew them all.
+        if let Some(asked) = asked {
+            evidenced.extend(asked.ids.iter().copied());
         }
+        self.selection_mut()
+            .nodes
+            .retain(|s| evidenced.contains(&s.symbol_instance.id));
 
         let changed = self.selection.as_ref().unwrap().nodes.len() != len_before;
         // Rows went for want of evidence that no read ran far enough to rule
@@ -860,120 +859,42 @@ impl SelectorState {
         Narrowed { changed, newly_cut }
     }
 
-    /// Narrow a child by its parent.
+    /// What narrowing by `dependency` would drop without proof: the rows no
+    /// list ties to it, and the kinds of relation whose lists were not read
+    /// to their end.  `None` when there is nothing to ask: nothing would be
+    /// dropped, the lists settle it, or asking cannot help (a cut neighbour
+    /// narrows nobody; a statement that is already a subset stays one).
     ///
-    /// THE SOURCE OF A REFERENCE IS THE INSTANCE THAT ENCLOSES IT.  A
-    /// reference is written in one place, so it is evidence for the instance
-    /// around that place and for no other instance of the same symbol, and
-    /// only while that instance is still one of the parent's rows.  The
-    /// TARGET stays a symbol: a reference names a symbol, not one of its
-    /// instances, so every instance of what is referred to is kept.
-    ///
-    /// Kept per symbol, "some `main` calls it" stood for every `main`.  C has
-    /// one symbol per name, so `file("…/ucx_profiling.c") { func("main")
-    /// { "print_version" } }` returned `print_version` on the strength of
-    /// another program's `main`, with no edge to show for it.
-    fn constrain_by_parent(&mut self, parent: &Selection, rel_type: RelationshipType) {
-        let check_refs = rel_type.contains(RelationshipType::REFS);
-        let check_has = rel_type.contains(RelationshipType::HAS);
-        let parent_instance_ids: std::collections::HashSet<_> =
-            parent.nodes.iter().map(|n| n.symbol_instance.id).collect();
-        let selection = self.selection_mut();
-        // A relationship is accepted on evidence from EITHER side's edge
-        // lists.  The parent's children/has_children are computed when the
-        // parent's statement runs — BEFORE a layer-creating child (e.g.
-        // `file("x") { search("y") }`) materialises its ephemeral rows — so
-        // they cannot name those rows.  This selection's own
-        // parents/has_parents were computed with the layer visible and do.
-        // The union is safe: both sides express the same predicate, one may
-        // just be missing edges to rows that did not exist yet.
-        let own_ref_evidence: std::collections::HashSet<i64> = if check_refs {
-            selection
-                .parents
-                .iter()
-                .filter(|r| parent_instance_ids.contains(&r.from_instance.id))
-                .map(|r| r.to_symbol.id)
-                .collect()
-        } else {
-            Default::default()
-        };
-        let own_has_evidence: std::collections::HashSet<i64> = if check_has {
-            selection
-                .has_parents
-                .iter()
-                .filter(|r| parent_instance_ids.contains(&r.parent_instance.id))
-                .map(|r| r.child_instance.id)
-                .collect()
-        } else {
-            Default::default()
-        };
-        selection.nodes.retain(|s| {
-            (check_refs
-                && (parent.children.iter().any(|r| {
-                    r.symbol.id == s.symbol.id && parent_instance_ids.contains(&r.from_instance.id)
-                }) || own_ref_evidence.contains(&s.symbol.id)))
-                || (check_has
-                    && (parent.has_children.iter().any(|r| {
-                        r.child_instance.id == s.symbol_instance.id
-                            && parent_instance_ids.contains(&r.parent_instance.id)
-                    }) || own_has_evidence.contains(&s.symbol_instance.id)))
-        });
-    }
-
-    /// Narrow a parent by its child: a parent row is kept when ITS instance
-    /// encloses a reference to one of the child's symbols (see
-    /// `constrain_by_parent` for the law), or holds one of its instances.
-    fn constrain_by_child(&mut self, child: &Selection, rel_type: RelationshipType) {
-        let check_refs = rel_type.contains(RelationshipType::REFS);
-        let check_has = rel_type.contains(RelationshipType::HAS);
-        let child_symbol_ids: std::collections::HashSet<_> = if check_refs {
-            child.nodes.iter().map(|n| n.symbol.id).collect()
-        } else {
-            Default::default()
-        };
-        let child_instance_ids: std::collections::HashSet<_> = if check_has {
-            child.nodes.iter().map(|n| n.symbol_instance.id).collect()
-        } else {
-            Default::default()
-        };
-        let selection = self.selection_mut();
-        // Same evidence-union as `constrain_by_parent`, mirrored: a
-        // relationship is accepted from EITHER side's edge lists.  With
-        // two-phase execution both sides are computed under the same
-        // tree-complete visibility, so this is uniformity (one side may have
-        // deferred its neighbourhood query), not a freshness patch.
-        let own_ref_evidence: std::collections::HashSet<i64> = if check_refs {
-            selection
-                .children
-                .iter()
-                .filter(|r| child_symbol_ids.contains(&r.symbol.id))
-                .map(|r| r.from_instance.id)
-                .collect()
-        } else {
-            Default::default()
-        };
-        let own_has_evidence: std::collections::HashSet<i64> = if check_has {
-            selection
-                .has_children
-                .iter()
-                .filter(|r| child_instance_ids.contains(&r.child_instance.id))
-                .map(|r| r.parent_instance.id)
-                .collect()
-        } else {
-            Default::default()
-        };
-        selection.nodes.retain(|s| {
-            (check_refs
-                && (child.parents.iter().any(|r| {
-                    r.from_instance.id == s.symbol_instance.id
-                        && child_symbol_ids.contains(&r.to_symbol.id)
-                }) || own_ref_evidence.contains(&s.symbol_instance.id)))
-                || (check_has
-                    && (child.has_parents.iter().any(|r| {
-                        r.parent_instance.id == s.symbol_instance.id
-                            && child_instance_ids.contains(&r.child_instance.id)
-                    }) || own_has_evidence.contains(&s.symbol_instance.id)))
-        });
+    /// WHEN THE LISTS CANNOT PROVE AN ABSENCE, THE ENGINE ASKS WHICH ROWS
+    /// RELATE.  The caller puts the question to the index
+    /// ([`ask_which_relate`]) and hands the answer to the narrowing.
+    pub(crate) fn unproven(
+        &self,
+        dependency: &Selection,
+        role: &DependencyRole,
+        rel_type: RelationshipType,
+    ) -> Option<Unproven> {
+        let own = self.selection.as_deref()?;
+        if dependency.capped || own.capped {
+            return None;
+        }
+        let (refs_proven, has_proven) = absence_by_kind(own, dependency, role)?;
+        let refs = rel_type.contains(RelationshipType::REFS) && !refs_proven;
+        let has = rel_type.contains(RelationshipType::HAS) && !has_proven;
+        if !refs && !has {
+            return None;
+        }
+        let evidenced = evidenced(own, dependency, role, rel_type)?;
+        let lacking: Vec<i64> = own
+            .nodes
+            .iter()
+            .map(|n| n.symbol_instance.id)
+            .filter(|id| !evidenced.contains(id))
+            .collect();
+        if lacking.is_empty() {
+            return None;
+        }
+        Some(Unproven { refs, has, lacking })
     }
 
     /// Constrain selection and produce a warning if the result is empty.
@@ -997,11 +918,13 @@ impl SelectorState {
         neighbour: &Span,
         conjoined: bool,
         for_echo: bool,
+        asked: Option<&Related>,
     ) -> (bool, bool, Vec<Diagnostic>) {
         if self.selection.is_none() {
             return (false, false, vec![]);
         }
-        let Narrowed { changed, newly_cut } = self.narrow(dependency, role, rel_type, for_echo);
+        let Narrowed { changed, newly_cut } =
+            self.narrow(dependency, role, rel_type, for_echo, asked);
         let mut warnings = vec![];
         if newly_cut {
             warnings.push(Diagnostic::incomplete(span.clone()));
@@ -1026,16 +949,200 @@ impl SelectorState {
         }
         (true, changed, warnings)
     }
+}
 
-    fn constrain_by_owner(&mut self, owner: &Selection) {
-        let selection = self.selection_mut();
-        selection.nodes.retain(|u| {
-            owner
+/// The rows of `own` that some list ties to `dependency`, by instance id.
+/// `None` for the roles that carry no constraint.
+fn evidenced(
+    own: &Selection,
+    dependency: &Selection,
+    role: &DependencyRole,
+    rel_type: RelationshipType,
+) -> Option<std::collections::HashSet<i64>> {
+    match role {
+        DependencyRole::Parent => Some(evidenced_by_child(own, dependency, rel_type)),
+        DependencyRole::Child => Some(evidenced_by_parent(own, dependency, rel_type)),
+        // Membership in the owner's rows.
+        DependencyRole::User => Some(
+            dependency
                 .nodes
                 .iter()
-                .any(|o| o.symbol_instance.id == u.symbol_instance.id)
-        });
+                .map(|o| o.symbol_instance.id)
+                .collect(),
+        ),
+        // PreSeed* edges carry no constraint data — pure ordering (with
+        // optional label-resolution as a side-effect at `compute_roots` time,
+        // not here).
+        DependencyRole::PreSeedSibling | DependencyRole::PreSeedLabel(_) => None,
     }
+}
+
+/// The rows of a child that its parent's rows refer to or hold.
+///
+/// THE SOURCE OF A REFERENCE IS THE INSTANCE THAT ENCLOSES IT.  A reference
+/// is written in one place, so it is evidence for the instance around that
+/// place and for no other instance of the same symbol, and only while that
+/// instance is still one of the parent's rows.  The TARGET stays a symbol: a
+/// reference names a symbol, not one of its instances, so every instance of
+/// what is referred to is kept.
+///
+/// Kept per symbol, "some `main` calls it" stood for every `main`.  C has one
+/// symbol per name, so `file("…/ucx_profiling.c") { func("main")
+/// { "print_version" } }` returned `print_version` on the strength of another
+/// program's `main`, with no edge to show for it.
+fn evidenced_by_parent(
+    selection: &Selection,
+    parent: &Selection,
+    rel_type: RelationshipType,
+) -> std::collections::HashSet<i64> {
+    let check_refs = rel_type.contains(RelationshipType::REFS);
+    let check_has = rel_type.contains(RelationshipType::HAS);
+    let parent_instance_ids: std::collections::HashSet<_> =
+        parent.nodes.iter().map(|n| n.symbol_instance.id).collect();
+    // A relationship is accepted on evidence from EITHER side's edge lists.
+    // The parent's children/has_children are computed when the parent's
+    // statement runs — BEFORE a layer-creating child (e.g. `file("x")
+    // { search("y") }`) materialises its ephemeral rows — so they cannot name
+    // those rows.  This selection's own parents/has_parents were computed
+    // with the layer visible and do.  The union is safe: both sides express
+    // the same predicate, one may just be missing edges to rows that did not
+    // exist yet.
+    let mut ref_evidence: std::collections::HashSet<i64> = Default::default();
+    let mut has_evidence: std::collections::HashSet<i64> = Default::default();
+    if check_refs {
+        ref_evidence.extend(
+            selection
+                .parents
+                .iter()
+                .filter(|r| parent_instance_ids.contains(&r.from_instance.id))
+                .map(|r| r.to_symbol.id),
+        );
+        ref_evidence.extend(
+            parent
+                .children
+                .iter()
+                .filter(|r| parent_instance_ids.contains(&r.from_instance.id))
+                .map(|r| r.symbol.id),
+        );
+    }
+    if check_has {
+        has_evidence.extend(
+            selection
+                .has_parents
+                .iter()
+                .filter(|r| parent_instance_ids.contains(&r.parent_instance.id))
+                .map(|r| r.child_instance.id),
+        );
+        has_evidence.extend(
+            parent
+                .has_children
+                .iter()
+                .filter(|r| parent_instance_ids.contains(&r.parent_instance.id))
+                .map(|r| r.child_instance.id),
+        );
+    }
+    selection
+        .nodes
+        .iter()
+        .filter(|s| {
+            ref_evidence.contains(&s.symbol.id) || has_evidence.contains(&s.symbol_instance.id)
+        })
+        .map(|s| s.symbol_instance.id)
+        .collect()
+}
+
+/// The rows of a parent that refer to, or hold, one of its child's rows: a
+/// parent row counts when ITS instance encloses a reference to one of the
+/// child's symbols (see `evidenced_by_parent` for the law), or holds one of
+/// its instances.
+fn evidenced_by_child(
+    selection: &Selection,
+    child: &Selection,
+    rel_type: RelationshipType,
+) -> std::collections::HashSet<i64> {
+    let check_refs = rel_type.contains(RelationshipType::REFS);
+    let check_has = rel_type.contains(RelationshipType::HAS);
+    let child_symbol_ids: std::collections::HashSet<_> =
+        child.nodes.iter().map(|n| n.symbol.id).collect();
+    let child_instance_ids: std::collections::HashSet<_> =
+        child.nodes.iter().map(|n| n.symbol_instance.id).collect();
+    // Same evidence-union as `evidenced_by_parent`, mirrored: a relationship
+    // is accepted from EITHER side's edge lists.  With two-phase execution
+    // both sides are computed under the same tree-complete visibility, so
+    // this is uniformity (one side may have deferred its neighbourhood
+    // query), not a freshness patch.
+    let mut evidence: std::collections::HashSet<i64> = Default::default();
+    if check_refs {
+        evidence.extend(
+            selection
+                .children
+                .iter()
+                .filter(|r| child_symbol_ids.contains(&r.symbol.id))
+                .map(|r| r.from_instance.id),
+        );
+        evidence.extend(
+            child
+                .parents
+                .iter()
+                .filter(|r| child_symbol_ids.contains(&r.to_symbol.id))
+                .map(|r| r.from_instance.id),
+        );
+    }
+    if check_has {
+        evidence.extend(
+            selection
+                .has_children
+                .iter()
+                .filter(|r| child_instance_ids.contains(&r.child_instance.id))
+                .map(|r| r.parent_instance.id),
+        );
+        evidence.extend(
+            child
+                .has_parents
+                .iter()
+                .filter(|r| child_instance_ids.contains(&r.child_instance.id))
+                .map(|r| r.parent_instance.id),
+        );
+    }
+    selection
+        .nodes
+        .iter()
+        .map(|s| s.symbol_instance.id)
+        .filter(|id| evidence.contains(id))
+        .collect()
+}
+
+/// What the lists between two statements leave open; see
+/// [`SelectorState::unproven`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Unproven {
+    /// The reference lists were not read to their end.
+    pub refs: bool,
+    /// The containment lists were not.
+    pub has: bool,
+    /// The rows no list ties to the neighbour.
+    pub lacking: Vec<i64>,
+}
+
+/// Put what the lists leave open to the index: which of the rows that lack
+/// evidence relate to the neighbour's rows.
+pub(crate) async fn ask_which_relate(
+    index: &Index,
+    unproven: &Unproven,
+    dependency: &Selection,
+    role: &DependencyRole,
+    eph: &EphContext,
+) -> Result<Related> {
+    let neighbour = dependency.get_instance_ids();
+    let (parents, children, want) = match role {
+        // We are the parent: which of our rows refer to, or hold, a row of
+        // the child.
+        DependencyRole::Parent => (&unproven.lacking, &neighbour, AskSide::Parents),
+        _ => (&neighbour, &unproven.lacking, AskSide::Children),
+    };
+    index
+        .which_relate(parents, children, want, unproven.refs, unproven.has, eph)
+        .await
 }
 
 /// What [`SelectorState::narrow`] did.
@@ -1068,29 +1175,42 @@ pub(crate) fn absence_is_proven(
     role: &DependencyRole,
     rel_type: RelationshipType,
 ) -> bool {
+    let Some((refs, has)) = absence_by_kind(own, dependency, role) else {
+        // Membership in the owner's rows: no family is consulted.
+        return true;
+    };
+    (!rel_type.contains(RelationshipType::REFS) || refs)
+        && (!rel_type.contains(RelationshipType::HAS) || has)
+}
+
+/// [`absence_is_proven`] kind by kind: whether silence about a reference, and
+/// about containment, proves there is none.  `None` for the roles that
+/// consult no family.
+fn absence_by_kind(
+    own: &Selection,
+    dependency: &Selection,
+    role: &DependencyRole,
+) -> Option<(bool, bool)> {
     let own_ids = own.get_instance_ids();
     let dependency_ids = dependency.get_instance_ids();
     let either = |ours: &FamilyRead, theirs: &FamilyRead| {
         ours.proves_absence_for(&dependency_ids) || theirs.proves_absence_for(&own_ids)
     };
-    let (refs, has) = match role {
+    match role {
         // We are the parent: our children families, the child's parents ones.
-        DependencyRole::Parent => (
+        DependencyRole::Parent => Some((
             either(&own.families.children, &dependency.families.parents),
             either(&own.families.has_children, &dependency.families.has_parents),
-        ),
+        )),
         // We are the child.
-        DependencyRole::Child => (
+        DependencyRole::Child => Some((
             either(&own.families.parents, &dependency.families.children),
             either(&own.families.has_parents, &dependency.families.has_children),
-        ),
-        // Membership in the owner's rows: no family is consulted.
+        )),
         DependencyRole::User | DependencyRole::PreSeedSibling | DependencyRole::PreSeedLabel(_) => {
-            return true;
+            None
         }
-    };
-    (!rel_type.contains(RelationshipType::REFS) || refs)
-        && (!rel_type.contains(RelationshipType::HAS) || has)
+    }
 }
 
 pub type SelectorId = usize;
@@ -1193,6 +1313,8 @@ pub trait Selector: std::fmt::Debug + Verb {
     /// Per-selector constraint logic for `accept_notification`.
     /// Returns whether to skip, constrain, or derive for this notification.
     /// `own` is the receiving command's text, which names it in a warning.
+    /// `asked` is what the index said about the rows the lists leave open
+    /// (`SelectorState::unproven`), when the caller had to ask.
     /// Override to customize constraint behavior (e.g. UserVerb's forced/circular logic).
     fn try_constrain_notification(
         &self,
@@ -1201,6 +1323,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         notif_ctx: &NotificationContext,
         notifier: &Statement,
         own: &Span,
+        asked: Option<&Related>,
     ) -> Result<ConstraintAction, pest::error::Error<Rule>> {
         // A weak notifier may seed an empty selector below, never narrow a
         // resolved one — see [`weak_notifier_blocks`].
@@ -1221,6 +1344,7 @@ pub trait Selector: std::fmt::Debug + Verb {
                 neighbour,
                 false,
                 notif_ctx.receiver_is_echo,
+                asked,
             )
         });
 
