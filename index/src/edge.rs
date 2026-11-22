@@ -35,6 +35,10 @@ pub struct RefTest {
     /// words `calls`, `writes`, `takes`.  Empty when `any` is set, which
     /// admits them all already.
     roles: Roles,
+    /// An ordinary reference passes when it states NO role: what a role word
+    /// passes over.  No word of the language asks for it; an answer reads it
+    /// to say what a role word could not decide.  False when `any` is set.
+    unstated: bool,
     /// The relation rows that pass: the words `declares`, `holds`.
     relations: Relations,
 }
@@ -102,6 +106,7 @@ impl RefTest {
     pub const EVERY: RefTest = RefTest {
         any: true,
         roles: Roles::NONE,
+        unstated: false,
         relations: Relations::ALL,
     };
 
@@ -109,6 +114,21 @@ impl RefTest {
     pub const ORDINARY: RefTest = RefTest {
         any: true,
         roles: Roles::NONE,
+        unstated: false,
+        relations: Relations::NONE,
+    };
+
+    /// The ordinary references that state no role: a token that names the
+    /// target and says nothing about what it does to it.
+    ///
+    /// AN UNSTATED ROLE IS UNKNOWN, NEVER "NO".  No role word admits such a
+    /// reference, and none may read its silence as a fact, so these are the
+    /// rows a role word passed over.  Together with the references that
+    /// state a role they are every ordinary reference.
+    pub const UNSTATED: RefTest = RefTest {
+        any: false,
+        roles: Roles::NONE,
+        unstated: true,
         relations: Relations::NONE,
     };
 
@@ -118,6 +138,7 @@ impl RefTest {
         (roles != Roles::NONE).then_some(RefTest {
             any: false,
             roles,
+            unstated: false,
             relations: Relations::NONE,
         })
     }
@@ -127,21 +148,23 @@ impl RefTest {
         RefTest {
             any: false,
             roles: Roles::NONE,
+            unstated: false,
             relations: Relations::of(relation),
         }
     }
 
     /// Either: the union of what the two admit.  "Every ordinary reference"
-    /// absorbs "the ordinary references that state a role".
+    /// absorbs "the ordinary references that state a role" and "those that
+    /// state none", and is what those two are together once every role is
+    /// asked for.
     pub fn or(self, other: RefTest) -> RefTest {
-        let any = self.any || other.any;
+        let roles = self.roles | other.roles;
+        let unstated = self.unstated || other.unstated;
+        let any = self.any || other.any || (unstated && roles.contains(Roles::ALL));
         RefTest {
             any,
-            roles: if any {
-                Roles::NONE
-            } else {
-                self.roles | other.roles
-            },
+            roles: if any { Roles::NONE } else { roles },
+            unstated: unstated && !any,
             relations: self.relations.or(other.relations),
         }
     }
@@ -165,7 +188,11 @@ impl RefTest {
     pub fn admits(self, roles: i16, relation: i16) -> bool {
         match Relation::from_stored(relation) {
             Some(relation) => self.relations.contains(relation),
-            None => self.any || roles & self.roles.bits() != 0,
+            None => {
+                self.any
+                    || roles & self.roles.bits() != 0
+                    || (self.unstated && roles & Roles::ALL.bits() == 0)
+            }
         }
     }
 
@@ -178,6 +205,12 @@ impl RefTest {
     /// every ordinary reference passes.
     pub fn roles(self) -> Roles {
         self.roles
+    }
+
+    /// The ordinary references that state no role pass, when not every
+    /// ordinary reference does.
+    pub fn unstated(self) -> bool {
+        self.unstated
     }
 
     /// The relations whose rows pass.
@@ -357,6 +390,42 @@ mod tests {
             .or(RefTest::relation(Relation::Holds));
         assert_eq!(all, RefTest::EVERY);
         assert!(all.is_every(), "so a bare scope adds no condition");
+    }
+
+    #[test]
+    fn an_unstated_role_is_unknown_and_no_role_word_admits_it() {
+        // The rows a role word passes over: ordinary, and stating nothing
+        // this engine knows.
+        assert!(RefTest::UNSTATED.admits(0, 0));
+        assert!(RefTest::UNSTATED.admits(64, 0), "a role nobody can ask for");
+        assert!(!RefTest::UNSTATED.admits(CALL, 0));
+        assert!(!RefTest::UNSTATED.admits(WRITE | TAKE, 0));
+        assert!(
+            !RefTest::UNSTATED.admits(0, HOLDS),
+            "a relation is no token"
+        );
+        // No role word reads the silence as a fact, either way.
+        for word in [Roles::CALL, Roles::WRITE, Roles::TAKE] {
+            assert!(!RefTest::stating(word).unwrap().admits(0, 0));
+        }
+        assert!(RefTest::UNSTATED.within(RefTest::ORDINARY));
+        assert!(!RefTest::UNSTATED.within(calls()));
+        assert!(!calls().within(RefTest::UNSTATED));
+    }
+
+    #[test]
+    fn stated_and_unstated_together_are_every_ordinary_reference() {
+        let stated = RefTest::stating(Roles::ALL).unwrap();
+        assert_eq!(stated.or(RefTest::UNSTATED), RefTest::ORDINARY);
+        assert_eq!(RefTest::UNSTATED.or(stated), RefTest::ORDINARY);
+        // Short of every role, the union is still two arms.
+        let calls_or_unstated = calls().or(RefTest::UNSTATED);
+        assert_ne!(calls_or_unstated, RefTest::ORDINARY);
+        assert!(calls_or_unstated.admits(CALL, 0));
+        assert!(calls_or_unstated.admits(0, 0));
+        assert!(!calls_or_unstated.admits(WRITE, 0));
+        assert_eq!(RefTest::ORDINARY.or(RefTest::UNSTATED), RefTest::ORDINARY);
+        assert_eq!(RefTest::EVERY.or(RefTest::UNSTATED), RefTest::EVERY);
     }
 
     #[test]

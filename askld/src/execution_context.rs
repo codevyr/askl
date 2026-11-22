@@ -151,6 +151,16 @@ pub struct ExecutionContext {
     /// superset of the statement's final selection, which is what both
     /// consumers require.
     pub probe_resolved: HashMap<usize, Vec<i64>>,
+    /// For each probe-resolved statement, the neighbours its resolving
+    /// probe was bound by: none for one that wave 0 resolved on its own
+    /// words, else the statements whose rows were its roles or tests.
+    ///
+    /// A statement's rows in `probe_resolved` were READ THROUGH the edges to
+    /// these neighbours, so they already lack what the words on those edges
+    /// passed over.  Through any other edge they are every row the statement
+    /// can have, which is what `statement::passed_over` needs to read from
+    /// when it asks what an edge's word passed over.
+    pub probe_through: HashMap<usize, Vec<usize>>,
 }
 
 /// Key for [`ExecutionContext::probe_resolved`]: statement identity by
@@ -172,6 +182,7 @@ impl ExecutionContext {
             probe_cap: DEFAULT_PROBE_CAP,
             probe_activations: Vec::new(),
             probe_resolved: HashMap::new(),
+            probe_through: HashMap::new(),
         }
     }
 }
