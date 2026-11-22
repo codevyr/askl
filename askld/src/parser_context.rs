@@ -1,12 +1,12 @@
 use crate::{
     command::Command,
-    execution_state::RelationshipType,
     scope::{DefaultScope, Scope},
     span::Span,
     statement::Statement,
     verb::{EphemeralOps, UnitVerb, Verb},
 };
 use anyhow::Result;
+use index::edge::Edge;
 use std::{
     cell::RefCell,
     rc::{Rc, Weak},
@@ -48,7 +48,7 @@ pub struct ParserContext {
     command: RefCell<Command>,
     /// The relationship type for statements created in this context.
     /// Set by @has verb, default is Refs.
-    relationship_type: RefCell<RelationshipType>,
+    relationship_type: RefCell<Edge>,
     /// Default symbol types for child scopes when no explicit type selector is present.
     /// Set by type selectors (@module, @function, etc.) to [parent_type, function_type].
     /// When a child scope has no explicit type selector, it will filter by these types.
@@ -75,7 +75,7 @@ impl ParserContext {
             alternative_context: RefCell::new(None),
             command: RefCell::new(command),
             scope_factory: Some(scope_factory),
-            relationship_type: RefCell::new(RelationshipType::REFS),
+            relationship_type: RefCell::new(Edge::EVERY_REFERENCE),
             default_symbol_types: RefCell::new(None),
             has_relationship_modifier: RefCell::new(false),
             inherit_relationship_modifier: RefCell::new(false),
@@ -199,19 +199,19 @@ impl ParserContext {
 
     /// Set the relationship type explicitly from a verb (@has or @refs).
     /// Marks that a relationship modifier was used, affecting child scope behavior.
-    pub fn set_relationship_type_explicit(&self, rel_type: RelationshipType) {
+    pub fn set_relationship_type_explicit(&self, rel_type: Edge) {
         *self.relationship_type.borrow_mut() = rel_type;
         *self.has_relationship_modifier.borrow_mut() = true;
     }
 
     /// Set the relationship type as a default/inherited value.
     /// Does NOT mark as explicit modifier - used for scope transitions and inheritance.
-    pub fn set_relationship_type_default(&self, rel_type: RelationshipType) {
+    pub fn set_relationship_type_default(&self, rel_type: Edge) {
         *self.relationship_type.borrow_mut() = rel_type;
     }
 
     /// Get the relationship type for statements created in this context.
-    pub fn get_relationship_type(&self) -> RelationshipType {
+    pub fn get_relationship_type(&self) -> Edge {
         *self.relationship_type.borrow()
     }
 
@@ -222,7 +222,7 @@ impl ParserContext {
 
     /// Set the relationship type and mark it for propagation to all descendants.
     /// Combines set_relationship_type_explicit + set_inherit_relationship_modifier(true).
-    pub fn set_relationship_type_inherited(&self, rel_type: RelationshipType) {
+    pub fn set_relationship_type_inherited(&self, rel_type: Edge) {
         self.set_relationship_type_explicit(rel_type);
         self.set_inherit_relationship_modifier(true);
     }

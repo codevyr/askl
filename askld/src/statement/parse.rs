@@ -1,6 +1,6 @@
 use crate::command::LabeledStatements;
 use crate::execution_state::{
-    DependencyKind, DependencyRole, RelationshipType, StatementDependency, StatementDependent,
+    DependencyKind, DependencyRole, StatementDependency, StatementDependent,
 };
 use crate::hierarchy::Hierarchy;
 use crate::parser::Rule;
@@ -8,6 +8,7 @@ use crate::parser_context::ParserContext;
 use crate::scope::{build_scope, EmptyScope, Scope};
 use crate::span::Span;
 use crate::verb::{build_compound_filter, DefaultTypeFilter};
+use index::edge::Edge;
 use pest::error::Error;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -42,9 +43,7 @@ pub fn build_statement<'a>(
                 if !sub_ctx.has_relationship_modifier() {
                     // No explicit has/refs — default to both so parent-child
                     // works regardless of whether the edge is containment or reference.
-                    sub_ctx.set_relationship_type_default(
-                        RelationshipType::REFS | RelationshipType::HAS,
-                    );
+                    sub_ctx.set_relationship_type_default(Edge::ALL);
                 }
 
                 // Allow all symbol types for children — empty vec means no type filtering.

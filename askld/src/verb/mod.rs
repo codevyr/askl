@@ -1,7 +1,7 @@
 use crate::cfg::ControlFlowGraph;
 use crate::diagnostic::Diagnostic;
 use crate::execution_context::{selector_state_with, ExecutionContext, SelectorRegistry};
-use crate::execution_state::{DependencyKind, DependencyRole, RelationshipType};
+use crate::execution_state::{DependencyKind, DependencyRole};
 use crate::parser::{Rule, Value};
 use crate::parser_context::ParserContext;
 use crate::span::Span;
@@ -14,6 +14,7 @@ use index::db_diesel::{
     Index, OuterParentFilterMixin, RootLayer, RootShardRef, ScopeContext, Selection,
     SymbolInstanceIdMixin, TraversalMode,
 };
+use index::edge::Edge;
 
 /// Root-shard populate callback used by [`LayerSpec`].  Called by the
 /// statement-execution layer inside [`Index::with_eph_layer`] — once PER
@@ -479,7 +480,7 @@ pub enum Dimension {
 #[derive(Debug, Clone)]
 pub struct NotificationContext {
     pub role: DependencyRole,
-    pub rel_type: RelationshipType,
+    pub rel_type: Edge,
     pub mode: TraversalMode,
     /// The receiving statement is an echo (`{ }`): it shows what the
     /// notifier's rows relate to and originates nothing of its own.
@@ -760,7 +761,7 @@ impl SelectorState {
         &mut self,
         dependency: &Selection,
         role: &DependencyRole,
-        rel_type: RelationshipType,
+        rel_type: Edge,
     ) -> bool {
         self.narrow(dependency, role, rel_type, false, None).changed
     }
@@ -772,7 +773,7 @@ impl SelectorState {
         &mut self,
         dependency: &Selection,
         role: &DependencyRole,
-        rel_type: RelationshipType,
+        rel_type: Edge,
         span: Span,
         for_echo: bool,
     ) -> (bool, Vec<Diagnostic>) {
@@ -816,7 +817,7 @@ impl SelectorState {
         &mut self,
         dependency: &Selection,
         role: &DependencyRole,
-        rel_type: RelationshipType,
+        rel_type: Edge,
         for_echo: bool,
         asked: Option<&Related>,
     ) -> Narrowed {
@@ -872,15 +873,15 @@ impl SelectorState {
         &self,
         dependency: &Selection,
         role: &DependencyRole,
-        rel_type: RelationshipType,
+        rel_type: Edge,
     ) -> Option<Unproven> {
         let own = self.selection.as_deref()?;
         if dependency.capped || own.capped {
             return None;
         }
         let (refs_proven, has_proven) = absence_by_kind(own, dependency, role)?;
-        let refs = rel_type.contains(RelationshipType::REFS) && !refs_proven;
-        let has = rel_type.contains(RelationshipType::HAS) && !has_proven;
+        let refs = rel_type.refs().is_some() && !refs_proven;
+        let has = rel_type.has() && !has_proven;
         if !refs && !has {
             return None;
         }
@@ -912,7 +913,7 @@ impl SelectorState {
         &mut self,
         dependency: &Selection,
         role: &DependencyRole,
-        rel_type: RelationshipType,
+        rel_type: Edge,
         span: Span,
         own: &Span,
         neighbour: &Span,
@@ -957,7 +958,7 @@ fn evidenced(
     own: &Selection,
     dependency: &Selection,
     role: &DependencyRole,
-    rel_type: RelationshipType,
+    rel_type: Edge,
 ) -> Option<std::collections::HashSet<i64>> {
     match role {
         DependencyRole::Parent => Some(evidenced_by_child(own, dependency, rel_type)),
@@ -993,10 +994,10 @@ fn evidenced(
 fn evidenced_by_parent(
     selection: &Selection,
     parent: &Selection,
-    rel_type: RelationshipType,
+    rel_type: Edge,
 ) -> std::collections::HashSet<i64> {
-    let check_refs = rel_type.contains(RelationshipType::REFS);
-    let check_has = rel_type.contains(RelationshipType::HAS);
+    let check_refs = rel_type.refs().is_some();
+    let check_has = rel_type.has();
     let parent_instance_ids: std::collections::HashSet<_> =
         parent.nodes.iter().map(|n| n.symbol_instance.id).collect();
     // A relationship is accepted on evidence from EITHER side's edge lists.
@@ -1058,10 +1059,10 @@ fn evidenced_by_parent(
 fn evidenced_by_child(
     selection: &Selection,
     child: &Selection,
-    rel_type: RelationshipType,
+    rel_type: Edge,
 ) -> std::collections::HashSet<i64> {
-    let check_refs = rel_type.contains(RelationshipType::REFS);
-    let check_has = rel_type.contains(RelationshipType::HAS);
+    let check_refs = rel_type.refs().is_some();
+    let check_has = rel_type.has();
     let child_symbol_ids: std::collections::HashSet<_> =
         child.nodes.iter().map(|n| n.symbol.id).collect();
     let child_instance_ids: std::collections::HashSet<_> =
@@ -1173,14 +1174,13 @@ pub(crate) fn absence_is_proven(
     own: &Selection,
     dependency: &Selection,
     role: &DependencyRole,
-    rel_type: RelationshipType,
+    rel_type: Edge,
 ) -> bool {
     let Some((refs, has)) = absence_by_kind(own, dependency, role) else {
         // Membership in the owner's rows: no family is consulted.
         return true;
     };
-    (!rel_type.contains(RelationshipType::REFS) || refs)
-        && (!rel_type.contains(RelationshipType::HAS) || has)
+    (!rel_type.refs().is_some() || refs) && (!rel_type.has() || has)
 }
 
 /// [`absence_is_proven`] kind by kind: whether silence about a reference, and
@@ -1498,8 +1498,8 @@ pub trait Selector: std::fmt::Debug + Verb {
         let (decl_ids, derive_capped) = index
             .find_child_instance_ids(
                 &parent_ids,
-                notif_ctx.rel_type.contains(RelationshipType::REFS),
-                notif_ctx.rel_type.contains(RelationshipType::HAS),
+                notif_ctx.rel_type.refs().is_some(),
+                notif_ctx.rel_type.has(),
                 &find_filter,
                 notif_ctx.within.as_deref(),
                 eph,
@@ -1578,8 +1578,8 @@ pub trait Selector: std::fmt::Debug + Verb {
         let found = index
             .find_child_instance_ids(
                 &parent_ids,
-                notif_ctx.rel_type.contains(RelationshipType::REFS),
-                notif_ctx.rel_type.contains(RelationshipType::HAS),
+                notif_ctx.rel_type.refs().is_some(),
+                notif_ctx.rel_type.has(),
                 &CompositeFilter::and(find_parts),
                 notif_ctx.within.as_deref(),
                 eph,
