@@ -26,9 +26,12 @@
 //!       stored with the project, `Index::what_projects_state`): "the
 //!       `linux` index states no roles; `calls` cannot match there".  One
 //!       such reference on the edge is enough to say it;
-//!     - it does, and some references on this edge still state none
-//!       (`#define` bodies, macro uses): "`calls` passed over 37 symbols
-//!       …".  Counted are the symbols that `refs`, written in that one
+//!     - it does, and some references on this edge still state none:
+//!       "`calls` passed over 37 symbols …".  WHY a reference states none
+//!       is not said: it differs by language and by indexer (an unexpanded
+//!       `#define` body in C, a function variable in Go), and a guess
+//!       printed as the reason would be wrong for most of them.
+//!       Counted are the symbols that `refs`, written in that one
 //!       place, would list and `calls` does not.  They are read from an end
 //!       of the edge whose rows the word had no part in choosing
 //!       (`rows_not_read_through`), under [`RefTest::UNSTATED`]; less what
@@ -931,7 +934,7 @@ async fn kept_by_other_edges(
 fn uncounted(words: &RoleWords, asked: Asked, parent: Option<&str>, child: Option<&str>) -> String {
     let quoted = |text: &str| format!("`{}`", Diagnostic::quote(text));
     let (expression, roles) = (&words.expression, &words.roles);
-    let why = "without stating a role (`#define` bodies, macro uses)";
+    let why = "without stating a role";
     let whose = match asked {
         Asked::Child => format!(
             "which {} makes",
@@ -949,7 +952,7 @@ fn uncounted(words: &RoleWords, asked: Asked, parent: Option<&str>, child: Optio
 }
 
 /// "`calls` passed over 2 symbols that `"caller"` names without stating a
-/// role (`#define` bodies, macro uses): `maybe`, `plain`. Whether it calls
+/// role: `maybe`, `plain`. Whether it calls
 /// them is not known; `refs { … }` lists them".
 fn undecided(
     words: &RoleWords,
@@ -986,7 +989,7 @@ fn undecided(
         Some(text) => format!(" matching {}", quoted(text)),
         None => String::new(),
     };
-    let why = "without stating a role (`#define` bodies, macro uses)";
+    let why = "without stating a role";
     let (expression, roles, they) = (&words.expression, &words.roles, &words.they);
     let (them, lists) = if one {
         ("it", "lists it")

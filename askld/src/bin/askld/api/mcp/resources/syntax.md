@@ -158,7 +158,7 @@ separate statements; a `{` must be on the same line as its verb to attach.
     method), and `"vfs_read"` selects none" (likewise "only a macro
     declares") → the word was asked of the wrong kind of source.
   - "`calls` passed over 2 symbols that `"caller"` names without stating a
-    role (`#define` bodies, macro uses): `maybe`, `plain`. Whether it calls
+    role: `maybe`, `plain`. Whether it calls
     them is not known; `refs { … }` lists them" → they may be calls; look at
     them with `refs`.
   - "nothing calls `"my_read"` directly; `slot` holds it (`⇢`): `calls
