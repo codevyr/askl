@@ -1599,6 +1599,46 @@ pub enum AskSide {
     Children,
 }
 
+/// One row of [`Index::instances_matching`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchedInstance {
+    pub instance: i64,
+    pub symbol: i64,
+    pub name: String,
+    pub symbol_type: i32,
+    pub project: i32,
+}
+
+/// What the index of one project was observed to state when it was uploaded
+/// ([`Index::what_projects_state`]).
+///
+/// AN INDEX THAT STATES NOTHING CANNOT BE ASKED BY WHAT IT DID NOT STATE.  A
+/// role word answers nothing on an index whose references state no role, and
+/// a relation word answers nothing on one that has no such rows; either
+/// answer looks like a fact about the code and is one about the index.
+/// These are observations of the upload, never claims about an indexer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectStates {
+    pub project: i32,
+    pub name: String,
+    /// Some ordinary reference states a role.
+    pub states_roles: bool,
+    /// Some row is a `declares` relation.
+    pub has_declares: bool,
+    /// Some row is a `holds` relation.
+    pub has_holds: bool,
+}
+
+impl ProjectStates {
+    /// The index has rows of `relation`.
+    pub fn has(&self, relation: crate::roles::Relation) -> bool {
+        match relation {
+            crate::roles::Relation::Declares => self.has_declares,
+            crate::roles::Relation::Holds => self.has_holds,
+        }
+    }
+}
+
 /// What [`Index::which_relate`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Related {
@@ -2669,6 +2709,7 @@ impl Index {
     pub const TEST_INPUT_TYPE_FILTER: &'static str = "test_input_type_filter.sql";
     pub const TEST_INPUT_REFERENCE_ROLES: &'static str = "test_input_reference_roles.sql";
     pub const TEST_INPUT_RELATION_ROWS: &'static str = "test_input_relation_rows.sql";
+    pub const TEST_INPUT_ROLE_WORDS: &'static str = "test_input_role_words.sql";
     pub const TEST_INPUT_STRUCT_FIELDS: &'static str = "test_input_struct_fields.sql";
     pub const TEST_INPUT_NAME_IN_MANY_STRUCTS: &'static str = "test_input_name_in_many_structs.sql";
     pub const TEST_INPUT_MANY_OCCURRENCES_FEW_PAIRS: &'static str =
@@ -2765,6 +2806,10 @@ impl Index {
         (
             "test_input_relation_rows.sql",
             include_str!("../../../sql/test_input_relation_rows.sql"),
+        ),
+        (
+            "test_input_role_words.sql",
+            include_str!("../../../sql/test_input_role_words.sql"),
         ),
         (
             "test_input_search.sql",
@@ -3024,6 +3069,26 @@ impl Index {
         filter: &CompositeFilter,
         eph: &EphContext,
     ) -> Result<Vec<String>> {
+        let names: std::collections::BTreeSet<String> = self
+            .instances_matching(filter, eph)
+            .await?
+            .into_iter()
+            .map(|row| row.name)
+            .collect();
+        Ok(names.into_iter().collect())
+    }
+
+    /// The instances `filter` matches, each with what a message needs to say
+    /// about it: its symbol, that symbol's name and type, and its project.
+    ///
+    /// The read behind [`Self::symbol_names_matching`], for a caller that has
+    /// to tell the rows apart (by symbol, by project) before naming them.
+    /// Bounded like every other read.
+    pub async fn instances_matching(
+        &self,
+        filter: &CompositeFilter,
+        eph: &EphContext,
+    ) -> Result<Vec<MatchedInstance>> {
         let chain_dependent = filter.is_chain_dependent();
         let read_limit: i64 = match eph.read_cap() {
             0 => i64::MAX,
@@ -3038,12 +3103,50 @@ impl Index {
                 q.filter(vis.guard()).limit(read_limit)
             })
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to read symbol names: {}", e))?;
-        let names: std::collections::BTreeSet<String> = rows
+            .map_err(|e| anyhow::anyhow!("Failed to read matching instances: {}", e))?;
+        Ok(rows
             .into_iter()
-            .map(|(symbol, _, _, _)| symbol.name)
-            .collect();
-        Ok(names.into_iter().collect())
+            .map(|(symbol, instance, _, project)| MatchedInstance {
+                instance: instance.id,
+                symbol: symbol.id,
+                name: symbol.name,
+                symbol_type: symbol.symbol_type,
+                project: project.id,
+            })
+            .collect())
+    }
+
+    /// What each project's index states, by project id.
+    ///
+    /// Observed at ingest and stored with the project (migration
+    /// `2026-11-22-000002`), so asking costs one small cached read and no
+    /// look at the references.  The cache is cleared by every upload, as it
+    /// is for anything else an upload changes.
+    pub async fn what_projects_state(&self) -> Result<Vec<ProjectStates>> {
+        use crate::schema_diesel::projects;
+
+        let rows: std::sync::Arc<Vec<(i32, String, bool, bool, bool)>> = self
+            .cached_load(projects::table.order(projects::id.asc()).select((
+                projects::id,
+                projects::project_name,
+                projects::states_roles,
+                projects::has_declares,
+                projects::has_holds,
+            )))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to read what the indices state: {}", e))?;
+        Ok(rows
+            .iter()
+            .map(
+                |(project, name, states_roles, has_declares, has_holds)| ProjectStates {
+                    project: *project,
+                    name: name.clone(),
+                    states_roles: *states_roles,
+                    has_declares: *has_declares,
+                    has_holds: *has_holds,
+                },
+            )
+            .collect())
     }
 
     pub async fn find_symbol(

@@ -28,6 +28,7 @@
 //! read that enters the references by target symbol stays index-only.
 
 use crate::edge::{RefTest, Relations};
+use crate::roles::Roles;
 
 /// SQL: the reference row `reference` passes `test`.  `None` when every row
 /// does and there is nothing to say.
@@ -51,11 +52,21 @@ pub(crate) fn passes(reference: &str, test: RefTest) -> Option<String> {
     let mut arms: Vec<String> = Vec::new();
     if test.any_ordinary() {
         arms.push(ordinary);
-    } else if test.roles().bits() != 0 {
-        arms.push(format!(
-            "({ordinary} AND ({reference}.roles & {}) <> 0)",
-            test.roles().bits()
-        ));
+    } else {
+        if test.roles().bits() != 0 {
+            arms.push(format!(
+                "({ordinary} AND ({reference}.roles & {}) <> 0)",
+                test.roles().bits()
+            ));
+        }
+        // States none of the roles this engine knows: what a role word
+        // passes over (`RefTest::UNSTATED`).
+        if test.unstated() {
+            arms.push(format!(
+                "({ordinary} AND ({reference}.roles & {}) = 0)",
+                Roles::ALL.bits()
+            ));
+        }
     }
     for relation in test.relations().iter() {
         arms.push(format!("{reference}.relation = {}", relation as i16));
@@ -107,6 +118,30 @@ mod tests {
         assert_eq!(
             passes("t", calls_or_writes).as_deref(),
             Some("((t.relation NOT IN (1, 2) AND (t.roles & 3) <> 0))")
+        );
+    }
+
+    #[test]
+    fn an_unstated_reference_is_an_ordinary_one_with_no_known_role() {
+        assert_eq!(
+            passes("sr", RefTest::UNSTATED).as_deref(),
+            Some("((sr.relation NOT IN (1, 2) AND (sr.roles & 7) = 0))")
+        );
+        let calls_or_unstated = RefTest::stating(Roles::CALL).unwrap().or(RefTest::UNSTATED);
+        assert_eq!(
+            passes("sr", calls_or_unstated).as_deref(),
+            Some(
+                "((sr.relation NOT IN (1, 2) AND (sr.roles & 1) <> 0) \
+                 OR (sr.relation NOT IN (1, 2) AND (sr.roles & 7) = 0))"
+            )
+        );
+        // Every role and none is every ordinary reference again.
+        assert_eq!(
+            passes(
+                "sr",
+                RefTest::stating(Roles::ALL).unwrap().or(RefTest::UNSTATED)
+            ),
+            passes("sr", RefTest::ORDINARY)
         );
     }
 
