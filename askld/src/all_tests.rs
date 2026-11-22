@@ -6351,9 +6351,11 @@ fn a_relationship_word_selects_the_edges_drawn_with_its_mark() {
         ids(r#"type("ops") has { field holds { } }"#),
         vec![10, 20, 30]
     );
-    // The last relationship word of a statement is the one in force.
-    assert_eq!(ids(r#"field("slot") has holds { }"#), vec![20, 30]);
-    assert_eq!(ids(r#"field("slot") holds refs { }"#), vec![20, 40]);
+    // Two relationship words on one statement mean either, and are joined
+    // with `or`.  (Side by side they used to run as the second alone; that
+    // is an error now, `two_relationship_words_are_joined_with_or`.)
+    assert_eq!(ids(r#"field("slot") has or holds { }"#), vec![20, 30]);
+    assert_eq!(ids(r#"field("slot") holds or refs { }"#), vec![20, 30, 40]);
 }
 
 #[test]
@@ -6678,6 +6680,40 @@ fn role_said(q: &str) -> Vec<String> {
 }
 
 #[test]
+fn a_relationship_word_acts_on_its_statement_wherever_it_stands() {
+    // A TERM ACTS ON THE STATEMENT IT IS WRITTEN IN.  A relationship word
+    // describes the edge into that statement's braces whether it is written
+    // first, last or between the other terms.
+    let ids = role_ids;
+    // The word is doing something in each of these: without it the answer
+    // is another one.
+    assert_ne!(ids(r#""caller" calls { }"#), ids(r#""caller" { }"#));
+    assert_ne!(ids(r#"func writes { "hook" }"#), ids(r#"func { "hook" }"#));
+    for (last, elsewhere) in [
+        (r#""caller" calls { }"#, r#"calls "caller" { }"#),
+        (r#"func calls { "hook" }"#, r#"calls func { "hook" }"#),
+        (r#"func writes { "hook" }"#, r#"writes func { "hook" }"#),
+        (r#"func "caller" calls { }"#, r#"func calls "caller" { }"#),
+        (
+            r#""caller" writes or takes { }"#,
+            r#"writes or takes "caller" { }"#,
+        ),
+        // In a nested statement as in the first.
+        (
+            r#""via" calls { field holds { func } }"#,
+            r#"calls "via" { holds field { func } }"#,
+        ),
+    ] {
+        assert!(!ids(last).is_empty(), "{last}");
+        assert_eq!(ids(elsewhere), ids(last), "{elsewhere}");
+    }
+    assert_eq!(
+        ids(r#"calls "via" { holds field { func } }"#),
+        vec![30, 50, 60, 140, 150]
+    );
+}
+
+#[test]
 fn a_role_word_narrows_refs_to_the_references_that_state_it() {
     let ids = role_ids;
     // `caller` calls `hook` and `shared`, takes `hook`, and `counter++`es;
@@ -6746,13 +6782,8 @@ fn a_role_word_narrows_refs_to_the_references_that_state_it() {
         ids(r#""via" calls { field calls { func } }"#)
     );
 
-    // The last relationship word of a statement is the one in force.
-    assert_eq!(ids(r#""caller" calls writes { }"#), vec![10, 110]);
-    assert_eq!(ids(r#""caller" writes calls { }"#), vec![10, 70, 80]);
-    assert_eq!(
-        ids(r#""caller" calls refs { }"#),
-        ids(r#""caller" refs { }"#)
-    );
+    // Two role words on one statement are joined with `or`
+    // (`relationship_words_joined_with_or_match_a_pair_by_any_of_its_rows`).
 
     // The words take no arguments.
     for q in [
@@ -7276,6 +7307,382 @@ fn what_a_role_word_says_survives_a_cache_hit() {
             (r#"calls { "shared" }"#, 2),
             (r#"calls { "my_read" }"#, 1),
             (r#"macro("OLD_DEFINE") declares { data }"#, 1),
+        ] {
+            let (cold, _) = crate::test_util::run_query_traced_on(index.clone(), q)
+                .await
+                .unwrap();
+            let before = index.sql_cache().stats();
+            let (warm, _) = crate::test_util::run_query_traced_on(index.clone(), q)
+                .await
+                .unwrap();
+            let after = index.sql_cache().stats();
+            assert_eq!(said(&cold).len(), notices, "{q}: {:?}", cold.warnings);
+            assert_eq!(said(&warm), said(&cold), "{q}");
+            assert_eq!(
+                after.misses, before.misses,
+                "{q}: the second run read nothing"
+            );
+            assert!(after.hits > before.hits, "{q}");
+        }
+    });
+}
+
+#[test]
+fn relationship_words_joined_with_or_match_a_pair_by_any_of_its_rows() {
+    // On the role-words fixture: `caller` calls `hook` and `shared`, writes
+    // and takes `counter`, takes `hook`; `via` calls `slot` and `direct`;
+    // `slot` (a field of `ops`) holds `my_read`, `direct` and `stored`.
+    let ids = role_ids;
+
+    // Two role words: either role.
+    assert_eq!(ids(r#""caller" calls { }"#), vec![10, 70, 80]);
+    assert_eq!(ids(r#""caller" writes { }"#), vec![10, 110]);
+    assert_eq!(
+        ids(r#""caller" calls or writes { }"#),
+        vec![10, 70, 80, 110]
+    );
+    assert_eq!(
+        ids(r#""caller" writes or calls { }"#),
+        vec![10, 70, 80, 110]
+    );
+    assert_eq!(
+        ids(r#""caller" (calls or writes) { }"#),
+        vec![10, 70, 80, 110]
+    );
+    // A role word or a relation: downward ...
+    assert_eq!(
+        ids(r#"field("slot") calls or holds { }"#),
+        vec![50, 60, 140, 150]
+    );
+    assert_eq!(ids(r#""via" calls or holds { }"#), vec![30, 50, 140]);
+    // ... and upward: `via` calls `direct`, `slot` holds it.
+    assert_eq!(ids(r#"calls { "direct" }"#), vec![30, 140]);
+    assert_eq!(ids(r#"holds { "direct" }"#), vec![50, 140]);
+    assert_eq!(ids(r#"calls or holds { "direct" }"#), vec![30, 50, 140]);
+    assert_eq!(ids(r#"calls or holds { "my_read" }"#), vec![50, 60]);
+    // A role word or containment.
+    assert_eq!(ids(r#"type("ops") calls { }"#), vec![40]);
+    assert_eq!(ids(r#"type("ops") has or calls { }"#), vec![40, 50]);
+    assert_eq!(ids(r#"calls or has { "slot" }"#)[..3], [30, 40, 50]);
+
+    // LAW 3: a type group for the statement, a relationship group for the
+    // edge, side by side.
+    assert_eq!(
+        ids(r#"func or field calls or holds { "direct" }"#),
+        vec![30, 50, 140]
+    );
+    assert_eq!(
+        ids(r#"func or data calls or holds { "direct" }"#),
+        vec![30, 140]
+    );
+    assert_eq!(
+        ids(r#"field or data calls or holds { "direct" }"#),
+        vec![50, 140]
+    );
+
+    // A role word narrows `refs`: beside `refs` it adds nothing.
+    assert_eq!(
+        ids(r#""caller" calls or refs { }"#),
+        ids(r#""caller" refs { }"#)
+    );
+    // One bit, two spellings.
+    assert_eq!(
+        ids(r#""caller" reads or takes { }"#),
+        ids(r#""caller" takes { }"#)
+    );
+
+    // The expression carries into nested scopes as one word does: `via`
+    // calls the slot, and the slot holds the three functions.
+    assert_eq!(
+        ids(r#""via" calls or holds { field { func } }"#),
+        vec![30, 50, 60, 140, 150]
+    );
+    assert_eq!(
+        ids(r#""via" calls or holds { field { func } }"#),
+        ids(r#""via" calls { field holds { func } }"#)
+    );
+
+    // On the relation fixture: `slot` HOLDS `my_read` and names `plain`;
+    // `DEFINE_X` DECLARES `lock` and names `plain`; `ops` contains `slot`.
+    let ids = relation_ids;
+    assert_eq!(ids(r#"field("slot") refs or holds { }"#), vec![20, 30, 40]);
+    assert_eq!(ids(r#"refs or holds { "my_read" }"#), vec![20, 30]);
+    assert_eq!(
+        ids(r#"macro("DEFINE_X") refs or declares { }"#),
+        vec![40, 60, 70]
+    );
+    assert_eq!(
+        ids(r#"macro("DEFINE_X") holds or declares { }"#),
+        vec![60, 70]
+    );
+    assert_eq!(ids(r#"type("ops") has or refs { }"#), vec![10, 20, 40]);
+    assert_eq!(ids(r#"type("ops") has or holds { }"#), vec![10, 20]);
+    assert_eq!(ids(r#"has or holds { "my_read" }"#), vec![20, 30, 500, 510]);
+}
+
+#[test]
+fn the_four_relationships_joined_are_the_bare_scope() {
+    // FOUR DISJOINT RELATIONSHIPS, ONE PER MARK; A BARE `{ }` IS ALL FOUR.
+    // Written out, they are the same edge, the same answer, and the same
+    // reads: the second query of each pair is answered from the SQL cache of
+    // the first without one new statement.
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        for (input, bare, written) in [
+            (
+                crate::test_util::TEST_INPUT_RELATION_ROWS,
+                r#"field("slot") { }"#,
+                r#"field("slot") has or refs or declares or holds { }"#,
+            ),
+            (
+                crate::test_util::TEST_INPUT_RELATION_ROWS,
+                r#"{ "my_read" }"#,
+                r#"holds or declares or refs or has { "my_read" }"#,
+            ),
+            (
+                crate::test_util::TEST_INPUT_RELATION_ROWS,
+                r#"type("ops") { { } }"#,
+                r#"type("ops") has or refs or declares or holds { { } }"#,
+            ),
+            (
+                crate::test_util::TEST_INPUT_ROLE_WORDS,
+                r#""via" { field { func } }"#,
+                r#""via" has or refs or (declares or holds) { field { func } }"#,
+            ),
+        ] {
+            let index = crate::test_util::get_shared_index(input).await;
+            let (first, _) = crate::test_util::run_query_traced_on(index.clone(), bare)
+                .await
+                .unwrap();
+            let before = index.sql_cache().stats();
+            let (second, _) = crate::test_util::run_query_traced_on(index.clone(), written)
+                .await
+                .unwrap();
+            let after = index.sql_cache().stats();
+            let ids = |res: &crate::statement::ExecutionResult| -> Vec<i64> {
+                let mut ids: Vec<i64> = res.nodes.as_vec().iter().map(|i| (*i).into()).collect();
+                ids.sort();
+                ids
+            };
+            assert!(!ids(&first).is_empty(), "{bare}");
+            assert_eq!(ids(&second), ids(&first), "{written}");
+            assert_eq!(
+                after.misses, before.misses,
+                "{written}: a statement the bare scope did not run"
+            );
+            assert!(after.hits > before.hits, "{written}");
+        }
+    });
+}
+
+#[test]
+fn what_an_expression_passed_over_is_said_of_the_words_it_is_true_of() {
+    let unstated = "without stating a role (`#define` bodies, macro uses)";
+
+    // Two role words: the expression is quoted as written, and what is not
+    // known is whether the source does either.
+    assert_eq!(
+        role_said(r#""caller" calls or writes { }"#),
+        vec![format!(
+            "`calls or writes` passed over 2 symbols that `\"caller\"` names {unstated}: \
+             `maybe`, `plain`. Whether it calls or writes them is not known; `refs {{ … }}` \
+             lists them"
+        )]
+    );
+    // Each spelling as it was written.
+    assert_eq!(
+        role_said(r#""caller" writes or reads { func }"#),
+        vec![format!(
+            "`writes or reads` passed over 2 symbols matching `func` that `\"caller\"` names \
+             {unstated}: `plain`, `shared`. Whether it writes or reads them is not known; \
+             `refs {{ … }}` lists them"
+        )]
+    );
+    // A role word beside a relation or beside containment: the expression
+    // passed them over, and what is not known is the role.
+    assert_eq!(
+        role_said(r#""caller" calls or holds { }"#),
+        vec![format!(
+            "`calls or holds` passed over 2 symbols that `\"caller\"` names {unstated}: \
+             `maybe`, `plain`. Whether it calls them is not known; `refs {{ … }}` lists them"
+        )]
+    );
+    assert_eq!(
+        role_said(r#""caller" has or calls { }"#),
+        vec![format!(
+            "`has or calls` passed over 2 symbols that `\"caller\"` names {unstated}: \
+             `maybe`, `plain`. Whether it calls them is not known; `refs {{ … }}` lists them"
+        )]
+    );
+    // Upward.  `slot` holds `stored`, so the answer is not empty; `other`
+    // names it with nothing stated.
+    assert_eq!(role_ids(r#"calls or holds { "stored" }"#), vec![50, 150]);
+    assert_eq!(
+        role_said(r#"calls or holds { "stored" }"#),
+        vec![format!(
+            "`calls or holds` passed over 1 symbol that names `\"stored\"` {unstated}: \
+             `other`. Whether it calls `\"stored\"` is not known; `refs {{ … }}` lists it"
+        )]
+    );
+    // `refs` admits a reference that states nothing: beside it, a role word
+    // passes nothing over.
+    for q in [
+        r#""caller" calls or refs { }"#,
+        r#""caller" refs or writes { func }"#,
+        r#"calls or refs { "stored" }"#,
+    ] {
+        assert_eq!(role_said(q), Vec::<String>::new(), "{q}");
+    }
+
+    // An index that states no roles: it is the ROLE word that cannot match
+    // there.  `holds` beside it is another matter, and is said separately:
+    // `old_caller` is a function, and only a slot holds.
+    assert_eq!(
+        role_said(r#""old_caller" calls or holds { }"#),
+        vec![
+            "the `silent` index states no roles; `calls` cannot match there. `refs { … }` \
+             lists its references"
+                .to_string(),
+            "`holds` related nothing: only a slot holds (a field, or an interface method), \
+             and `\"old_caller\"` selects none"
+                .to_string(),
+        ]
+    );
+    assert_eq!(
+        role_said(r#"writes or takes or has { "old_target" }"#),
+        vec![
+            "the `silent` index states no roles; `writes or takes` cannot match there. \
+             `refs { … }` lists its references"
+                .to_string()
+        ]
+    );
+
+    // "Nothing calls it directly; a slot holds it" is said to a query that
+    // did not ask for what a slot holds ...
+    assert_eq!(
+        role_said(r#"func calls or has { "my_read" }"#),
+        vec![
+            "nothing matching `func` calls `\"my_read\"` directly; `slot` holds it (`⇢`): \
+             `func calls { field holds { \"my_read\" } }` goes through the slot"
+                .to_string()
+        ]
+    );
+    // ... and not to one that did: `calls or holds` found the slot,
+    assert_eq!(role_ids(r#"calls or holds { "my_read" }"#), vec![50, 60]);
+    assert_eq!(
+        role_said(r#"calls or holds { "my_read" }"#),
+        Vec::<String>::new()
+    );
+    // and where the statement's own type left the slot out, the word passed
+    // nothing over: it is `func` that did, and it says nothing of slots.
+    assert_eq!(role_ids(r#"func calls or holds { "my_read" }"#), vec![60]);
+    assert_eq!(
+        role_said(r#"func calls or holds { "my_read" }"#),
+        Vec::<String>::new()
+    );
+    // A source somebody named, of the wrong kind for `holds`: that much is
+    // true of `holds` whatever stands beside it.
+    assert_eq!(
+        role_said(r#""caller" calls or holds { "my_read" }"#),
+        vec![
+            "`holds` related nothing: only a slot holds (a field, or an interface method), \
+             and `\"caller\"` selects none"
+                .to_string()
+        ]
+    );
+
+    // A relation word that could not match says so beside any other word
+    // (`stated` has no `declares` rows) ...
+    assert_eq!(
+        role_said(r#"macro("M") declares or has { }"#),
+        vec![
+            "the `stated` index has no `declares` rows: nothing in it records what a macro \
+             declares"
+                .to_string()
+        ]
+    );
+    // ... two of them are quoted as written ...
+    assert_eq!(
+        role_said(r#""old_caller" holds or declares { }"#),
+        vec![
+            "`holds or declares` related nothing: only a slot holds (a field, or an \
+             interface method); only a macro declares, and `\"old_caller\"` selects none"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        role_said(r#"declares or holds { "old_target" }"#),
+        vec![
+            "the `silent` index has no `declares` or `holds` rows: nothing in it records \
+             what a macro declares or what a slot holds"
+                .to_string()
+        ]
+    );
+    // ... and nothing is said when the answer is not empty.
+    assert_eq!(
+        role_said(r#"field("slot") holds or declares { }"#),
+        Vec::<String>::new()
+    );
+
+    // `refs` beside other words still lists only what those words list; the
+    // sentence names all of it.  (Relation fixture: `slot` holds `my_read`,
+    // `DEFINE_X` declares `lock`.)
+    assert_eq!(
+        passed_over(r#"field("slot") has or refs { "my_read" }"#),
+        vec![
+            "`has or refs` lists only containment (`▸`) and ordinary references (`→`); \
+             `field(\"slot\")` holds 1 symbol that `\"my_read\"` matches (`⇢`): `my_read`. \
+             `holds { … }` or `{ … }` lists it"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        passed_over(r#"refs or declares { "my_read" }"#),
+        vec![
+            "`refs or declares` lists only ordinary references (`→`) and what a macro \
+             declares (`↦`); 1 symbol holds `\"my_read\"` (`⇢`): `slot`. `holds { … }` or \
+             `{ … }` lists it"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        passed_over(r#"macro("DEFINE_X") calls or refs { data }"#),
+        vec![
+            "`calls or refs` lists only ordinary references (`→`); `macro(\"DEFINE_X\")` \
+             declares 1 symbol that `data` matches (`↦`): `lock`. `declares { … }` or \
+             `{ … }` lists it"
+                .to_string()
+        ]
+    );
+    // All four written out pass nothing over, like the bare scope.
+    for q in [
+        r#"field("slot") refs or holds { "my_read" }"#,
+        r#"field("slot") has or refs or declares or holds { "lock" }"#,
+        r#"field("slot") { "lock" }"#,
+    ] {
+        assert_eq!(passed_over(q), Vec::<String>::new(), "{q}");
+    }
+}
+
+#[test]
+fn what_an_expression_says_survives_a_cache_hit() {
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index =
+            crate::test_util::get_shared_index(crate::test_util::TEST_INPUT_ROLE_WORDS).await;
+        let said = |res: &crate::statement::ExecutionResult| -> Vec<String> {
+            res.warnings
+                .iter()
+                .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::PassedOver)
+                .map(|w| w.message.clone())
+                .collect()
+        };
+        for (q, notices) in [
+            (r#""caller" calls or writes { }"#, 1),
+            (r#""old_caller" calls or holds { }"#, 2),
+            (r#"func calls or has { "my_read" }"#, 1),
         ] {
             let (cold, _) = crate::test_util::run_query_traced_on(index.clone(), q)
                 .await
