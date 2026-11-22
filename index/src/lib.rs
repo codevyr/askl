@@ -1,4 +1,5 @@
 pub mod db;
+pub mod edge;
 pub mod ltree;
 pub mod offset_range;
 pub mod roles;
