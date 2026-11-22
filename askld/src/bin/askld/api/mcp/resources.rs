@@ -68,7 +68,8 @@ fn resource_definitions() -> Vec<ResourceDefinition> {
         ResourceDefinition {
             uri: "askl://syntax",
             name: "Askl syntax reference",
-            description: "The askl query language: selectors, scopes (callers/callees/has), \
+            description: "The askl query language: selectors, scopes (callers/callees), \
+relationship words (has/refs/declares/holds, calls/writes/takes) and what today's indices state, \
 filters, paths, search(). Read this before writing queries.",
             mime_type: MIME_MARKDOWN,
         },
@@ -89,7 +90,7 @@ narrow, deepen the projection, and read source.",
             uri: "askl://limitations",
             name: "Limitations",
             description: "What askl does and does not cover: indexed languages, symbol focus, \
-static edges, read-only, result caps.",
+static edges, what today's indices state about roles and slots, read-only, result caps.",
             mime_type: MIME_MARKDOWN,
         },
     ]
