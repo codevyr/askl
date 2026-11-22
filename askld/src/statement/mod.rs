@@ -29,6 +29,7 @@ use std::rc::{Rc, Weak};
 
 mod anchor;
 mod parse;
+mod passed_over;
 mod scope_helpers;
 mod weakness;
 
@@ -1306,6 +1307,7 @@ impl Statement {
             DiagnosticKind::Note => 1u8,
             DiagnosticKind::Truncation => 2u8,
             DiagnosticKind::LeftOut => 3u8,
+            DiagnosticKind::PassedOver => 4u8,
         };
         all_warnings.sort_by_key(|d| (d.start(), kind_rank(d)));
 
@@ -1711,6 +1713,7 @@ impl Statement {
 
         let mut warnings = self.gather_warnings(&statements);
         enrich_no_match_suggestions(&mut warnings, ctx, cfg).await;
+        warnings.extend(passed_over::notices(&statements, ctx, cfg).await);
 
         let _collect_results = tracing::debug_span!("collect_results").entered();
         let mut node_map: HashMap<i64, index::db_diesel::SelectionNode> = HashMap::new();
