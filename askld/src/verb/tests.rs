@@ -517,7 +517,7 @@ mod absence {
     use crate::execution_state::DependencyRole;
     use crate::verb::absence_is_proven;
     use index::db_diesel::{FamilyRead, Selection, Within};
-    use index::edge::Edge;
+    use index::edge::{Edge, RefTest};
 
     fn whole_within(ids: &[i64]) -> FamilyRead {
         FamilyRead::Whole(Within::Ids(ids.to_vec()))
@@ -528,9 +528,9 @@ mod absence {
         // Neither side read the references between the two statements: one
         // deferred to the other, the other was cut.
         let mut own = Selection::new();
-        own.families.parents = FamilyRead::Unread;
+        own.families.parents = FamilyRead::Unread.into();
         let mut parent = Selection::new();
-        parent.families.children = FamilyRead::Cut;
+        parent.families.children = FamilyRead::Cut.into();
         assert!(!absence_is_proven(
             &own,
             &parent,
@@ -539,7 +539,7 @@ mod absence {
         ));
 
         // One side read them in full, with no scope: that is proof.
-        own.families.parents = FamilyRead::whole();
+        own.families.parents = FamilyRead::whole().into();
         assert!(absence_is_proven(
             &own,
             &parent,
@@ -553,10 +553,13 @@ mod absence {
         // `X { "a" ; { } }`: X's references were read within the rows of
         // `"a"` (instance 7).  They are whole, and silent about instance 9.
         let mut x = Selection::new();
-        x.families.children = whole_within(&[7]);
-        assert!(x.families.children.proves_absence_for(&[7]));
-        assert!(!x.families.children.proves_absence_for(&[9]));
-        assert!(!x.families.children.proves_absence_for(&[7, 9]));
+        x.families.children = whole_within(&[7]).into();
+        assert!(x.families.children.proves_absence_for(&[7], RefTest::EVERY));
+        assert!(!x.families.children.proves_absence_for(&[9], RefTest::EVERY));
+        assert!(!x
+            .families
+            .children
+            .proves_absence_for(&[7, 9], RefTest::EVERY));
     }
 
     #[test]
@@ -564,7 +567,7 @@ mod absence {
         // References read in full, containment cut: a row with no reference
         // may still be contained.
         let mut own = Selection::new();
-        own.families.parents = FamilyRead::whole();
+        own.families.parents = FamilyRead::whole().into();
         own.families.has_parents = FamilyRead::Cut;
         let parent = Selection::new();
         let both = Edge::ALL;
@@ -590,5 +593,243 @@ mod absence {
             &DependencyRole::Child,
             both
         ));
+    }
+}
+
+/// Narrowing under a reference test, on the two fixtures that have roles and
+/// relations: what counts as evidence (`evidenced_by_*`) and what a family
+/// proves by its silence (`absence_is_proven`).
+mod under_a_test {
+    use super::super::{absence_is_proven, evidenced_by_child, evidenced_by_parent};
+    use crate::execution_state::DependencyRole;
+    use crate::test_util::{
+        get_shared_index, TEST_INPUT_REFERENCE_ROLES, TEST_INPUT_RELATION_ROWS,
+    };
+    use index::db_diesel::{
+        CompositeFilter, EphContext, FamilyDemand, FamilyDemands, Index, ScopeContext, Selection,
+        SymbolInstanceIdMixin,
+    };
+    use index::edge::{Edge, RefTest};
+    use index::roles::{Relation, Roles};
+    use index::symbols::SymbolInstanceId;
+
+    /// The statement that holds `instances`, with its reference families read
+    /// under `test` (`None`: not read).
+    async fn read(index: &Index, instances: &[i64], test: Option<RefTest>) -> Selection {
+        let eph = EphContext::rooted(index.load_root_layers().await.unwrap());
+        let ids: Vec<SymbolInstanceId> = instances
+            .iter()
+            .copied()
+            .map(SymbolInstanceId::new)
+            .collect();
+        let demand = FamilyDemand {
+            refs: test,
+            has: false,
+            listing: None,
+        };
+        index
+            .find_symbol(
+                &CompositeFilter::leaf(SymbolInstanceIdMixin::new(&ids)),
+                ScopeContext::Unscoped,
+                ScopeContext::Unscoped,
+                FamilyDemands {
+                    parent: demand,
+                    children: demand,
+                },
+                &eph,
+            )
+            .await
+            .unwrap()
+            .into_inner()
+    }
+
+    fn sorted(ids: std::collections::HashSet<i64>) -> Vec<i64> {
+        let mut ids: Vec<i64> = ids.into_iter().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    fn calls() -> RefTest {
+        RefTest::stating(Roles::CALL).unwrap()
+    }
+
+    fn writes() -> RefTest {
+        RefTest::stating(Roles::WRITE).unwrap()
+    }
+
+    // reference_roles: caller 10, hook 20, slot 30, my_read 40, plain 50.
+    const CALLER: i64 = 10;
+    const HOOK: i64 = 20;
+    const SLOT: i64 = 30;
+    const MY_READ: i64 = 40;
+    const PLAIN: i64 = 50;
+
+    /// A reference is evidence for an edge when the edge's test admits it,
+    /// whichever side's list holds it: families read for every reference
+    /// serve an edge that asks for less.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reference_is_evidence_when_the_edges_test_admits_it() {
+        let index = get_shared_index(TEST_INPUT_REFERENCE_ROLES).await;
+        let holds = RefTest::relation(Relation::Holds);
+        let sources = [CALLER, SLOT];
+        let targets = [HOOK, MY_READ, PLAIN];
+
+        // Each side's list alone: the other side read nothing.
+        for (parents_read, children_read) in [
+            (Some(RefTest::EVERY), None),
+            (None, Some(RefTest::EVERY)),
+            (Some(RefTest::EVERY), Some(RefTest::EVERY)),
+        ] {
+            let parents = read(&index, &sources, parents_read).await;
+            let children = read(&index, &targets, children_read).await;
+            for (test, kept_children, kept_parents) in [
+                (
+                    RefTest::EVERY,
+                    vec![HOOK, MY_READ, PLAIN],
+                    vec![CALLER, SLOT],
+                ),
+                (RefTest::ORDINARY, vec![HOOK, PLAIN], vec![CALLER]),
+                (calls(), vec![HOOK], vec![CALLER]),
+                (writes(), vec![HOOK], vec![CALLER]),
+                (holds, vec![MY_READ], vec![SLOT]),
+                (calls().or(holds), vec![HOOK, MY_READ], vec![CALLER, SLOT]),
+                (RefTest::relation(Relation::Declares), vec![], vec![]),
+            ] {
+                let edge = Edge::references(test);
+                assert_eq!(
+                    sorted(evidenced_by_parent(&children, &parents, edge)),
+                    kept_children,
+                    "children under {test:?} (read: {parents_read:?} / {children_read:?})"
+                );
+                assert_eq!(
+                    sorted(evidenced_by_child(&parents, &children, edge)),
+                    kept_parents,
+                    "parents under {test:?} (read: {parents_read:?} / {children_read:?})"
+                );
+            }
+        }
+    }
+
+    /// A family read for calls holds the calls and proves the absence of a
+    /// call; about any other reference it is silent, and silence it was not
+    /// read for proves nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_family_read_under_a_test_is_whole_only_for_that_test() {
+        let index = get_shared_index(TEST_INPUT_REFERENCE_ROLES).await;
+        let caller = read(&index, &[CALLER], Some(calls())).await;
+        let targets = read(&index, &[HOOK, PLAIN], None).await;
+        assert_eq!(
+            caller
+                .children
+                .iter()
+                .map(|c| (c.symbol_instance.id, c.symbol_ref.roles))
+                .collect::<Vec<_>>(),
+            vec![(HOOK, 1)],
+            "premise: the family holds the one call"
+        );
+
+        // For the test it was read under: plain is not called, and that is
+        // known.
+        let edge = Edge::references(calls());
+        assert_eq!(
+            sorted(evidenced_by_parent(&targets, &caller, edge)),
+            vec![HOOK]
+        );
+        assert!(absence_is_proven(
+            &targets,
+            &caller,
+            &DependencyRole::Child,
+            edge
+        ));
+        assert!(absence_is_proven(
+            &caller,
+            &targets,
+            &DependencyRole::Parent,
+            edge
+        ));
+
+        // For anything wider, or other: the rows it holds are still true, and
+        // what it does not hold may be there all the same (plain is referred
+        // to; hook is written).
+        for other in [
+            RefTest::ORDINARY,
+            RefTest::EVERY,
+            writes(),
+            calls().or(writes()),
+        ] {
+            let edge = Edge::references(other);
+            assert!(
+                !absence_is_proven(&targets, &caller, &DependencyRole::Child, edge),
+                "a list of calls cannot rule out {other:?}"
+            );
+            assert!(
+                !absence_is_proven(&caller, &targets, &DependencyRole::Parent, edge),
+                "a list of calls cannot rule out {other:?}"
+            );
+        }
+        assert_eq!(
+            sorted(evidenced_by_parent(
+                &targets,
+                &caller,
+                Edge::references(RefTest::ORDINARY)
+            )),
+            vec![HOOK],
+            "the call is an ordinary reference: true evidence, and not all of it"
+        );
+        // A write that the list of calls does not hold is not evidenced by it.
+        assert!(evidenced_by_parent(&targets, &caller, Edge::references(writes())).is_empty());
+
+        // Containment is its own question: a bare scope still needs both.
+        assert!(!absence_is_proven(
+            &targets,
+            &caller,
+            &DependencyRole::Child,
+            edge | Edge::HAS
+        ));
+    }
+
+    /// A relation belongs to its source only, under a test as under none:
+    /// `holds` keeps the slot and not the struct, the file or the directory
+    /// around it, while an ordinary reference keeps them all.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_relation_test_keeps_the_source_of_the_relation() {
+        // relation_rows: directory 500, file 510, ops 10, slot 20,
+        // my_read 30, plain 40, DEFINE_X 60, lock 70.
+        let index = get_shared_index(TEST_INPUT_RELATION_ROWS).await;
+        let sources = [500, 510, 10, 20, 60];
+        let targets = [30, 40, 70];
+        let holds = RefTest::relation(Relation::Holds);
+        let declares = RefTest::relation(Relation::Declares);
+
+        for (test, kept_parents, kept_children) in [
+            (holds, vec![20], vec![30]),
+            (declares, vec![60], vec![70]),
+            (RefTest::ORDINARY, vec![10, 20, 60, 500, 510], vec![40]),
+            (holds.or(declares), vec![20, 60], vec![30, 70]),
+            (RefTest::EVERY, vec![10, 20, 60, 500, 510], vec![30, 40, 70]),
+        ] {
+            // Read under the test itself, and under every reference.
+            for read_under in [test, RefTest::EVERY] {
+                let parents = read(&index, &sources, Some(read_under)).await;
+                let children = read(&index, &targets, Some(read_under)).await;
+                let edge = Edge::references(test);
+                assert_eq!(
+                    sorted(evidenced_by_child(&parents, &children, edge)),
+                    kept_parents,
+                    "parents under {test:?}, read under {read_under:?}"
+                );
+                assert_eq!(
+                    sorted(evidenced_by_parent(&children, &parents, edge)),
+                    kept_children,
+                    "children under {test:?}, read under {read_under:?}"
+                );
+                assert!(absence_is_proven(
+                    &parents,
+                    &children,
+                    &DependencyRole::Parent,
+                    edge
+                ));
+            }
+        }
     }
 }
