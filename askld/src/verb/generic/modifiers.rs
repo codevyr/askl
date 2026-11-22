@@ -4,7 +4,7 @@ use crate::verb::Args;
 use anyhow::{anyhow, bail, Result};
 use index::db_diesel::TraversalMode;
 use index::edge::{Edge, RefTest};
-use index::roles::Relation;
+use index::roles::{Relation, Roles};
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -160,6 +160,86 @@ impl Verb for RelationModifier {
 impl Display for RelationModifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "RelationModifier({})", self.name())
+    }
+}
+
+/// RoleModifier - the scope relates by an ordinary reference that STATES what
+/// it does to the child: `calls` (the token is the callee of a call),
+/// `writes` (the child is assigned or initialised), `takes` (its value or
+/// address is taken, not called).  `reads` is `takes` under the name an
+/// answer prints for data and fields: one bit, either word, any target.
+///
+/// A ROLE WORD NARROWS `refs`.  It selects the references drawn `→` whose
+/// words say that role, and nothing else: not a relation row, which no token
+/// spells, and not a reference that states nothing.  AN UNSTATED ROLE IS
+/// UNKNOWN, NEVER "NO" -- and never "yes" either, so no role word matches it;
+/// what a word passed over for that reason, the answer says
+/// (`crate::statement::passed_over`).
+///
+/// `calls` is literal.  A call through a slot is a call of the slot; the
+/// functions stored in it are one more hop, written `calls { field holds
+/// { func } }`.
+///
+/// Written where `refs` is written, and carried into nested scopes exactly as
+/// it is.
+#[derive(Debug)]
+pub(in crate::verb) struct RoleModifier {
+    span: Span,
+    word: &'static str,
+    role: Roles,
+}
+
+impl RoleModifier {
+    pub(in crate::verb) const CALLS: &'static str = "calls";
+    pub(in crate::verb) const WRITES: &'static str = "writes";
+    pub(in crate::verb) const TAKES: &'static str = "takes";
+    pub(in crate::verb) const READS: &'static str = "reads";
+
+    /// The role a word asks for; `None` for a word that is not a role word.
+    pub(crate) fn role_of(word: &str) -> Option<(&'static str, Roles)> {
+        match word {
+            Self::CALLS => Some((Self::CALLS, Roles::CALL)),
+            Self::WRITES => Some((Self::WRITES, Roles::WRITE)),
+            Self::TAKES => Some((Self::TAKES, Roles::TAKE)),
+            Self::READS => Some((Self::READS, Roles::TAKE)),
+            _ => None,
+        }
+    }
+
+    pub fn new(span: Span, args: &Args, word: &'static str, role: Roles) -> Result<Arc<dyn Verb>> {
+        args.accepts(0, &[])?;
+        Ok(Arc::new(Self { span, word, role }))
+    }
+}
+
+impl Verb for RoleModifier {
+    fn name(&self) -> &str {
+        self.word
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn class(&self) -> VerbClass {
+        VerbClass::Relationship
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Skip
+    }
+
+    fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
+        let test = RefTest::stating(self.role)
+            .ok_or_else(|| anyhow!("`{}` asks for no role", self.word))?;
+        ctx.set_relationship_type_inherited(Edge::references(test));
+        Ok(true) // consumed - don't add to command
+    }
+}
+
+impl Display for RoleModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RoleModifier({})", self.word)
     }
 }
 
