@@ -135,9 +135,15 @@ separate statements; a `{` must be on the same line as its verb to attach.
   with `or`/`and` is a new statement and errors. Newlines are free inside
   `( )`.
 - Not allowed inside expressions: `search`/`loc`/`layer` (not a single
-  predicate query), `has`/`refs`/labels (not predicates), bare `any` and
+  predicate query), labels (not predicates), bare `any` and
   `select` (constrain nothing), `!"..."` (forced). Union searches by
   juxtaposition instead: `search("a") search("b")`.
+- Relationship words (`has`, `refs`, ...) are an expression of their own: they
+  join with each other, with `or` only (`has or refs { "x" }` = either). The
+  expression describes the edge into the statement's `{ }` wherever it stands
+  among the terms (`func calls { … }` = `calls func { … }`). Mixing one with a
+  predicate (`func or has`), `and`, `not`, or two in one statement
+  (`has refs`) is an error that says what to write.
 
 ## Paths
 - `file()`/`dir()` arguments starting with `/` are **exact** and paths are
