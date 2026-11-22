@@ -7,7 +7,7 @@ use crate::{
 };
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use index::db_diesel::{FamilyDemands, FamilyRead};
+use index::db_diesel::{FamilyDemands, ReferenceRead};
 use index::{
     db_diesel::{CompositeFilter, EphContext, Index, ParentReference, ScopeContext, Selection},
     models_diesel::SymbolRef,
@@ -283,7 +283,7 @@ impl Selector for UserVerb {
 
         normal_selection.parents = fake_parent_references;
         // Fabricated in full from the parent's rows, not read under a limit.
-        normal_selection.families.parents = FamilyRead::whole();
+        normal_selection.families.parents = ReferenceRead::whole();
 
         Ok(Some(normal_selection))
     }
