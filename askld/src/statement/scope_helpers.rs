@@ -242,7 +242,7 @@ pub(super) fn build_family_demands(statement: &Statement) -> FamilyDemands {
         // `relationship_type` describes THIS statement's edge to its parent,
         // which is the same edge `constrain_by_child` uses when it reads this
         // statement's parents families from the other end.
-        Some(_) => demand_of(statement.relationship_type),
+        Some(_) => FamilyDemand::of(statement.relationship_type),
         None => FamilyDemand::both(),
     };
     let mut children_rel: Option<Edge> = None;
@@ -271,17 +271,9 @@ pub(super) fn build_family_demands(statement: &Statement) -> FamilyDemands {
     let children = match children_rel {
         Some(rel) => FamilyDemand {
             listing: listing.flatten(),
-            ..demand_of(rel)
+            ..FamilyDemand::of(rel)
         },
         None => FamilyDemand::both(),
     };
     FamilyDemands { parent, children }
-}
-
-fn demand_of(rel: Edge) -> FamilyDemand {
-    FamilyDemand {
-        refs: rel.refs().is_some(),
-        has: rel.has(),
-        listing: None,
-    }
 }
