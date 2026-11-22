@@ -3,7 +3,7 @@ use crate::command::{Command, ComputeResult, LabeledStatements};
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::execution_context::{statement_key, ExecutionContext, ProbeActivation};
 use crate::execution_state::{
-    DependencyRole, ExecutionState, RelationshipType, StatementDependency, StatementDependent,
+    DependencyRole, ExecutionState, StatementDependency, StatementDependent,
 };
 use crate::hierarchy::Hierarchy;
 use crate::name_pattern::NamePattern;
@@ -17,6 +17,7 @@ use crate::verb::{
 use anyhow::Result;
 use core::fmt::Debug;
 use index::db_diesel::{CompositeFilter, EphContext, ScopeContext, Selection, TraversalMode};
+use index::edge::Edge;
 use index::roles::Stated;
 use index::symbols::{FileId, Occurrence, SymbolId, SymbolInstanceId};
 use std::cell::{Ref, RefCell, RefMut};
@@ -352,7 +353,7 @@ pub struct Statement {
     /// The relationship type for this statement's relationship to its parent.
     /// - Refs (default): Reference-based traversal (calls)
     /// - Has: Containment-based traversal (composition)
-    pub relationship_type: RelationshipType,
+    pub relationship_type: Edge,
     /// How far this statement's scope reaches into the containment tree.
     /// By default every descendant whose symbol is not folded, at any depth.
     /// `nested` narrows it to one structural level, `unnest` widens it to
@@ -365,7 +366,7 @@ impl Statement {
         Statement::new_full(
             command,
             scope,
-            RelationshipType::REFS,
+            Edge::EVERY_REFERENCE,
             TraversalMode::Unfolded,
         )
     }
@@ -373,7 +374,7 @@ impl Statement {
     pub fn new_with_relationship(
         command: Command,
         scope: Rc<dyn Scope>,
-        relationship_type: RelationshipType,
+        relationship_type: Edge,
     ) -> Rc<Statement> {
         Statement::new_full(command, scope, relationship_type, TraversalMode::Unfolded)
     }
@@ -381,7 +382,7 @@ impl Statement {
     pub fn new_full(
         command: Command,
         scope: Rc<dyn Scope>,
-        relationship_type: RelationshipType,
+        relationship_type: Edge,
         mode: TraversalMode,
     ) -> Rc<Statement> {
         Rc::new(Statement {
@@ -398,7 +399,7 @@ impl Statement {
         self.mode
     }
 
-    pub fn get_relationship_type(&self) -> RelationshipType {
+    pub fn get_relationship_type(&self) -> Edge {
         self.relationship_type
     }
 
@@ -878,41 +879,39 @@ impl Statement {
                         between: ProbeNeighbour,
                     }
                     let mut neighbours: Vec<Resolved> = Vec::new();
-                    let mut consider = |statement: usize,
-                                        ids: &Vec<i64>,
-                                        rel: RelationshipType,
-                                        parent_side: bool| {
-                        let refs = rel.contains(RelationshipType::REFS);
-                        let has = rel.contains(RelationshipType::HAS);
-                        if !refs && !has {
-                            return; // EMPTY relationship: no constraint
-                        }
-                        let mut roles = Vec::new();
-                        if refs {
-                            roles.push(if parent_side {
-                                ProbeRole::RefsChildrenOf(ids.clone())
+                    let mut consider =
+                        |statement: usize, ids: &Vec<i64>, rel: Edge, parent_side: bool| {
+                            let refs = rel.refs().is_some();
+                            let has = rel.has();
+                            if !refs && !has {
+                                return; // EMPTY relationship: no constraint
+                            }
+                            let mut roles = Vec::new();
+                            if refs {
+                                roles.push(if parent_side {
+                                    ProbeRole::RefsChildrenOf(ids.clone())
+                                } else {
+                                    ProbeRole::RefsParentsOf(ids.clone())
+                                });
+                            }
+                            if has {
+                                roles.push(if parent_side {
+                                    ProbeRole::HasChildrenOf(ids.clone())
+                                } else {
+                                    ProbeRole::HasParentsOf(ids.clone())
+                                });
+                            }
+                            let between = if parent_side {
+                                ProbeNeighbour::parent(ids.clone(), refs, has)
                             } else {
-                                ProbeRole::RefsParentsOf(ids.clone())
+                                ProbeNeighbour::child(ids.clone(), refs, has)
+                            };
+                            neighbours.push(Resolved {
+                                statement,
+                                roles,
+                                between,
                             });
-                        }
-                        if has {
-                            roles.push(if parent_side {
-                                ProbeRole::HasChildrenOf(ids.clone())
-                            } else {
-                                ProbeRole::HasParentsOf(ids.clone())
-                            });
-                        }
-                        let between = if parent_side {
-                            ProbeNeighbour::parent(ids.clone(), refs, has)
-                        } else {
-                            ProbeNeighbour::child(ids.clone(), refs, has)
                         };
-                        neighbours.push(Resolved {
-                            statement,
-                            roles,
-                            between,
-                        });
-                    };
                     if let Some(parent) = stmt.parent().and_then(|p| p.upgrade()) {
                         let neighbour = statement_key(&parent);
                         if let Some(ids) = ctx.probe_resolved.get(&neighbour) {
