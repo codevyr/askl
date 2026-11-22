@@ -438,7 +438,8 @@ pub enum VerbClass {
     /// a command verb) and the `scope(...)` stub (a selector operationally,
     /// slated for removal with the filter-expressions work).
     Predicate,
-    /// Relationship-mode modifiers: `has`, `refs`, `derive` (consumed at
+    /// Relationship-mode modifiers: the relationship words and `inherit`
+    /// (consumed at
     /// parse time) and the traversal markers `unnest` / `nested` (read via
     /// [`Verb::traversal_mode`]).
     Relationship,
@@ -622,8 +623,8 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
     /// statements in its braces, if it is a relationship word (`has`,
     /// `refs`, `declares`, `holds`, `calls`, `writes`, `takes`, `reads`) or
     /// an expression of them.  The other relationship-class verbs are not
-    /// words of that kind: `derive(...)` takes arguments and is not part of
-    /// an expression, `unnest` and `nested` say how far a scope reaches.
+    /// words of that kind: `inherit(...)` carries one, and `unnest` and
+    /// `nested` say how far a scope reaches.
     fn relationship(&self) -> Option<&Relationship> {
         None
     }
@@ -1279,7 +1280,7 @@ pub type SelectorId = usize;
 /// neighbour that has already resolved — but it may still *supply* a
 /// selection to one that has none.  That second half is not a loophole: it
 /// is how a chain propagates through weak intermediaries (`{{"a"}}`, or
-/// `data(inherit=true) {{{"channels_a"}}}`), where every middle scope is
+/// `data inherit(type) {{{"channels_a"}}}`), where every middle scope is
 /// weak and the only data comes from the ends.
 ///
 /// Both notification edges ask this question and must answer it the same

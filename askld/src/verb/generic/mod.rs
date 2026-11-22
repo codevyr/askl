@@ -34,7 +34,7 @@ pub(crate) use self::ephemeral::{EphemeralOps, LabelResolutions};
 pub(super) use self::filters::{IgnoreVerb, PackageFilter, ProjectFilter};
 pub(super) use self::loc::LocSelector;
 pub(super) use self::modifiers::{
-    DeriveModifier, InheritVerb, LimitsVerb, NestedModifier, RelationshipVerb, UnnestModifier,
+    InheritVerb, LimitsVerb, NestedModifier, RelationshipVerb, UnnestModifier,
 };
 pub(super) use self::search::SearchSelector;
 pub(super) use self::selectors::{ForcedVerb, TypeSelector};
@@ -108,7 +108,6 @@ pub(crate) fn build_generic_verb(
             let word = Word::named(word).expect("checked by the guard");
             RelationshipVerb::word(verb_span, &args, word)
         }
-        DeriveModifier::NAME => DeriveModifier::new(verb_span, &args),
         LimitsVerb::NAME => LimitsVerb::new(verb_span, &args),
         UnnestModifier::NAME => UnnestModifier::new(verb_span, &args),
         NestedModifier::NAME => NestedModifier::new(verb_span, &args),

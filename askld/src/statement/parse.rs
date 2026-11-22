@@ -14,7 +14,7 @@ use pest::error::Error;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::{no_longer_carried, Statement};
+use super::Statement;
 
 pub fn build_statement<'a>(
     ctx: Rc<ParserContext>,
@@ -33,8 +33,6 @@ pub fn build_statement<'a>(
     let mut scope_has_real_children = false;
     // Where this statement wrote its relationship, if it has.
     let mut relationship: Option<pest::Span> = None;
-    // The relationship in force for this statement's braces, if it has any.
-    let mut braces: Option<Relationship> = None;
     let text = |span: &pest::Span| span.as_str().trim().to_string();
 
     for pair in iter.by_ref() {
@@ -74,8 +72,6 @@ pub fn build_statement<'a>(
                     // works regardless of whether the edge is containment or reference.
                     sub_ctx.set_relationship_type_default(Relationship::unwritten(Edge::ALL));
                 }
-
-                braces = Some(sub_ctx.get_relationship_type());
 
                 // Allow all symbol types for children — empty vec means no type filtering.
                 sub_ctx.set_default_symbol_types(vec![]);
@@ -161,18 +157,6 @@ pub fn build_statement<'a>(
     let mode = command.traversal_mode();
     let statement = Statement::new_full(command, scope.clone(), relationship_type, mode);
     scope.set_parent(Rc::downgrade(&statement));
-
-    // TRANSITIONAL: `has` and `refs` no longer reach nested scopes, and a
-    // query written as if they did is told so (`no_longer_carried`).
-    if let (Some(at), Some(written)) = (relationship, braces) {
-        // A term's span runs up to the next one; the word is what is left.
-        let word = at.as_str().trim_end().len();
-        let at = Span::from_pest(at, sub_ctx.source());
-        let at = at.sub_span(at.start(), at.start() + word);
-        if let Some(said) = no_longer_carried::notice(&written, at, scope.statements()) {
-            statement.get_state_mut().warnings.push(said);
-        }
-    }
 
     Ok(statement)
 }

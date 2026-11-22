@@ -420,18 +420,20 @@ pub(in crate::verb) struct TypeSelector {
     symbol_type_id: Option<i32>,
     name_pattern: Option<NamePattern>,
     /// If true, this filter is inherited (cloned) into derived child scopes,
-    /// so it constrains every descendant: `data(inherit=true) { { "x" } }`.
-    /// Off unless asked for: a type word filters the statement it is
-    /// written in, and no other.  `func { "x" }` asks which functions use
-    /// `x`, whatever `x` is.
+    /// so it constrains every descendant: `data inherit(type) { { "x" } }`.
+    /// No argument says so: a type word filters the statement it is written
+    /// in, and no other (`func { "x" }` asks which functions use `x`,
+    /// whatever `x` is), until `inherit(type)` on its statement carries it
+    /// ([`Verb::carried_below`]).
     inherit: bool,
     /// `match="contains"` was written: the name pattern may match anywhere
     /// in the leaf.  Without it a glob anchors to the whole leaf name for
     /// every type, and an exact compound name anchors its last token to the
     /// leaf for files and directories only — see `name_filter_leaf`.
     contains: bool,
-    /// This instance was cloned into a child scope by `inherit=true`.  There
-    /// it constrains — it never selects — whether or not it carries a name.
+    /// This instance was cloned into a child scope, carried there by
+    /// `inherit(type)`.  There it constrains — it never selects — whether or
+    /// not it carries a name.
     derived: bool,
 }
 
@@ -462,11 +464,7 @@ impl TypeSelector {
             );
         }
 
-        args.accepts(1, &["inherit", "match"])?;
-
-        // A type word is about its own statement.  It reaches the scopes
-        // below only when the query says so.
-        let inherit = args.named_bool("inherit")?.unwrap_or(false);
+        args.accepts(1, &["match"])?;
 
         let contains = matches!(args.named_str("match")?, Some("contains"));
 
@@ -474,7 +472,9 @@ impl TypeSelector {
             span,
             symbol_type_id,
             name_pattern,
-            inherit,
+            // A type word is about its own statement.  It reaches the scopes
+            // below only when `inherit(type)` says so.
+            inherit: false,
             contains,
             derived: false,
         }))
@@ -673,7 +673,8 @@ impl Verb for TypeSelector {
         }))
     }
 
-    /// `inherit(type)` is `inherit=true` written beside the word.
+    /// `inherit(type)` beside the word: the same word, cloned into the
+    /// scopes below.
     fn carried_below(&self) -> Option<Arc<dyn Verb>> {
         Some(Arc::new(TypeSelector {
             span: self.span.clone(),
@@ -697,7 +698,7 @@ impl Verb for TypeSelector {
     }
 
     /// Every type selector — bare or named — writes the type: `data` or
-    /// `data("foo")` under `func(inherit=true)` replaces the inherited
+    /// `data("foo")` under `func inherit(type)` replaces the inherited
     /// filter rather than AND'ing with it.  It does not evict
     /// `search`/`loc`/`layer`: those suppress the DEFAULT type filter but do
     /// not occupy the type dimension.

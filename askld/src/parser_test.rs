@@ -494,8 +494,8 @@ fn boolean_keywords_do_not_split_longer_words() {
     // !XID_CONTINUE guard on or/and/not.  `truthy` is not `true` followed by
     // garbage; it is not a value at all.
     for query in [
-        r#"func("a", inherit=truthy)"#,
-        r#"func("a", inherit=falsey)"#,
+        r#"filter("type", "func", inherit=truthy)"#,
+        r#"filter("type", "func", inherit=falsey)"#,
     ] {
         assert!(parse(query).is_err(), "must not parse: {query}");
     }
@@ -539,7 +539,7 @@ fn whitespace_may_surround_a_named_argument_equals() {
         r#"search("abc", limit = 5)"#,
         r#"search("abc", limit =5)"#,
         r#"search("abc", limit= 5)"#,
-        r#"func("a", inherit = true)"#,
+        r#"filter("type", "func", inherit = true)"#,
         r#"ignore("a", package = "p")"#,
         r#"func limits(symbols=200)"#,
         r#"func limits(symbols = 200, listing = 50)"#,
