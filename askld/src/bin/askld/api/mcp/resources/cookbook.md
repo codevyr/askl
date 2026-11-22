@@ -15,14 +15,34 @@ Call graph
 - Indirect calls (fn pointer):`func { method "color_adjust" { func } }`  (calls that dispatch through a struct fn-pointer field to its implementations; `method` = `field`, a type filter)
 - Implementations of an ops field: `"reg_mr" { func }`  (a struct field's children are the functions assigned to it in initializers — ONE query lists every `.reg_mr = xxx_reg_mr` implementation across providers; no grep needed)
 - Two levels of callees:      `"vfs_read" { { } }`
+- A call across an ops table: `"vfs_read" { field { func } }`  (`vfs_read` calls the slot `file_operations.read`; the functions stored in it are one hop further. Name the field or a function to narrow: `"vfs_read" { field("file_operations.read") { g"bt_bmc*" } }`. `"vfs_read" { func { func } }` skips the slot — a field is not a function — and drops every function behind it)
 
-Containment
+Containment and macros
 - Functions a macro's body calls: `macro("LOG") { func }`
 - What a macro's invocations declared: `macro("DEFINE_MUTEX") { data }`, `macro("UCS_PROFILE_FUNC") { func }`  (add `unnest` for the ones nobody names)
 - Macros that declare or use a symbol: `macro { "cgroup_mutex" }`  (the word `macro` is about the users only; the name matches at every type)
 - Everything in a module, incl. what macros generated: `mod("amdgpu") { unnest func }`  (the default leaves out symbols nobody wrote down, e.g. `__compiletime_assert_N`)
 - Fields of a struct:         `type("file_operations") has { field }`
-- Dispatch through a field:   `{ field("file_operations.read") }`
+- Only what a file defines:   `file("/proj/fs/read_write.c") has { func }`  (bare `{ func }` also lists the functions it refers to)
+- Files that define X:        `dir("/proj/fs") has inherit(relationship) { file { func("init_module") } }`  (`inherit(relationship)` carries `has` into the inner scope; without it the inner scope is bare and files that only mention X are listed too)
+- Who uses a field:           `{ field("file_operations.read") }`  (everything that uses the field — functions that call through it, test it or assign it — and what contains it; `func { … }` keeps the functions)
+
+By relationship — the query for today's indices first, then the word that asks for exactly it
+(No published index states roles or has `declares` / `holds` rows yet. On today's indices the second form finds nothing and `warnings` says so — "the `linux` index states no roles; `calls` cannot match there. `refs { … }` lists its references" — which is NOT "nothing calls x". Use the first form and read the code.)
+- Who calls through a slot, and who assigns it:
+  today `func { field("platform_driver.probe") }`  (both together: on the kernel, `platform_probe` calls through it and six functions assign it; `projection="body"` shows which)
+  words `func calls { field("platform_driver.probe") }` / `func writes { field("platform_driver.probe") }`
+- What a macro declares, and what its body names:
+  today `macro("DEFINE_MUTEX") { }`  (both together; a type word separates them where the types differ: `{ data }` the mutexes, `{ macro or type }` what the body names)
+  words `macro("DEFINE_MUTEX") declares { data }` / `macro("DEFINE_MUTEX") refs { }`
+- A call across an ops table:
+  today `"vfs_read" { field { func } }`
+  words `"vfs_read" calls { field holds { func } }`  (`calls` is literal: it reaches the slot; `holds` reaches what is stored in it)
+- What a slot holds (implementations of an ops field):
+  today `field("file_operations.read") { func }`
+  words `field("file_operations.read") holds { func }`
+- Either of two relationships: `"vfs_read" has or refs { }`  (words join with `or`; `and` / `not` between them are refused)
+- A warning that gives a query ("follow it: `"via" calls { field holds { func } }`", "`calls { field holds { "my_read" } }` goes through the slot"): run that query.
 
 Combining children — `;` is AND, a space is OR
 - Relates to BOTH (AND):      `func { "vfs_read" ; "vfs_write" }`  (`;` inside `{ }` makes each child a separate statement and all must match — here: functions calling both)

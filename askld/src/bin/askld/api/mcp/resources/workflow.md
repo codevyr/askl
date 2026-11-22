@@ -13,6 +13,10 @@ starting over — re-running an extended query is cheap (results are cached).
    - callees (what it calls): `"vfs_read" { }`
    - callers (who calls it): `{ "vfs_read" }`
    - go deeper by nesting: `"vfs_read" { func { } }`
+   - a bare `{ }` follows every relationship; a word narrows it: `has`
+     (containment), `refs` (references). `calls`, `writes`, `takes`,
+     `declares` and `holds` ask for more than today's indices state — see
+     the last paragraph.
 4. **Narrow the noise.** Add filters as you learn: `func` to keep functions,
    `project("…")` to stay in one tree, `ignore("…")` to drop helpers. A typed
    caller scope `func { "x" }` is far less noisy than a bare `{ "x" }`.
@@ -25,6 +29,15 @@ starting over — re-running an extended query is cheap (results are cached).
    the lines around a `search()` hit). Symbol bodies come from
    `askl_run(projection: "body")`.
 
-If a query returns nothing: re-check the name (case-sensitive), confirm the
-project with `askl_projects`, and re-read `askl://syntax`. Errors almost always
-mean the query, not the tool — do not fall back to grep.
+If a query returns nothing: **read `warnings` first**, then re-check the name
+(case-sensitive), confirm the project with `askl_projects`, and re-read
+`askl://syntax`. Errors almost always mean the query, not the tool — do not
+fall back to grep.
+
+A warning "the `linux` index states no roles; `calls` cannot match there"
+(or "has no `declares` rows", "has no `holds` rows") means the empty answer
+says nothing about the code: no published index records that yet. Drop the
+word, or write `refs`, and run it again — never report "nothing calls x"
+from it. A callee list that looks short for a dispatcher (`"vfs_read"
+{ func }`) is missing the calls through struct fields: ask
+`"vfs_read" { field { func } }`.

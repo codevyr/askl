@@ -116,8 +116,10 @@ fn prompt_content(name: &str, arguments: &HashMap<String, String>) -> Option<Pro
                 format!("Find the callers of {}", symbol),
                 format!(
                     "Using the askl MCP, find everything that calls `{symbol}`. Run `askl_run` \
-with query `{{ \"{symbol}\" }}` (caller scope). If it returns nothing, read `askl://syntax` and \
-check the name against `askl_projects`. Summarize the callers grouped by file, each with its \
+with query `{{ \"{symbol}\" }}` (caller scope). A function stored in a struct field (an ops \
+table) is called through the field: `func {{ field {{ \"{symbol}\" }} }}` lists those callers. If \
+it returns nothing, read `warnings` and `askl://syntax`, and check the name against \
+`askl_projects`. Summarize the callers grouped by file, each with its \
 `file:line`."
                 ),
             )
@@ -141,9 +143,10 @@ that name with `projection: \"body\"`. Summarize the call flow."
                 format!(
                     "Using the askl MCP, determine how `{from}` reaches `{to}` through the call \
 graph. Start from `\"{from}\" {{ }}` and expand promising callees toward `{to}`, growing the \
-query iteratively (e.g. `\"{from}\" {{ \"intermediate\" {{ }} }}`). If direct calls do not \
-connect them, try `search(\"{to}\")` to find where it is referenced. Report the chain of calls \
-with `file:line`."
+query iteratively (e.g. `\"{from}\" {{ \"intermediate\" {{ }} }}`). A call through a struct \
+field (an ops table) is one hop more than a direct call: `\"{from}\" {{ field {{ func }} }}` lists \
+the functions stored in the fields `{from}` uses. If calls do not connect them, try \
+`search(\"{to}\")` to find where it is referenced. Report the chain of calls with `file:line`."
                 ),
             )
         }
