@@ -7437,6 +7437,279 @@ fn what_a_role_word_says_survives_a_cache_hit() {
     });
 }
 
+/// What a listing said of the slots its parent calls through, on the
+/// role-words fixture.
+fn slots_said(q: &str) -> Vec<String> {
+    role_said(q)
+        .into_iter()
+        .filter(|message| message.contains("calls through"))
+        .collect()
+}
+
+#[test]
+fn a_listing_says_which_slots_its_parent_calls_through() {
+    // `calls` IS LITERAL: a call through `ops->slot(...)` is a call of the
+    // slot, a field.  A LISTING THAT LEAVES OUT A SLOT ITS PARENT CALLS
+    // THROUGH, AND WOULD LIST WHAT THE SLOT HOLDS, SAYS SO.
+    let ids = role_ids;
+
+    // `via` calls `slot` and `direct`; `slot` holds `my_read`, `direct` and
+    // `stored`.  Asked for the functions, the answer is `direct` -- and two
+    // more are one hop away, behind a field `func` passed over.
+    assert_eq!(ids(r#""via" { func }"#), vec![30, 140]);
+    let one = "`func` passed over 1 slot that `\"via\"` calls through: `slot`; follow it: \
+               `\"via\" calls { field holds { func } }`";
+    assert_eq!(slots_said(r#""via" { func }"#), vec![one.to_string()]);
+    // It is about the listing, and is said at it.
+    let at: Vec<String> = run_query(crate::test_util::TEST_INPUT_ROLE_WORDS, r#""via" { func }"#)
+        .warnings
+        .iter()
+        .filter(|w| w.message.contains("calls through"))
+        .map(|w| w.span.as_str().trim().to_string())
+        .collect();
+    assert_eq!(at, vec!["func".to_string()]);
+    // What it offers is a query, and reaches them.
+    assert_eq!(
+        ids(r#""via" calls { field holds { func } }"#),
+        vec![30, 50, 60, 140, 150]
+    );
+
+    // Under every edge that admits the call: the bare scope, `refs`, `calls`
+    // and an expression with one of them.
+    for q in [
+        r#""via" refs { func }"#,
+        r#""via" calls { func }"#,
+        r#"calls "via" { func }"#,
+        r#""via" has or calls { func }"#,
+        r#""via" calls or holds { func }"#,
+    ] {
+        assert_eq!(slots_said(q), vec![one.to_string()], "{q}");
+    }
+
+    // `multi` calls through six slots and calls `helper` by name.  Counted
+    // are the slots that hold a function the answer does not have already:
+    // not `slot_d` (it holds `helper`, which is listed), not `idle` (it
+    // holds nothing, though its declaration names a function), not `quiet`,
+    // which `multi` names without calling, and not `fp`, which it calls and
+    // which is a variable: a slot is a field, and `field holds` would not
+    // reach it.
+    assert_eq!(ids(r#""multi" { func }"#), vec![210, 300]);
+    assert_eq!(
+        slots_said(r#""multi" { func }"#),
+        vec![
+            "`func` passed over 4 slots that `\"multi\"` calls through: `slot_b`, `slot_c`, \
+             `slot_e` and 1 more; follow them: `\"multi\" calls { field holds { func } }`"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        ids(r#""multi" calls { field holds { func } }"#),
+        vec![210, 230, 240, 250, 260, 270, 280, 300, 310, 320, 330, 340, 350]
+    );
+
+    // A statement below that narrows still applies: of everything behind
+    // the slots only `b_read` calls `leaf` and is not listed already, so one
+    // slot was passed over, not four.
+    assert_eq!(ids(r#""multi" { func { "leaf" } }"#), vec![210, 300, 370]);
+    let offered = r#""multi" calls { field holds { func { "leaf" } } }"#;
+    assert_eq!(
+        slots_said(r#""multi" { func { "leaf" } }"#),
+        vec![format!(
+            "`func` passed over 1 slot that `\"multi\"` calls through: `slot_b`; follow it: \
+             `{offered}`"
+        )]
+    );
+    // The offered query runs, and lists what the slot holds: `b_read`.
+    // (And `helper` once more, through `slot_d`.)
+    assert_eq!(ids(offered), vec![210, 230, 250, 300, 310, 370]);
+    // A listing below narrows nothing (it is weak), so nothing behind the
+    // slots is lost to it: four again.
+    assert_eq!(
+        slots_said(r#""multi" { func { func } }"#),
+        vec![
+            "`func` passed over 4 slots that `\"multi\"` calls through: `slot_b`, `slot_c`, \
+             `slot_e` and 1 more; follow them: \
+             `\"multi\" calls { field holds { func { func } } }`"
+                .to_string()
+        ]
+    );
+    // A listing too long to quote is left as its shape.
+    let long =
+        r#""multi" { func { "leaf" "leaf" "leaf" "leaf" "leaf" "leaf" "leaf" "leaf" "leaf" } }"#;
+    assert_eq!(
+        slots_said(long),
+        vec![
+            "`func` passed over 1 slot that `\"multi\"` calls through: `slot_b`; follow it: \
+             `\"multi\" calls { field holds { func { … } } }`"
+                .to_string()
+        ]
+    );
+
+    // One sentence for the statement, whichever of its parents calls
+    // through.
+    assert_eq!(
+        slots_said(r#""multi" "via" { func }"#),
+        vec![
+            "`func` passed over 5 slots that `\"multi\" \"via\"` calls through: `slot`, \
+             `slot_b`, `slot_c` and 2 more; follow them: \
+             `\"multi\" \"via\" calls { field holds { func } }`"
+                .to_string()
+        ]
+    );
+    // A parent that is a listing itself.
+    assert_eq!(
+        slots_said(r#"func { func { "leaf" } }"#),
+        vec![
+            "`func` passed over 1 slot that `func` calls through: `slot_b`; follow it: \
+             `func calls { field holds { func { \"leaf\" } } }`"
+                .to_string()
+        ]
+    );
+    // One level down, and a parent that wrote nothing.
+    assert_eq!(
+        slots_said(r#"func { "via" { func } }"#),
+        vec![one.to_string()]
+    );
+    assert_eq!(
+        slots_said(r#""user_of_m" { { func } }"#),
+        Vec::<String>::new()
+    );
+    // A parent whose words stand around its relationship word: the hop is
+    // offered as what to put in place of the braces.
+    assert_eq!(
+        slots_said(r#""via" calls "multi" { func { "leaf" } }"#),
+        vec![
+            "`func` passed over 1 slot that `\"via\" calls \"multi\"` calls through: \
+             `slot_b`; follow it: `calls { field holds { func { \"leaf\" } } }`"
+                .to_string()
+        ]
+    );
+    // A filter the scope did not write.
+    assert_eq!(
+        slots_said(r#"func inherit(type) "via" { }"#),
+        vec![
+            "the filter carried into this scope passed over 1 slot that \
+             `func inherit(type) \"via\"` calls through: `slot`; follow it: \
+             `func inherit(type) \"via\" calls { field holds { } }`"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        ids(r#"func inherit(type) "via" calls { field holds { } }"#),
+        vec![30, 50, 60, 140, 150]
+    );
+}
+
+#[test]
+fn a_listing_says_nothing_of_slots_it_did_not_pass_over() {
+    for q in [
+        // Nothing was left out: the slot is listed.
+        r#""via" { }"#,
+        r#""via" { field }"#,
+        r#""via" calls { }"#,
+        r#""via" { func or field }"#,
+        // The edge does not admit a call.
+        r#""via" has { func }"#,
+        r#""via" holds { func }"#,
+        r#""via" declares { func }"#,
+        r#""via" writes { func }"#,
+        r#""via" takes { func }"#,
+        // What the slot holds is not what was asked for.
+        r#""via" { data }"#,
+        r#""via" { macro }"#,
+        r#""multi" { func { "hook" } }"#,
+        r#""via" { func { "leaf" } }"#,
+        // ... or is what the answer has already: of what `slot` holds, the
+        // filter matches `direct`, which `via` calls by name.
+        r#""via" { filter("compound_name", "direct") }"#,
+        // A statement that names what it wants is not a listing.
+        r#""via" { func("my_read") }"#,
+        r#""via" { "my_read" }"#,
+        r#""via" { func "my_read" }"#,
+        // No slot is called: `caller` calls functions, `other` states
+        // nothing, and `quiet` is only named.
+        r#""caller" { func }"#,
+        r#""other" { func }"#,
+        // An index that states no roles has no known call.
+        r#""old_caller" { func }"#,
+    ] {
+        assert_eq!(slots_said(q), Vec::<String>::new(), "{q}");
+    }
+}
+
+#[test]
+fn a_listing_counts_no_slot_it_could_not_read_to_the_end() {
+    // `multi` and `via` relate to two functions between them.  Limited to
+    // one row that answer is cut, and says it is incomplete: which slots it
+    // lacks is not known.
+    let cut = crate::test_util::run_query_with_read_cap(
+        crate::test_util::TEST_INPUT_ROLE_WORDS,
+        r#""multi" "via" { func }"#,
+        1,
+    );
+    assert!(
+        cut.warnings
+            .iter()
+            .all(|w| !w.message.contains("calls through")),
+        "{:?}",
+        cut.warnings
+    );
+    // `multi` relates to one function, and calls through six slots.  With
+    // room for the answer and not for the slots, what is said is said of the
+    // slots that were read, as "at least".
+    let mut said_at_all = false;
+    for cap in [1, 2, 3, 4] {
+        for said in role_said_with_read_cap(r#""multi" { func }"#, cap) {
+            if !said.contains("calls through") {
+                continue;
+            }
+            said_at_all = true;
+            assert!(
+                said.starts_with("`func` passed over at least "),
+                "cap {cap}: {said}"
+            );
+        }
+    }
+    assert!(said_at_all);
+    // With room for all of it, it is a count.
+    assert!(role_said_with_read_cap(r#""multi" { func }"#, 100)
+        .iter()
+        .any(|said| said.starts_with("`func` passed over 4 slots")));
+}
+
+#[test]
+fn what_a_listing_says_of_slots_survives_a_cache_hit() {
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index =
+            crate::test_util::get_shared_index(crate::test_util::TEST_INPUT_ROLE_WORDS).await;
+        let said = |res: &crate::statement::ExecutionResult| -> Vec<String> {
+            res.warnings
+                .iter()
+                .filter(|w| w.message.contains("calls through"))
+                .map(|w| w.message.clone())
+                .collect()
+        };
+        for q in [r#""via" { func }"#, r#""multi" { func { "leaf" } }"#] {
+            let (cold, _) = crate::test_util::run_query_traced_on(index.clone(), q)
+                .await
+                .unwrap();
+            let before = index.sql_cache().stats();
+            let (warm, _) = crate::test_util::run_query_traced_on(index.clone(), q)
+                .await
+                .unwrap();
+            let after = index.sql_cache().stats();
+            assert_eq!(said(&cold).len(), 1, "{q}: {:?}", cold.warnings);
+            assert_eq!(said(&warm), said(&cold), "{q}");
+            assert_eq!(
+                after.misses, before.misses,
+                "{q}: the second run read nothing"
+            );
+        }
+    });
+}
+
 #[test]
 fn relationship_words_joined_with_or_match_a_pair_by_any_of_its_rows() {
     // On the role-words fixture: `caller` calls `hook` and `shared`, writes
