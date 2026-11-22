@@ -1,8 +1,8 @@
 use crate::execution_context::ExecutionContext;
-use crate::execution_state::RelationshipType;
 use crate::hierarchy::Hierarchy;
 use index::db_diesel::{CompositeFilter, EphContext, ScopeContext};
 use index::db_diesel::{FamilyDemand, FamilyDemands, TraversalMode};
+use index::edge::Edge;
 
 use super::Statement;
 
@@ -245,7 +245,7 @@ pub(super) fn build_family_demands(statement: &Statement) -> FamilyDemands {
         Some(_) => demand_of(statement.relationship_type),
         None => FamilyDemand::both(),
     };
-    let mut children_rel: Option<RelationshipType> = None;
+    let mut children_rel: Option<Edge> = None;
     // The one mode every child lists under, if they are all echoes.  An echo
     // lists exactly what its mode admits (`derive_from_parent` reads under
     // the same filter), so the family it reads need hold nothing else.  A
@@ -278,10 +278,10 @@ pub(super) fn build_family_demands(statement: &Statement) -> FamilyDemands {
     FamilyDemands { parent, children }
 }
 
-fn demand_of(rel: RelationshipType) -> FamilyDemand {
+fn demand_of(rel: Edge) -> FamilyDemand {
     FamilyDemand {
-        refs: rel.contains(RelationshipType::REFS),
-        has: rel.contains(RelationshipType::HAS),
+        refs: rel.refs().is_some(),
+        has: rel.has(),
         listing: None,
     }
 }

@@ -1,9 +1,9 @@
-use crate::execution_state::RelationshipType;
 use crate::parser_context::ParserContext;
 use crate::span::Span;
 use crate::verb::Args;
 use anyhow::{anyhow, bail, Result};
 use index::db_diesel::TraversalMode;
+use index::edge::Edge;
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -43,7 +43,7 @@ impl Verb for HasModifier {
 
     /// The has verb consumes itself by setting the relationship type in the parser context
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.set_relationship_type_inherited(RelationshipType::HAS);
+        ctx.set_relationship_type_inherited(Edge::HAS);
         Ok(true) // consumed - don't add to command
     }
 }
@@ -89,7 +89,7 @@ impl Verb for RefsModifier {
 
     /// The refs verb consumes itself by setting the relationship type in the parser context
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.set_relationship_type_inherited(RelationshipType::REFS);
+        ctx.set_relationship_type_inherited(Edge::EVERY_REFERENCE);
         Ok(true) // consumed - don't add to command
     }
 }
@@ -108,7 +108,7 @@ impl Display for RefsModifier {
 #[derive(Debug)]
 pub(in crate::verb) struct DeriveModifier {
     span: Span,
-    relationship_type: RelationshipType,
+    relationship_type: Edge,
     inherit: bool,
 }
 
@@ -122,21 +122,23 @@ impl DeriveModifier {
             .named_str("type")?
             .ok_or_else(|| anyhow!("derive requires a 'type' parameter"))?;
 
-        let mut rel_type = RelationshipType::EMPTY;
+        let mut asked: Option<Edge> = None;
         for part in type_str.split(',') {
-            match part.trim() {
-                "refs" => rel_type = rel_type | RelationshipType::REFS,
-                "has" => rel_type = rel_type | RelationshipType::HAS,
+            let edge = match part.trim() {
+                "refs" => Edge::EVERY_REFERENCE,
+                "has" => Edge::HAS,
                 other => bail!(
                     "unknown relationship type '{}' in derive (expected 'refs' or 'has')",
                     other
                 ),
-            }
+            };
+            asked = Some(asked.map_or(edge, |so_far| so_far | edge));
         }
 
-        if rel_type == RelationshipType::EMPTY {
+        // `split` always yields a part, so an edge was asked or we bailed.
+        let Some(rel_type) = asked else {
             bail!("derive type parameter must contain at least one of 'refs', 'has'");
-        }
+        };
 
         let inherit = args.named_bool("inherit")?.unwrap_or(true);
 
