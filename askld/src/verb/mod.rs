@@ -4,6 +4,7 @@ use crate::execution_context::{selector_state_with, ExecutionContext, SelectorRe
 use crate::execution_state::{DependencyKind, DependencyRole};
 use crate::parser::{Rule, Value};
 use crate::parser_context::ParserContext;
+use crate::relationship::Relationship;
 use crate::span::Span;
 use crate::statement::Statement;
 use anyhow::Result;
@@ -208,7 +209,7 @@ mod labels;
 mod preamble;
 
 pub(crate) use self::args::Args;
-pub(crate) use self::compound::build_compound_filter;
+pub(crate) use self::compound::{build_compound_filter, Term};
 pub(crate) use self::generic::{
     name_filter, typed_selector_text, typed_selectors_for, word_a_bare_name_cannot_replace,
     EphemeralOps, LabelResolutions,
@@ -304,13 +305,14 @@ pub(super) fn construct_verb(
     Ok(verb)
 }
 
-pub fn build_verb(
-    ctx: Rc<ParserContext>,
-    pair: pest::iterators::Pair<Rule>,
+/// Give a constructed verb to the statement being built: the context
+/// consumes it (a relationship word, a preamble, a layer) or it joins the
+/// statement's command.
+pub(super) fn install_verb(
+    ctx: &Rc<ParserContext>,
+    verb: Arc<dyn Verb>,
+    verb_span: &Span,
 ) -> Result<(), Error<Rule>> {
-    let verb_span = Span::from_pest(pair.as_span(), ctx.source());
-    let verb = construct_verb(&ctx, pair)?;
-
     let verb = ctx.consume(verb).map_err(|e| {
         Error::new_from_span(
             CustomError {
@@ -595,6 +597,16 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
                 format!("`{}` cannot appear in a filter expression", self.name())
             }
         })
+    }
+
+    /// What this verb asks of the edge between its statement and the
+    /// statements in its braces, if it is a relationship word (`has`,
+    /// `refs`, `declares`, `holds`, `calls`, `writes`, `takes`, `reads`) or
+    /// an expression of them.  The other relationship-class verbs are not
+    /// words of that kind: `derive(...)` takes arguments and is not part of
+    /// an expression, `unnest` and `nested` say how far a scope reaches.
+    fn relationship(&self) -> Option<&Relationship> {
+        None
     }
 
     fn update_context(&self, _ctx: &ParserContext) -> Result<bool> {

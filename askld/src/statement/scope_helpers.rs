@@ -242,7 +242,7 @@ pub(super) fn build_family_demands(statement: &Statement) -> FamilyDemands {
         // `relationship_type` describes THIS statement's edge to its parent,
         // which is the same edge `constrain_by_child` uses when it reads this
         // statement's parents families from the other end.
-        Some(_) => FamilyDemand::of(statement.relationship_type),
+        Some(_) => FamilyDemand::of(statement.get_relationship_type()),
         None => FamilyDemand::both(),
     };
     let mut children_rel: Option<Edge> = None;
@@ -254,8 +254,8 @@ pub(super) fn build_family_demands(statement: &Statement) -> FamilyDemands {
     let mut listing: Option<Option<TraversalMode>> = None;
     for child in statement.children() {
         children_rel = Some(match children_rel {
-            None => child.relationship_type,
-            Some(acc) => acc | child.relationship_type,
+            None => child.get_relationship_type(),
+            Some(acc) => acc | child.get_relationship_type(),
         });
         let mode = match child.traversal_mode() {
             TraversalMode::Unnest => None,
