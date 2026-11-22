@@ -1,7 +1,7 @@
 use crate::cfg::ControlFlowGraph;
 use crate::diagnostic::Diagnostic;
 use crate::execution_context::{selector_state_with, ExecutionContext};
-use crate::execution_state::{DependencyRole, RelationshipType};
+use crate::execution_state::DependencyRole;
 use crate::parser::Rule;
 use crate::span::Span;
 use crate::statement::Statement;
@@ -17,6 +17,7 @@ use index::db_diesel::{
     CompositeFilter, EphContext, FoldedOnlyMixin, Index, InnermostOnlyMixin, ScopeContext,
     Selection, SymbolInstanceIdMixin, TraversalMode,
 };
+use index::edge::Edge;
 use index::symbols::SymbolInstanceId;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -665,7 +666,7 @@ impl Command {
         notifier: &Span,
         notifier_weak: bool,
         role: DependencyRole,
-        rel_type: RelationshipType,
+        rel_type: Edge,
         mode: TraversalMode,
         parent_scope: ScopeContext,
         children_scope: ScopeContext,
@@ -754,8 +755,8 @@ impl Command {
                     index
                         .find_parent_instance_ids(
                             &child_ids,
-                            rel_type.contains(RelationshipType::REFS),
-                            rel_type.contains(RelationshipType::HAS),
+                            rel_type.refs().is_some(),
+                            rel_type.has(),
                             &find_filter,
                             within,
                             &ctx.eph,
@@ -838,8 +839,8 @@ impl Command {
                 let found = index
                     .find_parent_instance_ids(
                         &dependency.get_instance_ids(),
-                        rel_type.contains(RelationshipType::REFS),
-                        rel_type.contains(RelationshipType::HAS),
+                        rel_type.refs().is_some(),
+                        rel_type.has(),
                         &CompositeFilter::and(find_parts),
                         within,
                         &ctx.eph,
