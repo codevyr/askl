@@ -6950,8 +6950,8 @@ fn a_role_word_says_how_many_symbols_it_could_not_decide() {
     assert_eq!(
         role_said(r#""caller" calls { }"#),
         vec![
-            "`calls` passed over 2 symbols that `\"caller\"` names without stating a role \
-             (`#define` bodies, macro uses): `maybe`, `plain`. Whether it calls them is not \
+            "`calls` passed over 2 symbols that `\"caller\"` names without stating a role: \
+            `maybe`, `plain`. Whether it calls them is not \
              known; `refs { … }` lists them"
                 .to_string()
         ]
@@ -6963,8 +6963,8 @@ fn a_role_word_says_how_many_symbols_it_could_not_decide() {
     assert_eq!(
         role_said(r#"calls { "hook" }"#),
         vec![
-            "`calls` passed over 1 symbol that names `\"hook\"` without stating a role \
-             (`#define` bodies, macro uses): `other`. Whether it calls `\"hook\"` is not \
+            "`calls` passed over 1 symbol that names `\"hook\"` without stating a role: \
+            `other`. Whether it calls `\"hook\"` is not \
              known; `refs { … }` lists it"
                 .to_string()
         ]
@@ -6974,7 +6974,7 @@ fn a_role_word_says_how_many_symbols_it_could_not_decide() {
         role_said(r#""caller" writes { data }"#),
         vec![
             "`writes` passed over 1 symbol matching `data` that `\"caller\"` names without \
-             stating a role (`#define` bodies, macro uses): `maybe`. Whether it writes it is \
+             stating a role: `maybe`. Whether it writes it is \
              not known; `refs { … }` lists it"
                 .to_string()
         ]
@@ -6984,7 +6984,7 @@ fn a_role_word_says_how_many_symbols_it_could_not_decide() {
         role_said(r#""caller" reads { func }"#),
         vec![
             "`reads` passed over 2 symbols matching `func` that `\"caller\"` names without \
-             stating a role (`#define` bodies, macro uses): `plain`, `shared`. Whether it \
+             stating a role: `plain`, `shared`. Whether it \
              reads them is not known; `refs { … }` lists them"
                 .to_string()
         ]
@@ -7000,7 +7000,7 @@ fn a_role_word_says_how_many_symbols_it_could_not_decide() {
         role_said(r#""other" calls { "hook" }"#),
         vec![
             "`calls` passed over 1 symbol matching `\"hook\"` that `\"other\"` names without \
-             stating a role (`#define` bodies, macro uses): `hook`. Whether it calls it is \
+             stating a role: `hook`. Whether it calls it is \
              not known; `refs { … }` lists it"
                 .to_string()
         ]
@@ -7009,7 +7009,7 @@ fn a_role_word_says_how_many_symbols_it_could_not_decide() {
         role_said(r#"func calls { "hook" }"#),
         vec![
             "`calls` passed over 1 symbol matching `func` that names `\"hook\"` without \
-             stating a role (`#define` bodies, macro uses): `other`. Whether it calls \
+             stating a role: `other`. Whether it calls \
              `\"hook\"` is not known; `refs { … }` lists it"
                 .to_string()
         ]
@@ -7020,8 +7020,8 @@ fn a_role_word_says_how_many_symbols_it_could_not_decide() {
         role_said(r#""caller" "other" calls { "hook" }"#),
         vec![
             "`calls` passed over 1 symbol matching `\"caller\" \"other\"` that names \
-             `\"hook\"` without stating a role (`#define` bodies, macro uses): `other`. \
-             Whether it calls `\"hook\"` is not known; `refs { … }` lists it"
+             `\"hook\"` without stating a role: `other`. \
+            Whether it calls `\"hook\"` is not known; `refs { … }` lists it"
                 .to_string()
         ]
     );
@@ -7039,7 +7039,7 @@ fn a_role_word_says_how_many_symbols_it_could_not_decide() {
         role_said(r#"macro("M") calls { "twin" }"#),
         vec![
             "`calls` passed over 1 symbol matching `\"twin\"` that `macro(\"M\")` names \
-             without stating a role (`#define` bodies, macro uses): `twin`. Whether it calls \
+             without stating a role: `twin`. Whether it calls \
              it is not known; `refs { … }` lists it"
                 .to_string()
         ]
@@ -7107,8 +7107,8 @@ fn what_a_role_word_passed_over_is_what_refs_would_have_listed_there() {
     assert_eq!(
         role_said(r#""via" calls { calls { "plain" } }"#),
         vec![
-            "`calls` passed over 1 symbol that names `\"plain\"` without stating a role \
-             (`#define` bodies, macro uses): `slot`. Whether it calls `\"plain\"` is not \
+            "`calls` passed over 1 symbol that names `\"plain\"` without stating a role: \
+            `slot`. Whether it calls `\"plain\"` is not \
              known; `refs { … }` lists it"
                 .to_string()
         ]
@@ -7157,8 +7157,8 @@ fn a_role_word_counts_nothing_it_could_not_read_to_the_end() {
     assert_eq!(
         role_said(r#""noisy" calls { }"#),
         vec![
-            "`calls` passed over 1 symbol that `\"noisy\"` names without stating a role \
-             (`#define` bodies, macro uses): `maybe`. Whether it calls it is not known; \
+            "`calls` passed over 1 symbol that `\"noisy\"` names without stating a role: \
+            `maybe`. Whether it calls it is not known; \
              `refs { … }` lists it"
                 .to_string()
         ]
@@ -7170,7 +7170,7 @@ fn a_role_word_counts_nothing_it_could_not_read_to_the_end() {
         role_said_with_read_cap(r#""noisy" calls { }"#, 1),
         vec![
             "`calls` passed over more references than could be read here, which `\"noisy\"` \
-             makes without stating a role (`#define` bodies, macro uses). Whether they are \
+             makes without stating a role. Whether they are \
              what `calls` asks for is not known; `refs { … }` lists them"
                 .to_string()
         ]
@@ -7197,7 +7197,7 @@ fn what_a_role_word_passed_over_is_read_from_rows_the_word_did_not_choose() {
             // "at least": three rows carry the name, and the read stops at
             // three.
             "`calls` passed over at least 1 symbols matching `\"twin\"` that it names \
-             without stating a role (`#define` bodies, macro uses): `twin`. Whether it calls \
+             without stating a role: `twin`. Whether it calls \
              them is not known; `refs { … }` lists them"
                 .to_string()
         ]
@@ -7210,7 +7210,7 @@ fn an_index_that_states_no_roles_says_a_role_word_cannot_match_there() {
     // references are all "refers to": a role word answers nothing there, and
     // that is a fact about the index, not about the code.
     let silent = "the `silent` index states no roles; `calls` cannot match there. \
-                  `refs { … }` lists its references";
+                 `refs { … }` lists its references";
     assert_eq!(
         role_said(r#""old_caller" calls { }"#),
         vec![silent.to_string()]
@@ -7238,8 +7238,8 @@ fn an_index_that_states_no_roles_says_a_role_word_cannot_match_there() {
         role_said(r#"calls { "shared" }"#),
         vec![
             silent.to_string(),
-            "`calls` passed over 1 symbol that names `\"shared\"` without stating a role \
-             (`#define` bodies, macro uses): `other`. Whether it calls `\"shared\"` is not \
+            "`calls` passed over 1 symbol that names `\"shared\"` without stating a role: \
+            `other`. Whether it calls `\"shared\"` is not \
              known; `refs { … }` lists it"
                 .to_string(),
         ]
@@ -7272,7 +7272,7 @@ fn a_role_word_that_found_nothing_says_which_slot_holds_the_target() {
         role_said(r#"calls { "my_read" }"#),
         vec![
             "nothing calls `\"my_read\"` directly; `slot` holds it (`⇢`): \
-             `calls { field holds { \"my_read\" } }` goes through the slot"
+            `calls { field holds { \"my_read\" } }` goes through the slot"
                 .to_string()
         ]
     );
@@ -7280,7 +7280,7 @@ fn a_role_word_that_found_nothing_says_which_slot_holds_the_target() {
         role_said(r#"func takes { "my_read" }"#),
         vec![
             "nothing matching `func` takes `\"my_read\"` directly; `slot` holds it (`⇢`): \
-             `func takes { field holds { \"my_read\" } }` goes through the slot"
+            `func takes { field holds { \"my_read\" } }` goes through the slot"
                 .to_string()
         ]
     );
@@ -7317,8 +7317,8 @@ fn a_role_word_that_found_nothing_says_which_slot_holds_the_target() {
     assert_eq!(
         role_said(r#"calls { "stored" }"#),
         vec![
-            "`calls` passed over 1 symbol that names `\"stored\"` without stating a role \
-             (`#define` bodies, macro uses): `other`. Whether it calls `\"stored\"` is not \
+            "`calls` passed over 1 symbol that names `\"stored\"` without stating a role: \
+            `other`. Whether it calls `\"stored\"` is not \
              known; `refs { … }` lists it"
                 .to_string()
         ]
@@ -7458,7 +7458,7 @@ fn a_listing_says_which_slots_its_parent_calls_through() {
     // more are one hop away, behind a field `func` passed over.
     assert_eq!(ids(r#""via" { func }"#), vec![30, 140]);
     let one = "`func` passed over 1 slot that `\"via\"` calls through: `slot`; follow it: \
-               `\"via\" calls { field holds { func } }`";
+              `\"via\" calls { field holds { func } }`";
     assert_eq!(slots_said(r#""via" { func }"#), vec![one.to_string()]);
     // It is about the listing, and is said at it.
     let at: Vec<String> = run_query(crate::test_util::TEST_INPUT_ROLE_WORDS, r#""via" { func }"#)
@@ -7516,7 +7516,7 @@ fn a_listing_says_which_slots_its_parent_calls_through() {
         slots_said(r#""multi" { func { "leaf" } }"#),
         vec![format!(
             "`func` passed over 1 slot that `\"multi\"` calls through: `slot_b`; follow it: \
-             `{offered}`"
+            `{offered}`"
         )]
     );
     // The offered query runs, and lists what the slot holds: `b_read`.
@@ -7529,7 +7529,7 @@ fn a_listing_says_which_slots_its_parent_calls_through() {
         vec![
             "`func` passed over 4 slots that `\"multi\"` calls through: `slot_b`, `slot_c`, \
              `slot_e` and 1 more; follow them: \
-             `\"multi\" calls { field holds { func { func } } }`"
+            `\"multi\" calls { field holds { func { func } } }`"
                 .to_string()
         ]
     );
@@ -7540,7 +7540,7 @@ fn a_listing_says_which_slots_its_parent_calls_through() {
         slots_said(long),
         vec![
             "`func` passed over 1 slot that `\"multi\"` calls through: `slot_b`; follow it: \
-             `\"multi\" calls { field holds { func { … } } }`"
+            `\"multi\" calls { field holds { func { … } } }`"
                 .to_string()
         ]
     );
@@ -7552,7 +7552,7 @@ fn a_listing_says_which_slots_its_parent_calls_through() {
         vec![
             "`func` passed over 5 slots that `\"multi\" \"via\"` calls through: `slot`, \
              `slot_b`, `slot_c` and 2 more; follow them: \
-             `\"multi\" \"via\" calls { field holds { func } }`"
+            `\"multi\" \"via\" calls { field holds { func } }`"
                 .to_string()
         ]
     );
@@ -7561,7 +7561,7 @@ fn a_listing_says_which_slots_its_parent_calls_through() {
         slots_said(r#"func { func { "leaf" } }"#),
         vec![
             "`func` passed over 1 slot that `func` calls through: `slot_b`; follow it: \
-             `func calls { field holds { func { \"leaf\" } } }`"
+            `func calls { field holds { func { \"leaf\" } } }`"
                 .to_string()
         ]
     );
@@ -7580,7 +7580,7 @@ fn a_listing_says_which_slots_its_parent_calls_through() {
         slots_said(r#""via" calls "multi" { func { "leaf" } }"#),
         vec![
             "`func` passed over 1 slot that `\"via\" calls \"multi\"` calls through: \
-             `slot_b`; follow it: `calls { field holds { func { \"leaf\" } } }`"
+            `slot_b`; follow it: `calls { field holds { func { \"leaf\" } } }`"
                 .to_string()
         ]
     );
@@ -7590,7 +7590,7 @@ fn a_listing_says_which_slots_its_parent_calls_through() {
         vec![
             "the filter carried into this scope passed over 1 slot that \
              `func inherit(type) \"via\"` calls through: `slot`; follow it: \
-             `func inherit(type) \"via\" calls { field holds { } }`"
+            `func inherit(type) \"via\" calls { field holds { } }`"
                 .to_string()
         ]
     );
@@ -7868,7 +7868,7 @@ fn the_four_relationships_joined_are_the_bare_scope() {
 
 #[test]
 fn what_an_expression_passed_over_is_said_of_the_words_it_is_true_of() {
-    let unstated = "without stating a role (`#define` bodies, macro uses)";
+    let unstated = "without stating a role";
 
     // Two role words: the expression is quoted as written, and what is not
     // known is whether the source does either.
@@ -7876,7 +7876,7 @@ fn what_an_expression_passed_over_is_said_of_the_words_it_is_true_of() {
         role_said(r#""caller" calls or writes { }"#),
         vec![format!(
             "`calls or writes` passed over 2 symbols that `\"caller\"` names {unstated}: \
-             `maybe`, `plain`. Whether it calls or writes them is not known; `refs {{ … }}` \
+            `maybe`, `plain`. Whether it calls or writes them is not known; `refs {{ … }}` \
              lists them"
         )]
     );
@@ -7895,14 +7895,14 @@ fn what_an_expression_passed_over_is_said_of_the_words_it_is_true_of() {
         role_said(r#""caller" calls or holds { }"#),
         vec![format!(
             "`calls or holds` passed over 2 symbols that `\"caller\"` names {unstated}: \
-             `maybe`, `plain`. Whether it calls them is not known; `refs {{ … }}` lists them"
+            `maybe`, `plain`. Whether it calls them is not known; `refs {{ … }}` lists them"
         )]
     );
     assert_eq!(
         role_said(r#""caller" has or calls { }"#),
         vec![format!(
             "`has or calls` passed over 2 symbols that `\"caller\"` names {unstated}: \
-             `maybe`, `plain`. Whether it calls them is not known; `refs {{ … }}` lists them"
+            `maybe`, `plain`. Whether it calls them is not known; `refs {{ … }}` lists them"
         )]
     );
     // Upward.  `slot` holds `stored`, so the answer is not empty; `other`
@@ -7912,7 +7912,7 @@ fn what_an_expression_passed_over_is_said_of_the_words_it_is_true_of() {
         role_said(r#"calls or holds { "stored" }"#),
         vec![format!(
             "`calls or holds` passed over 1 symbol that names `\"stored\"` {unstated}: \
-             `other`. Whether it calls `\"stored\"` is not known; `refs {{ … }}` lists it"
+            `other`. Whether it calls `\"stored\"` is not known; `refs {{ … }}` lists it"
         )]
     );
     // `refs` admits a reference that states nothing: beside it, a role word
@@ -7943,7 +7943,7 @@ fn what_an_expression_passed_over_is_said_of_the_words_it_is_true_of() {
         role_said(r#"writes or takes or has { "old_target" }"#),
         vec![
             "the `silent` index states no roles; `writes or takes` cannot match there. \
-             `refs { … }` lists its references"
+            `refs { … }` lists its references"
                 .to_string()
         ]
     );
@@ -7954,7 +7954,7 @@ fn what_an_expression_passed_over_is_said_of_the_words_it_is_true_of() {
         role_said(r#"func calls or has { "my_read" }"#),
         vec![
             "nothing matching `func` calls `\"my_read\"` directly; `slot` holds it (`⇢`): \
-             `func calls { field holds { \"my_read\" } }` goes through the slot"
+            `func calls { field holds { \"my_read\" } }` goes through the slot"
                 .to_string()
         ]
     );
@@ -8023,7 +8023,7 @@ fn what_an_expression_passed_over_is_said_of_the_words_it_is_true_of() {
         vec![
             "`has or refs` lists only containment (`▸`) and ordinary references (`→`); \
              `field(\"slot\")` holds 1 symbol that `\"my_read\"` matches (`⇢`): `my_read`. \
-             `holds { … }` or `{ … }` lists it"
+            `holds { … }` or `{ … }` lists it"
                 .to_string()
         ]
     );
@@ -8926,7 +8926,7 @@ fn search_cross_project_shared_content_scopes_to_filter() {
         p1_nodes.is_disjoint(&p2_nodes),
         "cross-project shared content must produce disjoint output node sets; \
          leakage means the (content_hash, project_id) JOIN didn't constrain. \
-         p1={:?}, p2={:?}",
+        p1={:?}, p2={:?}",
         p1_nodes,
         p2_nodes,
     );
@@ -9052,7 +9052,7 @@ fn search_different_filter_different_cache() {
         p1_nodes.is_disjoint(&p2_nodes),
         "project-scoped search layers must produce disjoint node sets; \
          shared nodes would indicate the cache key is not filter-aware. \
-         p1={:?}, p2={:?}",
+        p1={:?}, p2={:?}",
         p1_nodes,
         p2_nodes,
     );
@@ -11834,7 +11834,7 @@ fn uploading_references_records_what_the_index_states() {
             said(&ask().await),
             vec![
                 "the `test_project` index states no roles; `calls` cannot match there. \
-                 `refs { … }` lists its references"
+                `refs { … }` lists its references"
                     .to_string()
             ]
         );
@@ -11863,8 +11863,8 @@ fn uploading_references_records_what_the_index_states() {
         assert_eq!(
             said(&answered),
             vec![
-                "`calls` passed over 1 symbol that names `\"target\"` without stating a role \
-                 (`#define` bodies, macro uses): `old_user`. Whether it calls `\"target\"` is \
+                "`calls` passed over 1 symbol that names `\"target\"` without stating a role: \
+                `old_user`. Whether it calls `\"target\"` is \
                  not known; `refs { … }` lists it"
                     .to_string()
             ]
@@ -13677,7 +13677,7 @@ fn a_search_match_outside_every_declaration_is_reachable_from_its_file() {
         (1, 1, 1),
         "a match in its own file must be reachable from that file in every \
          traversal mode; got scoped={scoped} unnest={unnested} nested={nested}. \
-         Equal-but-zero means the row was numbered outside the file's interval, \
+        Equal-but-zero means the row was numbered outside the file's interval, \
          which is a PLACEMENT bug -- the owner tie-break took the outermost of \
          the co-extensive chain -- and no mode can work around it."
     );
