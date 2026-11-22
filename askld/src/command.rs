@@ -223,6 +223,28 @@ impl Command {
         self.span.as_ref().unwrap()
     }
 
+    /// The words this statement wrote to say WHAT it selects, as query text:
+    /// its own names, type words and filters, without the relationship words
+    /// after them and without what it inherited.  `None` for a statement that
+    /// wrote none (a bare `{ }`).  For naming a statement in a message about
+    /// its relationship to another.
+    pub fn own_words(&self) -> Option<String> {
+        let whole = self.span();
+        let (mut start, mut end) = (usize::MAX, 0usize);
+        for verb in self.predicate.iter().chain(self.bindings.iter()) {
+            if verb.is_unit() {
+                continue;
+            }
+            let span = verb.span();
+            if span.start() < whole.start() || span.end() > whole.end() {
+                continue; // inherited from an enclosing statement
+            }
+            start = start.min(span.start());
+            end = end.max(span.end());
+        }
+        (start < end).then(|| whole.input()[start..end].trim().to_string())
+    }
+
     pub fn set_verb_span(&mut self, span: Span) {
         self.verb_span = Some(span);
     }

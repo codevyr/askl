@@ -29,6 +29,12 @@ pub enum DiagnosticKind {
     /// there is.  Unlike `Truncation` the answer is complete for what was
     /// asked -- nothing was cut.
     LeftOut,
+    /// A relationship word listed nothing where a bare scope would have
+    /// listed something: the word passed over rows drawn with another mark,
+    /// or was asked of something that cannot be its source.  Never collapsed,
+    /// for the reason `LeftOut` is not: it is the only thing saying that the
+    /// empty answer is the word's doing.
+    PassedOver,
 }
 
 impl DiagnosticKind {
@@ -36,7 +42,10 @@ impl DiagnosticKind {
     /// says something about ONE statement's answer that no warning of another
     /// statement can stand for.
     pub fn always_surfaces(&self) -> bool {
-        matches!(self, DiagnosticKind::Truncation | DiagnosticKind::LeftOut)
+        matches!(
+            self,
+            DiagnosticKind::Truncation | DiagnosticKind::LeftOut | DiagnosticKind::PassedOver
+        )
     }
 }
 
@@ -158,7 +167,22 @@ impl Diagnostic {
         }
     }
 
-    fn quote(text: &str) -> String {
+    /// "A filter that passed over what it would otherwise have answered says
+    /// so."  `message` is the whole sentence; see
+    /// `crate::statement::passed_over`, which is the one place that writes
+    /// them.
+    pub fn passed_over(span: Span, message: impl Into<String>) -> Self {
+        Diagnostic {
+            span,
+            kind: DiagnosticKind::PassedOver,
+            message: message.into(),
+            token: None,
+            suggestions: Vec::new(),
+            name_exists: false,
+        }
+    }
+
+    pub(crate) fn quote(text: &str) -> String {
         const MAX: usize = 48;
         let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
         if one_line.chars().count() <= MAX {
