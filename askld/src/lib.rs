@@ -13,6 +13,7 @@ pub mod offset_range;
 pub mod parser;
 pub mod parser_context;
 pub mod proto;
+pub mod relationship;
 pub mod scope;
 pub mod span;
 pub mod statement;
