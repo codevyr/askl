@@ -38,6 +38,13 @@ separate statements; a `{` must be on the same line as its verb to attach.
 - `{ "x" }`  callers: what calls `x`.
 - `"a" { "b" { "c" } }`  a calls b, b calls c.
 - `has { }`  containment (the indexer's tree, not byte ranges) instead of references.
+- **A relationship word governs the statement it is written in, and no other**
+  (as a type word does): in `file has { "foo" { "bar" } }` the file contains
+  `foo`, and the braces under `foo` are a bare scope again. `inherit(relationship)`
+  on the same statement carries the word into every scope below, until a
+  statement writes its own: `"a" calls inherit(relationship) { "b" { "c" } }` =
+  `"a" calls { "b" calls { "c" } }`. (`has` and `refs` used to be carried without
+  being asked; a query written that way gets a warning for now.)
 - **`;` inside a scope conjoins — `A B` disjoins.** `X { A ; B }` are two
   *statements* in one scope and keep `X` only where it relates to *both*:
   `dir("/proj") has { mod ; file }` lists directories holding a module **and**
@@ -94,10 +101,11 @@ separate statements; a `{` must be on the same line as its verb to attach.
   in, and no other.** `func { "x" }` is the functions that use `x`, whatever
   `x` is (data, a macro, a type); `"x" { func { } }` leaves the innermost
   scope open to every type. To carry a type into every scope below, ask:
-  `data(inherit=true) { { "x" } }`.
+  `data inherit(type) { { "x" } }` (both kinds are two verbs:
+  `has inherit(relationship) data inherit(type)`).
 - **`any` is the type verb that constrains no type.** With a name it matches
   that name at every type: `any("ioctl")` finds the function, the macro and
-  the struct. Bare, it drops a type carried down by `inherit=true`.
+  the struct. Bare, it drops a type carried down by `inherit(type)`.
 - **Duality:** `func("x")` (with a name) is a *selector* that queries; bare `func`
   is a *filter* that constrains. This is the most common point of confusion.
   `any` follows the same rule: `any("x")` queries, bare `any` constrains.

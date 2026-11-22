@@ -528,6 +528,15 @@ impl Verb for GenericFilter {
         }
     }
 
+    /// `inherit(type)` is `inherit=true` written beside the filter.
+    fn carried_below(&self) -> Option<Arc<dyn Verb>> {
+        Some(Arc::new(GenericFilter {
+            span: self.span.clone(),
+            kind: self.kind.clone(),
+            inherit: true,
+        }))
+    }
+
     fn dimension(&self) -> Option<Dimension> {
         Some(match self.kind {
             FilterKind::Type { .. } => Dimension::Type,
