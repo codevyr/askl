@@ -881,20 +881,17 @@ impl Statement {
                     let mut neighbours: Vec<Resolved> = Vec::new();
                     let mut consider =
                         |statement: usize, ids: &Vec<i64>, rel: Edge, parent_side: bool| {
-                            let refs = rel.refs().is_some();
-                            let has = rel.has();
-                            if !refs && !has {
-                                return; // EMPTY relationship: no constraint
-                            }
+                            // The probe reads the references the edge's
+                            // test admits, as the side reads will.
                             let mut roles = Vec::new();
-                            if refs {
+                            if let Some(test) = rel.refs() {
                                 roles.push(if parent_side {
-                                    ProbeRole::RefsChildrenOf(ids.clone())
+                                    ProbeRole::RefsChildrenOf(ids.clone(), test)
                                 } else {
-                                    ProbeRole::RefsParentsOf(ids.clone())
+                                    ProbeRole::RefsParentsOf(ids.clone(), test)
                                 });
                             }
-                            if has {
+                            if rel.has() {
                                 roles.push(if parent_side {
                                     ProbeRole::HasChildrenOf(ids.clone())
                                 } else {
@@ -902,9 +899,9 @@ impl Statement {
                                 });
                             }
                             let between = if parent_side {
-                                ProbeNeighbour::parent(ids.clone(), refs, has)
+                                ProbeNeighbour::parent(ids.clone(), rel)
                             } else {
-                                ProbeNeighbour::child(ids.clone(), refs, has)
+                                ProbeNeighbour::child(ids.clone(), rel)
                             };
                             neighbours.push(Resolved {
                                 statement,
