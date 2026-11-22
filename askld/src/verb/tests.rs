@@ -382,10 +382,11 @@ fn test_preamble_empty_scope() {
 
 #[test]
 fn verb_classes_are_declared_per_aspect() {
-    use super::generic::{HasModifier, ProjectFilter, TypeSelector, UnnestModifier};
+    use super::generic::{ProjectFilter, RelationshipVerb, TypeSelector, UnnestModifier};
     use super::labels::{LabelVerb, UserVerb};
     use super::preamble::PreambleVerb;
     use crate::parser_context::SYMBOL_TYPE_FUNCTION;
+    use crate::relationship::Word;
 
     let span = || Span::synthetic("v");
     let bare = |verb: &str| Args::of(verb);
@@ -410,7 +411,7 @@ fn verb_classes_are_declared_per_aspect() {
 
     let unnest = UnnestModifier::new(span(), &bare("unnest")).unwrap();
     assert_eq!(unnest.class(), VerbClass::Relationship);
-    let has = HasModifier::new(span(), &bare("has")).unwrap();
+    let has = RelationshipVerb::word(span(), &bare("has"), Word::named("has").unwrap()).unwrap();
     assert_eq!(has.class(), VerbClass::Relationship);
 
     let label = LabelVerb::new(span(), &one("label", "l")).unwrap();
