@@ -43,6 +43,24 @@
 //!     that has no rows of that relation -- "the `linux` index has no
 //!     `declares` rows".
 //!
+//! UNDER AN EXPRESSION (`calls or holds`) each of these is said of the words
+//! it is true of, and the expression is quoted as the query wrote it
+//! ([`crate::relationship::Relationship`] keeps the words beside the edge):
+//!
+//!  - 1 is said when `refs` is among the words and some relation is not:
+//!    "`has or refs` lists only containment (`▸`) and ordinary references
+//!    (`→`); …".
+//!  - 3 is said when a role word is among them and `refs` is not (beside
+//!    `refs` a reference that states nothing is admitted, and nothing was
+//!    passed over).  The EXPRESSION passed the symbols over; what is not
+//!    known is the role ("whether it calls them"); and what cannot match on
+//!    an index that states no roles is the role word, not `holds` beside it.
+//!  - 4 is not said to an expression that asked for `holds`: the slot was
+//!    not passed over.
+//!  - 2 and 5 are said of each relation word among them, whatever stands
+//!    beside it: a word that could not match is one reason fewer for the
+//!    answer to be empty, and the reader is owed it.
+//!
 //! Worked out once per edge, after the statements have run.  The reads are
 //! the derive's own (`find_child_instance_ids` / `find_parent_instance_ids`)
 //! under the passed-over test, so they are bounded as it is (`read_cap + 1`
@@ -71,7 +89,7 @@ use index::db_diesel::{
     SYMBOL_TYPE_MACRO,
 };
 use index::edge::{Edge, RefTest, Relations};
-use index::roles::{Relation, Roles};
+use index::roles::Relation;
 use index::symbols::SymbolInstanceId;
 
 use super::Statement;
@@ -79,6 +97,7 @@ use crate::cfg::ControlFlowGraph;
 use crate::diagnostic::Diagnostic;
 use crate::execution_context::{statement_key, ExecutionContext};
 use crate::hierarchy::Hierarchy;
+use crate::relationship::{self, Relationship, Word};
 
 /// The word, the mark and the verb form of a relation.
 fn words(relation: Relation) -> (&'static str, &'static str, &'static str, &'static str) {
@@ -181,44 +200,47 @@ pub(super) async fn notices(
         let Some(parent) = child.parent().and_then(|p| p.upgrade()) else {
             continue;
         };
-        let edge: Edge = child.get_relationship_type();
-        // Containment is not a row of the reference table.  (A scope that
-        // admits every such row passed over none: nothing below reads.)
-        let Some(test) = edge.refs() else {
+        // The edge, and the words of the query that asked for it.  A scope
+        // that wrote none (the bare `{ }`) passed over nothing.
+        let asked = child.relationship();
+        // Containment is not a row of the reference table.
+        let Some(test) = asked.edge().refs() else {
             continue;
         };
         let empty = answered_nothing(child, ctx) || answered_nothing(&parent, ctx);
-        let role_word = !test.any_ordinary() && test.roles().bits() != 0;
-        let relation_word =
-            !test.any_ordinary() && test.roles().bits() == 0 && !test.relations().is_empty();
+        // A role word, and no `refs` beside it to admit what states nothing.
+        let narrowed_to_roles = !test.any_ordinary() && test.roles().bits() != 0;
+        let relation_words = relation_words(asked);
 
         let mut notices: Vec<anyhow::Result<Option<String>>> = Vec::new();
-        if role_word {
+        if narrowed_to_roles {
             // By default, empty or not: what the word could not decide.
-            let undecided = unstated_roles(child, &parent, test, ctx, cfg).await;
+            let undecided = unstated_roles(child, &parent, asked, ctx, cfg).await;
             // Every reference here states what it does: then an empty answer
             // is a fact, and the one thing left to say is where the target
-            // went.  (Undecided, "nothing calls it" is not known.)
+            // went.  (Undecided, "nothing calls it" is not known.)  An
+            // expression that asked for what a slot holds was not one hop
+            // short: it passed no slot over.
             let decided = matches!(&undecided, Ok(none) if none.is_empty());
             match undecided {
                 Ok(undecided) => notices.extend(undecided.into_iter().map(|m| Ok(Some(m)))),
                 Err(e) => notices.push(Err(e)),
             }
-            if decided {
-                notices.push(held_by_a_slot(child, &parent, test, ctx, cfg).await);
+            if decided && !test.relations().contains(Relation::Holds) {
+                notices.push(held_by_a_slot(child, &parent, asked, ctx, cfg).await);
             }
         }
         if empty && test.any_ordinary() {
-            notices.push(passed_over_relations(child, &parent, test, ctx, cfg).await);
+            notices.push(passed_over_relations(child, &parent, asked, ctx, cfg).await);
         }
-        if empty && relation_word {
-            let wrong_kind = not_a_source(&parent, test, ctx, cfg).await;
+        if empty && !relation_words.is_empty() {
+            let wrong_kind = not_a_source(&parent, &relation_words, ctx, cfg).await;
             // The source could be one: then whether the index records the
             // relation at all is the next thing an empty answer may be about.
             let could_be_a_source = matches!(&wrong_kind, Ok(None));
             notices.push(wrong_kind);
             if could_be_a_source {
-                notices.push(no_such_rows(child, &parent, test, ctx, cfg).await);
+                notices.push(no_such_rows(child, &parent, &relation_words, ctx, cfg).await);
             }
         }
         for notice in notices {
@@ -237,6 +259,45 @@ pub(super) async fn notices(
         }
     }
     said
+}
+
+/// The relation words of an expression, in the order written, with the
+/// relation each asks for.
+fn relation_words(asked: &Relationship) -> Vec<(Word, Relation)> {
+    asked
+        .words()
+        .iter()
+        .filter_map(|word| word.relation().map(|relation| (*word, relation)))
+        .collect()
+}
+
+/// "a", "a and b", "a, b and c".
+fn listed(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+/// What the words of an expression list, each with its mark, in the order
+/// written: "containment (`▸`) and ordinary references (`→`)".
+fn what_it_lists(asked: &Relationship) -> String {
+    let mut items: Vec<String> = Vec::new();
+    for word in asked.words() {
+        let item = if word.is_has() {
+            "containment (`▸`)".to_string()
+        } else if let Some(relation) = word.relation() {
+            format!("{} (`{}`)", recorded_by(relation), words(relation).1)
+        } else {
+            // `refs`, or a role word beside it: a reference a token makes.
+            "ordinary references (`→`)".to_string()
+        };
+        if !items.contains(&item) {
+            items.push(item);
+        }
+    }
+    listed(&items)
 }
 
 /// The derive's own read (`Selector::derive_from_parent`,
@@ -284,14 +345,18 @@ fn ids_leaf(ids: &[i64]) -> CompositeFilter {
     ))
 }
 
-/// Notice 1: the relation rows an ordinary-reference edge passed over.
+/// Notice 1: the relation rows an edge that asked for `refs` passed over.
 async fn passed_over_relations(
     child: &Rc<Statement>,
     parent: &Rc<Statement>,
-    test: RefTest,
+    asked_for: &Relationship,
     ctx: &ExecutionContext,
     cfg: &ControlFlowGraph,
 ) -> anyhow::Result<Option<String>> {
+    // What no word asked for, no word passed over.
+    let (Some(written), Some(test)) = (asked_for.written(), asked_for.edge().refs()) else {
+        return Ok(None);
+    };
     // The end that still has rows is where to read from; the other end is
     // the one whose answer is being explained.  With rows at both ends (two
     // statements that resolved on their own and emptied each other) the
@@ -367,7 +432,8 @@ async fn passed_over_relations(
         .map(|f| format!("`{} {{ … }}`", words(f.relation).0))
         .collect();
     Ok(Some(format!(
-        "`refs` lists only ordinary references (`→`); {}. {} or `{{ … }}` {} {}",
+        "`{written}` lists only {}; {}. {} or `{{ … }}` {} {}",
+        what_it_lists(asked_for),
         clauses.join("; "),
         rewrites.join(", "),
         if one { "lists" } else { "list" },
@@ -432,7 +498,7 @@ fn clause(found: &Found, asked: Asked, parent: Option<&str>, child: Option<&str>
 /// Notice 2: a relation word asked of rows none of which can be its source.
 async fn not_a_source(
     parent: &Rc<Statement>,
-    test: RefTest,
+    relation_words: &[(Word, Relation)],
     ctx: &ExecutionContext,
     cfg: &ControlFlowGraph,
 ) -> anyhow::Result<Option<String>> {
@@ -443,9 +509,8 @@ async fn not_a_source(
         return Ok(None);
     };
     let mut reasons = Vec::new();
-    let mut relation_words = Vec::new();
-    for relation in test.relations().iter() {
-        let (source_type, only) = source_of(relation);
+    for (_, relation) in relation_words {
+        let (source_type, only) = source_of(*relation);
         let of_the_kind = CompositeFilter::and(vec![
             CompositeFilter::leaf(SymbolInstanceIdMixin::new(
                 &parent_rows
@@ -465,100 +530,41 @@ async fn not_a_source(
             return Ok(None);
         }
         reasons.push(only);
-        relation_words.push(format!("`{}`", words(relation).0));
     }
     if reasons.is_empty() {
         return Ok(None);
     }
     Ok(Some(format!(
-        "{} related nothing: {}, and `{}` selects none",
-        relation_words.join(" or "),
+        "`{}` related nothing: {}, and `{}` selects none",
+        relationship::join(relation_words.iter().map(|(word, _)| word.text())),
         reasons.join("; "),
         Diagnostic::quote(&parent_words),
     )))
 }
 
-/// How the role words of a test read in a sentence: as written
-/// (`calls`, `calls or writes`), and the form after "they" (`call`).
+/// How an expression that names a role word reads in a sentence.
 struct RoleWords {
-    written: String,
-    base: String,
+    /// The whole expression as written: `calls or holds`.  It is the
+    /// expression that passed something over.
+    expression: String,
+    /// Its role words as written: `calls`, `writes or reads`.  What a
+    /// reference that states nothing leaves unknown is the role.
+    roles: String,
+    /// The same after "they": `call`, `write or read`.
+    they: String,
 }
 
-fn role_words(test: RefTest, parent: &Rc<Statement>) -> RoleWords {
-    let roles = test.roles();
-    let mut words: Vec<(&str, &str)> = Vec::new();
-    if roles.contains(Roles::CALL) {
-        words.push(("calls", "call"));
-    }
-    if roles.contains(Roles::WRITE) {
-        words.push(("writes", "write"));
-    }
-    if roles.contains(Roles::TAKE) {
-        // One bit, two spellings: say the one the query wrote.
-        words.push(if wrote_reads(parent) {
-            ("reads", "read")
-        } else {
-            ("takes", "take")
-        });
-    }
+fn role_words(asked: &Relationship) -> RoleWords {
+    let roles: Vec<&Word> = asked
+        .words()
+        .iter()
+        .filter(|word| word.role().is_some())
+        .collect();
     RoleWords {
-        written: words
-            .iter()
-            .map(|(word, _)| *word)
-            .collect::<Vec<_>>()
-            .join(" or "),
-        base: words
-            .iter()
-            .map(|(_, base)| *base)
-            .collect::<Vec<_>>()
-            .join(" or "),
+        expression: asked.written().unwrap_or_default(),
+        roles: relationship::join(roles.iter().map(|word| word.text())),
+        they: relationship::join(roles.iter().map(|word| word.they())),
     }
-}
-
-/// The query spelled the TAKE role `reads`: the nearest statement at or above
-/// `parent` that wrote either spelling wrote that one last.  (The word is
-/// consumed when it is parsed; the edge keeps the bit, not the spelling.)
-fn wrote_reads(parent: &Rc<Statement>) -> bool {
-    let mut at = Some(parent.clone());
-    while let Some(statement) = at {
-        let text = statement
-            .command()
-            .query_statement_span()
-            .as_pest_span()
-            .as_str();
-        let mut last: Option<bool> = None;
-        let mut word = String::new();
-        let mut quoted = false;
-        let mut escaped = false;
-        for c in text.chars().chain(std::iter::once(' ')) {
-            if quoted {
-                match c {
-                    _ if escaped => escaped = false,
-                    '\\' => escaped = true,
-                    '"' => quoted = false,
-                    _ => {}
-                }
-                continue;
-            }
-            if c.is_alphanumeric() || c == '_' {
-                word.push(c);
-                continue;
-            }
-            match word.as_str() {
-                "reads" => last = Some(true),
-                "takes" => last = Some(false),
-                _ => {}
-            }
-            word.clear();
-            quoted = c == '"';
-        }
-        if let Some(reads) = last {
-            return reads;
-        }
-        at = statement.parent().and_then(|p| p.upgrade());
-    }
-    false
 }
 
 /// The rows a statement has whatever the edge to `across` asks: what its
@@ -609,7 +615,7 @@ const CAN_STATE_A_ROLE: [i32; 3] = [SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_FIELD, SYM
 async fn unstated_roles(
     child: &Rc<Statement>,
     parent: &Rc<Statement>,
-    test: RefTest,
+    asked_for: &Relationship,
     ctx: &ExecutionContext,
     cfg: &ControlFlowGraph,
 ) -> anyhow::Result<Vec<String>> {
@@ -632,7 +638,7 @@ async fn unstated_roles(
         let Some(from) = from else {
             continue;
         };
-        let said = undecided_from(child, parent, test, from, asked, ctx, cfg).await?;
+        let said = undecided_from(child, parent, asked_for, from, asked, ctx, cfg).await?;
         if !said.is_empty() {
             return Ok(said);
         }
@@ -645,7 +651,7 @@ async fn unstated_roles(
 async fn undecided_from(
     child: &Rc<Statement>,
     parent: &Rc<Statement>,
-    test: RefTest,
+    asked_for: &Relationship,
     from: Vec<i64>,
     asked: Asked,
     ctx: &ExecutionContext,
@@ -683,7 +689,7 @@ async fn undecided_from(
             .push((row.instance, row.symbol_type));
     }
 
-    let words = role_words(test, parent);
+    let words = role_words(asked_for);
     let unstated = Edge::references(RefTest::UNSTATED);
     let mut said = Vec::new();
     for (project, (state, rows)) in by_project {
@@ -710,7 +716,7 @@ async fn undecided_from(
                 said.push(format!(
                     "the `{project}` index states no roles; `{}` cannot match there. \
                      `refs {{ … }}` lists its references",
-                    words.written
+                    words.roles
                 ));
             }
             continue;
@@ -894,7 +900,7 @@ async fn kept_by_other_edges(
 /// stating a role …".
 fn uncounted(words: &RoleWords, asked: Asked, parent: Option<&str>, child: Option<&str>) -> String {
     let quoted = |text: &str| format!("`{}`", Diagnostic::quote(text));
-    let written = &words.written;
+    let (expression, roles) = (&words.expression, &words.roles);
     let why = "without stating a role (`#define` bodies, macro uses)";
     let whose = match asked {
         Asked::Child => format!(
@@ -907,8 +913,8 @@ fn uncounted(words: &RoleWords, asked: Asked, parent: Option<&str>, child: Optio
         ),
     };
     format!(
-        "`{written}` passed over more references than could be read here, {whose} {why}. \
-         Whether they are what `{written}` asks for is not known; `refs {{ … }}` lists them"
+        "`{expression}` passed over more references than could be read here, {whose} {why}. \
+         Whether they are what `{roles}` asks for is not known; `refs {{ … }}` lists them"
     )
 }
 
@@ -951,7 +957,7 @@ fn undecided(
         None => String::new(),
     };
     let why = "without stating a role (`#define` bodies, macro uses)";
-    let (written, base) = (&words.written, &words.base);
+    let (expression, roles, they) = (&words.expression, &words.roles, &words.they);
     let (them, lists) = if one {
         ("it", "lists it")
     } else {
@@ -961,22 +967,22 @@ fn undecided(
         Asked::Child => {
             let source = parent.map(quoted).unwrap_or_else(|| "it".to_string());
             format!(
-                "`{written}` passed over {how_many}{} that {source} names {why}: {listed}. \
-                 Whether it {written} {them} is not known; `refs {{ … }}` {lists}",
+                "`{expression}` passed over {how_many}{} that {source} names {why}: {listed}. \
+                 Whether it {roles} {them} is not known; `refs {{ … }}` {lists}",
                 matching(child),
             )
         }
         Asked::Parent => {
             let target = child.map(quoted).unwrap_or_else(|| "it".to_string());
             format!(
-                "`{written}` passed over {how_many}{} that {} {target} {why}: {listed}. \
+                "`{expression}` passed over {how_many}{} that {} {target} {why}: {listed}. \
                  Whether {} {target} is not known; `refs {{ … }}` {lists}",
                 matching(parent),
                 if one { "names" } else { "name" },
                 if one {
-                    format!("it {written}")
+                    format!("it {roles}")
                 } else {
-                    format!("they {base}")
+                    format!("they {they}")
                 },
             )
         }
@@ -993,7 +999,7 @@ fn undecided(
 async fn held_by_a_slot(
     child: &Rc<Statement>,
     parent: &Rc<Statement>,
-    test: RefTest,
+    asked_for: &Relationship,
     ctx: &ExecutionContext,
     cfg: &ControlFlowGraph,
 ) -> anyhow::Result<Option<String>> {
@@ -1035,7 +1041,7 @@ async fn held_by_a_slot(
     }
 
     const SHOWN: usize = 3;
-    let words = role_words(test, parent);
+    let words = role_words(asked_for);
     let one = names.len() == 1 && !cut;
     let mut listed = names
         .iter()
@@ -1060,13 +1066,13 @@ async fn held_by_a_slot(
             .as_deref()
             .map(|s| format!(" matching `{s}`"))
             .unwrap_or_default(),
-        words.written,
+        words.roles,
         if one { "holds" } else { "hold" },
         source
             .as_deref()
             .map(|s| format!("{s} "))
             .unwrap_or_default(),
-        words.written,
+        words.roles,
     )))
 }
 
@@ -1088,7 +1094,7 @@ fn recorded_by(relation: Relation) -> &'static str {
 async fn no_such_rows(
     child: &Rc<Statement>,
     parent: &Rc<Statement>,
-    test: RefTest,
+    relation_words: &[(Word, Relation)],
     ctx: &ExecutionContext,
     cfg: &ControlFlowGraph,
 ) -> anyhow::Result<Option<String>> {
@@ -1117,12 +1123,12 @@ async fn no_such_rows(
         .collect();
     let mut lacking: BTreeMap<String, Vec<Relation>> = BTreeMap::new();
     for state in states.iter().filter(|s| projects.contains(&s.project)) {
-        for relation in test.relations().iter() {
-            if !state.has(relation) {
+        for (_, relation) in relation_words {
+            if !state.has(*relation) {
                 lacking
                     .entry(state.name.clone())
                     .or_default()
-                    .push(relation);
+                    .push(*relation);
             }
         }
     }
