@@ -755,8 +755,7 @@ impl Command {
                     index
                         .find_parent_instance_ids(
                             &child_ids,
-                            rel_type.refs().is_some(),
-                            rel_type.has(),
+                            rel_type,
                             &find_filter,
                             within,
                             &ctx.eph,
@@ -839,8 +838,7 @@ impl Command {
                 let found = index
                     .find_parent_instance_ids(
                         &dependency.get_instance_ids(),
-                        rel_type.refs().is_some(),
-                        rel_type.has(),
+                        rel_type,
                         &CompositeFilter::and(find_parts),
                         within,
                         &ctx.eph,
