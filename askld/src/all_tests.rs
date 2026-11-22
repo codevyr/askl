@@ -6233,16 +6233,17 @@ fn a_relation_belongs_to_its_source_only() {
     assert_eq!(ids(r#"field("slot") { func }"#), vec![20, 30, 40]);
     // The struct does not: only what a token inside it names.
     assert_eq!(ids(r#"type("ops") refs { func }"#), vec![10, 40]);
-    // Asked from the other end: who refers to my_read is the slot alone ...
-    assert_eq!(ids(r#"refs { "my_read" }"#), vec![20, 30]);
+    // Asked from the other end: what holds my_read is the slot alone ...
+    assert_eq!(ids(r#"holds { "my_read" }"#), vec![20, 30]);
+    assert_eq!(ids(r#"{ "my_read" }"#), vec![20, 30, 500, 510]);
     // ... while an ordinary reference at the same place still belongs to
     // everything around it (the macro body names `plain` too).
     assert_eq!(ids(r#"refs { "plain" }"#), vec![10, 20, 40, 60, 500, 510]);
 
     // The same for what a macro's invocation declared: the row sits on the
     // `#define`, and the file around the `#define` declares nothing.
-    assert_eq!(ids(r#"refs { "lock" }"#), vec![60, 70]);
-    assert_eq!(ids(r#"macro("DEFINE_X") refs { }"#), vec![40, 60, 70]);
+    assert_eq!(ids(r#"declares { "lock" }"#), vec![60, 70]);
+    assert_eq!(ids(r#"macro("DEFINE_X") { }"#), vec![40, 60, 70]);
 
     // And in the edges drawn among an answer's nodes: one edge to my_read.
     let res = run_query(
@@ -6267,6 +6268,388 @@ fn a_relation_belongs_to_its_source_only() {
         vec![10, 20, 510],
         "plain is referred to by all three"
     );
+}
+
+/// Instance ids of an answer on the relation fixture, sorted.
+///
+/// ids: dir 500, file 510, ops 10, slot 20, my_read 30, plain 40,
+///      DEFINE_X 60, lock 70, DEFINE_Y 80, both 90, bare_slot 100, kept 110,
+///      hidden 120 (folded), GEN_Z 130 (folded), gen_only 140.
+fn relation_ids(q: &str) -> Vec<i64> {
+    let res = run_query(crate::test_util::TEST_INPUT_RELATION_ROWS, q);
+    let mut ids: Vec<i64> = res.nodes.as_vec().iter().map(|i| (*i).into()).collect();
+    ids.sort();
+    ids
+}
+
+/// What a relationship word said it passed over, on the relation fixture.
+fn passed_over(q: &str) -> Vec<String> {
+    run_query(crate::test_util::TEST_INPUT_RELATION_ROWS, q)
+        .warnings
+        .iter()
+        .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::PassedOver)
+        .map(|w| w.message.clone())
+        .collect()
+}
+
+#[test]
+fn a_relationship_word_selects_the_edges_drawn_with_its_mark() {
+    let ids = relation_ids;
+    // `slot` HOLDS `my_read` and names `plain`; `DEFINE_X` DECLARES `lock`
+    // and names `plain`.  Four relationships, each with its own word.
+
+    // refs: a token names it.  Not what the slot holds, in either direction
+    // (a statement that names something shows it; the unnamed one is empty).
+    assert_eq!(ids(r#"field("slot") refs { }"#), vec![20, 40]);
+    assert_eq!(ids(r#"field("slot") refs { func }"#), vec![20, 40]);
+    assert_eq!(ids(r#"field("bare_slot") refs { }"#), vec![100]);
+    assert_eq!(ids(r#"refs { "my_read" }"#), vec![30]);
+    assert_eq!(ids(r#"macro("DEFINE_X") refs { }"#), vec![40, 60]);
+    assert_eq!(ids(r#"refs { "lock" }"#), vec![70]);
+    assert_eq!(ids(r#"refs { "plain" }"#), vec![10, 20, 40, 60, 500, 510]);
+    // `derive(type="refs")` is the word.
+    assert_eq!(
+        ids(r#"field("slot") derive(type="refs") { }"#),
+        vec![20, 40]
+    );
+
+    // holds: exactly the slot and what is stored in it.
+    assert_eq!(ids(r#"field("slot") holds { }"#), vec![20, 30]);
+    assert_eq!(ids(r#"holds { "my_read" }"#), vec![20, 30]);
+    assert_eq!(ids(r#"field("bare_slot") holds { }"#), vec![100, 110]);
+    assert_eq!(
+        ids(r#"field holds { "my_read" "kept" }"#),
+        vec![20, 30, 100, 110]
+    );
+    assert_eq!(ids(r#"field("slot") holds { "plain" }"#), Vec::<i64>::new());
+    assert_eq!(ids(r#"holds { "plain" }"#), vec![40]);
+    assert_eq!(ids(r#"holds { "lock" }"#), vec![70]);
+
+    // declares: exactly the macro and what its invocation declared.
+    assert_eq!(ids(r#"macro("DEFINE_X") declares { }"#), vec![60, 70]);
+    assert_eq!(ids(r#"declares { "lock" }"#), vec![60, 70]);
+    assert_eq!(
+        ids(r#"macro declares { "lock" "both" }"#),
+        vec![60, 70, 80, 90]
+    );
+    assert_eq!(ids(r#"declares { "plain" }"#), vec![40]);
+    assert_eq!(ids(r#"declares { "my_read" }"#), vec![30]);
+
+    // has is containment, as it was.
+    assert_eq!(ids(r#"type("ops") has { }"#), vec![10, 20]);
+
+    // A bare scope is all four.
+    assert_eq!(ids(r#"field("slot") { }"#), vec![20, 30, 40]);
+    assert_eq!(ids(r#"field("bare_slot") { }"#), vec![100, 110]);
+    assert_eq!(ids(r#"macro("DEFINE_X") { }"#), vec![40, 60, 70]);
+    assert_eq!(ids(r#"type("ops") { }"#), vec![10, 20, 40]);
+    assert_eq!(ids(r#"{ "my_read" }"#), vec![20, 30, 500, 510]);
+    assert_eq!(ids(r#"field { "my_read" }"#), vec![20, 30]);
+
+    // The words carry into nested scopes as `has` and `refs` do.
+    assert_eq!(
+        ids(r#"type("ops") has { field holds { } }"#),
+        vec![10, 20, 30]
+    );
+    // The last relationship word of a statement is the one in force.
+    assert_eq!(ids(r#"field("slot") has holds { }"#), vec![20, 30]);
+    assert_eq!(ids(r#"field("slot") holds refs { }"#), vec![20, 40]);
+}
+
+#[test]
+fn a_pair_with_two_relationships_is_listed_by_either_word_and_drawn_with_both() {
+    use index::roles::RefKind;
+    use index::symbols::SymbolType;
+
+    // `DEFINE_Y` declares `both`, and its body names it too.
+    let (define_y, both) = (SymbolId::new(7), SymbolId::new(8));
+    for q in [
+        r#"macro("DEFINE_Y") refs { }"#,
+        r#"macro("DEFINE_Y") declares { }"#,
+        r#"macro("DEFINE_Y") { }"#,
+        r#"refs { "both" }"#,
+        r#"declares { "both" }"#,
+    ] {
+        let res = run_query(crate::test_util::TEST_INPUT_RELATION_ROWS, q);
+        let mut ids: Vec<i64> = res.nodes.as_vec().iter().map(|i| (*i).into()).collect();
+        ids.sort();
+        let macro_and_data: Vec<i64> = ids
+            .iter()
+            .copied()
+            .filter(|id| *id == 80 || *id == 90)
+            .collect();
+        assert_eq!(macro_and_data, vec![80, 90], "{q}");
+        // Whichever word found the pair, it is drawn with all it has.
+        let stated = res.edges.stated(define_y, both);
+        assert_eq!(
+            stated.kinds(SymbolType::Data),
+            vec![RefKind::Declares],
+            "{q}"
+        );
+        assert!(stated.refers(), "{q}: a token of the macro names it too");
+    }
+    // `holds` is neither of the two.
+    assert_eq!(relation_ids(r#"macro("DEFINE_Y") holds { }"#), vec![80]);
+}
+
+#[test]
+fn refs_says_which_relations_it_passed_over_when_it_lists_nothing() {
+    // The slot holds `my_read` and no token of it names `my_read`: `refs`
+    // lists nothing, and says what the bare scope would have listed.  (The
+    // statement that was named still shows what it named.)
+    for (q, shown, expected) in [
+        (
+            r#"field("slot") refs { "my_read" }"#,
+            vec![],
+            "`refs` lists only ordinary references (`→`); `field(\"slot\")` holds 1 symbol \
+             that `\"my_read\"` matches (`⇢`): `my_read`. `holds { … }` or `{ … }` lists it",
+        ),
+        (
+            r#"field("slot") refs { func("my_read") }"#,
+            vec![],
+            "`refs` lists only ordinary references (`→`); `field(\"slot\")` holds 1 symbol \
+             that `func(\"my_read\")` matches (`⇢`): `my_read`. `holds { … }` or `{ … }` \
+             lists it",
+        ),
+        (
+            // A glob is not a predicate the read itself applies: the names
+            // are those the statement's whole predicate matches.
+            r#"field("slot") refs { g"my_*" }"#,
+            vec![],
+            "`refs` lists only ordinary references (`→`); `field(\"slot\")` holds 1 symbol \
+             that `g\"my_*\"` matches (`⇢`): `my_read`. `holds { … }` or `{ … }` lists it",
+        ),
+        (
+            r#"field("bare_slot") refs { }"#,
+            vec![100],
+            "`refs` lists only ordinary references (`→`); `field(\"bare_slot\")` holds 1 \
+             symbol (`⇢`): `kept`. `holds { … }` or `{ … }` lists it",
+        ),
+        (
+            r#"refs { "my_read" }"#,
+            vec![30],
+            "`refs` lists only ordinary references (`→`); 1 symbol holds `\"my_read\"` \
+             (`⇢`): `slot`. `holds { … }` or `{ … }` lists it",
+        ),
+        (
+            r#"field refs { "kept" }"#,
+            vec![110],
+            "`refs` lists only ordinary references (`→`); 1 symbol that `field` matches \
+             holds `\"kept\"` (`⇢`): `bare_slot`. `holds { … }` or `{ … }` lists it",
+        ),
+        (
+            r#"macro("DEFINE_X") refs { data }"#,
+            vec![60],
+            "`refs` lists only ordinary references (`→`); `macro(\"DEFINE_X\")` declares 1 \
+             symbol that `data` matches (`↦`): `lock`. `declares { … }` or `{ … }` lists it",
+        ),
+        (
+            r#"refs { "lock" }"#,
+            vec![70],
+            "`refs` lists only ordinary references (`→`); 1 symbol declares `\"lock\"` \
+             (`↦`): `DEFINE_X`. `declares { … }` or `{ … }` lists it",
+        ),
+    ] {
+        assert_eq!(passed_over(q), vec![expected.to_string()], "{q}");
+        assert_eq!(relation_ids(q), shown, "{q}");
+    }
+
+    // The same when the statement asked about is too broad to be read on its
+    // own and was resolved through its neighbour (the kernel's
+    // `field("file_operations.read") refs { func }`): with a cap of one,
+    // `data` (two symbols) is found only through the macro.
+    let through_neighbour = run_query_with_read_cap(
+        crate::test_util::TEST_INPUT_RELATION_ROWS,
+        r#"macro("DEFINE_X") refs { data }"#,
+        1,
+    );
+    let said: Vec<&str> = through_neighbour
+        .warnings
+        .iter()
+        .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::PassedOver)
+        .map(|w| w.message.as_str())
+        .collect();
+    assert_eq!(
+        said,
+        vec![
+            "`refs` lists only ordinary references (`→`); `macro(\"DEFINE_X\")` declares 1 \
+             symbol that `data` matches (`↦`): `lock`. `declares { … }` or `{ … }` lists it"
+        ]
+    );
+
+    // A listing passes over folded symbols, and so does what is said of it:
+    // the slot also holds `hidden` (folded), which `{ }` would not list ...
+    assert_eq!(
+        passed_over(r#"field("bare_slot") refs { unnest }"#),
+        vec![
+            "`refs` lists only ordinary references (`→`); `field(\"bare_slot\")` holds 2 \
+             symbols (`⇢`): `hidden`, `kept`. `holds { … }` or `{ … }` list them"
+        ]
+    );
+    // ... but a statement that names it shows it, folded or not.
+    assert_eq!(
+        passed_over(r#"field("bare_slot") refs { "hidden" }"#),
+        vec![
+            "`refs` lists only ordinary references (`→`); `field(\"bare_slot\")` holds 1 \
+             symbol that `\"hidden\"` matches (`⇢`): `hidden`. `holds { … }` or `{ … }` \
+             lists it"
+        ]
+    );
+    // Upward the same: `gen_only` is declared by a folded macro alone, which
+    // `{ "gen_only" }` does not list, and `macro("GEN_Z")` does.
+    assert_eq!(passed_over(r#"refs { "gen_only" }"#), Vec::<String>::new());
+    assert_eq!(
+        passed_over(r#"macro("GEN_Z") refs { "gen_only" }"#),
+        vec![
+            "`refs` lists only ordinary references (`→`); `macro(\"GEN_Z\")` declares 1 \
+             symbol that `\"gen_only\"` matches (`↦`): `gen_only`. `declares { … }` or \
+             `{ … }` lists it"
+        ]
+    );
+
+    // An answer a limit cut is not an empty answer: it is said to be
+    // incomplete, and nothing is read to explain it.
+    let three = r#""bare_slot" "kept" "lock" refs { }"#;
+    assert_eq!(
+        passed_over(three),
+        vec![
+            "`refs` lists only ordinary references (`→`); `\"bare_slot\" \"kept\" \"lock\"` \
+             holds 1 symbol (`⇢`): `kept`. `holds { … }` or `{ … }` lists it"
+        ]
+    );
+    let cut = run_query_with_read_cap(crate::test_util::TEST_INPUT_RELATION_ROWS, three, 2);
+    assert!(
+        cut.warnings
+            .iter()
+            .any(|w| w.message.contains("too many results in `{ }`")),
+        "the listing is cut: {:?}",
+        cut.warnings
+    );
+    assert!(cut
+        .warnings
+        .iter()
+        .all(|w| w.kind != crate::diagnostic::DiagnosticKind::PassedOver));
+
+    // Nothing is said when the answer is not empty ...
+    for q in [
+        r#"field("slot") refs { }"#,
+        r#"field("slot") refs { func }"#,
+        r#"refs { "plain" }"#,
+        r#"macro("DEFINE_Y") refs { }"#,
+        r#"refs { "both" }"#,
+    ] {
+        assert_eq!(passed_over(q), Vec::<String>::new(), "{q}");
+    }
+    // ... nor when it is empty and no relation was passed over: the struct
+    // holds nothing (a relation belongs to its source only); what the slot
+    // holds is not data, so `data` would not have listed it either; and a
+    // bare scope or a relation word passes over no relation.
+    for (q, shown) in [
+        (r#"type("ops") refs { "my_read" }"#, vec![]),
+        (r#"file("/ops.h") refs { "lock" }"#, vec![]),
+        (r#"macro("DEFINE_X") refs { "my_read" }"#, vec![]),
+        (r#"field("bare_slot") refs { data }"#, vec![100]),
+        (r#"field("slot") refs { g"zz*" }"#, vec![]),
+        (r#"field("bare_slot") refs { g"my_*" }"#, vec![]),
+        (r#"field("slot") holds { "plain" }"#, vec![]),
+        (r#"field("slot") { "lock" }"#, vec![]),
+    ] {
+        assert_eq!(passed_over(q), Vec::<String>::new(), "{q}");
+        assert_eq!(relation_ids(q), shown, "{q}");
+    }
+}
+
+#[test]
+fn a_relation_word_asked_of_what_cannot_be_its_source_says_so() {
+    // Only a slot holds, and only a macro declares.  Asked of anything else
+    // the scope is empty for a reason the reader can be told.
+    for (q, shown, expected) in [
+        (
+            r#"type("ops") holds { }"#,
+            vec![10],
+            "`holds` related nothing: only a slot holds (a field, or an interface method), \
+             and `type(\"ops\")` selects none",
+        ),
+        (
+            r#""plain" holds { func }"#,
+            vec![40],
+            "`holds` related nothing: only a slot holds (a field, or an interface method), \
+             and `\"plain\"` selects none",
+        ),
+        (
+            r#"macro("DEFINE_Y") holds { "both" }"#,
+            vec![],
+            "`holds` related nothing: only a slot holds (a field, or an interface method), \
+             and `macro(\"DEFINE_Y\")` selects none",
+        ),
+        (
+            r#"field("slot") declares { }"#,
+            vec![20],
+            "`declares` related nothing: only a macro declares, and `field(\"slot\")` \
+             selects none",
+        ),
+    ] {
+        assert_eq!(passed_over(q), vec![expected.to_string()], "{q}");
+        assert_eq!(relation_ids(q), shown, "{q}");
+    }
+    // Not said of a source of the right kind, whether it relates ...
+    for q in [
+        r#"field("slot") holds { }"#,
+        r#"macro("DEFINE_X") declares { }"#,
+        r#"holds { "my_read" }"#,
+    ] {
+        assert_eq!(passed_over(q), Vec::<String>::new(), "{q}");
+    }
+    // ... or not: the slot is a slot, it just does not hold `plain`.
+    assert_eq!(
+        passed_over(r#"field("slot") holds { "plain" }"#),
+        Vec::<String>::new()
+    );
+    // And never of a source nobody named: there is nothing to say about it.
+    assert_eq!(passed_over(r#"holds { "plain" }"#), Vec::<String>::new());
+    assert_eq!(
+        passed_over(r#"declares { "my_read" }"#),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_passed_over_notice_survives_a_cache_hit() {
+    // The notice is worked out from reads, and a read answered from the SQL
+    // cache is the same read: the second run says what the first said.
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index =
+            crate::test_util::get_shared_index(crate::test_util::TEST_INPUT_RELATION_ROWS).await;
+        let said = |res: &crate::statement::ExecutionResult| -> Vec<String> {
+            res.warnings
+                .iter()
+                .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::PassedOver)
+                .map(|w| w.message.clone())
+                .collect()
+        };
+        for q in [
+            r#"field("slot") refs { "my_read" }"#,
+            r#"type("ops") holds { }"#,
+        ] {
+            let (cold, _) = crate::test_util::run_query_traced_on(index.clone(), q)
+                .await
+                .unwrap();
+            let before = index.sql_cache().stats();
+            let (warm, _) = crate::test_util::run_query_traced_on(index.clone(), q)
+                .await
+                .unwrap();
+            let after = index.sql_cache().stats();
+            assert_eq!(said(&cold).len(), 1, "{q}: {:?}", cold.warnings);
+            assert_eq!(said(&warm), said(&cold), "{q}");
+            assert_eq!(
+                after.misses, before.misses,
+                "{q}: the second run read nothing"
+            );
+            assert!(after.hits > before.hits, "{q}");
+        }
+    });
 }
 
 #[test]
