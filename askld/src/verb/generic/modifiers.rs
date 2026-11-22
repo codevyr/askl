@@ -2,7 +2,7 @@ use crate::parser_context::ParserContext;
 use crate::relationship::{Relationship, Word};
 use crate::span::Span;
 use crate::verb::Args;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use index::db_diesel::TraversalMode;
 use std::fmt::Display;
 use std::sync::Arc;
@@ -220,95 +220,6 @@ impl Verb for InheritVerb {
 impl Display for InheritVerb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "InheritVerb({})", self.carried.word())
-    }
-}
-
-/// DeriveModifier - the parameterised spelling of `has` / `refs`, which says
-/// for itself whether it is carried into the scopes below (it is, unless
-/// `inherit=false`).  The words are carried by [`InheritVerb`] instead.
-/// derive(type="refs")           — `refs inherit(relationship)`
-/// derive(type="has")            — `has inherit(relationship)`
-/// derive(type="refs,has")       — `refs or has inherit(relationship)`
-/// derive(type="has", inherit=false) — `has`
-#[derive(Debug)]
-pub(in crate::verb) struct DeriveModifier {
-    span: Span,
-    relationship: Relationship,
-    inherit: bool,
-}
-
-impl DeriveModifier {
-    pub(in crate::verb) const NAME: &'static str = "derive";
-
-    pub fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
-        args.accepts(0, &["type", "inherit"])?;
-
-        let type_str = args
-            .named_str("type")?
-            .ok_or_else(|| anyhow!("derive requires a 'type' parameter"))?;
-
-        let mut asked: Option<Relationship> = None;
-        for part in type_str.split(',') {
-            // The two words `derive` has always taken, meaning what they mean
-            // written as words.
-            let word = match part.trim() {
-                part @ ("refs" | "has") => Word::named(part).expect("a relationship word"),
-                other => bail!(
-                    "unknown relationship type '{}' in derive (expected 'refs' or 'has')",
-                    other
-                ),
-            };
-            let word = Relationship::of(word);
-            asked = Some(match asked {
-                Some(so_far) => so_far.or(word),
-                None => word,
-            });
-        }
-
-        // `split` always yields a part, so a word was asked or we bailed.
-        let Some(relationship) = asked else {
-            bail!("derive type parameter must contain at least one of 'refs', 'has'");
-        };
-
-        let inherit = args.named_bool("inherit")?.unwrap_or(true);
-
-        Ok(Arc::new(Self {
-            span,
-            relationship,
-            inherit,
-        }))
-    }
-}
-
-impl Verb for DeriveModifier {
-    fn name(&self) -> &str {
-        DeriveModifier::NAME
-    }
-
-    fn span(&self) -> pest::Span<'_> {
-        self.span.as_pest_span()
-    }
-
-    fn class(&self) -> VerbClass {
-        VerbClass::Relationship
-    }
-
-    fn derive_method(&self) -> DeriveMethod {
-        DeriveMethod::Skip
-    }
-
-    fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.write_relationship(self.relationship.clone());
-        if self.inherit {
-            ctx.carry_relationship();
-        }
-        Ok(true) // consumed - don't add to command
-    }
-}
-
-impl Display for DeriveModifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "DeriveModifier")
     }
 }
 

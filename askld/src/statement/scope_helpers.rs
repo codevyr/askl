@@ -228,7 +228,7 @@ pub(super) fn build_children_scope(
 /// when the relationship carries REFS, and the containment families only when
 /// it carries HAS.  So `mod("x") { has func }` never reads a REFS family, and
 /// fetching one is work whose every row is discarded -- 10.9 s of it for
-/// `mod("amdgpu") { derive(type="has") func }` on the real index.
+/// `mod("amdgpu") { has func }` on the real index.
 ///
 /// A side with no statement is left demanding everything; `ScopeContext::
 /// Absent` already suppresses it, and saying so twice would only invite the
