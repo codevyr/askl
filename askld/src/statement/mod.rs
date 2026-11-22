@@ -789,8 +789,15 @@ impl Statement {
                 };
                 wave.push((m.statement.clone(), predicate, ProbePlan::Roles(vec![])));
             }
+            let alone: Vec<usize> = wave.iter().map(|(stmt, ..)| statement_key(stmt)).collect();
             let outcomes = run_probe_wave(wave, ctx.probe_cap, ctx.eph.clone()).await?;
             settle(outcomes, ctx, 0);
+            // Resolved on its own words: bound by no neighbour.
+            for key in alone {
+                if ctx.probe_resolved.contains_key(&key) {
+                    ctx.probe_through.insert(key, Vec::new());
+                }
+            }
 
             // Refinement rounds, to fixpoint.
             //
@@ -828,6 +835,9 @@ impl Statement {
             let mut tried: HashSet<(usize, String)> = HashSet::new();
             for round in 1..=(staged.len() * 8 + 8) {
                 let mut wave: Vec<(Rc<Statement>, CompositeFilter, ProbePlan)> = Vec::new();
+                // The neighbours each attempt of this round is bound by
+                // (`ExecutionContext::probe_through`).
+                let mut through: Vec<(usize, Vec<usize>)> = Vec::new();
                 for m in &staged {
                     let stmt = &m.statement;
                     let key = statement_key(stmt);
@@ -948,6 +958,10 @@ impl Statement {
                     };
                     tried.insert((key, attempt));
 
+                    through.push((
+                        key,
+                        neighbours[..level].iter().map(|n| n.statement).collect(),
+                    ));
                     if level == 1 {
                         // One neighbour, one probe per kind: the statement
                         // resolves iff every kind does, and the union of the
@@ -980,6 +994,11 @@ impl Statement {
                 // no attempt is repeated on the same inputs, and there are
                 // finitely many, so the loop ends.
                 settle(outcomes, ctx, round);
+                for (key, bound_by) in through {
+                    if ctx.probe_resolved.contains_key(&key) {
+                        ctx.probe_through.entry(key).or_insert(bound_by);
+                    }
+                }
             }
 
             // ---- Phase R: concurrent reads under tree-complete

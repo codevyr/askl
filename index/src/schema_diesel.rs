@@ -78,6 +78,11 @@ diesel::table! {
         symbol_chunks_total -> Nullable<Integer>,
         object_chunks_total -> Nullable<Integer>,
         root_layer_id -> BigInt,
+        // What the upload was observed to state (set at ingest, never
+        // cleared): see `index::db_diesel::ProjectStates`.
+        states_roles -> Bool,
+        has_declares -> Bool,
+        has_holds -> Bool,
     }
 }
 

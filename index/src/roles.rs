@@ -35,6 +35,9 @@ impl Roles {
     /// Its value or address is taken, not called: `request_irq(n, handler)`,
     /// `g = s->count`.
     pub const TAKE: Roles = Roles(4);
+    /// Every role this engine knows.  A reference that states none of these
+    /// states nothing a query can ask for.
+    pub const ALL: Roles = Roles(1 | 2 | 4);
 
     /// The bits a row carries.  Bits this engine does not know are kept and
     /// never printed, so a newer indexer's index still loads.
