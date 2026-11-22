@@ -9,6 +9,7 @@ use crate::hierarchy::Hierarchy;
 use crate::name_pattern::NamePattern;
 use crate::offset_range::range_bounds_to_offsets;
 use crate::parser::Rule;
+use crate::relationship::Relationship;
 use crate::scope::{Scope, StatementIter};
 use crate::verb::{
     name_filter, typed_selector_text, typed_selectors_for, weak_notifier_blocks,
@@ -351,10 +352,9 @@ pub struct Statement {
     pub scope: Rc<dyn Scope>,
     pub parent: RefCell<Option<Weak<Statement>>>,
     pub execution_state: RefCell<ExecutionState>,
-    /// The relationship type for this statement's relationship to its parent.
-    /// - Refs (default): Reference-based traversal (calls)
-    /// - Has: Containment-based traversal (composition)
-    pub relationship_type: Edge,
+    /// This statement's relationship to its parent: the edge the engine
+    /// reads, and the words of the query that asked for it.
+    relationship: Relationship,
     /// How far this statement's scope reaches into the containment tree.
     /// By default every descendant whose symbol is not folded, at any depth.
     /// `nested` narrows it to one structural level, `unnest` widens it to
@@ -367,7 +367,7 @@ impl Statement {
         Statement::new_full(
             command,
             scope,
-            Edge::EVERY_REFERENCE,
+            Relationship::unwritten(Edge::EVERY_REFERENCE),
             TraversalMode::Unfolded,
         )
     }
@@ -375,15 +375,15 @@ impl Statement {
     pub fn new_with_relationship(
         command: Command,
         scope: Rc<dyn Scope>,
-        relationship_type: Edge,
+        relationship: Relationship,
     ) -> Rc<Statement> {
-        Statement::new_full(command, scope, relationship_type, TraversalMode::Unfolded)
+        Statement::new_full(command, scope, relationship, TraversalMode::Unfolded)
     }
 
     pub fn new_full(
         command: Command,
         scope: Rc<dyn Scope>,
-        relationship_type: Edge,
+        relationship: Relationship,
         mode: TraversalMode,
     ) -> Rc<Statement> {
         Rc::new(Statement {
@@ -391,7 +391,7 @@ impl Statement {
             scope,
             parent: RefCell::new(None),
             execution_state: RefCell::new(ExecutionState::new()),
-            relationship_type,
+            relationship,
             mode,
         })
     }
@@ -400,8 +400,16 @@ impl Statement {
         self.mode
     }
 
+    /// The edge between this statement and its parent: what the engine
+    /// reads.
     pub fn get_relationship_type(&self) -> Edge {
-        self.relationship_type
+        self.relationship.edge()
+    }
+
+    /// The same with the words that asked for it, for an answer that quotes
+    /// them.
+    pub fn relationship(&self) -> &Relationship {
+        &self.relationship
     }
 
     pub fn command(&self) -> &Command {
@@ -923,13 +931,13 @@ impl Statement {
                     if let Some(parent) = stmt.parent().and_then(|p| p.upgrade()) {
                         let neighbour = statement_key(&parent);
                         if let Some(ids) = ctx.probe_resolved.get(&neighbour) {
-                            consider(neighbour, ids, stmt.relationship_type, true);
+                            consider(neighbour, ids, stmt.get_relationship_type(), true);
                         }
                     }
                     for child in stmt.children() {
                         let neighbour = statement_key(&child);
                         if let Some(ids) = ctx.probe_resolved.get(&neighbour) {
-                            consider(neighbour, ids, child.relationship_type, false);
+                            consider(neighbour, ids, child.get_relationship_type(), false);
                         }
                     }
                     if neighbours.is_empty() {
