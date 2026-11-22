@@ -526,6 +526,73 @@ async fn do_upload_objects(
     insert_symbol_refs(conn, &ref_rows).await?;
     tracing::info!("upload_objects: refs done");
 
+    record_what_the_upload_states(conn, project_id, Observed::of(&ref_rows)).await?;
+
+    Ok(())
+}
+
+/// What a batch of references was seen to state: the three facts kept per
+/// project (`index.projects.states_roles`, `.has_declares`, `.has_holds`).
+///
+/// AN OBSERVATION, NOT A CAPABILITY.  Nothing here asks what the indexer
+/// could have written; it is what these rows say.  A role is one this engine
+/// knows (a bit it does not know is stored and never asked for), on a row
+/// that is an ordinary reference.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Observed {
+    pub(super) roles: bool,
+    pub(super) declares: bool,
+    pub(super) holds: bool,
+}
+
+impl Observed {
+    pub(super) fn of(rows: &[NewSymbolRef]) -> Self {
+        use index::roles::{Relation, Roles};
+        let mut seen = Observed::default();
+        for row in rows {
+            match Relation::from_stored(row.relation) {
+                Some(Relation::Declares) => seen.declares = true,
+                Some(Relation::Holds) => seen.holds = true,
+                None => seen.roles |= row.roles & Roles::ALL.bits() != 0,
+            }
+        }
+        seen
+    }
+
+    fn anything(self) -> bool {
+        self.roles || self.declares || self.holds
+    }
+}
+
+/// Add what a chunk was seen to state to what its project states.
+///
+/// In the chunk's own transaction, so the fact and the rows that make it
+/// true commit together, and a chunk that is re-sent (its slot already
+/// claimed) never reaches here.  Only ever sets: chunks arrive in any order
+/// and each knows only its own rows, so the project's fact is the OR of
+/// them.  A chunk that states nothing writes nothing -- every upload of an
+/// index without roles leaves the project row alone.
+async fn record_what_the_upload_states(
+    conn: &mut AsyncPgConnection,
+    project_id: i32,
+    seen: Observed,
+) -> Result<(), UploadError> {
+    use diesel::IntoSql;
+    use index_schema::projects::dsl as p;
+
+    if !seen.anything() {
+        return Ok(());
+    }
+    let said = |column_is: bool| column_is.into_sql::<diesel::sql_types::Bool>();
+    diesel::update(p::projects.filter(p::id.eq(project_id)))
+        .set((
+            p::states_roles.eq(p::states_roles.or(said(seen.roles))),
+            p::has_declares.eq(p::has_declares.or(said(seen.declares))),
+            p::has_holds.eq(p::has_holds.or(said(seen.holds))),
+        ))
+        .execute(conn)
+        .await
+        .map_err(|e| UploadError::Storage(e.to_string()))?;
     Ok(())
 }
 
@@ -1443,6 +1510,69 @@ mod tests {
         let rows = build_symbol_refs(1, 1000001, &[object], &obj_map).unwrap();
         let said: Vec<(i16, i16)> = rows.iter().map(|r| (r.roles, r.relation)).collect();
         assert_eq!(said, vec![(6, 0), (0, 2), (0, 0)]);
+    }
+
+    #[test]
+    fn what_a_batch_states_is_what_its_rows_say() {
+        use super::Observed;
+        let rows = |refs: Vec<SymbolRef>| {
+            let object = UploadObject {
+                local_id: 1,
+                refs,
+                ..Default::default()
+            };
+            let map = HashMap::from([(1i64, 10i32)]);
+            build_symbol_refs(1, 5, &[object], &map).unwrap()
+        };
+        let stating = |roles, relation| SymbolRef {
+            roles,
+            relation,
+            ..sref(1, 0, 4)
+        };
+        // Nothing stated: an index from before roles, or one whose indexer
+        // knows none.
+        assert_eq!(
+            Observed::of(&rows(vec![sref(1, 0, 4)])),
+            Observed::default()
+        );
+        assert_eq!(Observed::of(&[]), Observed::default());
+        // One reference that states a role is enough.
+        assert_eq!(
+            Observed::of(&rows(vec![sref(1, 0, 4), stating(4, 0)])),
+            Observed {
+                roles: true,
+                ..Default::default()
+            }
+        );
+        // A relation row is not a reference that states a role, whatever its
+        // `roles` column holds; each relation is its own fact.
+        assert_eq!(
+            Observed::of(&rows(vec![stating(1, 1)])),
+            Observed {
+                declares: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            Observed::of(&rows(vec![stating(0, 2)])),
+            Observed {
+                holds: true,
+                ..Default::default()
+            }
+        );
+        // A bit this engine cannot be asked for states nothing it can answer.
+        assert_eq!(
+            Observed::of(&rows(vec![stating(64, 0)])),
+            Observed::default()
+        );
+        // A relation this engine does not know is a reference underneath.
+        assert_eq!(
+            Observed::of(&rows(vec![stating(2, 9)])),
+            Observed {
+                roles: true,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
