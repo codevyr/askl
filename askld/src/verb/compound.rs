@@ -18,14 +18,38 @@
 //!   of different dimensions conjoin by juxtaposition, not by operators.
 //!
 //! The suppression rule: atoms contribute ONLY their predicate.  Their
-//! parse-context side effects (`update_context` — relationship switching,
-//! default-type propagation) never run, so `file or dir { … }` leaves the
-//! scope on its default relationship.  Layer blocks are the one construct
-//! whose verbs mutate shared state during CONSTRUCTION rather than in
-//! `update_context`, so expressions are refused inside them outright.
+//! parse-context side effects (`update_context` — default-type propagation)
+//! never run, so `file or dir { … }` leaves the scope on its default
+//! relationship.  Layer blocks are the one construct whose verbs mutate
+//! shared state during CONSTRUCTION rather than in `update_context`, so
+//! expressions are refused inside them outright.
+//!
+//! # Relationship expressions
+//!
+//! AN EXPRESSION IS OVER PREDICATES OR OVER RELATIONSHIP WORDS, NEVER BOTH.
+//! The same builder parses `calls or holds`: the relationship words (`has`,
+//! `refs`, `declares`, `holds`, `calls`, `writes`, `takes`, `reads`; see
+//! [`crate::relationship`]) are atoms of another dimension, the edge between
+//! a statement and the statements in its braces.  Such an expression never
+//! becomes a [`CompoundVerb`]: it is folded at once into the ONE
+//! [`Relationship`] it asks for ([`relationship_of`]) and consumed by the
+//! parser context exactly as a single word is.
+//!
+//! - RELATIONSHIP WORDS JOIN WITH `or`, AND A PAIR MATCHES IF ANY OF ITS
+//!   ROWS DOES: the fold is the union of the words' edges, so every sentence
+//!   stays one test on a reference row plus containment.
+//! - `and` and `not` are refused, as not supported YET.  They are not
+//!   meaningless: read on the pair as a whole ("it both calls and writes
+//!   it") they have a meaning, and one row filter cannot decide it.
+//! - A relationship word and a predicate in one expression is a type error
+//!   with the rewrite: they are written side by side (`func or data calls or
+//!   holds { … }` is two expressions, in either order: each acts on the
+//!   statement it is written in, and where it stands among the terms means
+//!   nothing).
 
 use crate::parser::Rule;
 use crate::parser_context::ParserContext;
+use crate::relationship::{self, Relationship, Word};
 use crate::span::Span;
 use index::db_diesel::{CompositeFilter, EphContext};
 use pest::error::Error;
@@ -36,9 +60,10 @@ use std::fmt::Display;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
+use super::generic::RelationshipVerb;
 use super::{
-    construct_verb, AnchorKind, DeriveMethod, Dimension, Filter, OwnPredicate, Selector, Verb,
-    VerbClass,
+    construct_verb, install_verb, AnchorKind, DeriveMethod, Dimension, Filter, OwnPredicate,
+    Selector, Verb, VerbClass,
 };
 use async_trait::async_trait;
 
@@ -215,6 +240,157 @@ impl PredicateExpr {
             PredicateExpr::Atom(_) => false,
         }
     }
+}
+
+impl PredicateExpr {
+    /// Whether some atom is a relationship word: then the expression is a
+    /// relationship expression, or an error.
+    fn names_a_relationship(&self) -> bool {
+        let mut names = false;
+        self.for_each_atom(true, &mut |v, _| names |= v.relationship().is_some());
+        names
+    }
+
+    /// The expression as the query wrote it, atoms in their own text:
+    /// `calls and writes`, `not (calls or writes)`.  A sub-expression is
+    /// parenthesised; the whole (`top`) is not.
+    fn spelled(&self, top: bool) -> String {
+        let joined = |parts: &[PredicateExpr], operator: &str| {
+            let inner = parts
+                .iter()
+                .map(|part| part.spelled(false))
+                .collect::<Vec<_>>()
+                .join(operator);
+            if top {
+                inner
+            } else {
+                format!("({inner})")
+            }
+        };
+        match self {
+            PredicateExpr::Atom(v) => v.span().as_str().trim().to_string(),
+            PredicateExpr::And(parts) => joined(parts, " and "),
+            PredicateExpr::Or(parts) => joined(parts, " or "),
+            PredicateExpr::Not(inner) => format!("not {}", inner.spelled(false)),
+        }
+    }
+
+    /// The relationship words of the expression, in the order written.
+    fn relationship_words(&self) -> Vec<Word> {
+        let mut words = Vec::new();
+        self.for_each_atom(true, &mut |v, _| {
+            if let Some(relationship) = v.relationship() {
+                words.extend(relationship.words().iter().copied());
+            }
+        });
+        words
+    }
+
+    /// The union of an expression of relationship words; `and` and `not`
+    /// are met in the order they were written and refused.
+    fn joined(&self) -> Result<Relationship, String> {
+        match self {
+            PredicateExpr::Atom(v) => Ok(v
+                .relationship()
+                .expect("only relationship words reach the fold: `relationship_of`")
+                .clone()),
+            PredicateExpr::Or(parts) => {
+                let mut parts = parts.iter();
+                let first = parts
+                    .next()
+                    .expect("an `or` has operands: the Pratt parser")
+                    .joined()?;
+                parts.try_fold(first, |so_far, part| Ok(so_far.or(part.joined()?)))
+            }
+            PredicateExpr::And(_) => Err(format!(
+                "`and` between relationships is not supported yet: `{}` would have to be \
+                 decided for the pair as a whole. Ask each in its own query.",
+                self.spelled(true)
+            )),
+            PredicateExpr::Not(inner) => Err(format!(
+                "`{}` is not supported yet: name what you want: {}.",
+                self.spelled(true),
+                instead_of(&inner.relationship_words())
+            )),
+        }
+    }
+}
+
+/// What to write in place of a negated relationship: the words the negation
+/// leaves, each of which is a positive question.
+///
+/// Of a role, the other roles (or any reference at all, or what no token
+/// spells); of a relationship, the other relationships.
+fn instead_of(negated: &[Word]) -> String {
+    let quoted = |text: String| format!("`{text}`");
+    let mut items: Vec<String> = Vec::new();
+    if negated.iter().all(|word| word.role().is_some()) {
+        let mut others: Vec<&str> = Vec::new();
+        for word in Word::ALL {
+            let Some(role) = word.role() else { continue };
+            let taken = negated.iter().any(|n| n.role() == Some(role));
+            // One role, one suggestion: the first spelling in the table.
+            let said = Word::ALL
+                .iter()
+                .any(|w| w.role() == Some(role) && others.contains(&w.text()));
+            if !taken && !said {
+                others.push(word.text());
+            }
+        }
+        if !others.is_empty() {
+            items.push(quoted(relationship::join(others.into_iter())));
+        }
+        items.push(quoted("refs".to_string()));
+        items.push(quoted("declares".to_string()));
+    } else {
+        items.extend(
+            Word::ALL
+                .into_iter()
+                .filter(|word| word.is_relationship() && !negated.contains(word))
+                .map(|word| quoted(word.text().to_string())),
+        );
+    }
+    items.join(", ")
+}
+
+/// The relationship an expression that names a relationship word asks for.
+///
+/// Refused, with what to write instead: a predicate in the same expression
+/// (they are written side by side), `and`, `not`.
+fn relationship_of(expr: &PredicateExpr) -> Result<Relationship, String> {
+    let (mut words, mut others): (Vec<&Arc<dyn Verb>>, Vec<&Arc<dyn Verb>>) = (vec![], vec![]);
+    expr.for_each_atom(true, &mut |v, _| {
+        if v.relationship().is_some() {
+            words.push(v);
+        } else {
+            others.push(v);
+        }
+    });
+    if let (Some(other), Some(word)) = (others.first(), words.first()) {
+        let text = |v: &Arc<dyn Verb>| v.span().as_str().trim().to_string();
+        let what = if other.is_type_word() {
+            "a type"
+        } else if other.as_selector().is_some() {
+            "a selector"
+        } else {
+            "a filter"
+        };
+        let side = |verbs: &[&Arc<dyn Verb>]| {
+            verbs
+                .iter()
+                .map(|v| text(v))
+                .collect::<Vec<_>>()
+                .join(" or ")
+        };
+        return Err(format!(
+            "`{}` is {what}, `{}` a relationship: write them side by side: `{} {} {{ … }}`",
+            text(other),
+            text(word),
+            side(&others),
+            side(&words),
+        ));
+    }
+    expr.joined()
 }
 
 impl Display for PredicateExpr {
@@ -425,6 +601,11 @@ fn span_err(message: String, span: pest::Span<'_>) -> Error<Rule> {
 fn construct_atom(ctx: &Rc<ParserContext>, pair: Pair<Rule>) -> Result<PredicateExpr, Error<Rule>> {
     let pest_span = pair.as_span();
     let verb = construct_verb(ctx, pair)?;
+    // A relationship word is an atom of the other kind of expression: what
+    // it may stand beside is decided over the whole tree (`relationship_of`).
+    if verb.relationship().is_some() {
+        return Ok(PredicateExpr::Atom(verb));
+    }
     // One gate, one source of truth: the verb itself says whether it may be
     // an atom and, if not, why (see [`Verb::compound_admission`]).
     verb.compound_admission()
@@ -520,14 +701,26 @@ fn validate(expr: &PredicateExpr, span: pest::Span<'_>) -> Result<(), Error<Rule
     Ok(())
 }
 
+/// What one term of a statement turned out to be.  A statement writes its
+/// relationship once and last (`statement/parse.rs`), so the statement
+/// builder needs to know which of its terms was one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Term {
+    /// A relationship word, or several joined with `or`.
+    Relationship,
+    /// Anything else: a predicate expression, a label, a mode, a limit.
+    Other,
+}
+
 /// Build one `compound_filter` pair into the current command.  A single
-/// bare verb (no operators) takes the classic [`super::build_verb`] path —
-/// context side effects included; anything with operators builds a
-/// [`CompoundVerb`].
+/// bare verb (no operators) is constructed and installed as it is —
+/// context side effects included; an expression of relationship words is
+/// folded into one [`RelationshipVerb`]; anything else with operators builds
+/// a [`CompoundVerb`].
 pub(crate) fn build_compound_filter(
     ctx: Rc<ParserContext>,
     pair: Pair<Rule>,
-) -> Result<(), Error<Rule>> {
+) -> Result<Term, Error<Rule>> {
     let pest_span = pair.as_span();
     let span = Span::from_pest(pest_span, ctx.source());
 
@@ -537,7 +730,15 @@ pub(crate) fn build_compound_filter(
         let first = probe.next();
         if let (Some(first), None) = (first, probe.next()) {
             if first.as_rule() == Rule::verb {
-                return super::build_verb(ctx, first);
+                let verb_span = Span::from_pest(first.as_span(), ctx.source());
+                let verb = construct_verb(&ctx, first)?;
+                let term = if verb.relationship().is_some() {
+                    Term::Relationship
+                } else {
+                    Term::Other
+                };
+                install_verb(&ctx, verb, &verb_span)?;
+                return Ok(term);
             }
         }
     }
@@ -555,11 +756,20 @@ pub(crate) fn build_compound_filter(
     }
 
     let expr = build_expr(&ctx, pair.into_inner())?;
+    if expr.names_a_relationship() {
+        let relationship = relationship_of(&expr).map_err(|reason| span_err(reason, pest_span))?;
+        install_verb(
+            &ctx,
+            RelationshipVerb::joined(span.clone(), relationship),
+            &span,
+        )?;
+        return Ok(Term::Relationship);
+    }
     validate(&expr, pest_span)?;
 
     let verb = Arc::new(CompoundVerb::new(span, expr));
 
-    // The same rule build_verb applies: a preamble configures the query and
+    // The same rule `install_verb` applies: a preamble configures the query and
     // cannot select, so an anchor-capable expression is rejected there.
     if ctx.redirects_to_global() && verb.anchor_kind().is_some() {
         return Err(span_err(
@@ -572,5 +782,5 @@ pub(crate) fn build_compound_filter(
     }
 
     ctx.extend_verb(verb);
-    Ok(())
+    Ok(Term::Other)
 }

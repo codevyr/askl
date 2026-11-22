@@ -1,5 +1,6 @@
 use crate::{
     command::Command,
+    relationship::Relationship,
     scope::{DefaultScope, Scope},
     span::Span,
     statement::Statement,
@@ -46,9 +47,10 @@ pub struct ParserContext {
     alternative_context: RefCell<Option<Weak<ParserContext>>>,
     scope_factory: Option<ScopeFactory>,
     command: RefCell<Command>,
-    /// The relationship type for statements created in this context.
-    /// Set by @has verb, default is Refs.
-    relationship_type: RefCell<Edge>,
+    /// The relationship of statements created in this context to their
+    /// parent: the edge, and the words that asked for it.  Set by a
+    /// relationship word or an expression of them.
+    relationship_type: RefCell<Relationship>,
     /// Default symbol types for child scopes when no explicit type selector is present.
     /// Set by type selectors (@module, @function, etc.) to [parent_type, function_type].
     /// When a child scope has no explicit type selector, it will filter by these types.
@@ -75,7 +77,7 @@ impl ParserContext {
             alternative_context: RefCell::new(None),
             command: RefCell::new(command),
             scope_factory: Some(scope_factory),
-            relationship_type: RefCell::new(Edge::EVERY_REFERENCE),
+            relationship_type: RefCell::new(Relationship::unwritten(Edge::EVERY_REFERENCE)),
             default_symbol_types: RefCell::new(None),
             has_relationship_modifier: RefCell::new(false),
             inherit_relationship_modifier: RefCell::new(false),
@@ -144,7 +146,7 @@ impl ParserContext {
     /// one — including inside a `preamble { … }` scope, since `derive`
     /// carries the redirection down.  A verb landing here configures every
     /// statement in the query rather than joining a statement of its own,
-    /// which is why [`build_verb`](crate::verb::build_verb) refuses selectors
+    /// which is why `install_verb` (`crate::verb`) refuses selectors
     /// at this point.
     pub fn redirects_to_global(&self) -> bool {
         self.alternative_context.borrow().is_some()
@@ -199,20 +201,20 @@ impl ParserContext {
 
     /// Set the relationship type explicitly from a verb (@has or @refs).
     /// Marks that a relationship modifier was used, affecting child scope behavior.
-    pub fn set_relationship_type_explicit(&self, rel_type: Edge) {
+    pub fn set_relationship_type_explicit(&self, rel_type: Relationship) {
         *self.relationship_type.borrow_mut() = rel_type;
         *self.has_relationship_modifier.borrow_mut() = true;
     }
 
     /// Set the relationship type as a default/inherited value.
     /// Does NOT mark as explicit modifier - used for scope transitions and inheritance.
-    pub fn set_relationship_type_default(&self, rel_type: Edge) {
+    pub fn set_relationship_type_default(&self, rel_type: Relationship) {
         *self.relationship_type.borrow_mut() = rel_type;
     }
 
     /// Get the relationship type for statements created in this context.
-    pub fn get_relationship_type(&self) -> Edge {
-        *self.relationship_type.borrow()
+    pub fn get_relationship_type(&self) -> Relationship {
+        self.relationship_type.borrow().clone()
     }
 
     /// Check if a relationship modifier (@has or @refs) was explicitly used.
@@ -222,7 +224,7 @@ impl ParserContext {
 
     /// Set the relationship type and mark it for propagation to all descendants.
     /// Combines set_relationship_type_explicit + set_inherit_relationship_modifier(true).
-    pub fn set_relationship_type_inherited(&self, rel_type: Edge) {
+    pub fn set_relationship_type_inherited(&self, rel_type: Relationship) {
         self.set_relationship_type_explicit(rel_type);
         self.set_inherit_relationship_modifier(true);
     }
