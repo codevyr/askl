@@ -514,9 +514,10 @@ fn slot_cascade_type_write_keeps_layer_backed_anchors() {
 /// The three ways a row could be dropped on evidence nobody read; see
 /// `absence_is_proven`.
 mod absence {
-    use crate::execution_state::{DependencyRole, RelationshipType};
+    use crate::execution_state::DependencyRole;
     use crate::verb::absence_is_proven;
     use index::db_diesel::{FamilyRead, Selection, Within};
+    use index::edge::Edge;
 
     fn whole_within(ids: &[i64]) -> FamilyRead {
         FamilyRead::Whole(Within::Ids(ids.to_vec()))
@@ -534,7 +535,7 @@ mod absence {
             &own,
             &parent,
             &DependencyRole::Child,
-            RelationshipType::REFS
+            Edge::EVERY_REFERENCE
         ));
 
         // One side read them in full, with no scope: that is proof.
@@ -543,7 +544,7 @@ mod absence {
             &own,
             &parent,
             &DependencyRole::Child,
-            RelationshipType::REFS
+            Edge::EVERY_REFERENCE
         ));
     }
 
@@ -566,7 +567,7 @@ mod absence {
         own.families.parents = FamilyRead::whole();
         own.families.has_parents = FamilyRead::Cut;
         let parent = Selection::new();
-        let both = RelationshipType::REFS | RelationshipType::HAS;
+        let both = Edge::ALL;
         assert!(!absence_is_proven(
             &own,
             &parent,
@@ -577,7 +578,7 @@ mod absence {
             &own,
             &parent,
             &DependencyRole::Child,
-            RelationshipType::REFS
+            Edge::EVERY_REFERENCE
         ));
 
         // Either end may hold the proof: the parent read what it contains.
