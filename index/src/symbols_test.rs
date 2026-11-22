@@ -1108,7 +1108,7 @@ async fn recursive_edge_survives_when_the_lowest_target_is_the_caller() -> anyho
 /// carries REFS and the containment families only when it carries HAS, so
 /// `mod("x") { has func }` never looks at a REFS family.  On the real index
 /// that family was 10.9 s and 70,202 rows for
-/// `mod("amdgpu") { derive(type="has") func }`, every row discarded.
+/// `mod("amdgpu") { has func }`, every row discarded.
 ///
 /// Both directions are asserted so neither half can pass vacuously: the
 /// fixture's module both refers to things and contains them.

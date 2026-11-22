@@ -93,7 +93,7 @@ VALUES (7, 1, int4range(915, 916));
 -- ============================================================================
 -- Data inheritance pruning test data
 -- Models: driver → id_table → {info_a, info_b} → {config_a, config_b} → {channels_a, channels_b}
--- Query: data(inherit="true") "driver" {{{{"channels_a"}}}}
+-- Query: data inherit(type) "driver" {{{{"channels_a"}}}}
 -- Expected: only the path driver → id_table → info_a → config_a → channels_a
 -- ============================================================================
 

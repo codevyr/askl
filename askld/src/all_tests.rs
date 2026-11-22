@@ -2904,8 +2904,8 @@ fn a_type_word_filters_its_own_statement_only() {
         "driver -> id_table -> info_a; got {:?}",
         nodes
     );
-    // `inherit=true` is how a type word is carried into every scope below.
-    let res = run_query(VERB_TEST, r#"func(inherit=true) { "config.Debug" }"#);
+    // `inherit(type)` is how a type word is carried into every scope below.
+    let res = run_query(VERB_TEST, r#"func inherit(type) { "config.Debug" }"#);
     assert!(
         !res.nodes.as_vec().contains(&SymbolInstanceId::new(97)),
         "an inherited `func` makes the child a function, and config.Debug is data"
@@ -3009,7 +3009,7 @@ fn two_type_words_in_one_statement_are_an_error() {
     for query in [
         r#"func "foo" "tar""#,
         r#""foo" { macro or func }"#,
-        r#"func(inherit=true) "foo" { data }"#,
+        r#"func inherit(type) "foo" { data }"#,
         r#"filter("type", "func") filter("type", "mod") "foo""#,
     ] {
         assert!(
@@ -3026,19 +3026,19 @@ fn a_group_that_says_a_type_replaces_the_inherited_one() {
     // one typed child replaces the type...
     let one = run_query(
         VERB_TEST,
-        r#"func(inherit=true) "foo" { data("config.Debug") }"#,
+        r#"func inherit(type) "foo" { data("config.Debug") }"#,
     );
     assert_eq!(sorted_ids(&one), vec![91, 97]);
     // ...and so does a group of them.  The group used to keep the inherited
     // `func` beside its own `data` and match nothing.
     let group = run_query(
         VERB_TEST,
-        r#"func(inherit=true) "foo" { data("config.Debug") or data("config.Port") }"#,
+        r#"func inherit(type) "foo" { data("config.Debug") or data("config.Port") }"#,
     );
     assert_eq!(sorted_ids(&group), vec![91, 97]);
     let juxtaposed = run_query(
         VERB_TEST,
-        r#"func(inherit=true) "foo" { data("config.Debug") data("config.Port") }"#,
+        r#"func inherit(type) "foo" { data("config.Debug") data("config.Port") }"#,
     );
     assert_eq!(sorted_ids(&juxtaposed), vec![91, 97]);
 }
@@ -3048,8 +3048,8 @@ fn weak_child_does_not_eliminate_parent() {
     // A bare type word constrains nothing about its neighbours: it is weak.
     // The fixture has no data symbols, so the child resolves empty.  A weak
     // child is a display echo: its emptiness must not take the parent with
-    // it.  (`inherit=false` is the default, spelled out.)
-    const QUERY: &str = r#""foo" { data(inherit=false) }"#;
+    // it.
+    const QUERY: &str = r#""foo" { data }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     let nodes = res.nodes.as_vec();
@@ -3066,7 +3066,7 @@ fn weak_parent_does_not_eliminate_child() {
     // it is a bug rather than a preference: written on the other side of the
     // braces, the same weak statement asserting the same absent evidence has
     // always left its neighbour alone.  Both spellings must agree.
-    const QUERY: &str = r#"data(inherit=false) { "foo" }"#;
+    const QUERY: &str = r#"data { "foo" }"#;
     let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
 
     let nodes = res.nodes.as_vec();
@@ -3074,20 +3074,6 @@ fn weak_parent_does_not_eliminate_child() {
         nodes.contains(&SymbolInstanceId::new(20)),
         "foo must survive an empty WEAK parent; got {:?}",
         nodes
-    );
-}
-
-#[test]
-fn bare_and_explicit_type_children_agree() {
-    // `data` and `data(inherit=false)` are one statement: a type word does
-    // not inherit unless asked to, and neither spelling constrains a parent.
-    let bare = run_query(TEST_INPUT_CONTAINMENT, r#""foo" { data }"#);
-    let explicit = run_query(TEST_INPUT_CONTAINMENT, r#""foo" { data(inherit=false) }"#);
-
-    assert_eq!(
-        bare.nodes.as_vec(),
-        explicit.nodes.as_vec(),
-        "the two spellings of a weak type child must return the same nodes"
     );
 }
 
@@ -3166,104 +3152,42 @@ fn generic_select_is_idempotent() {
 }
 
 // ============================================================================
-// derive Tests
+// A relationship word, alone, joined and carried
 // ============================================================================
 
 #[test]
-fn derive_type_refs_equivalent_to_refs() {
-    // derive(type="refs") should behave identically to refs
-    const DERIVE_QUERY: &str = r#""foo" derive(type="refs") { "bar" }"#;
-    const REFS_QUERY: &str = r#""foo" refs { "bar" }"#;
-    let derive_res = run_query(TEST_INPUT_CONTAINMENT, DERIVE_QUERY);
-    let refs_res = run_query(TEST_INPUT_CONTAINMENT, REFS_QUERY);
+fn a_relationship_is_asked_of_its_own_edge_and_below_when_carried() {
+    let ids = |q: &str| sorted_ids(&run_query(TEST_INPUT_CONTAINMENT, q));
 
-    assert_eq!(derive_res.nodes.as_vec(), refs_res.nodes.as_vec());
-    assert_eq!(derive_res.nodes.as_vec().len(), 2); // foo + bar
-}
+    // `refs`: foo and bar.  `has`: the file and foo.
+    assert_eq!(ids(r#""foo" refs { "bar" }"#), vec![20, 30]);
+    assert_eq!(ids(r#"file("/main.go") has { "foo" }"#), vec![20, 510]);
 
-#[test]
-fn derive_type_has_equivalent_to_has() {
-    // derive(type="has") should behave identically to has
-    const DERIVE_QUERY: &str = r#"file("/main.go") derive(type="has") { "foo" }"#;
-    const HAS_QUERY: &str = r#"file("/main.go") has { "foo" }"#;
-    let derive_res = run_query(TEST_INPUT_CONTAINMENT, DERIVE_QUERY);
-    let has_res = run_query(TEST_INPUT_CONTAINMENT, HAS_QUERY);
+    // Either.  The file contains foo and calls nothing; foo calls bar and
+    // contains nothing.
+    assert_eq!(
+        ids(r#"file("/main.go") refs or has { "foo" }"#),
+        vec![20, 510]
+    );
+    assert_eq!(ids(r#""foo" refs or has { "bar" }"#), vec![20, 30]);
 
-    assert_eq!(derive_res.nodes.as_vec(), has_res.nodes.as_vec());
-    assert_eq!(derive_res.nodes.as_vec().len(), 2); // file + foo
-}
+    // Carried into the scopes below: file has→ func has→ foo, and file has→
+    // foo has→ bar.  A function contains no function, so both are empty.
+    assert_eq!(
+        ids(r#"file("/main.go") has inherit(relationship) { func { "foo" } }"#),
+        Vec::<i64>::new()
+    );
+    assert_eq!(
+        ids(r#"file("/main.go") has inherit(relationship) { "foo" { "bar" } }"#),
+        Vec::<i64>::new()
+    );
 
-#[test]
-fn derive_type_refs_has_union() {
-    // derive(type="refs,has") should find via either relationship
-    // File contains foo (has), foo calls bar (refs) — so with file as parent:
-    // - has finds foo (contained by file)
-    // - refs finds nothing (file doesn't call anything)
-    // - derive(type="refs,has") finds foo (union)
-    const QUERY: &str = r#"file("/main.go") derive(type="refs,has") { "foo" }"#;
-    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
-
-    assert_eq!(res.nodes.as_vec().len(), 2); // file + foo
-    assert!(res.nodes.as_vec().contains(&SymbolInstanceId::new(510))); // file
-    assert!(res.nodes.as_vec().contains(&SymbolInstanceId::new(20))); // foo
-
-    // Now test where refs would find results but has wouldn't:
-    // foo calls bar (refs), but foo doesn't contain bar (has)
-    const QUERY2: &str = r#""foo" derive(type="refs,has") { "bar" }"#;
-    let res2 = run_query(TEST_INPUT_CONTAINMENT, QUERY2);
-
-    assert_eq!(res2.nodes.as_vec().len(), 2); // foo + bar
-    assert!(res2.nodes.as_vec().contains(&SymbolInstanceId::new(20))); // foo
-    assert!(res2.nodes.as_vec().contains(&SymbolInstanceId::new(30))); // bar
-}
-
-#[test]
-fn derive_inherit_true_propagates() {
-    // derive(type="has", inherit=true) propagates to grandchildren
-    // file derive(type="has", inherit=true) { { "foo" } }
-    // Without inherit, the grandchild {} would reset to refs, but with inherit
-    // the grandchild also uses has semantics
-    // file has→ ??? has→ foo
-    // Since file contains foo directly, the intermediate {} derives contained functions,
-    // then the inner "foo" also uses has to constrain
-    const QUERY: &str = r#"file("/main.go") derive(type="has", inherit=true) { func { "foo" } }"#;
-    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
-
-    println!("derive inherit=true result: {:#?}", res.nodes);
-    // file → (has) functions → (has) foo
-    // intermediate func gets all functions contained in file (foo, bar, baz)
-    // then "foo" is constrained by has from those functions — but functions don't contain other functions
-    // So this should be empty because foo doesn't contain foo
-    // Actually: the inner "foo" is a child of func, so it derives from func's selection
-    // With has semantics: which of func's results contain "foo"? None — functions don't contain functions
-    // This is expected: has between peer functions yields nothing
-    assert_eq!(res.nodes.as_vec().len(), 0);
-}
-
-#[test]
-fn derive_inherits_by_default() {
-    // derive now inherits by default (inherit=true).
-    // file derive(type="has") { "foo" { "bar" } }
-    // file has→ foo has→ bar — but foo doesn't contain bar → empty
-    const QUERY: &str = r#"file("/main.go") derive(type="has") { "foo" { "bar" } }"#;
-    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
-
-    println!("derive inherits by default result: {:#?}", res.nodes);
-    // foo doesn't contain bar → empty
-    assert_eq!(res.nodes.as_vec().len(), 0);
-}
-
-#[test]
-fn derive_explicit_no_inherit_resets_to_refs() {
-    // With explicit inherit=false, grandchild resets to refs
-    // file derive(type="has", inherit=false) { "foo" { "bar" } }
-    // file has→ foo refs→ bar (grandchild resets to refs)
-    const QUERY: &str = r#"file("/main.go") derive(type="has", inherit=false) { "foo" { "bar" } }"#;
-    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
-
-    println!("derive explicit no inherit result: {:#?}", res.nodes);
-    // file (has) foo (refs) bar — should find all three
-    assert_eq!(res.nodes.as_vec().len(), 3); // file, foo, bar
+    // Not carried, the scope below is bare: file has→ foo, and foo calls
+    // bar.  All three.
+    assert_eq!(
+        ids(r#"file("/main.go") has { "foo" { "bar" } }"#),
+        vec![20, 30, 510]
+    );
 }
 
 // ============================================================================
@@ -3379,13 +3303,14 @@ fn func_overrides_has_in_nested_scope() {
 }
 
 #[test]
-fn derive_refs_overrides_inherited_refs_has() {
-    // derive(type="refs") inside dir overrides inherited refs+has to REFS-only
-    const QUERY: &str = r#"dir("/") derive(type="refs") { dir }"#;
+fn refs_on_a_dir_asks_for_references_only() {
+    // `refs` on a dir narrows its bare scope (every relationship) to
+    // references only.
+    const QUERY: &str = r#"dir("/") refs { dir }"#;
     let res = run_query(TEST_INPUT_TREE_BROWSER, QUERY);
 
     let names: Vec<_> = res.nodes.0.iter().map(|n| n.symbol.name.as_str()).collect();
-    println!("derive refs override names: {:?}", names);
+    println!("refs override names: {:?}", names);
 
     // REFS only: / references /src and /docs via symbol_refs
     assert!(names.contains(&"/"), "Should contain /");
@@ -3412,22 +3337,6 @@ fn file_implicit_has_shows_functions() {
     assert!(nodes.contains(&SymbolInstanceId::new(30)), "bar");
     assert!(nodes.contains(&SymbolInstanceId::new(40)), "baz");
     assert_eq!(nodes.len(), 4);
-}
-
-#[test]
-fn derive_invalid_type_errors() {
-    // derive(type="invalid") should produce an error
-    const QUERY: &str = r#"derive(type="invalid") { "foo" }"#;
-    let res = run_query_err(TEST_INPUT_CONTAINMENT, QUERY);
-    assert!(res.is_err(), "Expected error for invalid type");
-}
-
-#[test]
-fn derive_missing_type_errors() {
-    // derive without type param should produce an error
-    const QUERY: &str = r#"derive { "foo" }"#;
-    let res = run_query_err(TEST_INPUT_CONTAINMENT, QUERY);
-    assert!(res.is_err(), "Expected error for missing type param");
 }
 
 // Nested function containment tests
@@ -3555,7 +3464,7 @@ fn non_constraining_bare_mod_does_not_narrow_caller_chain() {
     );
 
     // Carried down on request, the type meets a function and finds nothing.
-    let res = run_query(TEST_INPUT_CONTAINMENT, r#"mod(inherit=true) {{ "baz" }}"#);
+    let res = run_query(TEST_INPUT_CONTAINMENT, r#"mod inherit(type) {{ "baz" }}"#);
     assert_eq!(sorted_ids(&res), Vec::<i64>::new());
 }
 
@@ -3658,10 +3567,10 @@ fn non_constraining_containment_still_works() {
 
 #[test]
 fn data_inherit_with_name_prunes_to_target_path() {
-    // data(inherit=true) "driver" {{{{"channels_a"}}}}
+    // data inherit(type) "driver" {{{{"channels_a"}}}}
     // Should return ONLY the path: driver → id_table → info_a → config_a → channels_a
     // NOT info_b, config_b, channels_b
-    const QUERY: &str = r#"data(inherit=true) "driver" {{{{"channels_a"}}}}"#;
+    const QUERY: &str = r#"data inherit(type) "driver" {{{{"channels_a"}}}}"#;
     let res = run_query(VERB_TEST, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -3690,8 +3599,8 @@ fn data_inherit_with_name_prunes_to_target_path() {
 #[test]
 fn data_inherit_without_name_prunes_to_target_path() {
     // Same query without the top-level name selector — should also prune correctly.
-    // data(inherit=true) {{{{"channels_a"}}}}
-    const QUERY: &str = r#"data(inherit=true) {{{{"channels_a"}}}}"#;
+    // data inherit(type) {{{{"channels_a"}}}}
+    const QUERY: &str = r#"data inherit(type) {{{{"channels_a"}}}}"#;
     let res = run_query(VERB_TEST, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -3719,9 +3628,9 @@ fn data_inherit_without_name_prunes_to_target_path() {
 fn data_inherit_weak_parent_derives_full_chain() {
     // Regression: weak UnitVerb children were skipped even when the parent was also weak,
     // preventing the full chain from being derived.
-    // data(inherit=true) {{{"channels_a"}}} — 3-level deep, all intermediate statements are weak.
+    // data inherit(type) {{{"channels_a"}}} — 3-level deep, all intermediate statements are weak.
     // Expected chain: id_table → info_a → config_a → channels_a
-    const QUERY: &str = r#"data(inherit=true) {{{"channels_a"}}}"#;
+    const QUERY: &str = r#"data inherit(type) {{{"channels_a"}}}"#;
     let res = run_query(VERB_TEST, QUERY);
 
     println!("{:#?}", res.nodes);
@@ -3921,15 +3830,14 @@ fn direct_only_refs_module_shows_all_refs() {
 //
 // `direct_only_refs_module_shows_all_refs` above cannot see this, because its
 // fixture module spans the whole file and the HAS half of the default relation
-// supplies the same nodes.  These tests isolate the REFS half with
-// `derive(type="refs")`.
+// supplies the same nodes.  These tests isolate the REFS half with `refs`.
 // ----------------------------------------------------------------------------
 
 #[test]
 fn direct_only_refs_module_isolates_refs_half() {
     // REFS only: every ref in the fixture sits inside a function, so if functions
     // shadowed the module this returns the module and nothing else.
-    const QUERY: &str = r#"mod("testmodule") derive(type="refs") { }"#;
+    const QUERY: &str = r#"mod("testmodule") refs { }"#;
     let res = run_query(TEST_INPUT_NESTED_FUNC, QUERY);
 
     let nodes = res.nodes.as_vec();
@@ -3948,7 +3856,7 @@ fn direct_only_refs_module_isolates_refs_half() {
 fn direct_only_refs_type_sees_refs_inside_its_fields() {
     // struct Outer { Inner a; Helper b; } — both refs live inside fields (level 1),
     // which are narrower than the type (level 2) and so must not shadow it.
-    const QUERY: &str = r#"type("Outer") derive(type="refs") { }"#;
+    const QUERY: &str = r#"type("Outer") refs { }"#;
     let res = run_query(TEST_INPUT_STRUCT_FIELDS, QUERY);
 
     let nodes = res.nodes.as_vec();
@@ -3974,10 +3882,7 @@ fn unfolded_refs_type_reaches_through_nested_type() {
     // dropping the filter entirely.  With nothing folded here the default is
     // plain transitive descent; that the filter exists at all is pinned where
     // a fixture does fold a symbol (`type_filter_test.rs`).
-    let outer = run_query(
-        TEST_INPUT_STRUCT_FIELDS,
-        r#"type("Wrapper") derive(type="refs") { }"#,
-    );
+    let outer = run_query(TEST_INPUT_STRUCT_FIELDS, r#"type("Wrapper") refs { }"#);
     let outer_nodes = outer.nodes.as_vec();
     println!("Wrapper refs-only: {:?}", outer_nodes);
     assert!(
@@ -3987,7 +3892,7 @@ fn unfolded_refs_type_reaches_through_nested_type() {
 
     let inner = run_query(
         TEST_INPUT_STRUCT_FIELDS,
-        r#"type("Wrapper.Nested") derive(type="refs") { }"#,
+        r#"type("Wrapper.Nested") refs { }"#,
     );
     let inner_nodes = inner.nodes.as_vec();
     println!("Wrapper.Nested refs-only: {:?}", inner_nodes);
@@ -6311,11 +6216,6 @@ fn a_relationship_word_selects_the_edges_drawn_with_its_mark() {
     assert_eq!(ids(r#"macro("DEFINE_X") refs { }"#), vec![40, 60]);
     assert_eq!(ids(r#"refs { "lock" }"#), vec![70]);
     assert_eq!(ids(r#"refs { "plain" }"#), vec![10, 20, 40, 60, 500, 510]);
-    // `derive(type="refs")` is the word.
-    assert_eq!(
-        ids(r#"field("slot") derive(type="refs") { }"#),
-        vec![20, 40]
-    );
 
     // holds: exactly the slot and what is stored in it.
     assert_eq!(ids(r#"field("slot") holds { }"#), vec![20, 30]);
@@ -6779,8 +6679,8 @@ fn a_word_governs_its_statement_and_inherit_carries_it() {
 
 #[test]
 fn inherit_type_carries_the_statements_type() {
-    // `inherit(type)` is what `T(inherit=true)` was: the type is asked of
-    // every statement below, until one writes its own.
+    // `inherit(type)` carries a type word: the type is asked of every
+    // statement below, until one writes its own.
     let ids = |q: &str| sorted_ids(&run_query(TEST_INPUT_CONTAINMENT, q));
     // A type word is about its own statement: the module and `baz`.
     assert_eq!(ids(r#"mod {{ "baz" }}"#), ids(r#"mod { { "baz" } }"#));
@@ -6791,7 +6691,6 @@ fn inherit_type_carries_the_statements_type() {
         r#"inherit(type) mod {{ "baz" }}"#,
     ] {
         assert_eq!(ids(q), Vec::<i64>::new(), "{q}");
-        assert_eq!(ids(q), ids(r#"mod(inherit=true) {{ "baz" }}"#), "{q}");
     }
 
     let ids = |q: &str| sorted_ids(&run_query(VERB_TEST, q));
@@ -6802,11 +6701,6 @@ fn inherit_type_carries_the_statements_type() {
         r#""driver" data inherit(type) {{{{"channels_a"}}}}"#,
     ] {
         assert_eq!(ids(q), vec![200, 210, 220, 240, 260], "{q}");
-        assert_eq!(
-            ids(q),
-            ids(r#"data(inherit=true) "driver" {{{{"channels_a"}}}}"#),
-            "{q}"
-        );
     }
     // A statement below that writes its own type replaces the carried one.
     assert_eq!(
@@ -6890,104 +6784,6 @@ fn a_preamble_carries_what_it_writes() {
         ids(r#"preamble filter("compound_name", "test"); { "a" }"#),
         ids(r#"preamble filter("compound_name", "test", inherit=true); { "a" }"#)
     );
-}
-
-/// What the transition notice says of a query on the containment fixture.
-fn no_longer_carried(q: &str) -> Vec<String> {
-    run_query(TEST_INPUT_CONTAINMENT, q)
-        .warnings
-        .iter()
-        .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::NoLongerCarried)
-        .map(|w| format!("{} @ `{}`", w.message, w.span.as_str()))
-        .collect()
-}
-
-#[test]
-fn has_and_refs_say_they_no_longer_reach_nested_scopes() {
-    // TRANSITIONAL, one release.  `has` and `refs` used to reach every scope
-    // below them.  Where a query is written as if they still did -- a
-    // nested statement with braces of its own and no word on them -- the
-    // answer says what changed, once per statement.
-    let said = |word: &str| {
-        vec![format!(
-            "`{word}` no longer reaches nested scopes; write `inherit(relationship)` to \
-             carry it @ `{word}`"
-        )]
-    };
-    assert_eq!(
-        no_longer_carried(r#"file has { "foo" { "bar" } }"#),
-        said("has")
-    );
-    assert_eq!(
-        no_longer_carried(r#""foo" refs { "bar" { "baz" } }"#),
-        said("refs")
-    );
-    // Braces count whatever is in them, and wherever the word stands.
-    assert_eq!(no_longer_carried(r#"has file { "foo" { } }"#), said("has"));
-    // Once per statement, however many scopes are nested in it...
-    assert_eq!(
-        no_longer_carried(r#"file has { "foo" { "bar" } "bar" { "baz" } }"#),
-        said("has")
-    );
-    // ...and of the statement whose word it is: here the file's.
-    assert_eq!(
-        no_longer_carried(r#"mod("testmodule") has { file has { "foo" { "bar" } } }"#),
-        said("has")
-    );
-    assert_eq!(
-        no_longer_carried(r#"mod("testmodule") has { file refs { "foo" { "bar" } } }"#),
-        said("refs")
-    );
-
-    // It is said beside whatever else the statement is told, never folded
-    // into the warning next to it.
-    let res = run_query(TEST_INPUT_CONTAINMENT, r#""nosuch"has { "foo" { "bar" } }"#);
-    let kinds: Vec<_> = res.warnings.iter().map(|w| w.kind.clone()).collect();
-    assert_eq!(
-        kinds,
-        vec![
-            crate::diagnostic::DiagnosticKind::NoMatch,
-            crate::diagnostic::DiagnosticKind::NoLongerCarried
-        ],
-        "{:?}",
-        res.warnings
-    );
-
-    // Not said:
-    for q in [
-        // nothing nested has braces;
-        r#"file has { "foo" }"#,
-        r#"file has { "foo" "bar" }"#,
-        r#""foo" has"#,
-        // the query says it wants the word carried;
-        r#"file has inherit(relationship) { "foo" { "bar" } }"#,
-        r#"inherit(relationship) file has { "foo" { "bar" } }"#,
-        // every nested scope writes its own relationship;
-        r#"file has { "foo" refs { "bar" } }"#,
-        r#"file has { "foo" has { "bar" } }"#,
-        r#"file has { "foo" derive(type="refs") { "bar" } }"#,
-        // the word is carried there from above;
-        r#"mod("testmodule") has inherit(relationship) { file { "foo" { "bar" } } }"#,
-        // no word at all;
-        r#"file { "foo" { "bar" } }"#,
-        // `derive`, which says for itself whether it is carried;
-        r#"file derive(type="has", inherit=false) { "foo" { "bar" } }"#,
-        r#"file derive(type="has") { "foo" { "bar" } }"#,
-        // an expression, which never was carried.
-        r#"file has or refs { "foo" { "bar" } }"#,
-    ] {
-        assert_eq!(no_longer_carried(q), Vec::<String>::new(), "{q}");
-    }
-    // Nor of the six words that never reached further than their statement.
-    for word in ["declares", "holds", "calls", "writes", "takes", "reads"] {
-        let q = format!(r#""via" {word} {{ field {{ func }} }}"#);
-        let said = run_query(crate::test_util::TEST_INPUT_ROLE_WORDS, &q)
-            .warnings
-            .iter()
-            .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::NoLongerCarried)
-            .count();
-        assert_eq!(said, 0, "{q}");
-    }
 }
 
 #[test]

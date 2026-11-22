@@ -127,9 +127,9 @@ impl PredicateExpr {
     }
 
     /// The expression with every positive atom that says a type carried
-    /// below ([`Verb::carried_below`]): `func or method inherit(type)` is
-    /// `func(inherit=true) or method(inherit=true)`.  A negated atom is an
-    /// exclusion, which is carried whatever it is.
+    /// below ([`Verb::carried_below`]): `func or method inherit(type)`
+    /// carries `func` and carries `method`.  A negated atom is an exclusion,
+    /// which is carried whatever it is.
     fn carried_below(&self, positive: bool) -> PredicateExpr {
         let each = |parts: &[PredicateExpr]| {
             parts
@@ -490,7 +490,7 @@ impl Verb for CompoundVerb {
     }
 
     /// A branch holds no slot, and still replaces the type it inherited:
-    /// `func(inherit=true) { data("a") or data("b") }` finds the two as
+    /// `func inherit(type) { data("a") or data("b") }` finds the two as
     /// data, exactly as `{ data("a") }` alone does.
     fn writes(&self) -> Vec<Dimension> {
         self.expr.positive_writes()

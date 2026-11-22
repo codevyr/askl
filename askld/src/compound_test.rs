@@ -48,8 +48,8 @@ fn keywords_do_not_split_identifiers() {
 #[test]
 fn non_predicate_verbs_are_rejected_in_expressions() {
     // (A relationship WORD is an atom of the other kind of expression: see
-    // "Relationship expressions" below.  `derive(...)` is not one.)
-    let err = parse_err(r#"not derive(type="has") "a""#);
+    // "Relationship expressions" below.  `unnest` is not one.)
+    let err = parse_err(r#"not unnest "a""#);
     assert!(err.contains("relationship verb"), "{}", err);
 
     let err = parse_err(r#"@l or "a""#);
@@ -215,7 +215,7 @@ fn ignore_with_no_usable_package_still_parses_standalone() {
 /// word does, which a type word does only on request.
 #[test]
 fn filter_group_with_an_exclusion_still_inherits() {
-    let ast = parse(r#"func(inherit=true) and not g"test_*" { "x" }"#).unwrap();
+    let ast = parse(r#"func and not g"test_*" inherit(type) { "x" }"#).unwrap();
     let outer: Vec<_> = ast.scope().statements().collect();
     let inner: Vec<_> = outer[0].scope().statements().collect();
     let child: Vec<String> = inner[0]
@@ -568,8 +568,8 @@ fn a_relationship_and_a_predicate_are_written_side_by_side() {
     }
 
     // What is not a predicate either says so itself.
-    let err = parse_err(r#"derive(type="has") or calls { "x" }"#);
-    assert!(err.contains("`derive` is a relationship verb"), "{err}");
+    let err = parse_err(r#"unnest or calls { "x" }"#);
+    assert!(err.contains("`unnest` is a relationship verb"), "{err}");
     let err = parse_err(r#"@l or calls { "x" }"#);
     assert!(err.contains("label verb"), "{err}");
     // A relationship word takes no arguments, in an expression as outside.
@@ -701,70 +701,71 @@ fn inherit_carries_what_its_statement_writes() {
         edges_down(r#""a" calls inherit(relationship)"#),
         Vec::<String>::new()
     );
-    // `derive` keeps its own argument until it is removed, and the verb
-    // carries what `derive` wrote as it carries a word.
-    assert_eq!(
-        edges_down(r#""a" derive(type="has", inherit=false) { "b" { "c" } }"#),
-        vec!["has", "-"]
-    );
-    for q in [
-        r#""a" derive(type="has", inherit=false) inherit(relationship) { "b" { "c" } }"#,
-        r#""a" inherit(relationship) derive(type="has", inherit=false) { "b" { "c" } }"#,
-        r#""a" derive(type="has") { "b" { "c" } }"#,
-    ] {
-        assert_eq!(edges_down(q), vec!["has", "has"], "{q}");
-    }
 }
 
 #[test]
-fn inherit_type_is_inherit_true_on_the_statements_type() {
+fn inherit_type_carries_the_statements_type_filter() {
     // `inherit(type)` CARRIES THE STATEMENT'S TYPE FILTER: the statements
-    // below run under exactly the filters `T(inherit=true)` gives them,
-    // whichever side of the type word it is written on.
-    for (argument, verb, other_side) in [
+    // below run under it, whichever side of the type word it is written on.
+    // (Each row: the two spellings, and the filters of every statement from
+    // the first down.)
+    let data = "TypeSelector(data)";
+    let func = "TypeSelector(function)";
+    let either = "Compound((func or field))";
+    let but = "Compound((func and not _name_select))";
+    let generic = "GenericFilter(type=[1])";
+    for (verb, other_side, expected) in [
         (
-            r#"data(inherit=true) { { "x" } }"#,
             r#"data inherit(type) { { "x" } }"#,
             r#"inherit(type) data { { "x" } }"#,
+            vec![vec![data], vec![data], vec![data]],
         ),
         (
-            r#"func(inherit=true) "foo" { data { "x" } }"#,
             r#"func inherit(type) "foo" { data { "x" } }"#,
             r#"inherit(type) "foo" func { data { "x" } }"#,
+            vec![vec![func], vec![data], vec![]],
         ),
+        // A named type selector is a branch of its own statement and a
+        // filter below it.
         (
-            r#"func("a", inherit=true) { { "x" } }"#,
             r#"func("a") inherit(type) { { "x" } }"#,
             r#"inherit(type) func("a") { { "x" } }"#,
+            vec![vec![], vec![func], vec![func]],
         ),
         (
-            r#"func(inherit=true) or method(inherit=true) { { "x" } }"#,
             r#"func or method inherit(type) { { "x" } }"#,
             r#"inherit(type) func or method { { "x" } }"#,
+            vec![vec![either], vec![either], vec![either]],
         ),
         (
-            r#"func(inherit=true) and not g"test_*" { { "x" } }"#,
             r#"func and not g"test_*" inherit(type) { { "x" } }"#,
             r#"inherit(type) func and not g"test_*" { { "x" } }"#,
+            vec![vec![but], vec![but], vec![but]],
+        ),
+        // The generic filter keeps its own argument, and the verb carries it
+        // as that argument does.
+        (
+            r#"filter("type", "func") inherit(type) { { "x" } }"#,
+            r#"inherit(type) filter("type", "func") { { "x" } }"#,
+            vec![vec![generic], vec![generic], vec![generic]],
         ),
         (
             r#"filter("type", "func", inherit=true) { { "x" } }"#,
-            r#"filter("type", "func") inherit(type) { { "x" } }"#,
-            r#"inherit(type) filter("type", "func") { { "x" } }"#,
+            r#"filter("type", "func", inherit=false) inherit(type) { { "x" } }"#,
+            vec![vec![generic], vec![generic], vec![generic]],
         ),
         // A statement under a carried type that writes its own replaces it,
         // and its own stays in its statement.
         (
-            r#"func(inherit=true) "foo" { data { { "x" } } }"#,
             r#"func inherit(type) "foo" { data { { "x" } } }"#,
             r#"inherit(type) func "foo" { data { { "x" } } }"#,
+            vec![vec![func], vec![data], vec![], vec![]],
         ),
     ] {
-        let expected = filters_down(argument);
-        assert!(
-            expected[1..].iter().any(|filters| !filters.is_empty()),
-            "{argument}: nothing was carried, so this compares nothing"
-        );
+        let expected: Vec<Vec<String>> = expected
+            .into_iter()
+            .map(|filters| filters.into_iter().map(str::to_string).collect())
+            .collect();
         assert_eq!(filters_down(verb), expected, "{verb}");
         assert_eq!(filters_down(other_side), expected, "{other_side}");
     }
@@ -776,7 +777,7 @@ fn inherit_type_is_inherit_true_on_the_statements_type() {
     // It carries the type and nothing else the statement wrote...
     assert_eq!(
         filters_down(r#"data filter("compound_name", "a") inherit(type) { { "x" } }"#)[1..],
-        filters_down(r#"data(inherit=true) { { "x" } }"#)[1..]
+        filters_down(r#"data inherit(type) { { "x" } }"#)[1..]
     );
     // ...and a statement that wrote no type has none to carry.
     assert_eq!(
@@ -788,7 +789,7 @@ fn inherit_type_is_inherit_true_on_the_statements_type() {
     assert_eq!(edges_down(both), vec!["has", "has"]);
     assert_eq!(
         filters_down(both)[1..],
-        filters_down(r#"data(inherit=true) "a" { { "x" } }"#)[1..]
+        [vec![data.to_string()], vec![data.to_string()]]
     );
     assert_eq!(
         edges_down(r#""a" has data inherit(type) { { "x" } }"#),
@@ -860,7 +861,7 @@ fn inherit_says_what_it_takes() {
     }
     // The words it is spelled with stay what they were everywhere else.
     for q in [
-        r#"func(inherit=true) { "x" }"#,
+        r#"filter("type", "func", inherit=true) { "x" }"#,
         r#"type("relationship") { "x" }"#,
         r#""inherit" { "x" }"#,
         r#"@inherit "a"; #inherit { "x" }"#,
@@ -895,4 +896,83 @@ fn two_relationship_words_are_joined_with_or() {
         let err = parse_err(q);
         assert!(err.contains(expected), "{q}: {err}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// What is carried, and what is not
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_relationship_reaches_below_only_when_carried() {
+    // A WORD GOVERNS THE STATEMENT IT IS WRITTEN IN; `inherit(relationship)`
+    // CARRIES IT.  The same wherever the words stand.
+    for (written, edges) in [
+        ("has inherit(relationship)", vec!["has", "has"]),
+        ("refs inherit(relationship)", vec!["refs", "refs"]),
+        (
+            "refs or has inherit(relationship)",
+            vec!["refs or has", "refs or has"],
+        ),
+        (
+            "inherit(relationship) has or refs",
+            vec!["has or refs", "has or refs"],
+        ),
+        ("has", vec!["has", "-"]),
+        ("refs or has", vec!["refs or has", "-"]),
+    ] {
+        assert_eq!(
+            edges_down(&format!(r#""a" {written} {{ "b" {{ "c" }} }}"#)),
+            edges,
+            "{written}"
+        );
+        assert_eq!(
+            edges_down(&format!(r#"{written} "a" {{ "b" {{ "c" }} }}"#)),
+            edges,
+            "{written}"
+        );
+    }
+    // A PREAMBLE CARRIES WHAT IT WRITES.
+    parse(r#"preamble has; "a" { "b" { "c" } }"#).unwrap();
+    parse(r#"preamble func; "a" { "b" }"#).unwrap();
+}
+
+#[test]
+fn a_type_reaches_below_only_when_carried() {
+    for q in [
+        r#"func inherit(type) { { "x" } }"#,
+        r#"any inherit(type) "a" { { "x" } }"#,
+        r#"func("a") inherit(type) { { "x" } }"#,
+        r#"data(g"a*", match="contains") inherit(type) { { "x" } }"#,
+    ] {
+        let carried = filters_down(q);
+        assert!(!carried[2].is_empty(), "{q}: {carried:?}");
+    }
+    for q in [r#"data { { "x" } }"#, r#"func("a") { { "x" } }"#] {
+        let carried = filters_down(q);
+        assert!(carried[2].is_empty(), "{q}: {carried:?}");
+    }
+
+    // A relationship is a word and a type word takes no `inherit`: neither
+    // has a parameterised spelling.
+    for q in [
+        r#""a" derive(type="has") { "b" }"#,
+        r#"func(inherit=true) { "x" }"#,
+        r#"func("a", inherit=false) { "x" }"#,
+        r#"has(inherit=true) { "x" }"#,
+    ] {
+        assert!(parse(q).is_err(), "`{q}` must not parse");
+    }
+
+    // The generic filter keeps its parameter: a name filter has no
+    // `inherit(kind)`.
+    for q in [
+        r#"filter("type", "func", inherit=true) { { "x" } }"#,
+        r#"filter("compound_name", "a", inherit=true) { { "x" } }"#,
+        r#"filter("compound_name", "a", inherit=false) { { "x" } }"#,
+    ] {
+        parse(q).unwrap_or_else(|e| panic!("`{}` failed to parse: {}", q, e));
+    }
+    assert!(
+        !filters_down(r#"filter("compound_name", "a", inherit=true) { { "x" } }"#)[2].is_empty()
+    );
 }

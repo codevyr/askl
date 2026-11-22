@@ -29,7 +29,6 @@ use std::pin::Pin;
 use std::rc::{Rc, Weak};
 
 mod anchor;
-mod no_longer_carried;
 mod parse;
 mod passed_over;
 mod scope_helpers;
@@ -1336,7 +1335,6 @@ impl Statement {
             DiagnosticKind::Truncation => 2u8,
             DiagnosticKind::LeftOut => 3u8,
             DiagnosticKind::PassedOver => 4u8,
-            DiagnosticKind::NoLongerCarried => 5u8,
         };
         all_warnings.sort_by_key(|d| (d.start(), kind_rank(d)));
 
