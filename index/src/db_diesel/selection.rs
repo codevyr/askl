@@ -1,3 +1,4 @@
+use crate::edge::RefTest;
 use crate::models_diesel::{Object, Project, Symbol, SymbolInstance, SymbolRef};
 use crate::symbols::{FileId, Occurrence, SymbolId, SymbolInstanceId, SymbolScope, SymbolType};
 use std::collections::{hash_map::Entry, HashMap, HashSet};
@@ -481,11 +482,90 @@ impl FamilyRead {
     }
 }
 
+/// How far a REFERENCE family was read, and under which test.
+///
+/// A SIDE READ UNDER A TEST IS WHOLE ONLY FOR THAT TEST.  A family read for
+/// `calls` holds the calls and is silent about every other reference, so its
+/// silence proves the absence of a call and of nothing else.  The read
+/// carries its test, and an edge is answered from it only when everything the
+/// edge admits is something the read looked for ([`RefTest::within`]).
+///
+/// The rows it holds are true whatever the test: evidence needs nothing of
+/// the read, here as in [`FamilyRead`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReferenceRead {
+    read: FamilyRead,
+    under: RefTest,
+}
+
+impl Default for ReferenceRead {
+    /// Not read.
+    fn default() -> Self {
+        FamilyRead::Unread.into()
+    }
+}
+
+impl From<FamilyRead> for ReferenceRead {
+    /// A read of every row of the reference table: a family built by hand,
+    /// or read for an edge that asks for any reference.
+    fn from(read: FamilyRead) -> Self {
+        ReferenceRead {
+            read,
+            under: RefTest::EVERY,
+        }
+    }
+}
+
+impl ReferenceRead {
+    /// A family that ran to its end, over everything, under no test.
+    pub fn whole() -> Self {
+        FamilyRead::whole().into()
+    }
+
+    /// `read`, made for the rows `under` admits.
+    pub fn under(read: FamilyRead, under: RefTest) -> Self {
+        ReferenceRead { read, under }
+    }
+
+    /// How far the read ran.
+    pub fn read(&self) -> &FamilyRead {
+        &self.read
+    }
+
+    /// The test the read was made under.
+    pub fn test(&self) -> RefTest {
+        self.under
+    }
+
+    /// Whether a row this family does NOT hold is thereby shown to have no
+    /// reference to any of `neighbours` that `test` admits.
+    pub fn proves_absence_for(&self, neighbours: &[i64], test: RefTest) -> bool {
+        test.within(self.under) && self.read.proves_absence_for(neighbours)
+    }
+
+    /// The state of the union of two families, each read for its own rows.
+    /// Two reads under different tests looked for different things, so their
+    /// union is whole for neither: it says nothing.
+    fn union(self, other: ReferenceRead) -> ReferenceRead {
+        if self.under == other.under {
+            ReferenceRead {
+                read: self.read.union(other.read),
+                under: self.under,
+            }
+        } else {
+            match (&self.read, &other.read) {
+                (FamilyRead::Cut, _) | (_, FamilyRead::Cut) => FamilyRead::Cut.into(),
+                _ => FamilyRead::Unread.into(),
+            }
+        }
+    }
+}
+
 /// The four families of a [`Selection`], each with how far it was read.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct FamilyReads {
-    pub parents: FamilyRead,
-    pub children: FamilyRead,
+    pub parents: ReferenceRead,
+    pub children: ReferenceRead,
     pub has_parents: FamilyRead,
     pub has_children: FamilyRead,
 }
@@ -1083,25 +1163,87 @@ mod tests {
     fn extend_keeps_what_both_families_were_read_against() {
         let mut empty = Selection::new();
         let mut read = selection_with_node(1, 1);
-        read.families.parents = FamilyRead::Whole(Within::Ids(vec![1, 2]));
+        read.families.parents = FamilyRead::Whole(Within::Ids(vec![1, 2])).into();
         empty.extend(read.clone());
         assert_eq!(empty.families.parents, read.families.parents);
 
         let mut other = selection_with_node(1, 1);
         other.nodes[0].symbol_instance.id += 1;
-        other.families.parents = FamilyRead::Whole(Within::Ids(vec![2, 3]));
+        other.families.parents = FamilyRead::Whole(Within::Ids(vec![2, 3])).into();
         let mut both = read.clone();
         both.extend(other);
         assert_eq!(
             both.families.parents,
-            FamilyRead::Whole(Within::Ids(vec![2]))
+            FamilyRead::Whole(Within::Ids(vec![2])).into()
         );
 
         let mut cut = selection_with_node(1, 1);
         cut.nodes[0].symbol_instance.id += 2;
-        cut.families.parents = FamilyRead::Cut;
+        cut.families.parents = FamilyRead::Cut.into();
         both.extend(cut);
-        assert_eq!(both.families.parents, FamilyRead::Cut);
+        assert_eq!(both.families.parents, FamilyRead::Cut.into());
+    }
+
+    /// A read made under a test is silent about everything the test left
+    /// out, so its silence answers only an edge that asks for no more.
+    #[test]
+    fn a_read_under_a_test_is_whole_only_for_that_test() {
+        use crate::roles::{Relation, Roles};
+        let calls = RefTest::stating(Roles::CALL).unwrap();
+        let calls_or_writes = RefTest::stating(Roles::CALL | Roles::WRITE).unwrap();
+        let holds = RefTest::relation(Relation::Holds);
+
+        // Read for every reference: whole for any test.
+        let every = ReferenceRead::whole();
+        for test in [RefTest::EVERY, RefTest::ORDINARY, calls, holds] {
+            assert!(every.proves_absence_for(&[1], test), "{test:?}");
+        }
+
+        // Read for calls or writes: whole for those, and for calls alone.
+        let narrow = ReferenceRead::under(FamilyRead::whole(), calls_or_writes);
+        assert!(narrow.proves_absence_for(&[1], calls_or_writes));
+        assert!(narrow.proves_absence_for(&[1], calls));
+        // Not for anything it did not look for.
+        assert!(!narrow.proves_absence_for(&[1], RefTest::ORDINARY));
+        assert!(!narrow.proves_absence_for(&[1], RefTest::EVERY));
+        assert!(!narrow.proves_absence_for(&[1], holds));
+        assert!(!narrow.proves_absence_for(&[1], calls.or(holds)));
+
+        // The test adds to what the read must be, it replaces none of it.
+        let scoped = ReferenceRead::under(FamilyRead::Whole(Within::Ids(vec![1])), calls);
+        assert!(scoped.proves_absence_for(&[1], calls));
+        assert!(!scoped.proves_absence_for(&[2], calls));
+        assert!(!ReferenceRead::under(FamilyRead::Cut, calls).proves_absence_for(&[1], calls));
+        assert!(!ReferenceRead::under(FamilyRead::Unread, calls).proves_absence_for(&[1], calls));
+    }
+
+    /// Two reads under one test are one read; under two tests their union is
+    /// whole for neither.
+    #[test]
+    fn extend_keeps_a_test_both_families_were_read_under() {
+        use crate::roles::{Relation, Roles};
+        let calls = RefTest::stating(Roles::CALL).unwrap();
+        let holds = RefTest::relation(Relation::Holds);
+
+        let mut one = selection_with_node(1, 1);
+        one.families.children = ReferenceRead::under(FamilyRead::whole(), calls);
+        let mut same = selection_with_node(1, 1);
+        same.nodes[0].symbol_instance.id += 1;
+        same.families.children = ReferenceRead::under(FamilyRead::whole(), calls);
+        let mut both = one.clone();
+        both.extend(same);
+        assert_eq!(
+            both.families.children,
+            ReferenceRead::under(FamilyRead::whole(), calls)
+        );
+
+        let mut other = selection_with_node(1, 1);
+        other.nodes[0].symbol_instance.id += 2;
+        other.families.children = ReferenceRead::under(FamilyRead::whole(), holds);
+        both.extend(other);
+        assert!(!both.families.children.proves_absence_for(&[1], calls));
+        assert!(!both.families.children.proves_absence_for(&[1], holds));
+        assert_eq!(both.families.children.read(), &FamilyRead::Unread);
     }
 
     /// Mirror of `extend_ors_budget_bounded` for the discovery-capping flag:

@@ -1,5 +1,6 @@
 use crate::db_diesel::FamilyDemands;
 use crate::db_diesel::{CompositeFilter, CompoundNameMixin, EphContext, ScopeContext};
+use crate::edge::{Edge, RefTest};
 use crate::symbols::{package_match, partial_name_match, Symbol, SymbolId};
 use diesel::pg::PgConnection;
 use diesel::Connection;
@@ -406,7 +407,7 @@ async fn test_probe_instance_ids() -> anyhow::Result<()> {
     let outcome = index
         .probe_instance_ids(
             &unconstrained,
-            vec![ProbeRole::RefsParentsOf(vec![92])],
+            vec![ProbeRole::RefsParentsOf(vec![92], RefTest::EVERY)],
             100,
             &eph,
         )
@@ -420,7 +421,7 @@ async fn test_probe_instance_ids() -> anyhow::Result<()> {
     let outcome = index
         .probe_instance_ids(
             &unconstrained,
-            vec![ProbeRole::RefsChildrenOf(vec![942])],
+            vec![ProbeRole::RefsChildrenOf(vec![942], RefTest::EVERY)],
             100,
             &eph,
         )
@@ -525,7 +526,7 @@ async fn a_probe_role_past_its_budget_is_capped() -> anyhow::Result<()> {
 
     // The same for references: `wide` (instance 40) refers to twelve symbols.
     let vis_1 = CompositeFilter::leaf(CompoundNameMixin::new("vis_1"));
-    let called_by_wide = || vec![ProbeRole::RefsChildrenOf(vec![40])];
+    let called_by_wide = || vec![ProbeRole::RefsChildrenOf(vec![40], RefTest::EVERY)];
     let within = 12usize.div_ceil(PROBE_ROLE_ROWS_PER_CAP);
     assert_eq!(
         index
@@ -571,14 +572,24 @@ async fn a_reference_role_binds_the_instances_that_refer() -> anyhow::Result<()>
     let main = CompositeFilter::leaf(CompoundNameMixin::new("main"));
     assert_eq!(
         index
-            .probe_instance_ids(&main, vec![ProbeRole::RefsParentsOf(vec![30])], 10, &eph)
+            .probe_instance_ids(
+                &main,
+                vec![ProbeRole::RefsParentsOf(vec![30], RefTest::EVERY)],
+                10,
+                &eph
+            )
             .await?,
         ProbeOutcome::Resolved(vec![10]),
         "the main that calls print_version"
     );
     assert_eq!(
         index
-            .probe_instance_ids(&main, vec![ProbeRole::RefsParentsOf(vec![40])], 10, &eph)
+            .probe_instance_ids(
+                &main,
+                vec![ProbeRole::RefsParentsOf(vec![40], RefTest::EVERY)],
+                10,
+                &eph
+            )
             .await?,
         ProbeOutcome::Resolved(vec![20]),
         "the main that calls helper"
@@ -590,7 +601,7 @@ async fn a_reference_role_binds_the_instances_that_refer() -> anyhow::Result<()>
         index
             .probe_instance_ids(
                 &anything,
-                vec![ProbeRole::RefsParentsOf(vec![30])],
+                vec![ProbeRole::RefsParentsOf(vec![30], RefTest::EVERY)],
                 10,
                 &eph
             )
@@ -603,7 +614,7 @@ async fn a_reference_role_binds_the_instances_that_refer() -> anyhow::Result<()>
         index
             .probe_instance_ids(
                 &anything,
-                vec![ProbeRole::RefsChildrenOf(vec![10, 20])],
+                vec![ProbeRole::RefsChildrenOf(vec![10, 20], RefTest::EVERY)],
                 10,
                 &eph
             )
@@ -712,7 +723,7 @@ async fn a_reference_is_one_role_row_however_many_instances_its_target_has() -> 
     let outcome = index
         .probe_instance_ids(
             &unconstrained,
-            vec![ProbeRole::RefsParentsOf(all_b)],
+            vec![ProbeRole::RefsParentsOf(all_b, RefTest::EVERY)],
             cap,
             &eph,
         )
@@ -890,27 +901,23 @@ async fn asking_which_rows_relate_agrees_with_the_whole_lists() -> anyhow::Resul
     assert_eq!(referring, vec![10, 20, 30, 40, 510], "premise: all refer");
     assert_eq!(holding, vec![510], "premise: only the file holds");
 
-    let ask = |want: AskSide, refs: bool, has: bool| {
+    let ask = |want: AskSide, edge: Edge| {
         let (index, eph, parents, children) = (&index, &eph, &parents, &children);
-        async move {
-            index
-                .which_relate(parents, children, want, refs, has, eph)
-                .await
-        }
+        async move { index.which_relate(parents, children, want, edge, eph).await }
     };
 
     // a: the parents that refer to a child.
-    let a = ask(AskSide::Parents, true, false).await?;
+    let a = ask(AskSide::Parents, Edge::EVERY_REFERENCE).await?;
     assert!(a.whole);
     assert_eq!(a.ids, referring);
     // b: the parents that hold one.
-    let b = ask(AskSide::Parents, false, true).await?;
+    let b = ask(AskSide::Parents, Edge::HAS).await?;
     assert!(b.whole);
     assert_eq!(b.ids, holding);
     // c: the children a parent refers to -- every instance of a symbol
     // referred to, the folded one included: what a listing leaves out is
     // decided by the rows it is asked about, not by the ask.
-    let c = ask(AskSide::Children, true, false).await?;
+    let c = ask(AskSide::Children, Edge::EVERY_REFERENCE).await?;
     assert!(c.whole);
     assert_eq!(c.ids, vec![110, 120, 140, 150], "nothing refers to spare");
     let expected: Vec<i64> = sorted(
@@ -923,14 +930,14 @@ async fn asking_which_rows_relate_agrees_with_the_whole_lists() -> anyhow::Resul
     );
     assert_eq!(c.ids, expected);
     // d: the children a parent holds.
-    let d = ask(AskSide::Children, false, true).await?;
+    let d = ask(AskSide::Children, Edge::HAS).await?;
     assert!(d.whole);
     assert_eq!(d.ids, held);
 
     // Only the rows asked about count: `quiet` refers to `knob` and `only_q`,
     // and to neither `dial` nor `spare`.
     let narrow = index
-        .which_relate(&[10, 20], &[120, 130], AskSide::Parents, true, true, &eph)
+        .which_relate(&[10, 20], &[120, 130], AskSide::Parents, Edge::ALL, &eph)
         .await?;
     assert_eq!(narrow.ids, vec![10], "flood refers to dial; quiet does not");
     assert!(narrow.whole);
@@ -962,7 +969,7 @@ async fn an_ask_that_runs_out_of_references_does_not_know() -> anyhow::Result<()
     // `brook` (1,700 references, none to knob) against `knob` (1,951
     // references to it): neither side fits.
     let unknown = index
-        .which_relate(&[40], &[110], AskSide::Parents, true, false, &eph)
+        .which_relate(&[40], &[110], AskSide::Parents, Edge::EVERY_REFERENCE, &eph)
         .await?;
     assert!(!unknown.whole, "neither side could be read");
     assert!(unknown.ids.is_empty());
@@ -970,7 +977,7 @@ async fn an_ask_that_runs_out_of_references_does_not_know() -> anyhow::Result<()
     // `quiet` makes two references: read from its side, the answer is whole
     // although the references to `knob` are not.
     let from_parent = index
-        .which_relate(&[20], &[110], AskSide::Parents, true, false, &eph)
+        .which_relate(&[20], &[110], AskSide::Parents, Edge::EVERY_REFERENCE, &eph)
         .await?;
     assert!(from_parent.whole);
     assert_eq!(from_parent.ids, vec![20]);
@@ -978,14 +985,14 @@ async fn an_ask_that_runs_out_of_references_does_not_know() -> anyhow::Result<()
     // `only_q` has one reference to it: read from its side, whole although
     // `brook` is not.
     let from_child = index
-        .which_relate(&[40], &[140], AskSide::Parents, true, false, &eph)
+        .which_relate(&[40], &[140], AskSide::Parents, Edge::EVERY_REFERENCE, &eph)
         .await?;
     assert!(from_child.whole);
     assert!(from_child.ids.is_empty(), "brook does not refer to only_q");
 
     // Containment needs no reading of references and is always whole.
     let held = index
-        .which_relate(&[510], &[110, 130], AskSide::Children, false, true, &eph)
+        .which_relate(&[510], &[110, 130], AskSide::Children, Edge::HAS, &eph)
         .await?;
     assert!(held.whole);
     assert_eq!(held.ids, vec![110, 130]);
@@ -1023,7 +1030,7 @@ async fn a_derive_read_counts_the_instances_it_finds() -> anyhow::Result<()> {
     // Four instances, a cap of five: all of them, and nothing was cut.
     eph.set_read_cap(5);
     let (found, capped) = index
-        .find_child_instance_ids(&[10], true, false, &any, None, &eph)
+        .find_child_instance_ids(&[10], Edge::EVERY_REFERENCE, &any, None, &eph)
         .await?;
     assert_eq!(ids(found), vec![20, 21, 22, 30]);
     assert!(!capped, "four instances fit a cap of five");
@@ -1031,7 +1038,7 @@ async fn a_derive_read_counts_the_instances_it_finds() -> anyhow::Result<()> {
     // A cap of four still holds them.
     eph.set_read_cap(4);
     let (found, capped) = index
-        .find_child_instance_ids(&[10], true, false, &any, None, &eph)
+        .find_child_instance_ids(&[10], Edge::EVERY_REFERENCE, &any, None, &eph)
         .await?;
     assert_eq!(ids(found), vec![20, 21, 22, 30]);
     assert!(!capped, "four instances fit a cap of four");
@@ -1039,14 +1046,14 @@ async fn a_derive_read_counts_the_instances_it_finds() -> anyhow::Result<()> {
     // A cap of three does not, and the read says so.
     eph.set_read_cap(3);
     let (_, capped) = index
-        .find_child_instance_ids(&[10], true, false, &any, None, &eph)
+        .find_child_instance_ids(&[10], Edge::EVERY_REFERENCE, &any, None, &eph)
         .await?;
     assert!(capped, "four instances do not fit a cap of three");
 
     // The statement's own predicate is applied before anything is counted.
     let solo = CompositeFilter::leaf(crate::db_diesel::ExactNameMixin::new("solo"));
     let (found, capped) = index
-        .find_child_instance_ids(&[10], true, false, &solo, None, &eph)
+        .find_child_instance_ids(&[10], Edge::EVERY_REFERENCE, &solo, None, &eph)
         .await?;
     assert_eq!(ids(found), vec![30]);
     assert!(!capped);
@@ -1117,17 +1124,9 @@ async fn a_family_the_relationship_cannot_read_is_not_fetched() -> anyhow::Resul
     let eph = EphContext::rooted(index.load_root_layers().await?);
     let module = CompositeFilter::leaf(CompoundNameMixin::new("testmodule"));
 
-    let demands = |refs: bool, has: bool| FamilyDemands {
-        parent: FamilyDemand {
-            refs,
-            has,
-            listing: None,
-        },
-        children: FamilyDemand {
-            refs,
-            has,
-            listing: None,
-        },
+    let demands = |edge: Edge| FamilyDemands {
+        parent: FamilyDemand::of(edge),
+        children: FamilyDemand::of(edge),
     };
 
     let both = index
@@ -1135,7 +1134,7 @@ async fn a_family_the_relationship_cannot_read_is_not_fetched() -> anyhow::Resul
             &module,
             ScopeContext::Unscoped,
             ScopeContext::Unscoped,
-            demands(true, true),
+            demands(Edge::ALL),
             &eph,
         )
         .await?
@@ -1150,7 +1149,7 @@ async fn a_family_the_relationship_cannot_read_is_not_fetched() -> anyhow::Resul
             &module,
             ScopeContext::Unscoped,
             ScopeContext::Unscoped,
-            demands(false, true),
+            demands(Edge::HAS),
             &eph,
         )
         .await?
@@ -1170,7 +1169,7 @@ async fn a_family_the_relationship_cannot_read_is_not_fetched() -> anyhow::Resul
             &module,
             ScopeContext::Unscoped,
             ScopeContext::Unscoped,
-            demands(true, false),
+            demands(Edge::EVERY_REFERENCE),
             &eph,
         )
         .await?
@@ -1248,7 +1247,7 @@ async fn deriving_and_constraining_agree_on_the_same_relation() -> anyhow::Resul
 
     // What DERIVE would produce from the same sources.
     let (derived_ids, _capped) = index
-        .find_child_instance_ids(&source_ids, true, true, &identity, None, &eph)
+        .find_child_instance_ids(&source_ids, Edge::ALL, &identity, None, &eph)
         .await?;
     let mut from_derive: Vec<i64> = derived_ids.into_iter().map(Into::into).collect();
     from_derive.sort_unstable();
@@ -1283,7 +1282,7 @@ async fn a_family_read_is_bounded_by_the_safety_cap() -> anyhow::Result<()> {
 
     // `lock` (symbol 2) is defined at instance 3000 and has ten callers.
     let (uncapped, uncapped_flag) = index
-        .find_parent_instance_ids(&[3000], true, false, &identity, None, &eph)
+        .find_parent_instance_ids(&[3000], Edge::EVERY_REFERENCE, &identity, None, &eph)
         .await?;
     assert!(
         uncapped.len() >= 10,
@@ -1297,7 +1296,7 @@ async fn a_family_read_is_bounded_by_the_safety_cap() -> anyhow::Result<()> {
 
     eph.set_read_cap(3);
     let (capped, capped_flag) = index
-        .find_parent_instance_ids(&[3000], true, false, &identity, None, &eph)
+        .find_parent_instance_ids(&[3000], Edge::EVERY_REFERENCE, &identity, None, &eph)
         .await?;
     assert!(
         capped.len() <= 4,
@@ -1333,16 +1332,16 @@ async fn a_probe_walks_from_one_neighbour_and_tests_the_others() -> anyhow::Resu
     let eph = EphContext::rooted(index.load_root_layers().await?);
     let any = CompositeFilter::and(vec![]);
 
-    let lock_refs = ProbeNeighbour::child(vec![3000], true, false);
-    let modx_holds = ProbeNeighbour::parent(vec![10], false, true);
+    let lock_refs = ProbeNeighbour::child(vec![3000], Edge::EVERY_REFERENCE);
+    let modx_holds = ProbeNeighbour::parent(vec![10], Edge::HAS);
 
     // Premise: as roles, at a cap of one, each neighbour alone is too many
     // and so are the two together.
     for roles in [
-        vec![ProbeRole::RefsParentsOf(vec![3000])],
+        vec![ProbeRole::RefsParentsOf(vec![3000], RefTest::EVERY)],
         vec![ProbeRole::HasChildrenOf(vec![10])],
         vec![
-            ProbeRole::RefsParentsOf(vec![3000]),
+            ProbeRole::RefsParentsOf(vec![3000], RefTest::EVERY),
             ProbeRole::HasChildrenOf(vec![10]),
         ],
     ] {
@@ -1363,7 +1362,7 @@ async fn a_probe_walks_from_one_neighbour_and_tests_the_others() -> anyhow::Resu
     // The walk is what is budgeted.  `lock`, `hot` and `t_1` are referred to
     // 21 times between them, past the budget of ten: "too many", although
     // one row would pass the test, and never a partial set.
-    let three_targets = ProbeNeighbour::child(vec![3000, 3001, 4101], true, false);
+    let three_targets = ProbeNeighbour::child(vec![3000, 3001, 4101], Edge::EVERY_REFERENCE);
     assert_eq!(
         index
             .probe_between(&any, &three_targets, &[modx_holds.clone()], 1, &eph)
@@ -1409,35 +1408,35 @@ async fn walking_from_a_neighbour_and_testing_against_it_agree() -> anyhow::Resu
     let neighbours = [
         (
             "what refers to lock",
-            ProbeNeighbour::child(vec![3000], true, false),
+            ProbeNeighbour::child(vec![3000], Edge::EVERY_REFERENCE),
         ),
         (
             "what holds in_1",
-            ProbeNeighbour::child(vec![1001], false, true),
+            ProbeNeighbour::child(vec![1001], Edge::HAS),
         ),
         (
             "what refers to or holds in_1",
-            ProbeNeighbour::child(vec![1001], true, true),
+            ProbeNeighbour::child(vec![1001], Edge::ALL),
         ),
         (
             "what modx holds",
-            ProbeNeighbour::parent(vec![10], false, true),
+            ProbeNeighbour::parent(vec![10], Edge::HAS),
         ),
         (
             "what modx refers to",
-            ProbeNeighbour::parent(vec![10], true, false),
+            ProbeNeighbour::parent(vec![10], Edge::EVERY_REFERENCE),
         ),
         (
             "what modx holds or refers to",
-            ProbeNeighbour::parent(vec![10], true, true),
+            ProbeNeighbour::parent(vec![10], Edge::ALL),
         ),
         (
             "what hub and in_1 refer to",
-            ProbeNeighbour::parent(vec![4001, 1001], true, false),
+            ProbeNeighbour::parent(vec![4001, 1001], Edge::EVERY_REFERENCE),
         ),
         (
             "what refers to t_1",
-            ProbeNeighbour::child(vec![4101], true, false),
+            ProbeNeighbour::child(vec![4101], Edge::EVERY_REFERENCE),
         ),
     ];
 
@@ -1509,28 +1508,46 @@ async fn a_derive_within_what_the_probe_found_reads_only_that() -> anyhow::Resul
 
     // Callers of `lock` (instance 3000), by reference.
     let (found, cut) = index
-        .find_parent_instance_ids(&[3000], true, false, &identity, Some(&[1001]), &eph)
+        .find_parent_instance_ids(
+            &[3000],
+            Edge::EVERY_REFERENCE,
+            &identity,
+            Some(&[1001]),
+            &eph,
+        )
         .await?;
     assert_eq!(ids(found), vec![1001]);
     assert!(!cut, "one caller among the one instance asked about");
 
     // What `modx` (instance 10) holds, by containment.
     let (found, cut) = index
-        .find_child_instance_ids(&[10], false, true, &identity, Some(&[1001, 1002]), &eph)
+        .find_child_instance_ids(&[10], Edge::HAS, &identity, Some(&[1001, 1002]), &eph)
         .await?;
     assert_eq!(ids(found), vec![1001, 1002]);
     assert!(!cut);
 
     // What `in_1` (instance 1001) refers to, among `lock` and a stranger.
     let (found, cut) = index
-        .find_child_instance_ids(&[1001], true, false, &identity, Some(&[3000, 2001]), &eph)
+        .find_child_instance_ids(
+            &[1001],
+            Edge::EVERY_REFERENCE,
+            &identity,
+            Some(&[3000, 2001]),
+            &eph,
+        )
         .await?;
     assert_eq!(ids(found), vec![3000], "in_1 calls lock, not out_1");
     assert!(!cut);
 
     // An instance the neighbour does not relate to is not found.
     let (found, _) = index
-        .find_parent_instance_ids(&[3000], true, false, &identity, Some(&[1002]), &eph)
+        .find_parent_instance_ids(
+            &[3000],
+            Edge::EVERY_REFERENCE,
+            &identity,
+            Some(&[1002]),
+            &eph,
+        )
         .await?;
     assert!(ids(found).is_empty(), "in_2 does not call lock");
     Ok(())
@@ -2113,12 +2130,12 @@ async fn a_relation_row_is_attributed_to_the_declaration_it_sits_in() -> anyhow:
 
     // The derive reads.
     let (children, _) = index
-        .find_child_instance_ids(&[10], true, false, &any, None, &eph)
+        .find_child_instance_ids(&[10], Edge::EVERY_REFERENCE, &any, None, &eph)
         .await?;
     let children: Vec<i64> = children.into_iter().map(Into::into).collect();
     assert_eq!(children, vec![40], "what ops refers to");
     let (parents, _) = index
-        .find_parent_instance_ids(&[30], true, false, &any, None, &eph)
+        .find_parent_instance_ids(&[30], Edge::EVERY_REFERENCE, &any, None, &eph)
         .await?;
     let mut parents: Vec<i64> = parents.into_iter().map(Into::into).collect();
     parents.sort_unstable();
@@ -2127,21 +2144,31 @@ async fn a_relation_row_is_attributed_to_the_declaration_it_sits_in() -> anyhow:
     // The probe's roles.
     assert_eq!(
         index
-            .probe_instance_ids(&any, vec![ProbeRole::RefsParentsOf(vec![30])], 100, &eph)
+            .probe_instance_ids(
+                &any,
+                vec![ProbeRole::RefsParentsOf(vec![30], RefTest::EVERY)],
+                100,
+                &eph
+            )
             .await?,
         ProbeOutcome::Resolved(vec![20])
     );
     assert_eq!(
         index
-            .probe_instance_ids(&any, vec![ProbeRole::RefsChildrenOf(vec![10])], 100, &eph)
+            .probe_instance_ids(
+                &any,
+                vec![ProbeRole::RefsChildrenOf(vec![10], RefTest::EVERY)],
+                100,
+                &eph
+            )
             .await?,
         ProbeOutcome::Resolved(vec![40])
     );
 
     // The probe that walks from one neighbour and tests another: what refers
     // to my_read (walked) and is held by the file (tested) ...
-    let walk_my_read = ProbeNeighbour::child(vec![30], true, false);
-    let in_file = ProbeNeighbour::parent(vec![510], false, true);
+    let walk_my_read = ProbeNeighbour::child(vec![30], Edge::EVERY_REFERENCE);
+    let in_file = ProbeNeighbour::parent(vec![510], Edge::HAS);
     assert_eq!(
         index
             .probe_between(&any, &walk_my_read, &[in_file.clone()], 100, &eph)
@@ -2150,14 +2177,14 @@ async fn a_relation_row_is_attributed_to_the_declaration_it_sits_in() -> anyhow:
     );
     // ... and with the reference as the TEST: what the file holds (walked)
     // that refers to my_read, and what it holds that ops refers to.
-    let refers_to_my_read = ProbeNeighbour::child(vec![30], true, false);
+    let refers_to_my_read = ProbeNeighbour::child(vec![30], Edge::EVERY_REFERENCE);
     assert_eq!(
         index
             .probe_between(&any, &in_file, &[refers_to_my_read], 100, &eph)
             .await?,
         ProbeOutcome::Resolved(vec![20])
     );
-    let ops_refers = ProbeNeighbour::parent(vec![10], true, false);
+    let ops_refers = ProbeNeighbour::parent(vec![10], Edge::EVERY_REFERENCE);
     assert_eq!(
         index
             .probe_between(&any, &in_file, &[ops_refers], 100, &eph)
@@ -2168,11 +2195,23 @@ async fn a_relation_row_is_attributed_to_the_declaration_it_sits_in() -> anyhow:
     // The ask: of ops and slot, which refers to my_read; of my_read and
     // plain, which ops refers to.
     let asked = index
-        .which_relate(&[10, 20], &[30], AskSide::Parents, true, false, &eph)
+        .which_relate(
+            &[10, 20],
+            &[30],
+            AskSide::Parents,
+            Edge::EVERY_REFERENCE,
+            &eph,
+        )
         .await?;
     assert_eq!((asked.ids, asked.whole), (vec![20], true));
     let asked = index
-        .which_relate(&[10], &[30, 40], AskSide::Children, true, false, &eph)
+        .which_relate(
+            &[10],
+            &[30, 40],
+            AskSide::Children,
+            Edge::EVERY_REFERENCE,
+            &eph,
+        )
         .await?;
     assert_eq!((asked.ids, asked.whole), (vec![40], true));
 
@@ -2505,5 +2544,437 @@ async fn a_pooled_session_plans_for_the_values_it_is_given() -> anyhow::Result<(
             .get_result(&mut conn)
             .await?;
     assert_eq!(idle.value, "1min");
+    Ok(())
+}
+
+/// The SQL rendering of a reference test and its in-memory reading are one
+/// test: over every reference row of a fixture, `reference_test::passes`
+/// (the reads) and `RefTest::admits` (narrowing) say the same.
+#[cfg(test)]
+fn assert_the_sql_test_agrees_with_admits(url: &str) -> anyhow::Result<()> {
+    use crate::db_diesel::reference_test::passes;
+    use crate::roles::{Relation, Roles};
+    use diesel::RunQueryDsl;
+
+    #[derive(diesel::QueryableByName)]
+    struct Row {
+        #[diesel(sql_type = diesel::sql_types::SmallInt)]
+        roles: i16,
+        #[diesel(sql_type = diesel::sql_types::SmallInt)]
+        relation: i16,
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        passes: bool,
+    }
+
+    let stating = |roles| RefTest::stating(roles).unwrap();
+    let tests = [
+        RefTest::ORDINARY,
+        stating(Roles::CALL),
+        stating(Roles::WRITE),
+        stating(Roles::TAKE),
+        stating(Roles::CALL | Roles::TAKE),
+        RefTest::relation(Relation::Declares),
+        RefTest::relation(Relation::Holds),
+        stating(Roles::CALL).or(RefTest::relation(Relation::Holds)),
+        RefTest::ORDINARY.or(RefTest::relation(Relation::Declares)),
+    ];
+    let conn = &mut PgConnection::establish(url)?;
+    for test in tests {
+        let condition = passes("sr", test).expect("a narrower test is a condition");
+        let rows: Vec<Row> = diesel::sql_query(format!(
+            "SELECT sr.roles AS roles, sr.relation AS relation, {condition} AS passes \
+             FROM index.symbol_refs sr"
+        ))
+        .load(conn)?;
+        assert!(!rows.is_empty(), "premise: the fixture has references");
+        for row in rows {
+            assert_eq!(
+                row.passes,
+                test.admits(row.roles, row.relation),
+                "{test:?} on (roles {}, relation {}): {condition}",
+                row.roles,
+                row.relation
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A READ OF REFERENCES READS THE ROWS ITS TEST ADMITS: the two reference
+/// families, the derive reads and the probe's roles, each under a role test,
+/// a relation test and the ordinary references.  A read for any reference
+/// (`RefTest::EVERY`) is every other test in this file.
+///
+/// The fixture: `caller` refers to `hook` three times (CALL, TAKE,
+/// WRITE|TAKE) and to `plain` saying nothing; `slot` HOLDS `my_read`.
+#[tokio::test(flavor = "current_thread")]
+async fn a_read_under_a_test_reads_the_references_it_admits() -> anyhow::Result<()> {
+    use crate::db_diesel::{
+        EphContext, FamilyDemand, Index, ProbeOutcome, ProbeRole, SymbolInstanceIdMixin,
+    };
+    use crate::roles::{Relation, Roles};
+    use crate::symbols::SymbolInstanceId;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_REFERENCE_ROLES)
+        .await?;
+    assert_the_sql_test_agrees_with_admits(&url)?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+    let any = CompositeFilter::and(vec![]);
+    // Instances.
+    const CALLER: i64 = 10;
+    const HOOK: i64 = 20;
+    const SLOT: i64 = 30;
+    const MY_READ: i64 = 40;
+    const PLAIN: i64 = 50;
+    const OPS: i64 = 60;
+
+    let calls = RefTest::stating(Roles::CALL).unwrap();
+    let writes = RefTest::stating(Roles::WRITE).unwrap();
+    let takes = RefTest::stating(Roles::TAKE).unwrap();
+    let holds = RefTest::relation(Relation::Holds);
+    let declares = RefTest::relation(Relation::Declares);
+    let sorted = |mut v: Vec<i64>| {
+        v.sort_unstable();
+        v
+    };
+
+    // The two families of a statement, read for one test.
+    let read = |instance: i64, test: RefTest| {
+        let (index, eph) = (&index, &eph);
+        async move {
+            let demand = FamilyDemand {
+                refs: Some(test),
+                has: false,
+                listing: None,
+            };
+            index
+                .find_symbol(
+                    &CompositeFilter::leaf(SymbolInstanceIdMixin::new(&[SymbolInstanceId::new(
+                        instance,
+                    )])),
+                    ScopeContext::Unscoped,
+                    ScopeContext::Unscoped,
+                    FamilyDemands {
+                        parent: demand,
+                        children: demand,
+                    },
+                    eph,
+                )
+                .await
+                .map(|checked| checked.into_inner())
+        }
+    };
+    // What `caller` refers to: (target instance, roles) per reference.
+    for (test, expected) in [
+        (
+            RefTest::EVERY,
+            vec![(HOOK, 1), (HOOK, 4), (HOOK, 6), (PLAIN, 0)],
+        ),
+        (
+            RefTest::ORDINARY,
+            vec![(HOOK, 1), (HOOK, 4), (HOOK, 6), (PLAIN, 0)],
+        ),
+        (calls, vec![(HOOK, 1)]),
+        (writes, vec![(HOOK, 6)]),
+        (takes, vec![(HOOK, 4), (HOOK, 6)]),
+        (calls.or(writes), vec![(HOOK, 1), (HOOK, 6)]),
+        (holds, vec![]),
+        (declares, vec![]),
+    ] {
+        let caller = read(CALLER, test).await?;
+        let mut rows: Vec<(i64, i16)> = caller
+            .children
+            .iter()
+            .map(|c| (c.symbol_instance.id, c.symbol_ref.roles))
+            .collect();
+        rows.sort_unstable();
+        assert_eq!(rows, expected, "what caller refers to under {test:?}");
+        // The read says what it was read for, and is whole for that.
+        assert_eq!(caller.families.children.test(), test);
+        assert!(caller.families.children.proves_absence_for(&[HOOK], test));
+        assert_eq!(
+            caller
+                .families
+                .children
+                .proves_absence_for(&[HOOK], RefTest::EVERY),
+            test == RefTest::EVERY,
+            "a read under {test:?} is whole for every reference only if it read them all"
+        );
+    }
+    // The other direction: what refers to `hook`, to `my_read`, to `plain`.
+    for (target, test, expected) in [
+        (
+            HOOK,
+            RefTest::EVERY,
+            vec![(CALLER, 1), (CALLER, 4), (CALLER, 6)],
+        ),
+        (HOOK, calls, vec![(CALLER, 1)]),
+        (HOOK, takes, vec![(CALLER, 4), (CALLER, 6)]),
+        (HOOK, holds, vec![]),
+        (MY_READ, RefTest::EVERY, vec![(SLOT, 0)]),
+        (MY_READ, holds, vec![(SLOT, 0)]),
+        (MY_READ, RefTest::ORDINARY, vec![]),
+        (MY_READ, calls, vec![]),
+        (PLAIN, RefTest::ORDINARY, vec![(CALLER, 0)]),
+        (PLAIN, calls, vec![]),
+    ] {
+        let selection = read(target, test).await?;
+        let mut rows: Vec<(i64, i16)> = selection
+            .parents
+            .iter()
+            .map(|p| (p.from_instance.id, p.symbol_ref.roles))
+            .collect();
+        rows.sort_unstable();
+        assert_eq!(rows, expected, "what refers to {target} under {test:?}");
+        assert_eq!(selection.families.parents.test(), test);
+    }
+
+    // The derive reads, along an edge.
+    let ids = |found: Vec<SymbolInstanceId>| -> Vec<i64> {
+        let mut ids: Vec<i64> = found.into_iter().map(Into::into).collect();
+        ids.sort_unstable();
+        ids
+    };
+    for (from, edge, expected) in [
+        (CALLER, Edge::references(calls), vec![HOOK]),
+        (
+            CALLER,
+            Edge::references(RefTest::ORDINARY),
+            vec![HOOK, PLAIN],
+        ),
+        (CALLER, Edge::references(holds), vec![]),
+        (SLOT, Edge::references(holds), vec![MY_READ]),
+        (SLOT, Edge::references(RefTest::ORDINARY), vec![]),
+        // Containment is asked for or not, whatever the test: ops holds slot.
+        (OPS, Edge::references(calls) | Edge::HAS, vec![SLOT]),
+    ] {
+        let (found, cut) = index
+            .find_child_instance_ids(&[from], edge, &any, None, &eph)
+            .await?;
+        assert_eq!(ids(found), expected, "children of {from} along {edge:?}");
+        assert!(!cut);
+    }
+    for (to, edge, expected) in [
+        (HOOK, Edge::references(writes), vec![CALLER]),
+        (MY_READ, Edge::references(holds), vec![SLOT]),
+        (MY_READ, Edge::references(RefTest::ORDINARY), vec![]),
+        (PLAIN, Edge::references(calls), vec![]),
+        (PLAIN, Edge::references(RefTest::ORDINARY), vec![CALLER]),
+    ] {
+        let (found, cut) = index
+            .find_parent_instance_ids(&[to], edge, &any, None, &eph)
+            .await?;
+        assert_eq!(ids(found), expected, "parents of {to} along {edge:?}");
+        assert!(!cut);
+    }
+
+    // The probe's roles.
+    for (role, expected) in [
+        (ProbeRole::RefsChildrenOf(vec![CALLER], calls), vec![HOOK]),
+        (
+            ProbeRole::RefsChildrenOf(vec![CALLER], RefTest::ORDINARY),
+            vec![HOOK, PLAIN],
+        ),
+        (ProbeRole::RefsChildrenOf(vec![CALLER], holds), vec![]),
+        (ProbeRole::RefsChildrenOf(vec![SLOT], holds), vec![MY_READ]),
+        (ProbeRole::RefsParentsOf(vec![MY_READ], holds), vec![SLOT]),
+        (
+            ProbeRole::RefsParentsOf(vec![MY_READ], RefTest::ORDINARY),
+            vec![],
+        ),
+        (ProbeRole::RefsParentsOf(vec![PLAIN], calls), vec![]),
+        (ProbeRole::RefsParentsOf(vec![HOOK], calls), vec![CALLER]),
+    ] {
+        assert_eq!(
+            index
+                .probe_instance_ids(&any, vec![role.clone()], 100, &eph)
+                .await?,
+            ProbeOutcome::Resolved(sorted(expected)),
+            "{role:?}"
+        );
+    }
+    Ok(())
+}
+
+/// The probe that walks from one neighbour and tests another, and the ask,
+/// under a test: each reads the references the edge to that neighbour admits.
+///
+/// The fixture: `slot` (in `ops`, in the file) HOLDS `my_read` and names
+/// `plain`; `DEFINE_X` DECLARES `lock` and names `plain`.
+#[tokio::test(flavor = "current_thread")]
+async fn a_walk_a_test_and_an_ask_read_under_the_edges_test() -> anyhow::Result<()> {
+    use crate::db_diesel::{AskSide, EphContext, Index, ProbeNeighbour, ProbeOutcome};
+    use crate::roles::Relation;
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index
+        .load_test_input(Index::TEST_INPUT_RELATION_ROWS)
+        .await?;
+    assert_the_sql_test_agrees_with_admits(&url)?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+    let any = CompositeFilter::and(vec![]);
+    // Instances.
+    const FILE: i64 = 510;
+    const OPS: i64 = 10;
+    const SLOT: i64 = 20;
+    const MY_READ: i64 = 30;
+    const PLAIN: i64 = 40;
+    const DEFINE_X: i64 = 60;
+    const LOCK: i64 = 70;
+
+    let holds = Edge::references(RefTest::relation(Relation::Holds));
+    let declares = Edge::references(RefTest::relation(Relation::Declares));
+    let ordinary = Edge::references(RefTest::ORDINARY);
+    let in_file = ProbeNeighbour::parent(vec![FILE], Edge::HAS);
+
+    // Walking from a child: what refers to it, by the edge's test, among
+    // what the file holds.
+    for (target, edge, expected) in [
+        (MY_READ, holds, vec![SLOT]),
+        (MY_READ, ordinary, vec![]),
+        (MY_READ, declares, vec![]),
+        (PLAIN, ordinary, vec![OPS, SLOT, DEFINE_X]),
+        (PLAIN, holds, vec![]),
+        (LOCK, declares, vec![DEFINE_X]),
+    ] {
+        let walked = ProbeNeighbour::child(vec![target], edge);
+        assert_eq!(
+            index
+                .probe_between(&any, &walked, &[in_file.clone()], 100, &eph)
+                .await?,
+            ProbeOutcome::Resolved(expected.clone()),
+            "walking from {target} along {edge:?}"
+        );
+        // Testing against the same neighbour is the same relation.
+        assert_eq!(
+            index
+                .probe_between(&any, &in_file, &[walked], 100, &eph)
+                .await?,
+            ProbeOutcome::Resolved(expected),
+            "testing against {target} along {edge:?}"
+        );
+    }
+    // Walking from a parent: what it refers to, by the edge's test.
+    for (source, edge, expected) in [
+        (SLOT, holds, vec![MY_READ]),
+        (SLOT, ordinary, vec![PLAIN]),
+        (OPS, holds, vec![]),
+        (DEFINE_X, declares, vec![LOCK]),
+        (DEFINE_X, ordinary, vec![PLAIN]),
+        (DEFINE_X, holds, vec![]),
+    ] {
+        let walked = ProbeNeighbour::parent(vec![source], edge);
+        assert_eq!(
+            index
+                .probe_between(&any, &walked, &[in_file.clone()], 100, &eph)
+                .await?,
+            ProbeOutcome::Resolved(expected.clone()),
+            "walking from {source} along {edge:?}"
+        );
+        assert_eq!(
+            index
+                .probe_between(&any, &in_file, &[walked], 100, &eph)
+                .await?,
+            ProbeOutcome::Resolved(expected),
+            "testing against {source} along {edge:?}"
+        );
+    }
+
+    // The ask, read from the children's side (fewer children) and from the
+    // parents' (fewer parents).
+    let sources = [OPS, SLOT, DEFINE_X];
+    let targets = [MY_READ, PLAIN, LOCK];
+    for (parents, children, want, edge, expected) in [
+        (
+            &sources[..],
+            &targets[..],
+            AskSide::Parents,
+            holds,
+            vec![SLOT],
+        ),
+        (
+            &sources[..],
+            &targets[..],
+            AskSide::Parents,
+            declares,
+            vec![DEFINE_X],
+        ),
+        (
+            &sources[..],
+            &targets[..],
+            AskSide::Parents,
+            ordinary,
+            vec![OPS, SLOT, DEFINE_X],
+        ),
+        (
+            &sources[..],
+            &targets[..],
+            AskSide::Children,
+            holds,
+            vec![MY_READ],
+        ),
+        (
+            &sources[..],
+            &targets[..],
+            AskSide::Children,
+            declares,
+            vec![LOCK],
+        ),
+        (
+            &sources[..],
+            &targets[..],
+            AskSide::Children,
+            ordinary,
+            vec![PLAIN],
+        ),
+        (
+            &[SLOT][..],
+            &targets[..],
+            AskSide::Children,
+            holds,
+            vec![MY_READ],
+        ),
+        (
+            &[SLOT][..],
+            &targets[..],
+            AskSide::Children,
+            ordinary,
+            vec![PLAIN],
+        ),
+        (&[OPS][..], &targets[..], AskSide::Children, holds, vec![]),
+        (
+            &[OPS][..],
+            &targets[..],
+            AskSide::Parents,
+            ordinary,
+            vec![OPS],
+        ),
+        // Containment is asked for or not, whatever the test: ops holds the
+        // slot and does not hold (in the slot's sense) my_read.
+        (
+            &[OPS][..],
+            &[SLOT, MY_READ][..],
+            AskSide::Children,
+            holds | Edge::HAS,
+            vec![SLOT],
+        ),
+    ] {
+        let asked = index
+            .which_relate(parents, children, want, edge, &eph)
+            .await?;
+        assert_eq!(
+            (asked.ids, asked.whole),
+            (expected, true),
+            "{parents:?} / {children:?}, {want:?}, along {edge:?}"
+        );
+    }
     Ok(())
 }
