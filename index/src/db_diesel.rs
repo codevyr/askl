@@ -18,11 +18,12 @@ pub use index_impl::{
     eph_pool_manager_config, layer_shard_hash, purge_eph_cache, selection_shard_hash,
     setup_pool_session, AskSide, ContainmentEdge, EphInstanceRow, EphLayerKind, EphLayerMeta,
     EphRefRow, EphScopedFut, EphSymbolRow, EphTransaction, FamilyDemand, FamilyDemands,
-    ImplicitEdge, Index, LayerBatch, LayerOutcome, MaterialisedLayer, NameSuggestionRow,
-    ProbeNeighbour, ProbeOutcome, ProbeRole, Related, ResolvedSourceFile, RootShardRef,
-    ScopeContext, SearchMatchRow, ShardRole, ASK_REFERENCES_PER_CAP, DEFAULT_READ_CAP,
-    DEFAULT_SQL_CACHE_BYTES, DFS_STRIDE, EPH_POOL_IDLE_IN_TXN_TIMEOUT, EPH_POOL_RECYCLING_QUERY,
-    POOL_PLAN_CACHE_MODE, PROBE_ROLE_ROWS_PER_CAP,
+    ImplicitEdge, Index, LayerBatch, LayerOutcome, MatchedInstance, MaterialisedLayer,
+    NameSuggestionRow, ProbeNeighbour, ProbeOutcome, ProbeRole, ProjectStates, Related,
+    ResolvedSourceFile, RootShardRef, ScopeContext, SearchMatchRow, ShardRole,
+    ASK_REFERENCES_PER_CAP, DEFAULT_READ_CAP, DEFAULT_SQL_CACHE_BYTES, DFS_STRIDE,
+    EPH_POOL_IDLE_IN_TXN_TIMEOUT, EPH_POOL_RECYCLING_QUERY, POOL_PLAN_CACHE_MODE,
+    PROBE_ROLE_ROWS_PER_CAP,
 };
 pub use mixins::{
     CompositeFilter, CompoundNameMixin, CurrentQuery, DefaultSymbolTypeMixin, DirectOnlyMixin,
