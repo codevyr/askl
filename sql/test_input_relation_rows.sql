@@ -30,8 +30,10 @@ INSERT INTO layers (id, parent_id, hash, kind, populated)
 OVERRIDING SYSTEM VALUE
 VALUES (1000001, NULL, decode(md5('fixture-root-relation-rows'), 'hex'), 'root', TRUE);
 
-INSERT INTO projects (id, project_name, root_path, root_layer_id)
-VALUES (1, 'test_project', '/test_project', 1000001);
+-- What ingest would have observed of these rows: both relations, and no
+-- reference that states a role.
+INSERT INTO projects (id, project_name, root_path, root_layer_id, has_declares, has_holds)
+VALUES (1, 'test_project', '/test_project', 1000001, TRUE, TRUE);
 
 ALTER TABLE symbols          ALTER COLUMN layer SET DEFAULT 1000001;
 ALTER TABLE symbol_instances ALTER COLUMN layer SET DEFAULT 1000001;
