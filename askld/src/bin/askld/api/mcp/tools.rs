@@ -375,8 +375,11 @@ grep/file-reading for structural questions — \"who calls X\", \"what does X ca
 defined\", \"find text\". **Read the `askl://syntax` and `askl://cookbook` resources first** so \
 your query is well-formed. Core forms: `\"name\"` (definition), `\"x\" { }` (callees of x), \
 `{ \"x\" }` (callers of x), `search(\"literal\")` (full-text), `file(\"/path\")` (scope), plus \
-filters like `func`/`data` and `project(\"p\")`. Grow the query iteratively — the string is your \
-accumulated context.",
+filters like `func`/`data` and `project(\"p\")`. A bare `{ }` follows every relationship; `has` \
+and `refs` narrow it. **Read `warnings`:** the words `calls`/`writes`/`takes`/`declares`/`holds` \
+ask for what no published index states yet, so they return nothing with a warning saying so — \
+that is not \"nothing calls x\"; drop the word and re-run. Grow the query iteratively — the string \
+is your accumulated context.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

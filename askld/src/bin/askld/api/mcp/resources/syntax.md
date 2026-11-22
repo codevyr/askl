@@ -33,18 +33,21 @@ separate statements; a `{` must be on the same line as its verb to attach.
   `X { A B }` disjoins, `X { A ; B }` conjoins. See Scopes.
 
 ## Scopes — relationships
-- `"x" { }`  callees: what `x` calls/references (a bare scope accepts references
-  or containment; two functions can only reference each other).
-- `{ "x" }`  callers: what calls `x`.
-- `"a" { "b" { "c" } }`  a calls b, b calls c.
-- `has { }`  containment (the indexer's tree, not byte ranges) instead of references.
-- **A relationship word governs the statement it is written in, and no other**
-  (as a type word does): in `file has { "foo" { "bar" } }` the file contains
-  `foo`, and the braces under `foo` are a bare scope again. `inherit(relationship)`
-  on the same statement carries the word into every scope below, until a
-  statement writes its own: `"a" calls inherit(relationship) { "b" { "c" } }` =
-  `"a" calls { "b" calls { "c" } }`. (`has` and `refs` used to be carried without
-  being asked; a query written that way gets a warning for now.)
+- `"x" { }`  what `x` relates to: for a function, what it calls and references.
+- `{ "x" }`  what relates to `x`: its callers and users, and what contains it.
+- `"a" { "b" { "c" } }`  a relates to b, b to c.
+- **A bare `{ }` accepts every relationship.** There are four; they are
+  disjoint, and each is one mark of the report:
+  - `has`      `▸`  containment (the indexer's tree, not byte ranges)
+  - `refs`     `→`  an ordinary reference: a token of the source names the target
+  - `declares` `↦`  the source macro's invocation declared the target
+  - `holds`    `⇢`  a slot (struct field, interface method) and a function
+    stored in it or implementing it
+
+  Written on a statement, a word narrows that statement's `{ }` to its
+  relationship: `file("/proj/x.c") has { func }` is the functions in the file;
+  bare `{ func }` also lists the ones it refers to. Two functions can only
+  refer to each other. See **Relationship words**.
 - **`;` inside a scope conjoins — `A B` disjoins.** `X { A ; B }` are two
   *statements* in one scope and keep `X` only where it relates to *both*:
   `dir("/proj") has { mod ; file }` lists directories holding a module **and**
@@ -54,8 +57,8 @@ separate statements; a `{` must be on the same line as its verb to attach.
   whole conjunction, so `"x" { "b" ; "typo" }` returns nothing.
   (At the **top level**, `;` just separates statements and their results are
   unioned into one answer — it only conjoins inside `{ }`.)
-- Container selectors `mod`/`file`/`dir` imply refs+has for children, so
-  `file("/proj/x.c") { func }` lists functions in the file — no explicit `has`.
+- A bare scope includes containment for every kind of parent, so
+  `file("/proj/x.c") { func }` lists the functions in the file with no `has`.
 - `X { }` lists what is inside `X` at **any depth**, except **folded** symbols:
   ones nobody wrote down in normal code, i.e. what macros generated for
   themselves (`__compiletime_assert_N`, an unused `name##_show`).  Folding only
@@ -88,12 +91,87 @@ separate statements; a `{` must be on the same line as its verb to attach.
   macro that only redeclares (`EXPORT_SYMBOL(foo)`) has no edge to `foo`.  A
   macro is ONE node: `A -> MACRO -> d` does not mean `A`'s invocation
   declared `d`, so do not read a path through a macro as a call chain.
+  (`declares` asks for exactly these edges; see Relationship words for what
+  today's indices record.)
 - "too many results in `<statement>`: this part of the graph is incomplete"
   means a limit cut that statement's answer.  Folded symbols a listing leaves
   out never cause it.  Counts then read "N of at least M" (M is how far the
   reading got, not a total) and JSON carries `"incomplete": true`;
   `"truncated"` alone means everything was found and `limits(symbols=)`
   shows more of it.
+
+## Relationship words — which edge a scope follows
+- **A word describes the edge into the `{ }` of the statement it is written
+  on**, wherever it stands among that statement's terms (`func calls { "x" }`
+  = `calls func { "x" }`), downward (`"x" has { }`: what x contains) or
+  upward (`has { "x" }`: what contains x). A statement says it once.
+- The four relationships: `type("file_operations") has { field }`;
+  `"vfs_read" refs { }`; `macro("DEFINE_MUTEX") declares { data }` (what its
+  invocations declared) against `macro("DEFINE_MUTEX") refs { }` (what its
+  body names); `field("file_operations.read") holds { func }` (the functions
+  stored in the slot).
+- **Role words narrow `refs`** to the references that state what the text
+  does to the target: `calls` (it is the callee of a call), `writes` (it is
+  assigned or initialised), `takes` = `reads` (a function's address is taken;
+  data or a field is read). `func calls { field("platform_driver.probe") }`
+  is who calls through the slot, `func writes { … }` who assigns it.
+- **TODAY NO PUBLISHED INDEX STATES ROLES OR HAS `declares` / `holds` ROWS.**
+  On every current project `calls`, `writes`, `takes`, `reads`, `declares`
+  and `holds` find nothing, and `warnings` says why (texts below). **That is
+  not "nothing calls x".** Today ask with a bare `{ }`, `refs` or `has`:
+  they list every reference whatever it does, and today's indices record
+  what a macro declared and what a slot holds as ordinary references, so
+  `macro("DEFINE_MUTEX") { data }` and `field("file_operations.read") { func }`
+  answer now. Read the code (`projection="body"`) for which reference is a
+  call. `askl_projects` does not report what an index states; the warning does.
+- **An unstated role is unknown, never "no".** Where an index does state
+  roles, a name in a `#define` body or a macro argument may still state none:
+  no role word matches it, and the answer counts what it passed over.
+- **`calls` is literal.** `vfs_read` calls the slot `file_operations.read`,
+  not the functions stored in it. The hop is written:
+  `"vfs_read" calls { field holds { func } }`. With bare scopes, today:
+  `"vfs_read" { field { func } }`. `"vfs_read" { func { func } }` skips the
+  slot (a field is not a function) and so drops every function behind it.
+- **Join words with `or`** (and parentheses): `"x" has or refs { }`,
+  `"vfs_read" calls or holds { func }`; a pair matches if any of its edges
+  does. All four joined are the bare scope. Refused, each with what to write
+  in the error: `and` between words ("not supported yet … Ask each in its own
+  query"), `not calls` ("not supported yet: name what you want"), a word in
+  an expression with a filter (`func or has` → `func has { … }`), two words
+  in one statement without `or` (`has refs` → `has or refs`).
+- **A word governs its own statement, and no other** (as a type word does):
+  in `file has { "foo" { "bar" } }` the file contains `foo`, and the braces
+  under `foo` are a bare scope again. `inherit(relationship)` on the same
+  statement carries the word into every scope below, until a statement
+  writes its own: `"a" refs inherit(relationship) { "b" { "c" } }` =
+  `"a" refs { "b" refs { "c" } }`;
+  `dir("/proj/d") has inherit(relationship) { file { func("init_module") } }`
+  is the files that contain `init_module`, not the ones that mention it. It
+  copies the word into braces that exist; it adds no hop.
+- **What `warnings` says about a word, and what to do:**
+  - "the `linux` index states no roles; `calls` cannot match there. `refs
+    { … }` lists its references" → the empty answer says nothing about the
+    code. Re-run with `refs` or a bare scope.
+  - "the `linux` index has no `declares` rows: nothing in it records what a
+    macro declares" (likewise `holds`, "what a slot holds") → use a bare scope.
+  - "`holds` related nothing: only a slot holds (a field, or an interface
+    method), and `"vfs_read"` selects none" (likewise "only a macro
+    declares") → the word was asked of the wrong kind of source.
+  - "`calls` passed over 2 symbols that `"caller"` names without stating a
+    role (`#define` bodies, macro uses): `maybe`, `plain`. Whether it calls
+    them is not known; `refs { … }` lists them" → they may be calls; look at
+    them with `refs`.
+  - "nothing calls `"my_read"` directly; `slot` holds it (`⇢`): `calls
+    { field holds { "my_read" } }` goes through the slot" → run that query.
+  - "`refs` lists only ordinary references (`→`); `field("slot")` holds 1
+    symbol that `"my_read"` matches (`⇢`): `my_read`. `holds { … }` or
+    `{ … }` lists it" → use the word it names, or a bare scope.
+  - "`func` passed over 1 slot that `"via"` calls through: `slot`; follow it:
+    `"via" calls { field holds { func } }`" → run that query: the listing
+    left out a slot and the functions behind it.
+
+  The last four need an index that states roles or has those rows; they are
+  quoted from the engine's tests, with its names.
 
 ## Filters — constrain, add nothing
 - A **bare** type verb is a filter: `func`, `type`, `data`, `macro`, `field`,
@@ -112,6 +190,12 @@ separate statements; a `{` must be on the same line as its verb to attach.
 - `project("name")` restrict to one project (list names with the `askl_projects`
   tool). `package("path")` keep only symbols under a package path.
   `ignore("pat")` exclude matches.
+- `preamble <constraints>;` (a top-level statement of its own) applies what it
+  writes to every statement after it, at every depth, with no `inherit(…)`:
+  `preamble ignore("test") func; "vfs_read" { }` keeps functions and drops
+  tests in every scope; `preamble has; …` makes every scope containment. A
+  statement that writes its own type or relationship replaces the carried
+  one. A preamble selects nothing: no names in it.
 - **Scoping to a project is cheaper as an argument than as a verb:** pass
   `projects: ["linux"]` to `askl_run` and the other projects stop existing for
   that call, instead of being filtered out of the results afterwards. Use
@@ -136,7 +220,8 @@ separate statements; a `{` must be on the same line as its verb to attach.
   except test_*. Exclusions accumulate and inherit.
 - A filter group inherits into `{ }` as a unit, when every positive member
   would on its own: `project("a") or project("b")` does, `func or method`
-  does not (a type word stays in its statement). An inherited group is
+  does not (a type word stays in its statement) unless `inherit(type)`
+  carries it: `func or method inherit(type)`. An inherited group is
   **replaced wholesale** by a child writing the same dimension.
 - **One line per expression, unless a `(` is open**: an operator at the END
   of a line continues onto the next (`"a" or` ⏎ `"b"`), but a line STARTING
@@ -146,12 +231,9 @@ separate statements; a `{` must be on the same line as its verb to attach.
   predicate query), labels (not predicates), bare `any` and
   `select` (constrain nothing), `!"..."` (forced). Union searches by
   juxtaposition instead: `search("a") search("b")`.
-- Relationship words (`has`, `refs`, ...) are an expression of their own: they
-  join with each other, with `or` only (`has or refs { "x" }` = either). The
-  expression describes the edge into the statement's `{ }` wherever it stands
-  among the terms (`func calls { … }` = `calls func { … }`). Mixing one with a
-  predicate (`func or has`), `and`, `not`, or two in one statement
-  (`has refs`) is an error that says what to write.
+- Relationship words are an expression of their own, joined with `or` only
+  (`has or refs { "x" }` = either), never mixed with a filter in one
+  expression: see Relationship words.
 
 ## Paths
 - `file()`/`dir()` arguments starting with `/` are **exact** and paths are
@@ -179,18 +261,24 @@ separate statements; a `{` must be on the same line as its verb to attach.
   states it: `→ handler  (func, takes)`.  `calls`: it is the callee of a
   call.  `writes`: it is assigned or initialised.  `takes`: a function's
   address is passed, stored or returned.  `reads`: the value of data or of a
-  field is used.  JSON carries the same words as `kinds` on an edge.
-- **No word means nothing is stated**, not "not called": an older index and a
-  name in a `#define` body say nothing about what they do.
+  field is used.  JSON carries the same words as `kinds` on an edge.  They
+  are the role words of a query: `calls { "x" }` asks for the edges drawn
+  `calls`.
+- **No word means nothing is stated**, not "not called": an index that states
+  no roles (every published one today) and a name in a `#define` body say
+  nothing about what they do.
 
 ## Recipes — the short list (more in the `askl://cookbook` resource)
 - Find a symbol by fuzzy name:   `g"*color*"`  (prefer over `search()` for names)
 - Who calls X:                   `func { "vfs_read" }`
 - What X calls:                  `"vfs_read" { func }`
 - Functions in a file:           `file("/proj/fs/read_write.c") { func }`
+- Only what X contains:           `file("/proj/fs/read_write.c") has { func }`
 - Implementations of an ops field: `"reg_mr" { func }`  — a struct field's
   children are the functions assigned to it in initializers, so this one query
   lists every `.reg_mr = xxx_reg_mr` implementation; don't grep for `.field =`.
+- A call through an ops table:   `"vfs_read" { field { func } }`  (name the
+  field or a function to narrow; `{ func { func } }` skips the slot)
 - Everything inside X, generated symbols too: `mod("amdgpu") { unnest func }`
 - Full-text (non-symbol text):   `project("linux") search("EXPORT_SYMBOL", whole_word=true)`
 
