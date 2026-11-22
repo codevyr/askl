@@ -30,7 +30,8 @@ use super::mixins::{
 };
 use super::selection::{
     is_eph_leak, ChildReference, EphContext, FamilyRead, FamilyReads, HasChildReference,
-    HasParentReference, ParentReference, RootLayer, Selection, SelectionNode, Within,
+    HasParentReference, ParentReference, ReferenceRead, RootLayer, Selection, SelectionNode,
+    Within,
 };
 
 // ============================================================================
@@ -100,9 +101,15 @@ impl ScopeContext {
 /// rows to list one, and reported the one as an incomplete answer.  `None`
 /// when some reader selects by a predicate of its own: a named child is found
 /// behind a fold, so its evidence must not be filtered.
+///
+/// `refs` narrows a reference family a third way: by the test of the edge
+/// that reads it ([`RefTest`]).  A family read for `calls` holds the calls,
+/// its limit counts calls, and the selection records the test it was read
+/// under (`ReferenceRead`), because the family is whole for that test only.
+/// `None` when no reader consumes references at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FamilyDemand {
-    pub refs: bool,
+    pub refs: Option<RefTest>,
     pub has: bool,
     pub listing: Option<TraversalMode>,
 }
@@ -111,9 +118,15 @@ impl FamilyDemand {
     /// Everything — the conservative default for callers with no statement
     /// context (tests, direct index use).
     pub fn both() -> Self {
+        Self::of(Edge::ALL)
+    }
+
+    /// What an edge consumes: containment if it accepts it, and the
+    /// references that pass its test.
+    pub fn of(edge: Edge) -> Self {
         Self {
-            refs: true,
-            has: true,
+            refs: edge.refs(),
+            has: edge.has(),
             listing: None,
         }
     }
@@ -190,7 +203,9 @@ fn build_current_id_query(vis: &EphVisibility) -> CurrentIdQuery<'static> {
 
 use super::attribution::belongs_to;
 use super::mixins::EphSqlFragment;
+use super::reference_test::{and_passes, passes};
 use super::relation::{InstanceSet, Relation, RelationName, With};
+use crate::edge::{Edge, RefTest};
 
 /// REFS semi-join: rows whose instance is a CHILD (callee) of any of the
 /// given parent instances.  Used by scope resolution.
@@ -283,6 +298,7 @@ fn refs_parents_of_expr(
 fn refs_role_cte_body(
     seed: &InstanceSet,
     parents: bool,
+    test: RefTest,
     vis: &EphVisibility,
 ) -> Box<dyn diesel::query_builder::QueryFragment<Pg> + Send> {
     let builder = EphSqlFragment::<diesel::sql_types::BigInt>::builder();
@@ -311,7 +327,7 @@ fn refs_role_cte_body(
                 .eph_visibility("si.layer", vis)
                 .sql(" AND ")
                 .in_set("si.id", seed)
-                .sql(")")
+                .sql(format!("){}", and_passes("sr", test)))
                 .build(),
         )
     } else {
@@ -329,6 +345,7 @@ fn refs_role_cte_body(
                 .eph_visibility("pd.layer", vis)
                 .sql(" AND ")
                 .in_set("pd.id", seed)
+                .sql(and_passes("sr", test))
                 .build(),
         )
     }
@@ -651,13 +668,15 @@ impl Index {
     /// other if that ran out -- and joined to the other side's extents.  If
     /// both ran out, `whole` is false: the ids are still true, and the caller
     /// is where it was without asking.
+    ///
+    /// `edge` is what "relate" means here: containment if it accepts it, and
+    /// the references that pass its test, read under that test.
     pub async fn which_relate(
         &self,
         parents: &[i64],
         children: &[i64],
         want: AskSide,
-        refs: bool,
-        has: bool,
+        edge: Edge,
         eph: &EphContext,
     ) -> Result<Related> {
         use super::cte::PROBE_OVERFLOW;
@@ -679,8 +698,8 @@ impl Index {
             "which_relate",
             parents = parents.len(),
             children = children.len(),
-            refs,
-            has
+            refs = edge.refs().is_some(),
+            has = edge.has()
         )
         .entered();
         let t0 = std::time::Instant::now();
@@ -693,13 +712,14 @@ impl Index {
         let mut ids: Vec<i64> = Vec::new();
         let mut whole = true;
         let mut walked = "";
-        if has {
+        if edge.has() {
             let rows: std::sync::Arc<Vec<i64>> = self
                 .cached_load(ask_statement(
                     &parents,
                     &children,
                     want,
                     AskStep::Containment,
+                    RefTest::EVERY,
                     None,
                     &vis,
                 ))
@@ -707,7 +727,7 @@ impl Index {
                 .map_err(|e| anyhow::anyhow!("Failed to ask which rows hold: {}", e))?;
             ids.extend(rows.iter().copied());
         }
-        if refs {
+        if let Some(test) = edge.refs() {
             // Fewer rows first: one file against the thousand things it
             // names is read from the file, a module against one hot type
             // from the type.
@@ -719,7 +739,9 @@ impl Index {
             whole = false;
             for step in order {
                 let rows: std::sync::Arc<Vec<i64>> = self
-                    .cached_load(ask_statement(&parents, &children, want, step, budget, &vis))
+                    .cached_load(ask_statement(
+                        &parents, &children, want, step, test, budget, &vis,
+                    ))
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to ask which rows refer: {}", e))?;
                 if rows.contains(&PROBE_OVERFLOW) {
@@ -920,7 +942,11 @@ pub const SCOPE_FUSION_MAX_RANGES: i64 = 1024;
 // Shared query builders — used by both find_symbol and find_*_instance_ids
 // ============================================================================
 
-fn build_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ParentsQuery<'static> {
+fn build_parents_query(
+    source_ids: Vec<i64>,
+    test: RefTest,
+    vis: &EphVisibility,
+) -> ParentsQuery<'static> {
     use crate::schema_diesel::*;
     use diesel::sql_types::Bool;
 
@@ -944,7 +970,7 @@ fn build_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ParentsQuer
         .sql("))")
         .build();
 
-    symbol_refs::dsl::symbol_refs
+    let query = symbol_refs::dsl::symbol_refs
         .inner_join(
             parent_decls.on(parent_decls
                 .field(symbol_instances::dsl::object_id)
@@ -977,21 +1003,41 @@ fn build_parents_query(source_ids: Vec<i64>, vis: &EphVisibility) -> ParentsQuer
             SymbolRef::as_select(),
             parent_decls.fields(crate::schema_diesel::symbol_instances::all_columns),
         ))
-        .into_boxed::<Pg>()
+        .into_boxed::<Pg>();
+    under_test(query, test)
+}
+
+/// A boxed read of `symbol_refs`, narrowed to the references `test` admits:
+/// the read itself when every row passes (see `reference_test`).
+fn under_test<'a, Q>(query: Q, test: RefTest) -> Q
+where
+    Q: diesel::query_dsl::methods::FilterDsl<
+        diesel::expression::SqlLiteral<diesel::sql_types::Bool>,
+        Output = Q,
+    >,
+{
+    match passes("symbol_refs", test) {
+        Some(sql) => query.filter(diesel::dsl::sql::<diesel::sql_types::Bool>(&sql)),
+        None => query,
+    }
 }
 
 /// What the `parents` instances refer to: one row per reference and enclosing
 /// declaration (see `ChildSelectionTuple`).  Both readers of the relation go
 /// through it -- the children family in [`Index::find_symbol`] and the derive
 /// read in [`Index::find_child_instance_ids`] -- so what a statement derives
-/// and what it is narrowed by cannot disagree.
-fn build_children_query(parents: &InstanceSet, vis: &EphVisibility) -> ChildrenQuery<'static> {
+/// and what it is narrowed by cannot disagree, under whatever test they read.
+fn build_children_query(
+    parents: &InstanceSet,
+    test: RefTest,
+    vis: &EphVisibility,
+) -> ChildrenQuery<'static> {
     use crate::schema_diesel::*;
 
     let parent_decls = PARENT_DECLS_ALIAS;
     let parent_symbols = PARENT_SYMBOLS_ALIAS;
 
-    symbol_refs::dsl::symbol_refs
+    let query = symbol_refs::dsl::symbol_refs
         .inner_join(symbols::dsl::symbols.on(symbol_refs::dsl::to_symbol.eq(symbols::id)))
         .inner_join(
             parent_decls.on(parent_decls
@@ -1027,7 +1073,8 @@ fn build_children_query(parents: &InstanceSet, vis: &EphVisibility) -> ChildrenQ
             SymbolRef::as_select(),
             Object::as_select(),
         ))
-        .into_boxed::<Pg>()
+        .into_boxed::<Pg>();
+    under_test(query, test)
 }
 
 /// The scope of a children read: the referenced symbol has an instance in
@@ -1223,30 +1270,31 @@ pub struct ProbeNeighbour {
     /// it holds or refers to.  Otherwise it is a child: the statement's rows
     /// are what holds it or refers to it.
     parent_side: bool,
-    refs: bool,
-    has: bool,
+    /// The edge between the statement and this neighbour: walking from the
+    /// neighbour and testing against it both read the references its test
+    /// admits, and containment if it accepts it.
+    edge: Edge,
 }
 
 impl ProbeNeighbour {
-    /// The statement's parent, related by reference, containment or either.
-    pub fn parent(ids: Vec<i64>, refs: bool, has: bool) -> Self {
-        Self::new(ids, true, refs, has)
+    /// The statement's parent, related along `edge`.
+    pub fn parent(ids: Vec<i64>, edge: Edge) -> Self {
+        Self::new(ids, true, edge)
     }
 
     /// One of the statement's children.
-    pub fn child(ids: Vec<i64>, refs: bool, has: bool) -> Self {
-        Self::new(ids, false, refs, has)
+    pub fn child(ids: Vec<i64>, edge: Edge) -> Self {
+        Self::new(ids, false, edge)
     }
 
-    fn new(mut ids: Vec<i64>, parent_side: bool, refs: bool, has: bool) -> Self {
+    fn new(mut ids: Vec<i64>, parent_side: bool, edge: Edge) -> Self {
         // The binds are part of the SQL-cache key.
         ids.sort_unstable();
         ids.dedup();
         Self {
             ids,
             parent_side,
-            refs,
-            has,
+            edge,
         }
     }
 
@@ -1270,14 +1318,17 @@ impl ProbeNeighbour {
     fn walk(&self, budget: i64, vis: &EphVisibility) -> Vec<(Vec<Relation>, String)> {
         let seed = self.seed();
         let mut kinds = Vec::new();
-        if self.refs && self.parent_side {
-            let referred =
-                Relation::new("probe_walk_referred", refs_role_cte_body(&seed, false, vis))
-                    .bounded(budget);
+        let refs = self.edge.refs();
+        if let (Some(test), true) = (refs, self.parent_side) {
+            let referred = Relation::new(
+                "probe_walk_referred",
+                refs_role_cte_body(&seed, false, test, vis),
+            )
+            .bounded(budget);
             let admits = referred.name().holds("symbols.id", "symbol");
             kinds.push((vec![referred], admits));
         }
-        if self.refs && !self.parent_side {
+        if let (Some(test), false) = (refs, self.parent_side) {
             let points = Relation::new(
                 "probe_walk_points",
                 EphSqlFragment::<diesel::sql_types::BigInt>::builder()
@@ -1294,7 +1345,7 @@ impl ProbeNeighbour {
                     .eph_visibility("si.layer", vis)
                     .sql(" AND ")
                     .in_set("si.id", &seed)
-                    .sql(")")
+                    .sql(format!("){}", and_passes("sr", test)))
                     .build(),
             )
             .bounded(budget);
@@ -1319,7 +1370,7 @@ impl ProbeNeighbour {
             let admits = instance_member_sql(around.name());
             kinds.push((vec![points, around], admits));
         }
-        if self.has {
+        if self.edge.has() {
             let name = if self.parent_side {
                 "probe_walk_held"
             } else {
@@ -1371,7 +1422,7 @@ impl ProbeNeighbour {
         let extents_name = extents.name().clone();
         relations.push(extents);
 
-        if self.has {
+        if self.edge.has() {
             // Containment either way is a join of two sets of extents on the
             // object they are in.
             let (outer, inner) = if self.parent_side {
@@ -1393,7 +1444,8 @@ impl ProbeNeighbour {
             tests.push(held.name().holds("c.id", "id"));
             relations.push(held);
         }
-        if self.refs && self.parent_side {
+        let refs = self.edge.refs();
+        if let (Some(test), true) = (refs, self.parent_side) {
             // The neighbour refers to the candidate's SYMBOL: asked once per
             // symbol, from the symbol (the one indexed way in).
             let referred = Relation::new(
@@ -1408,13 +1460,16 @@ impl ProbeNeighbour {
                         inside = belongs_to("sr", "n")
                     ))
                     .eph_visibility("sr.layer", vis)
-                    .sql(" AND sr.to_symbol = d.symbol LIMIT 1) hit")
+                    .sql(format!(
+                        " AND sr.to_symbol = d.symbol{} LIMIT 1) hit",
+                        and_passes("sr", test)
+                    ))
                     .build(),
             );
             tests.push(referred.name().holds("c.symbol", "symbol"));
             relations.push(referred);
         }
-        if self.refs && !self.parent_side {
+        if let (Some(test), false) = (refs, self.parent_side) {
             // The candidate INSTANCE encloses a reference to one of the
             // neighbour's symbols: asked per candidate and symbol, which is
             // one probe of the references' unique index.
@@ -1429,9 +1484,10 @@ impl ProbeNeighbour {
                     .eph_visibility("sr.layer", vis)
                     .sql(format!(
                         " AND sr.to_symbol = n.symbol AND sr.from_object = c.object_id \
-                           AND {} \
+                           AND {}{} \
                          LIMIT 1) hit",
-                        belongs_to("sr", "c")
+                        belongs_to("sr", "c"),
+                        and_passes("sr", test)
                     ))
                     .build(),
             );
@@ -1474,12 +1530,12 @@ pub enum ProbeRole {
     /// Probe rows' SYMBOLS must be referred to from within these instances.
     /// What a reference names is a symbol, so this role matches at SYMBOL
     /// level, as narrowing does: every instance of a symbol referred to is
-    /// kept.
-    RefsChildrenOf(Vec<i64>),
+    /// kept.  The references are those the test admits, here and below.
+    RefsChildrenOf(Vec<i64>, RefTest),
     /// Probe rows must enclose a reference to one of these instances'
     /// symbols.  What refers is the instance around the reference, so this
     /// role matches at INSTANCE level (see `instance_member_sql`).
-    RefsParentsOf(Vec<i64>),
+    RefsParentsOf(Vec<i64>, RefTest),
     /// Probe rows must be contained in these instances.  Containment is
     /// between instances, so the HAS roles match at INSTANCE level too.
     HasChildrenOf(Vec<i64>),
@@ -1495,8 +1551,12 @@ impl ProbeRole {
     ) -> Box<dyn diesel::query_builder::QueryFragment<Pg> + Send> {
         let ids = |ids: &Vec<i64>| InstanceSet::Ids(ids.clone());
         match self {
-            ProbeRole::RefsChildrenOf(seed) => refs_role_cte_body(&ids(seed), false, vis),
-            ProbeRole::RefsParentsOf(seed) => refs_role_cte_body(&ids(seed), true, vis),
+            ProbeRole::RefsChildrenOf(seed, test) => {
+                refs_role_cte_body(&ids(seed), false, *test, vis)
+            }
+            ProbeRole::RefsParentsOf(seed, test) => {
+                refs_role_cte_body(&ids(seed), true, *test, vis)
+            }
             ProbeRole::HasChildrenOf(seed) => has_role_cte_body(&ids(seed), true, vis),
             ProbeRole::HasParentsOf(seed) => has_role_cte_body(&ids(seed), false, vis),
         }
@@ -1506,8 +1566,8 @@ impl ProbeRole {
     /// symbol for what is referred to, by instance for everything else.
     fn admits(&self, relation: &RelationName) -> String {
         match self {
-            ProbeRole::RefsChildrenOf(_) => relation.holds("symbols.id", "symbol"),
-            ProbeRole::RefsParentsOf(_)
+            ProbeRole::RefsChildrenOf(..) => relation.holds("symbols.id", "symbol"),
+            ProbeRole::RefsParentsOf(..)
             | ProbeRole::HasChildrenOf(_)
             | ProbeRole::HasParentsOf(_) => instance_member_sql(relation),
         }
@@ -1586,6 +1646,7 @@ fn ask_statement(
     children: &[i64],
     want: AskSide,
     step: AskStep,
+    test: RefTest,
     budget: Option<i64>,
     vis: &EphVisibility,
 ) -> With<ProbeSurvivors> {
@@ -1648,7 +1709,10 @@ fn ask_statement(
                          FROM index.symbol_refs sr WHERE ",
                     )
                     .eph_visibility("sr.layer", vis)
-                    .sql(" AND sr.to_symbol IN (SELECT DISTINCT symbol FROM ask_children)")
+                    .sql(format!(
+                        " AND sr.to_symbol IN (SELECT DISTINCT symbol FROM ask_children){}",
+                        and_passes("sr", test)
+                    ))
                     .build(),
             ));
             let complete = points
@@ -1680,6 +1744,7 @@ fn ask_statement(
                         belongs_to("t", "p")
                     ))
                     .eph_visibility("t.layer", vis)
+                    .sql(and_passes("t", test))
                     .build(),
             ));
             let complete = inside
@@ -3066,10 +3131,10 @@ impl Index {
         // itself cut; `None` for a family nobody read.  Turned into the
         // selection's `FamilyReads` once the row counts are known.
         let mut parents_within: Option<(Within, bool)> = None;
-        let parents = match parent_scope {
-            _ if !demands.parent.refs => vec![],
-            ScopeContext::Absent | ScopeContext::Deferred => vec![],
-            ScopeContext::Unscoped => {
+        let parents = match (demands.parent.refs, &parent_scope) {
+            (None, _) => vec![],
+            (_, ScopeContext::Absent | ScopeContext::Deferred) => vec![],
+            (Some(test), ScopeContext::Unscoped) => {
                 let _parents_span: tracing::span::EnteredSpan = tracing::info_span!(
                     "select_parents",
                     scope = "unscoped",
@@ -3080,7 +3145,7 @@ impl Index {
                 let t0 = std::time::Instant::now();
                 let rows: Vec<(SymbolRef, SymbolInstance)> = self
                     .cached_load_partitioned(eph, chain_dependent, |vis| {
-                        let mut q = build_parents_query(current_instance_ids.clone(), vis);
+                        let mut q = build_parents_query(current_instance_ids.clone(), test, vis);
                         if let Some(expr) = filter.compose_parents(vis) {
                             q = q.filter(expr);
                         }
@@ -3097,11 +3162,14 @@ impl Index {
                 parents_within = Some((Within::Everything, false));
                 rows
             }
-            ScopeContext::Scope {
-                ref ids,
-                filter: ref scope_filter,
-                whole_side,
-            } => {
+            (
+                Some(test),
+                ScopeContext::Scope {
+                    ids,
+                    filter: scope_filter,
+                    whole_side,
+                },
+            ) => {
                 let _parents_span: tracing::span::EnteredSpan = tracing::info_span!(
                     "select_parents",
                     scope = "scoped",
@@ -3116,7 +3184,7 @@ impl Index {
                     .resolve_scope_ids(ids, scope_filter, Some(&role), eph)
                     .await?;
                 parents_within = Some((
-                    if whole_side {
+                    if *whole_side {
                         Within::Everything
                     } else {
                         Within::Ids(scope_ids.clone())
@@ -3126,7 +3194,7 @@ impl Index {
 
                 let rows: Vec<(SymbolRef, SymbolInstance)> = self
                     .cached_load_partitioned(eph, chain_dependent, |vis| {
-                        let mut q = build_parents_query(current_instance_ids.clone(), vis);
+                        let mut q = build_parents_query(current_instance_ids.clone(), test, vis);
                         if let Some(expr) = filter.compose_parents(vis) {
                             q = q.filter(expr);
                         }
@@ -3171,7 +3239,7 @@ impl Index {
             }
         );
         let children_within: Option<Option<InstanceSet>> = match &children_scope {
-            _ if !demands.children.refs => None,
+            _ if demands.children.refs.is_none() => None,
             ScopeContext::Absent | ScopeContext::Deferred => None,
             ScopeContext::Unscoped => Some(None),
             ScopeContext::Scope {
@@ -3192,9 +3260,9 @@ impl Index {
         // counts what `current` refers to and not how many instances the
         // symbols referred to happen to have.
         let children: Vec<(Symbol, Symbol, SymbolInstance, SymbolRef, Object)> =
-            match &children_within {
-                None => vec![],
-                Some(within) => {
+            match (&children_within, demands.children.refs) {
+                (None, _) | (_, None) => vec![],
+                (Some(within), Some(test)) => {
                     let _select_children: tracing::span::EnteredSpan = tracing::info_span!(
                         "select_children",
                         scope = if within.is_some() {
@@ -3210,7 +3278,7 @@ impl Index {
                     let sources = InstanceSet::Ids(current_instance_ids.clone());
                     let rows = self
                         .cached_load_partitioned(eph, chain_dependent, |vis| {
-                            let mut q = build_children_query(&sources, vis);
+                            let mut q = build_children_query(&sources, test, vis);
                             if let Some(expr) = filter.compose_children(vis) {
                                 q = q.filter(expr);
                             }
@@ -3457,22 +3525,34 @@ impl Index {
                 _ => (Within::Everything, false),
             })
         };
+        // A reference family is whole for the test it was read under and no
+        // other; one nobody read has no test and says nothing.
+        let read_under = |read: FamilyRead, test: Option<RefTest>| match test {
+            Some(test) => ReferenceRead::under(read, test),
+            None => read.into(),
+        };
         let families = FamilyReads {
-            parents: read_of(
-                parents.len(),
-                parents_within.map(|(within, cut)| match within {
-                    Within::Ids(ids) => (Within::Ids(sorted(ids)), cut),
-                    everything => (everything, cut),
-                }),
+            parents: read_under(
+                read_of(
+                    parents.len(),
+                    parents_within.map(|(within, cut)| match within {
+                        Within::Ids(ids) => (Within::Ids(sorted(ids)), cut),
+                        everything => (everything, cut),
+                    }),
+                ),
+                demands.parent.refs,
             ),
-            children: read_of(
-                children.len(),
-                children_within.as_ref().map(|within| match within {
-                    Some(InstanceSet::Ids(ids)) if !children_whole_side => {
-                        (Within::Ids(sorted(ids.clone())), children_scope_cut)
-                    }
-                    _ => (Within::Everything, children_scope_cut),
-                }),
+            children: read_under(
+                read_of(
+                    children.len(),
+                    children_within.as_ref().map(|within| match within {
+                        Some(InstanceSet::Ids(ids)) if !children_whole_side => {
+                            (Within::Ids(sorted(ids.clone())), children_scope_cut)
+                        }
+                        _ => (Within::Everything, children_scope_cut),
+                    }),
+                ),
+                demands.children.refs,
             ),
             has_parents: read_of(
                 has_parents.len(),
@@ -3693,11 +3773,13 @@ impl Index {
     /// what the statement is and not by what one neighbour reaches.  `None`
     /// when no probe resolved the statement: the read is the neighbour's
     /// whole side, under the limit.
+    ///
+    /// `edge` is the edge being derived along: containment if it accepts it,
+    /// and the references that pass its test.
     pub async fn find_child_instance_ids(
         &self,
         parent_ids: &[i64],
-        include_refs: bool,
-        include_has: bool,
+        edge: Edge,
         filter: &CompositeFilter,
         within: Option<&[i64]>,
         eph: &EphContext,
@@ -3734,7 +3816,7 @@ impl Index {
         // re-detect the truncation — carry it out explicitly.
         let mut derive_capped = false;
 
-        if include_has {
+        if edge.has() {
             let _span = tracing::info_span!(
                 "find_child_instance_ids_has",
                 source_count = parent_ids.len(),
@@ -3803,7 +3885,7 @@ impl Index {
             all_ids.extend(results.iter().map(|(_, _, _, child_inst, _)| child_inst.id));
         }
 
-        if include_refs {
+        if let Some(test) = edge.refs() {
             use super::cte::PROBE_OVERFLOW;
 
             let _span = tracing::info_span!(
@@ -3834,7 +3916,8 @@ impl Index {
             // looking further.  Combined visibility for the same reason as
             // there: the two steps consult chain-visible rows.
             let vis = EphVisibility::combined(eph);
-            let mut references = build_children_query(&InstanceSet::Ids(source_ids.clone()), &vis);
+            let mut references =
+                build_children_query(&InstanceSet::Ids(source_ids.clone()), test, &vis);
             if let Some(expr) = filter.compose_children(&vis) {
                 references = references.filter(expr);
             }
@@ -3901,8 +3984,7 @@ impl Index {
     pub async fn find_parent_instance_ids(
         &self,
         child_ids: &[i64],
-        include_refs: bool,
-        include_has: bool,
+        edge: Edge,
         filter: &CompositeFilter,
         within: Option<&[i64]>,
         eph: &EphContext,
@@ -3938,7 +4020,7 @@ impl Index {
         // a downstream filter can hide it from the by-id re-read.
         let mut derive_capped = false;
 
-        if include_refs {
+        if let Some(test) = edge.refs() {
             let _span = tracing::info_span!(
                 "find_parent_instance_ids_refs",
                 source_count = child_ids.len(),
@@ -3948,7 +4030,7 @@ impl Index {
             let t0 = std::time::Instant::now();
             let results: Vec<(SymbolRef, SymbolInstance)> = self
                 .cached_load_partitioned(eph, chain_dependent, |vis| {
-                    let mut q = build_parents_query(source_ids.clone(), vis);
+                    let mut q = build_parents_query(source_ids.clone(), test, vis);
                     if let Some(expr) = filter.compose_parents(vis) {
                         q = q.filter(expr);
                     }
@@ -3983,7 +4065,7 @@ impl Index {
             all_ids.extend(results.iter().map(|(_, parent_inst)| parent_inst.id));
         }
 
-        if include_has {
+        if edge.has() {
             let _span = tracing::info_span!(
                 "find_parent_instance_ids_has",
                 source_count = child_ids.len(),
@@ -5918,6 +6000,130 @@ mod tests {
         );
     }
 
+    /// A READ FOR ANY REFERENCE IS THE STATEMENT IT WAS.  Every read that
+    /// takes a reference test renders `RefTest::EVERY` as nothing at all, and
+    /// a narrower test exactly once, on the reference row it reads -- so the
+    /// two texts differ, and with them the SQL-cache keys.  No database.
+    #[test]
+    fn every_read_renders_its_test_and_any_reference_renders_none() {
+        use crate::roles::Roles;
+
+        fn text<Q: diesel::query_builder::QueryFragment<Pg>>(query: &Q) -> String {
+            format!("{:?}", diesel::debug_query::<Pg, _>(query))
+        }
+        fn with(relations: Vec<Relation>, outer: String) -> String {
+            text(&With::new(relations, ProbeSurvivors { sql: outer }))
+        }
+
+        let eph = EphContext::rooted(vec![RootLayer {
+            project_id: 1,
+            id: 424242,
+            name: "p1".to_string(),
+            hash: vec![0x42; 32],
+        }]);
+        let vis = EphVisibility::combined(&eph);
+        let seed = InstanceSet::Ids(vec![1, 2]);
+        let candidates = Relation::new(
+            "probe_candidates",
+            EphSqlFragment::<diesel::sql_types::BigInt>::builder()
+                .sql("SELECT 1")
+                .build(),
+        );
+        let candidates = candidates.name().clone();
+
+        let reads = |test: RefTest| -> Vec<(&'static str, String)> {
+            let role = |parents: bool| {
+                with(
+                    vec![Relation::new(
+                        "role",
+                        refs_role_cte_body(&seed, parents, test, &vis),
+                    )],
+                    "SELECT 1".to_string(),
+                )
+            };
+            let walk = |neighbour: ProbeNeighbour| {
+                let mut kinds = neighbour.walk(10, &vis);
+                assert_eq!(kinds.len(), 1);
+                let (relations, admits) = kinds.remove(0);
+                with(relations, admits)
+            };
+            let tested = |neighbour: ProbeNeighbour| {
+                let (relations, test) = neighbour.test(0, &candidates, &vis);
+                with(relations, test)
+            };
+            let ask = |step: AskStep| {
+                text(&ask_statement(
+                    &[1],
+                    &[2],
+                    AskSide::Parents,
+                    step,
+                    test,
+                    Some(10),
+                    &vis,
+                ))
+            };
+            let edge = Edge::references(test);
+            vec![
+                (
+                    "the parents family and the derive of parents",
+                    text(&build_parents_query(vec![1, 2], test, &vis)),
+                ),
+                (
+                    "the children family and the derive of children",
+                    text(&build_children_query(&seed, test, &vis)),
+                ),
+                ("the role of what is referred to", role(false)),
+                ("the role of what refers", role(true)),
+                (
+                    "the walk from a parent",
+                    walk(ProbeNeighbour::parent(vec![1, 2], edge)),
+                ),
+                (
+                    "the walk from a child",
+                    walk(ProbeNeighbour::child(vec![1, 2], edge)),
+                ),
+                (
+                    "the test against a parent",
+                    tested(ProbeNeighbour::parent(vec![1, 2], edge)),
+                ),
+                (
+                    "the test against a child",
+                    tested(ProbeNeighbour::child(vec![1, 2], edge)),
+                ),
+                (
+                    "the ask from the children",
+                    ask(AskStep::ReferencesToChildren),
+                ),
+                (
+                    "the ask from the parents",
+                    ask(AskStep::ReferencesInParents),
+                ),
+            ]
+        };
+
+        let calls = RefTest::stating(Roles::CALL).unwrap();
+        let any = reads(RefTest::EVERY);
+        let narrowed = reads(calls);
+        assert_eq!(any.len(), narrowed.len());
+        for ((read, any), (_, narrowed)) in any.iter().zip(&narrowed) {
+            assert!(
+                !any.contains("roles &") && !any.contains("relation NOT IN"),
+                "{read}: any reference is no condition, got: {any}"
+            );
+            let condition = [" sr", " t", "symbol_refs"]
+                .iter()
+                .filter_map(|alias| passes(alias.trim(), calls))
+                .find(|condition| narrowed.contains(condition.as_str()))
+                .unwrap_or_else(|| panic!("{read}: the test is not rendered, got: {narrowed}"));
+            assert_eq!(
+                narrowed.matches("roles &").count(),
+                1,
+                "{read}: the test is rendered once ({condition}), got: {narrowed}"
+            );
+            assert_ne!(any, narrowed, "{read}: two tests, two cache keys");
+        }
+    }
+
     /// Pins the disjointness property of the partition at the SQL level,
     /// with no database: the eph-branch instantiation must render the
     /// `NOT (...all recorded columns = ANY($roots)...)` guard over every
@@ -5936,7 +6142,7 @@ mod tests {
         eph.push_materialisation(&[(424242, -7)]);
 
         let evis = EphVisibility::eph_touching(&eph);
-        let eq = build_parents_query(vec![1, 2], &evis).filter(evis.guard());
+        let eq = build_parents_query(vec![1, 2], RefTest::EVERY, &evis).filter(evis.guard());
         let esql = format!("{:?}", diesel::debug_query::<Pg, _>(&eq));
         // Three tables, because the query no longer joins the referenced
         // symbol's own rows — `si2` inside the `to_symbol` probe resolves that
@@ -5963,7 +6169,7 @@ mod tests {
         );
 
         let pvis = EphVisibility::root_only(&eph);
-        let pq = build_parents_query(vec![1, 2], &pvis).filter(pvis.guard());
+        let pq = build_parents_query(vec![1, 2], RefTest::EVERY, &pvis).filter(pvis.guard());
         let psql = format!("{:?}", diesel::debug_query::<Pg, _>(&pq));
         assert!(
             psql.contains("parent_symbols.layer = ANY("),
