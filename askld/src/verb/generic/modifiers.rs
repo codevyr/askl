@@ -3,7 +3,8 @@ use crate::span::Span;
 use crate::verb::Args;
 use anyhow::{anyhow, bail, Result};
 use index::db_diesel::TraversalMode;
-use index::edge::Edge;
+use index::edge::{Edge, RefTest};
+use index::roles::Relation;
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -54,8 +55,15 @@ impl Display for HasModifier {
     }
 }
 
-/// RefsModifier - explicitly sets the relationship type to Refs (reference/call-based)
-/// This is the default, but can be used to override an inherited has
+/// RefsModifier - the scope relates by an ORDINARY reference: a token of the
+/// parent names the child (`→`).
+///
+/// A RELATIONSHIP WORD SELECTS THE EDGES DRAWN WITH ITS MARK.  There are four
+/// relationships and they are disjoint: `has` (`▸`), `refs` (`→`), `declares`
+/// (`↦`), `holds` (`⇢`).  A bare `{ }` asks for all four.  `refs` used to mean
+/// every row of the reference table, the two relations included, so
+/// `field refs { func }` listed what a slot holds under a word that says a
+/// token names it.
 #[derive(Debug)]
 pub(in crate::verb) struct RefsModifier {
     span: Span,
@@ -89,7 +97,7 @@ impl Verb for RefsModifier {
 
     /// The refs verb consumes itself by setting the relationship type in the parser context
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.set_relationship_type_inherited(Edge::EVERY_REFERENCE);
+        ctx.set_relationship_type_inherited(Edge::references(RefTest::ORDINARY));
         Ok(true) // consumed - don't add to command
     }
 }
@@ -97,6 +105,61 @@ impl Verb for RefsModifier {
 impl Display for RefsModifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "RefsModifier")
+    }
+}
+
+/// RelationModifier - the scope relates by a relation, a fact no token of
+/// the parent spells: `declares` (the parent's invocation declared the child,
+/// `↦`) or `holds` (the parent is a slot and the child is stored in it, or an
+/// interface method and an implementer, `⇢`).
+///
+/// Written where `has` and `refs` are written, and carried into nested scopes
+/// exactly as they are.
+#[derive(Debug)]
+pub(in crate::verb) struct RelationModifier {
+    span: Span,
+    relation: Relation,
+}
+
+impl RelationModifier {
+    pub(in crate::verb) const DECLARES: &'static str = "declares";
+    pub(in crate::verb) const HOLDS: &'static str = "holds";
+
+    pub fn new(span: Span, args: &Args, relation: Relation) -> Result<Arc<dyn Verb>> {
+        args.accepts(0, &[])?;
+        Ok(Arc::new(Self { span, relation }))
+    }
+}
+
+impl Verb for RelationModifier {
+    fn name(&self) -> &str {
+        match self.relation {
+            Relation::Declares => RelationModifier::DECLARES,
+            Relation::Holds => RelationModifier::HOLDS,
+        }
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn class(&self) -> VerbClass {
+        VerbClass::Relationship
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Skip
+    }
+
+    fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
+        ctx.set_relationship_type_inherited(Edge::references(RefTest::relation(self.relation)));
+        Ok(true) // consumed - don't add to command
+    }
+}
+
+impl Display for RelationModifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RelationModifier({})", self.name())
     }
 }
 
@@ -125,7 +188,8 @@ impl DeriveModifier {
         let mut asked: Option<Edge> = None;
         for part in type_str.split(',') {
             let edge = match part.trim() {
-                "refs" => Edge::EVERY_REFERENCE,
+                // What the word `refs` means (see `RefsModifier`).
+                "refs" => Edge::references(RefTest::ORDINARY),
                 "has" => Edge::HAS,
                 other => bail!(
                     "unknown relationship type '{}' in derive (expected 'refs' or 'has')",
