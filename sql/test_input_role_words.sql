@@ -28,6 +28,23 @@
 --     noisy   (func)  names `maybe` eleven times, nothing stated.
 --     hook, shared, plain (func); maybe, counter (data); T (type)
 --
+--   and, for what a listing passes over when its parent calls through a
+--   slot (nothing above names any of these):
+--
+--     multi   (func)  CALLs six slots of `ops2` and CALLs `helper` by name;
+--                     names a seventh slot, `quiet`, with nothing stated;
+--                     and CALLs `fp`, a variable.
+--     ops2    (type)  a struct with seven fields:
+--       slot_b  HOLDS `b_read` and `b_other`;   slot_c  HOLDS `c_read`;
+--       slot_e  HOLDS `e_read`;                 slot_f  HOLDS `f_read`;
+--       slot_d  HOLDS `helper`, which `multi` calls by name as well;
+--       idle    holds nothing (its declaration names `leaf`);
+--       quiet   HOLDS `q_read` (and is never CALLed).
+--     helper, b_read (func)  each CALLs `leaf`.
+--     b_other, c_read, e_read, f_read, q_read, leaf (func)
+--     fp      (data)  a function pointer that is no field; HOLDS `g_read`.
+--     g_read  (func)
+--
 -- Project `silent` -- an index that states nothing: no roles, no relations
 -- -- one file, /b.c:
 --
@@ -101,6 +118,82 @@ VALUES (10,  1,  1, int4range(100, 500), 1),     -- caller
        (190, 19, 1, int4range(3200, 3210), 1),   -- M2, the #define
        (200, 20, 1, int4range(3300, 3400), 1),   -- user_of_m
        (165, 16, 1, int4range(3500, 3510), 2);   -- twin (the first), its declaration
+
+-- A function that calls through several slots.
+INSERT INTO symbols (id, name, project_id, symbol_type, symbol_scope)
+VALUES (21, 'multi',   1, 1, 1),
+       (22, 'ops2',    1, 5, 1),
+       (23, 'slot_b',  1, 8, 1),
+       (24, 'slot_c',  1, 8, 1),
+       (25, 'slot_d',  1, 8, 1),
+       (26, 'slot_e',  1, 8, 1),
+       (27, 'slot_f',  1, 8, 1),
+       (28, 'idle',    1, 8, 1),
+       (29, 'quiet',   1, 8, 1),
+       (30, 'helper',  1, 1, 1),
+       (31, 'b_read',  1, 1, 1),
+       (32, 'b_other', 1, 1, 1),
+       (33, 'c_read',  1, 1, 1),
+       (34, 'e_read',  1, 1, 1),
+       (35, 'f_read',  1, 1, 1),
+       (36, 'q_read',  1, 1, 1),
+       (37, 'leaf',    1, 1, 1),
+       (38, 'fp',      1, 6, 1),
+       (39, 'g_read',  1, 1, 1);
+
+INSERT INTO symbol_instances (id, symbol, object_id, offset_range, instance_type)
+VALUES (210, 21, 1, int4range(4000, 4200), 1),   -- multi
+       (220, 22, 1, int4range(4300, 4500), 1),   -- ops2
+       (230, 23, 1, int4range(4310, 4320), 1),   -- slot_b, inside ops2
+       (240, 24, 1, int4range(4330, 4340), 1),   -- slot_c
+       (250, 25, 1, int4range(4350, 4360), 1),   -- slot_d
+       (260, 26, 1, int4range(4370, 4380), 1),   -- slot_e
+       (270, 27, 1, int4range(4390, 4400), 1),   -- slot_f
+       (280, 28, 1, int4range(4410, 4420), 1),   -- idle
+       (290, 29, 1, int4range(4430, 4440), 1),   -- quiet
+       (300, 30, 1, int4range(4600, 4650), 1),   -- helper
+       (310, 31, 1, int4range(4700, 4750), 1),   -- b_read
+       (320, 32, 1, int4range(4800, 4850), 1),   -- b_other
+       (330, 33, 1, int4range(4900, 4950), 1),   -- c_read
+       (340, 34, 1, int4range(5000, 5050), 1),   -- e_read
+       (350, 35, 1, int4range(5100, 5150), 1),   -- f_read
+       (360, 36, 1, int4range(5200, 5250), 1),   -- q_read
+       (370, 37, 1, int4range(5300, 5350), 1),   -- leaf
+       (380, 38, 1, int4range(5400, 5410), 1),   -- fp
+       (390, 39, 1, int4range(5500, 5550), 1);   -- g_read
+
+-- Inside `multi`: six calls through a slot, one call by name ...
+INSERT INTO symbol_refs (to_symbol, from_object, from_offset_range, roles)
+VALUES (23, 1, int4range(4010, 4016), 1),  -- ops->slot_b(x)   CALL
+       (24, 1, int4range(4020, 4026), 1),  -- ops->slot_c(x)   CALL
+       (25, 1, int4range(4030, 4036), 1),  -- ops->slot_d(x)   CALL
+       (26, 1, int4range(4040, 4046), 1),  -- ops->slot_e(x)   CALL
+       (27, 1, int4range(4050, 4056), 1),  -- ops->slot_f(x)   CALL
+       (28, 1, int4range(4060, 4064), 1),  -- ops->idle(x)     CALL
+       (30, 1, int4range(4070, 4076), 1),  -- helper(x)        CALL
+       (38, 1, int4range(4090, 4092), 1);  -- fp(x)            CALL
+-- ... and a slot it only names.
+INSERT INTO symbol_refs (to_symbol, from_object, from_offset_range)
+VALUES (29, 1, int4range(4080, 4085));     -- quiet
+
+-- On the slots' declarations: what each holds.
+INSERT INTO symbol_refs (to_symbol, from_object, from_offset_range, relation)
+VALUES (31, 1, int4range(4311, 4312), 2),  -- slot_b holds b_read
+       (32, 1, int4range(4313, 4314), 2),  -- slot_b holds b_other
+       (33, 1, int4range(4331, 4332), 2),  -- slot_c holds c_read
+       (30, 1, int4range(4351, 4352), 2),  -- slot_d holds helper
+       (34, 1, int4range(4371, 4372), 2),  -- slot_e holds e_read
+       (35, 1, int4range(4391, 4392), 2),  -- slot_f holds f_read
+       (36, 1, int4range(4431, 4432), 2),  -- quiet holds q_read
+       (39, 1, int4range(5401, 5402), 2);  -- fp holds g_read
+-- `idle` holds nothing; its declaration names `leaf`, an ordinary reference.
+INSERT INTO symbol_refs (to_symbol, from_object, from_offset_range)
+VALUES (37, 1, int4range(4411, 4415));
+
+-- `helper` and `b_read` each call `leaf`.
+INSERT INTO symbol_refs (to_symbol, from_object, from_offset_range, roles)
+VALUES (37, 1, int4range(4610, 4614), 1),
+       (37, 1, int4range(4710, 4714), 1);
 
 -- Inside `caller`: what it states ...
 INSERT INTO symbol_refs (to_symbol, from_object, from_offset_range, roles)
