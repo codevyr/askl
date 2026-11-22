@@ -221,6 +221,17 @@ impl Edge {
         }
     }
 
+    /// The edge of these parts: `None` when there is neither containment nor
+    /// a reference test, which is no edge.  For what is left of an edge when
+    /// part of it is settled (`Unproven`).
+    pub const fn of(has: bool, refs: Option<RefTest>) -> Option<Edge> {
+        if has || refs.is_some() {
+            Some(Edge { has, refs })
+        } else {
+            None
+        }
+    }
+
     /// Either: a pair is related if it is related by one or the other.
     pub fn or(self, other: Edge) -> Edge {
         Edge {
@@ -383,5 +394,20 @@ mod tests {
         );
         assert!(!two.has());
         assert_eq!(Edge::HAS | Edge::HAS, Edge::HAS);
+    }
+
+    #[test]
+    fn an_edge_of_no_part_is_no_edge() {
+        assert_eq!(Edge::of(false, None), None);
+        assert_eq!(Edge::of(true, None), Some(Edge::HAS));
+        assert_eq!(
+            Edge::of(false, Some(RefTest::EVERY)),
+            Some(Edge::EVERY_REFERENCE)
+        );
+        assert_eq!(Edge::of(true, Some(RefTest::EVERY)), Some(Edge::ALL));
+        assert_eq!(
+            Edge::of(true, Some(calls())),
+            Some(Edge::references(calls()) | Edge::HAS)
+        );
     }
 }

@@ -8,13 +8,13 @@ use crate::span::Span;
 use crate::statement::Statement;
 use anyhow::Result;
 use async_trait::async_trait;
-use index::db_diesel::{AskSide, FamilyDemands, FamilyRead, Related};
+use index::db_diesel::{AskSide, FamilyDemands, FamilyRead, ReferenceRead, Related};
 use index::db_diesel::{
     CompositeFilter, DirectOnlyMixin, EphContext, EphScopedFut, EphTransaction, FoldedOnlyMixin,
     Index, OuterParentFilterMixin, RootLayer, RootShardRef, ScopeContext, Selection,
     SymbolInstanceIdMixin, TraversalMode,
 };
-use index::edge::Edge;
+use index::edge::{Edge, RefTest};
 
 /// Root-shard populate callback used by [`LayerSpec`].  Called by the
 /// statement-execution layer inside [`Index::with_eph_layer`] — once PER
@@ -879,12 +879,13 @@ impl SelectorState {
         if dependency.capped || own.capped {
             return None;
         }
-        let (refs_proven, has_proven) = absence_by_kind(own, dependency, role)?;
-        let refs = rel_type.refs().is_some() && !refs_proven;
-        let has = rel_type.has() && !has_proven;
-        if !refs && !has {
-            return None;
-        }
+        let (refs_proven, has_proven) = absence_by_kind(own, dependency, role, rel_type)?;
+        // What of the edge the lists leave open: nothing, and there is
+        // nothing to ask.
+        let open = Edge::of(
+            rel_type.has() && !has_proven,
+            rel_type.refs().filter(|_| !refs_proven),
+        )?;
         let evidenced = evidenced(own, dependency, role, rel_type)?;
         let lacking: Vec<i64> = own
             .nodes
@@ -895,7 +896,10 @@ impl SelectorState {
         if lacking.is_empty() {
             return None;
         }
-        Some(Unproven { refs, has, lacking })
+        Some(Unproven {
+            edge: open,
+            lacking,
+        })
     }
 
     /// Constrain selection and produce a warning if the result is empty.
@@ -996,7 +1000,6 @@ fn evidenced_by_parent(
     parent: &Selection,
     rel_type: Edge,
 ) -> std::collections::HashSet<i64> {
-    let check_refs = rel_type.refs().is_some();
     let check_has = rel_type.has();
     let parent_instance_ids: std::collections::HashSet<_> =
         parent.nodes.iter().map(|n| n.symbol_instance.id).collect();
@@ -1010,11 +1013,15 @@ fn evidenced_by_parent(
     // exist yet.
     let mut ref_evidence: std::collections::HashSet<i64> = Default::default();
     let mut has_evidence: std::collections::HashSet<i64> = Default::default();
-    if check_refs {
+    // A reference is evidence when the edge's test admits it: a family may
+    // have been read for a wider test than this edge asks (two children of
+    // one parent, each with its own).
+    if let Some(test) = rel_type.refs() {
         ref_evidence.extend(
             selection
                 .parents
                 .iter()
+                .filter(|r| admitted(test, &r.symbol_ref))
                 .filter(|r| parent_instance_ids.contains(&r.from_instance.id))
                 .map(|r| r.to_symbol.id),
         );
@@ -1022,6 +1029,7 @@ fn evidenced_by_parent(
             parent
                 .children
                 .iter()
+                .filter(|r| admitted(test, &r.symbol_ref))
                 .filter(|r| parent_instance_ids.contains(&r.from_instance.id))
                 .map(|r| r.symbol.id),
         );
@@ -1061,7 +1069,6 @@ fn evidenced_by_child(
     child: &Selection,
     rel_type: Edge,
 ) -> std::collections::HashSet<i64> {
-    let check_refs = rel_type.refs().is_some();
     let check_has = rel_type.has();
     let child_symbol_ids: std::collections::HashSet<_> =
         child.nodes.iter().map(|n| n.symbol.id).collect();
@@ -1073,11 +1080,12 @@ fn evidenced_by_child(
     // this is uniformity (one side may have deferred its neighbourhood
     // query), not a freshness patch.
     let mut evidence: std::collections::HashSet<i64> = Default::default();
-    if check_refs {
+    if let Some(test) = rel_type.refs() {
         evidence.extend(
             selection
                 .children
                 .iter()
+                .filter(|r| admitted(test, &r.symbol_ref))
                 .filter(|r| child_symbol_ids.contains(&r.symbol.id))
                 .map(|r| r.from_instance.id),
         );
@@ -1085,6 +1093,7 @@ fn evidenced_by_child(
             child
                 .parents
                 .iter()
+                .filter(|r| admitted(test, &r.symbol_ref))
                 .filter(|r| child_symbol_ids.contains(&r.to_symbol.id))
                 .map(|r| r.from_instance.id),
         );
@@ -1113,14 +1122,20 @@ fn evidenced_by_child(
         .collect()
 }
 
+/// The reference row `reference` passes `test`: the in-memory reading of the
+/// test the reads put in SQL (`RefTest::admits`).
+fn admitted(test: RefTest, reference: &index::models_diesel::SymbolRef) -> bool {
+    test.admits(reference.roles, reference.relation)
+}
+
 /// What the lists between two statements leave open; see
 /// [`SelectorState::unproven`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Unproven {
-    /// The reference lists were not read to their end.
-    pub refs: bool,
-    /// The containment lists were not.
-    pub has: bool,
+    /// The part of the edge no list settles: its reference test when the
+    /// reference lists were not read to their end (or were read for
+    /// something narrower), containment when the containment lists were not.
+    pub edge: Edge,
     /// The rows no list ties to the neighbour.
     pub lacking: Vec<i64>,
 }
@@ -1142,7 +1157,7 @@ pub(crate) async fn ask_which_relate(
         _ => (&neighbour, &unproven.lacking, AskSide::Children),
     };
     index
-        .which_relate(parents, children, want, unproven.refs, unproven.has, eph)
+        .which_relate(parents, children, want, unproven.edge, eph)
         .await
 }
 
@@ -1169,42 +1184,54 @@ struct Narrowed {
 ///  * a family read against another neighbour's rows says nothing about this
 ///    one (`X { "a" ; { } }`: X's references are read within `"a"`);
 ///  * a bare scope accepts a reference OR containment, so references read in
-///    full cannot rule a row out while containment was cut.
+///    full cannot rule a row out while containment was cut;
+///  * a reference family read under a test says nothing about a reference
+///    the test left out (`ReferenceRead`): a list of calls cannot rule out a
+///    write.
 pub(crate) fn absence_is_proven(
     own: &Selection,
     dependency: &Selection,
     role: &DependencyRole,
     rel_type: Edge,
 ) -> bool {
-    let Some((refs, has)) = absence_by_kind(own, dependency, role) else {
+    let Some((refs, has)) = absence_by_kind(own, dependency, role, rel_type) else {
         // Membership in the owner's rows: no family is consulted.
         return true;
     };
-    (!rel_type.refs().is_some() || refs) && (!rel_type.has() || has)
+    (rel_type.refs().is_none() || refs) && (!rel_type.has() || has)
 }
 
-/// [`absence_is_proven`] kind by kind: whether silence about a reference, and
-/// about containment, proves there is none.  `None` for the roles that
-/// consult no family.
+/// [`absence_is_proven`] kind by kind: whether silence about a reference
+/// that `rel_type` admits, and about containment, proves there is none.
+/// `None` for the roles that consult no family.  The reference half is
+/// vacuously true for an edge that accepts no reference; its callers read it
+/// only for one that does.
 fn absence_by_kind(
     own: &Selection,
     dependency: &Selection,
     role: &DependencyRole,
+    rel_type: Edge,
 ) -> Option<(bool, bool)> {
     let own_ids = own.get_instance_ids();
     let dependency_ids = dependency.get_instance_ids();
     let either = |ours: &FamilyRead, theirs: &FamilyRead| {
         ours.proves_absence_for(&dependency_ids) || theirs.proves_absence_for(&own_ids)
     };
+    let either_reference = |ours: &ReferenceRead, theirs: &ReferenceRead| {
+        rel_type.refs().is_none_or(|test| {
+            ours.proves_absence_for(&dependency_ids, test)
+                || theirs.proves_absence_for(&own_ids, test)
+        })
+    };
     match role {
         // We are the parent: our children families, the child's parents ones.
         DependencyRole::Parent => Some((
-            either(&own.families.children, &dependency.families.parents),
+            either_reference(&own.families.children, &dependency.families.parents),
             either(&own.families.has_children, &dependency.families.has_parents),
         )),
         // We are the child.
         DependencyRole::Child => Some((
-            either(&own.families.parents, &dependency.families.children),
+            either_reference(&own.families.parents, &dependency.families.children),
             either(&own.families.has_parents, &dependency.families.has_children),
         )),
         DependencyRole::User | DependencyRole::PreSeedSibling | DependencyRole::PreSeedLabel(_) => {
@@ -1498,8 +1525,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         let (decl_ids, derive_capped) = index
             .find_child_instance_ids(
                 &parent_ids,
-                notif_ctx.rel_type.refs().is_some(),
-                notif_ctx.rel_type.has(),
+                notif_ctx.rel_type,
                 &find_filter,
                 notif_ctx.within.as_deref(),
                 eph,
@@ -1578,8 +1604,7 @@ pub trait Selector: std::fmt::Debug + Verb {
         let found = index
             .find_child_instance_ids(
                 &parent_ids,
-                notif_ctx.rel_type.refs().is_some(),
-                notif_ctx.rel_type.has(),
+                notif_ctx.rel_type,
                 &CompositeFilter::and(find_parts),
                 notif_ctx.within.as_deref(),
                 eph,
