@@ -6652,6 +6652,650 @@ fn a_passed_over_notice_survives_a_cache_hit() {
     });
 }
 
+/// Instance ids of an answer on the role-words fixture, sorted.
+///
+/// project `stated`: caller 10, other 20, via 30, ops 40, slot 50,
+///   my_read 60, hook 70, shared 80, plain 90, maybe 100, counter 110,
+///   T 120, M 130, direct 140, stored 150, twin 160 (declared at 165) and
+///   170, noisy 180, M2 190, user_of_m 200.
+/// project `silent`: old_caller 1010, shared 1020, old_target 1030,
+///   OLD_DEFINE 1040, old_lock 1050.
+fn role_ids(q: &str) -> Vec<i64> {
+    let res = run_query(crate::test_util::TEST_INPUT_ROLE_WORDS, q);
+    let mut ids: Vec<i64> = res.nodes.as_vec().iter().map(|i| (*i).into()).collect();
+    ids.sort();
+    ids
+}
+
+/// What a relationship word said it passed over, on the role-words fixture.
+fn role_said(q: &str) -> Vec<String> {
+    run_query(crate::test_util::TEST_INPUT_ROLE_WORDS, q)
+        .warnings
+        .iter()
+        .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::PassedOver)
+        .map(|w| w.message.clone())
+        .collect()
+}
+
+#[test]
+fn a_role_word_narrows_refs_to_the_references_that_state_it() {
+    let ids = role_ids;
+    // `caller` calls `hook` and `shared`, takes `hook`, and `counter++`es;
+    // it names `plain`, `maybe`, `T` and `M` with nothing stated.
+    assert_eq!(
+        ids(r#""caller" refs { }"#),
+        vec![10, 70, 80, 90, 100, 110, 120, 130]
+    );
+
+    // calls: downward and upward.
+    assert_eq!(ids(r#""caller" calls { }"#), vec![10, 70, 80]);
+    assert_eq!(ids(r#"calls { "hook" }"#), vec![10, 70]);
+    assert_eq!(ids(r#"func calls { "hook" }"#), vec![10, 70]);
+    assert_eq!(ids(r#""caller" calls { "hook" }"#), vec![10, 70]);
+    // writes.
+    assert_eq!(ids(r#""caller" writes { }"#), vec![10, 110]);
+    assert_eq!(ids(r#"writes { "counter" }"#), vec![10, 110]);
+    // takes, also spelled reads: one bit, either word, any target.
+    assert_eq!(ids(r#""caller" takes { }"#), vec![10, 70, 110]);
+    assert_eq!(ids(r#""caller" reads { }"#), vec![10, 70, 110]);
+    assert_eq!(ids(r#"takes { "hook" }"#), vec![10, 70]);
+    assert_eq!(ids(r#"reads { "hook" }"#), vec![10, 70]);
+    assert_eq!(ids(r#"reads { "counter" }"#), vec![10, 110]);
+
+    // `counter++` is one token that states two roles: both words find it.
+    assert_eq!(
+        ids(r#"writes { "counter" }"#),
+        ids(r#"takes { "counter" }"#)
+    );
+    // A role is a role: the call of `hook` is not a write of it.
+    assert_eq!(ids(r#"writes { "hook" }"#), vec![70]);
+
+    // AN UNSTATED ROLE IS UNKNOWN, NEVER "NO" -- and never "yes": no role
+    // word matches a reference that states nothing.  (A statement that names
+    // something shows it; the unnamed one is empty.)
+    for word in ["calls", "writes", "takes", "reads"] {
+        assert_eq!(ids(&format!(r#"{word} {{ "plain" }}"#)), vec![90], "{word}");
+        assert_eq!(ids(&format!(r#""other" {word} {{ }}"#)), vec![20], "{word}");
+        assert_eq!(
+            ids(&format!(r#""old_caller" {word} {{ }}"#)),
+            vec![1010],
+            "{word}"
+        );
+    }
+    // A relation row is no token and states no role.
+    assert_eq!(ids(r#"calls { "my_read" }"#), vec![60]);
+    assert_eq!(ids(r#"field("slot") calls { }"#), vec![50]);
+
+    // `calls` is literal: `via` calls the slot.  What the slot holds is one
+    // more hop, and it is written.
+    assert_eq!(ids(r#""via" calls { }"#), vec![30, 50, 140]);
+    assert_eq!(ids(r#""via" calls { func }"#), vec![30, 140]);
+    assert_eq!(ids(r#""via" calls { field }"#), vec![30, 50]);
+    assert_eq!(
+        ids(r#""via" calls { field holds { func } }"#),
+        vec![30, 50, 60, 140, 150]
+    );
+    // The word carries into nested scopes as `refs` does: the slot calls
+    // nothing, so the inner scope written without `holds` finds nothing.
+    assert_ne!(
+        ids(r#""via" calls { field { func } }"#),
+        ids(r#""via" calls { field holds { func } }"#)
+    );
+    assert_eq!(
+        ids(r#""via" calls { field { func } }"#),
+        ids(r#""via" calls { field calls { func } }"#)
+    );
+
+    // The last relationship word of a statement is the one in force.
+    assert_eq!(ids(r#""caller" calls writes { }"#), vec![10, 110]);
+    assert_eq!(ids(r#""caller" writes calls { }"#), vec![10, 70, 80]);
+    assert_eq!(
+        ids(r#""caller" calls refs { }"#),
+        ids(r#""caller" refs { }"#)
+    );
+
+    // The words take no arguments.
+    for q in [
+        r#"calls(inherit=true) { "hook" }"#,
+        r#"writes("x") { "hook" }"#,
+        r#"reads(inherit=false) { "hook" }"#,
+    ] {
+        assert!(
+            crate::test_util::run_query_err(crate::test_util::TEST_INPUT_ROLE_WORDS, q).is_err(),
+            "{q}"
+        );
+    }
+}
+
+#[test]
+fn a_role_word_reads_a_drawn_edge_as_a_reference_that_states_nothing() {
+    // A forced edge (`!"x"`) is drawn by the query, not read from the text:
+    // in memory it is an ordinary reference that states nothing, and every
+    // relationship word is applied to it as to any other row.  `refs` admits
+    // such a reference and draws the edge.  No other word does: not `has`,
+    // not the relation words, and not a role word -- the edge is not stated
+    // to be a call.
+    let ids = role_ids;
+    let drawn = |word: &str| ids(&format!(r#""other" {word} {{ !"my_read" }}"#));
+    assert_eq!(drawn(""), vec![20, 60], "a bare scope draws it");
+    assert_eq!(drawn("refs"), vec![20, 60]);
+    for word in [
+        "has", "holds", "declares", "calls", "writes", "takes", "reads",
+    ] {
+        assert_eq!(drawn(word), Vec::<i64>::new(), "{word}");
+    }
+
+    // A label use (`#l`) is the same kind of row.  The label's own statement
+    // prints `my_read` whatever happens; the question is what becomes of
+    // `other`.  A word that reads the reference table and does not admit the
+    // row leaves `other` as it was, role words exactly as `holds` and
+    // `declares` do.  (`has`, which reads no reference at all, drops it.)
+    let labelled = |word: &str| ids(&format!(r#"@l "my_read"; "other" {word} {{ #l }}"#));
+    assert_eq!(labelled(""), vec![20, 60]);
+    assert_eq!(labelled("refs"), vec![20, 60]);
+    for word in ["holds", "declares", "calls", "writes", "takes", "reads"] {
+        assert_eq!(labelled(word), vec![20, 60], "{word}");
+    }
+    assert_eq!(labelled("has"), vec![60]);
+}
+
+#[test]
+fn a_role_word_says_how_many_symbols_it_could_not_decide() {
+    // `caller` names `plain` and `maybe` without saying what it does to
+    // them; `calls` lists neither and cannot say they are not calls.  `T` (a
+    // type) and `M` (a macro) are not counted: a reference to one has no
+    // role to state.  `counter` is not counted: its reference states what it
+    // does, and that is not a call.
+    assert_eq!(
+        role_said(r#""caller" calls { }"#),
+        vec![
+            "`calls` passed over 2 symbols that `\"caller\"` names without stating a role \
+             (`#define` bodies, macro uses): `maybe`, `plain`. Whether it calls them is not \
+             known; `refs { … }` lists them"
+                .to_string()
+        ]
+    );
+    // By default: the answer is not empty (it lists `hook` and `shared`).
+    assert_eq!(role_ids(r#""caller" calls { }"#), vec![10, 70, 80]);
+
+    // Upward: `other` names `hook`, role unstated.
+    assert_eq!(
+        role_said(r#"calls { "hook" }"#),
+        vec![
+            "`calls` passed over 1 symbol that names `\"hook\"` without stating a role \
+             (`#define` bodies, macro uses): `other`. Whether it calls `\"hook\"` is not \
+             known; `refs { … }` lists it"
+                .to_string()
+        ]
+    );
+    // The statement's own words are part of what would have been listed.
+    assert_eq!(
+        role_said(r#""caller" writes { data }"#),
+        vec![
+            "`writes` passed over 1 symbol matching `data` that `\"caller\"` names without \
+             stating a role (`#define` bodies, macro uses): `maybe`. Whether it writes it is \
+             not known; `refs { … }` lists it"
+                .to_string()
+        ]
+    );
+    // The word as it was written.
+    assert_eq!(
+        role_said(r#""caller" reads { func }"#),
+        vec![
+            "`reads` passed over 2 symbols matching `func` that `\"caller\"` names without \
+             stating a role (`#define` bodies, macro uses): `plain`, `shared`. Whether it \
+             reads them is not known; `refs { … }` lists them"
+                .to_string()
+        ]
+    );
+    assert!(role_said(r#""caller" takes { func }"#)[0].starts_with("`takes` passed over 2 symbols"));
+    // `caller` names `shared` where nothing is stated and CALLS it somewhere
+    // else: `calls` found it, so it did not pass it over (above); `reads`
+    // did not find it, and did.
+
+    // Between two statements that both name something, the target is the one
+    // spoken of; when the target was found, the sources are.
+    assert_eq!(
+        role_said(r#""other" calls { "hook" }"#),
+        vec![
+            "`calls` passed over 1 symbol matching `\"hook\"` that `\"other\"` names without \
+             stating a role (`#define` bodies, macro uses): `hook`. Whether it calls it is \
+             not known; `refs { … }` lists it"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        role_said(r#"func calls { "hook" }"#),
+        vec![
+            "`calls` passed over 1 symbol matching `func` that names `\"hook\"` without \
+             stating a role (`#define` bodies, macro uses): `other`. Whether it calls \
+             `\"hook\"` is not known; `refs { … }` lists it"
+                .to_string()
+        ]
+    );
+    // Two sources in one statement: `caller` calls `hook`, so `hook` was
+    // found; `other` only names it, and is what was passed over.
+    assert_eq!(
+        role_said(r#""caller" "other" calls { "hook" }"#),
+        vec![
+            "`calls` passed over 1 symbol matching `\"caller\" \"other\"` that names \
+             `\"hook\"` without stating a role (`#define` bodies, macro uses): `other`. \
+             Whether it calls `\"hook\"` is not known; `refs { … }` lists it"
+                .to_string()
+        ]
+    );
+    // Two symbols of one name: `M` calls one `twin` and names the other.
+    // The one it only names is the one passed over.
+    assert_eq!(
+        role_ids(r#"macro("M") calls { "twin" }"#),
+        vec![130, 160, 165]
+    );
+    assert_eq!(
+        role_ids(r#"macro("M") refs { "twin" }"#),
+        vec![130, 160, 165, 170]
+    );
+    assert_eq!(
+        role_said(r#"macro("M") calls { "twin" }"#),
+        vec![
+            "`calls` passed over 1 symbol matching `\"twin\"` that `macro(\"M\")` names \
+             without stating a role (`#define` bodies, macro uses): `twin`. Whether it calls \
+             it is not known; `refs { … }` lists it"
+                .to_string()
+        ]
+    );
+
+    // Nothing passed over, nothing said: every reference states its role ...
+    for q in [
+        r#""via" calls { }"#,
+        r#"writes { "counter" }"#,
+        r#""caller" calls { "hook" }"#,
+        // ... or the only unstated ones name a type or a macro ...
+        r#"calls { "T" }"#,
+        r#"calls { "M" }"#,
+        r#""caller" calls { type }"#,
+        // ... or the statement would not have listed them anyway ...
+        r#""caller" calls { "counter" }"#,
+        r#""caller" calls { field }"#,
+        // ... or its own words match nothing anywhere (it is told that).
+        r#""caller" calls { "no_such_symbol" }"#,
+        r#""no_such_symbol" calls { "plain" }"#,
+    ] {
+        assert_eq!(role_said(q), Vec::<String>::new(), "{q}");
+    }
+    // A word that is not a role word passes over no role.
+    for q in [
+        r#""caller" refs { }"#,
+        r#""caller" { }"#,
+        r#""caller" has { }"#,
+    ] {
+        assert_eq!(role_said(q), Vec::<String>::new(), "{q}");
+    }
+}
+
+#[test]
+fn what_a_role_word_passed_over_is_what_refs_would_have_listed_there() {
+    // "passed over" is measured against the answer the same query gives with
+    // `refs` in that one place.  `caller` names `plain` with nothing stated,
+    // and `plain` calls nothing: the outer `calls` passed `plain` over only
+    // if the inner scope would have kept it.
+    assert_eq!(
+        role_said(r#""caller" calls { calls { "hook" } }"#),
+        Vec::<String>::new(),
+        "`plain` and `maybe` do not call `hook`: `refs` there lists neither"
+    );
+    // From the far end too: `other` names `hook` with nothing stated, but
+    // `caller` does not call `other`, so it was never going to be listed.
+    assert_eq!(
+        role_ids(r#""caller" refs { calls { "hook" } }"#),
+        Vec::<i64>::new(),
+        "nothing `caller` names calls `hook`, whatever the outer word"
+    );
+
+    // One scope further out there is nothing settled to test against (the
+    // middle scopes name nothing and came out empty), so nothing can be said
+    // to have been passed over: silence, not a guess.
+    assert_eq!(
+        role_said(r#"calls { calls { calls { "plain" } } }"#),
+        Vec::<String>::new()
+    );
+
+    // `via` calls `slot`, and `slot` names `plain` with nothing stated: with
+    // `refs` in the inner scope `slot` is listed, so the inner `calls`
+    // passed it over.  `caller` names `plain` too and is not counted: `via`
+    // does not call `caller`.
+    assert_eq!(
+        role_said(r#""via" calls { calls { "plain" } }"#),
+        vec![
+            "`calls` passed over 1 symbol that names `\"plain\"` without stating a role \
+             (`#define` bodies, macro uses): `slot`. Whether it calls `\"plain\"` is not \
+             known; `refs { … }` lists it"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        role_ids(r#""via" calls { refs { "plain" } }"#),
+        vec![30, 50, 90]
+    );
+}
+
+/// What a relationship word said it passed over on the role-words fixture,
+/// with every read limited to `cap` rows.
+fn role_said_with_read_cap(q: &str, cap: usize) -> Vec<String> {
+    crate::test_util::run_query_with_read_cap(crate::test_util::TEST_INPUT_ROLE_WORDS, q, cap)
+        .warnings
+        .iter()
+        .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::PassedOver)
+        .map(|w| w.message.clone())
+        .collect()
+}
+
+#[test]
+fn a_role_word_counts_nothing_it_could_not_read_to_the_end() {
+    // `caller` calls two things.  Limited to one row the answer is cut, and
+    // says it is incomplete.  So is the read of what the word found, and
+    // what it passed over is what it did not find: nothing is counted.
+    let cut = crate::test_util::run_query_with_read_cap(
+        crate::test_util::TEST_INPUT_ROLE_WORDS,
+        r#""caller" calls { }"#,
+        1,
+    );
+    assert!(
+        cut.warnings
+            .iter()
+            .any(|w| w.kind == crate::diagnostic::DiagnosticKind::Truncation),
+        "{:?}",
+        cut.warnings
+    );
+    assert_eq!(
+        role_said_with_read_cap(r#""caller" calls { }"#, 1),
+        Vec::<String>::new()
+    );
+
+    // `noisy` names `maybe` eleven times with nothing stated.  Read whole,
+    // that is one symbol passed over ...
+    assert_eq!(
+        role_said(r#""noisy" calls { }"#),
+        vec![
+            "`calls` passed over 1 symbol that `\"noisy\"` names without stating a role \
+             (`#define` bodies, macro uses): `maybe`. Whether it calls it is not known; \
+             `refs { … }` lists it"
+                .to_string()
+        ]
+    );
+    // ... and with a budget of ten references the read gives up without a
+    // row.  There is then nothing to count or to name, and silence would
+    // pass the eleven over without a word.
+    assert_eq!(
+        role_said_with_read_cap(r#""noisy" calls { }"#, 1),
+        vec![
+            "`calls` passed over more references than could be read here, which `\"noisy\"` \
+             makes without stating a role (`#define` bodies, macro uses). Whether they are \
+             what `calls` asks for is not known; `refs { … }` lists them"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn what_a_role_word_passed_over_is_read_from_rows_the_word_did_not_choose() {
+    // Two functions are called `twin`.  The body of `M` calls the first and
+    // names the second; the body of `M2` names the first.  `user_of_m` uses
+    // both macros.
+    //
+    // With a probe cap of two, `"twin"` (three rows) does not resolve on its
+    // own words and is resolved THROUGH the edge: the `twin` the macros
+    // call.  Those rows were chosen by the word.  The unnamed middle was
+    // not: it is what `user_of_m` names, `M` and `M2`.  That is where to
+    // read from, and reading from there the `twin` that `M` only names is
+    // what `calls` passed over.  (Read from the chosen rows, the answer
+    // would speak of `M2` instead and never look at what the macros name.)
+    let q = r#""user_of_m" refs { calls { "twin" } }"#;
+    assert_eq!(
+        role_said_with_read_cap(q, 2),
+        vec![
+            // "at least": three rows carry the name, and the read stops at
+            // three.
+            "`calls` passed over at least 1 symbols matching `\"twin\"` that it names \
+             without stating a role (`#define` bodies, macro uses): `twin`. Whether it calls \
+             them is not known; `refs { … }` lists them"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn an_index_that_states_no_roles_says_a_role_word_cannot_match_there() {
+    // `silent` was uploaded by something that states no roles.  Its
+    // references are all "refers to": a role word answers nothing there, and
+    // that is a fact about the index, not about the code.
+    let silent = "the `silent` index states no roles; `calls` cannot match there. \
+                  `refs { … }` lists its references";
+    assert_eq!(
+        role_said(r#""old_caller" calls { }"#),
+        vec![silent.to_string()]
+    );
+    assert_eq!(
+        role_said(r#"calls { "old_target" }"#),
+        vec![silent.to_string()]
+    );
+    assert_eq!(
+        role_said(r#"writes { "old_target" }"#),
+        vec![silent.replace("`calls`", "`writes`")]
+    );
+    // Said once, however many scopes carry the word: both edges of this
+    // query run into the same index.
+    assert_eq!(
+        role_said(r#""old_caller" calls { calls { "old_target" } }"#),
+        vec![silent.to_string()]
+    );
+
+    // `shared` is a name in both projects.  Each index is spoken of for what
+    // it is: one states no roles; in the other `other` names `shared`
+    // without stating one.
+    assert_eq!(role_ids(r#"calls { "shared" }"#), vec![10, 80, 1020]);
+    assert_eq!(
+        role_said(r#"calls { "shared" }"#),
+        vec![
+            silent.to_string(),
+            "`calls` passed over 1 symbol that names `\"shared\"` without stating a role \
+             (`#define` bodies, macro uses): `other`. Whether it calls `\"shared\"` is not \
+             known; `refs { … }` lists it"
+                .to_string(),
+        ]
+    );
+    // With only the stating project in view, nothing is said of the other.
+    assert_eq!(
+        role_said(r#"project("stated") calls { "shared" }"#).len(),
+        1
+    );
+    assert!(role_said(r#"project("stated") calls { "shared" }"#)[0].starts_with("`calls` passed"));
+
+    // Not said where the word passed nothing over in that index: nothing
+    // there names `OLD_DEFINE`, and `old_target` names nothing.
+    for q in [
+        r#"calls { "OLD_DEFINE" }"#,
+        r#""old_target" calls { }"#,
+        r#""old_caller" refs { }"#,
+    ] {
+        assert_eq!(role_said(q), Vec::<String>::new(), "{q}");
+    }
+}
+
+#[test]
+fn a_role_word_that_found_nothing_says_which_slot_holds_the_target() {
+    // Nothing calls `my_read` by name: it is stored in `ops.slot` and called
+    // through it.  `calls` is literal, so the answer is empty -- and says
+    // where the function went.
+    assert_eq!(role_ids(r#"calls { "my_read" }"#), vec![60]);
+    assert_eq!(
+        role_said(r#"calls { "my_read" }"#),
+        vec![
+            "nothing calls `\"my_read\"` directly; `slot` holds it (`⇢`): \
+             `calls { field holds { \"my_read\" } }` goes through the slot"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        role_said(r#"func takes { "my_read" }"#),
+        vec![
+            "nothing matching `func` takes `\"my_read\"` directly; `slot` holds it (`⇢`): \
+             `func takes { field holds { \"my_read\" } }` goes through the slot"
+                .to_string()
+        ]
+    );
+    // The rewrite is a query, and it answers.
+    assert_eq!(
+        role_ids(r#"calls { field holds { "my_read" } }"#),
+        vec![30, 50, 60]
+    );
+
+    // Not said when something does call it, when no slot holds it, or when
+    // the word is not a role word.
+    for q in [
+        r#"calls { "hook" }"#,
+        r#"writes { "counter" }"#,
+        r#"calls { "T" }"#,
+        r#"refs { "my_read" }"#,
+        r#"has { "my_read" }"#,
+        r#""no_such_symbol" calls { "my_read" }"#,
+    ] {
+        assert!(
+            role_said(q).iter().all(|m| !m.contains("directly")),
+            "{q}: {:?}",
+            role_said(q)
+        );
+    }
+    // `direct` is held by the slot too, and `via` calls it by name: the
+    // answer is not empty and there is nothing to explain.
+    assert_eq!(role_ids(r#"calls { "direct" }"#), vec![30, 140]);
+    assert_eq!(role_said(r#"calls { "direct" }"#), Vec::<String>::new());
+    // `stored` is held by the slot, and `other` names it without stating a
+    // role.  "Nothing calls it" is then not known, and the answer says that
+    // and no more.
+    assert_eq!(role_ids(r#"calls { "stored" }"#), vec![150]);
+    assert_eq!(
+        role_said(r#"calls { "stored" }"#),
+        vec![
+            "`calls` passed over 1 symbol that names `\"stored\"` without stating a role \
+             (`#define` bodies, macro uses): `other`. Whether it calls `\"stored\"` is not \
+             known; `refs { … }` lists it"
+                .to_string()
+        ]
+    );
+    // Likewise of an index that states no roles.
+    assert!(role_said(r#"calls { "old_target" }"#)
+        .iter()
+        .all(|m| !m.contains("directly")));
+}
+
+#[test]
+fn a_relation_word_says_when_the_index_has_no_such_rows() {
+    // `silent` records no relation of either kind; `stated` has `holds`
+    // rows and no `declares` rows.
+    assert_eq!(
+        role_said(r#"macro("OLD_DEFINE") declares { data }"#),
+        vec![
+            "the `silent` index has no `declares` rows: nothing in it records what a macro \
+             declares"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        role_said(r#"declares { "old_lock" }"#),
+        vec![
+            "the `silent` index has no `declares` rows: nothing in it records what a macro \
+             declares"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        role_said(r#"holds { "old_target" }"#),
+        vec![
+            "the `silent` index has no `holds` rows: nothing in it records what a slot holds"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        role_said(r#"macro("M") declares { }"#),
+        vec![
+            "the `stated` index has no `declares` rows: nothing in it records what a macro \
+             declares"
+                .to_string()
+        ]
+    );
+
+    // An index that has such rows is asked, and its silence is its answer.
+    for q in [
+        r#"holds { "plain" }"#,
+        r#"field("slot") holds { "plain" }"#,
+        // Not empty.
+        r#"field("slot") holds { }"#,
+        r#"holds { "my_read" }"#,
+        // Its own words match nothing anywhere (it is told that).
+        r#"macro("OLD_DEFINE") declares { "no_such_symbol" }"#,
+    ] {
+        assert!(
+            role_said(q).iter().all(|m| !m.contains("rows")),
+            "{q}: {:?}",
+            role_said(q)
+        );
+    }
+    // The source is the wrong kind of thing: that is the reason, and the
+    // only one given.
+    assert_eq!(
+        role_said(r#""old_caller" holds { }"#),
+        vec![
+            "`holds` related nothing: only a slot holds (a field, or an interface method), \
+             and `\"old_caller\"` selects none"
+                .to_string()
+        ]
+    );
+    // On the relation fixture, whose index has both kinds, nothing is said
+    // of the index.
+    for q in [r#"declares { "plain" }"#, r#"holds { "plain" }"#] {
+        assert!(passed_over(q).iter().all(|m| !m.contains("rows")), "{q}");
+    }
+}
+
+#[test]
+fn what_a_role_word_says_survives_a_cache_hit() {
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let index =
+            crate::test_util::get_shared_index(crate::test_util::TEST_INPUT_ROLE_WORDS).await;
+        let said = |res: &crate::statement::ExecutionResult| -> Vec<String> {
+            res.warnings
+                .iter()
+                .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::PassedOver)
+                .map(|w| w.message.clone())
+                .collect()
+        };
+        for (q, notices) in [
+            (r#""caller" calls { }"#, 1),
+            (r#"calls { "shared" }"#, 2),
+            (r#"calls { "my_read" }"#, 1),
+            (r#"macro("OLD_DEFINE") declares { data }"#, 1),
+        ] {
+            let (cold, _) = crate::test_util::run_query_traced_on(index.clone(), q)
+                .await
+                .unwrap();
+            let before = index.sql_cache().stats();
+            let (warm, _) = crate::test_util::run_query_traced_on(index.clone(), q)
+                .await
+                .unwrap();
+            let after = index.sql_cache().stats();
+            assert_eq!(said(&cold).len(), notices, "{q}: {:?}", cold.warnings);
+            assert_eq!(said(&warm), said(&cold), "{q}");
+            assert_eq!(
+                after.misses, before.misses,
+                "{q}: the second run read nothing"
+            );
+            assert!(after.hits > before.hits, "{q}");
+        }
+    });
+}
+
 #[test]
 fn hidden_children_are_not_an_incomplete_answer() {
     // `GEN` refers to `shown` and to twelve folded symbols.  `"GEN" { }` lists
@@ -10223,6 +10867,234 @@ fn uploading_one_token_read_in_two_places_keeps_both_references() {
             "the call in each generated function must survive, and a re-sent \
              chunk must not duplicate them"
         );
+    });
+}
+
+/// WHAT AN INDEX STATES IS OBSERVED WHEN IT IS UPLOADED.
+///
+/// A role word answers nothing on an index whose references state no role,
+/// and the answer has to say that this is why.  The engine knows it from
+/// three facts kept with the project, which ingest sets when it stores a row
+/// that has the property -- per chunk, since chunks arrive separately and in
+/// any order -- and never clears.
+#[test]
+fn uploading_references_records_what_the_index_states() {
+    use crate::proto::askl::index::{
+        Object as UploadObject, Project as UploadProject, Symbol as UploadSymbol,
+        SymbolInstance as UploadInstance, SymbolRef as UploadRef,
+    };
+    use crate::test_util::{create_isolated_fixture, store_and_index_with_shared_cache};
+    use diesel_async::AsyncConnection;
+    let fx = create_isolated_fixture(VERB_TEST);
+
+    #[derive(diesel::QueryableByName, Debug, PartialEq)]
+    struct States {
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        states_roles: bool,
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        has_declares: bool,
+        #[diesel(sql_type = diesel::sql_types::Bool)]
+        has_holds: bool,
+    }
+
+    async fn states(conn: &mut diesel_async::AsyncPgConnection) -> States {
+        use diesel_async::RunQueryDsl;
+        diesel::sql_query(
+            "SELECT states_roles, has_declares, has_holds FROM index.projects \
+             WHERE project_name = 'test_project'",
+        )
+        .get_result::<States>(conn)
+        .await
+        .unwrap()
+    }
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let (store, index) = store_and_index_with_shared_cache(fx.url()).await;
+
+        // Re-upload the fixture's own project; see
+        // `uploading_two_instances_at_one_extent_keeps_both`.
+        let mut conn = diesel_async::AsyncPgConnection::establish(fx.url())
+            .await
+            .unwrap();
+        diesel_async::RunQueryDsl::execute(
+            diesel::sql_query("UPDATE index.projects SET upload_status = 'failed'"),
+            &mut conn,
+        )
+        .await
+        .unwrap();
+        // The fixture wrote its objects with explicit ids and left the
+        // sequence behind them; this test uploads more than one file.
+        diesel_async::RunQueryDsl::execute(
+            diesel::sql_query(
+                "SELECT setval(pg_get_serial_sequence('index.objects', 'id'), \
+                 (SELECT max(id) FROM index.objects))",
+            ),
+            &mut conn,
+        )
+        .await
+        .unwrap();
+
+        let (pid, _) = store
+            .upload_index(
+                UploadProject {
+                    project_name: "test_project".to_string(),
+                    root_path: "/test_project".to_string(),
+                    ..Default::default()
+                },
+                Some(1),
+                Some(4),
+            )
+            .await
+            .unwrap();
+        let sym = |local_id: i64, name: &str, r#type: i32| UploadSymbol {
+            local_id,
+            name: name.to_string(),
+            r#type,
+            ..Default::default()
+        };
+        store
+            .upload_symbol_chunk(
+                pid,
+                0,
+                vec![
+                    sym(1, "old_user", 1),
+                    sym(2, "new_user", 1),
+                    sym(3, "target", 1),
+                    sym(4, "slot", 8),
+                ],
+            )
+            .await
+            .unwrap();
+
+        // One file per chunk: a function, or the slot, with one row inside.
+        let file = |local_id: i64, symbol: i64, row: Option<UploadRef>| UploadProject {
+            objects: vec![UploadObject {
+                local_id,
+                module_path: "mod".to_string(),
+                filesystem_path: format!("/test_project/f{local_id}.c"),
+                filetype: "c".to_string(),
+                content: format!("file {local_id}").into_bytes(),
+                symbol_instances: vec![UploadInstance {
+                    symbol_local_id: symbol,
+                    instance_type: 1,
+                    start_offset: 0,
+                    end_offset: 100,
+                    dfs_enter: 0,
+                    dfs_exit: 8192,
+                    nesting_level: 0,
+                    ..Default::default()
+                }],
+                refs: row
+                    .into_iter()
+                    .map(|row| UploadRef {
+                        to_symbol_local_id: 3,
+                        from_offset_start: 10,
+                        from_offset_end: 16,
+                        nesting_level: 1,
+                        dfs_enter: 1,
+                        ..row
+                    })
+                    .collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let said = |res: &crate::statement::ExecutionResult| -> Vec<String> {
+            res.warnings
+                .iter()
+                .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::PassedOver)
+                .map(|w| w.message.clone())
+                .collect()
+        };
+        let ask = || async {
+            crate::test_util::run_query_traced_on(index.clone(), r#"calls { "target" }"#)
+                .await
+                .unwrap()
+                .0
+        };
+        let nothing_stated = States {
+            states_roles: false,
+            has_declares: false,
+            has_holds: false,
+        };
+
+        // A new project states nothing, and neither does a chunk whose
+        // references state nothing: an index from before roles.
+        assert_eq!(states(&mut conn).await, nothing_stated);
+        store
+            .upload_object_chunk(pid, 3, file(4, 3, None))
+            .await
+            .unwrap();
+        let unstated = file(1, 1, Some(UploadRef::default()));
+        store
+            .upload_object_chunk(pid, 0, unstated.clone())
+            .await
+            .unwrap();
+        assert_eq!(states(&mut conn).await, nothing_stated);
+        assert_eq!(
+            said(&ask().await),
+            vec![
+                "the `test_project` index states no roles; `calls` cannot match there. \
+                 `refs { … }` lists its references"
+                    .to_string()
+            ]
+        );
+
+        // A later chunk has one reference that states a role.
+        let calling = file(
+            2,
+            2,
+            Some(UploadRef {
+                roles: 1,
+                ..Default::default()
+            }),
+        );
+        store.upload_object_chunk(pid, 1, calling).await.unwrap();
+        assert_eq!(
+            states(&mut conn).await,
+            States {
+                states_roles: true,
+                ..nothing_stated
+            }
+        );
+        // The same question is now answered -- the cache did not keep the
+        // old fact -- and what is left unstated is counted, not blamed on
+        // the index.
+        let answered = ask().await;
+        assert_eq!(
+            said(&answered),
+            vec![
+                "`calls` passed over 1 symbol that names `\"target\"` without stating a role \
+                 (`#define` bodies, macro uses): `old_user`. Whether it calls `\"target\"` is \
+                 not known; `refs { … }` lists it"
+                    .to_string()
+            ]
+        );
+        assert_eq!(answered.nodes.as_vec().len(), 2, "`new_user` and `target`");
+
+        // A relation row sets its own fact and no other.
+        let holding = file(
+            3,
+            4,
+            Some(UploadRef {
+                relation: 2,
+                ..Default::default()
+            }),
+        );
+        store.upload_object_chunk(pid, 2, holding).await.unwrap();
+        let all_but_declares = States {
+            states_roles: true,
+            has_declares: false,
+            has_holds: true,
+        };
+        assert_eq!(states(&mut conn).await, all_but_declares);
+
+        // Never cleared: a re-sent chunk that states nothing changes nothing.
+        store.upload_object_chunk(pid, 0, unstated).await.unwrap();
+        store.finalize_project(pid).await.unwrap();
+        assert_eq!(states(&mut conn).await, all_but_declares);
     });
 }
 
