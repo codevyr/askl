@@ -4,6 +4,7 @@ use crate::parser_context::{
     SYMBOL_TYPE_DATA, SYMBOL_TYPE_DIRECTORY, SYMBOL_TYPE_FIELD, SYMBOL_TYPE_FILE,
     SYMBOL_TYPE_FUNCTION, SYMBOL_TYPE_MACRO, SYMBOL_TYPE_MODULE, SYMBOL_TYPE_TYPE,
 };
+use crate::relationship::Word;
 use crate::span::Span;
 use index::db_diesel::{CompositeFilter, CompoundNameMixin, LeafNameMixin};
 use pest::error::Error;
@@ -33,8 +34,7 @@ pub(crate) use self::ephemeral::{EphemeralOps, LabelResolutions};
 pub(super) use self::filters::{IgnoreVerb, PackageFilter, ProjectFilter};
 pub(super) use self::loc::LocSelector;
 pub(super) use self::modifiers::{
-    DeriveModifier, HasModifier, LimitsVerb, NestedModifier, RefsModifier, RelationModifier,
-    RoleModifier, UnnestModifier,
+    DeriveModifier, LimitsVerb, NestedModifier, RelationshipVerb, UnnestModifier,
 };
 pub(super) use self::search::SearchSelector;
 pub(super) use self::selectors::{ForcedVerb, TypeSelector};
@@ -104,17 +104,9 @@ pub(crate) fn build_generic_verb(
         LabelVerb::NAME => LabelVerb::new(verb_span, &args),
         UserVerb::NAME => UserVerb::new(verb_span, &args),
         PreambleVerb::NAME => PreambleVerb::new(verb_span, &args),
-        HasModifier::NAME => HasModifier::new(verb_span, &args),
-        RefsModifier::NAME => RefsModifier::new(verb_span, &args),
-        RelationModifier::DECLARES => {
-            RelationModifier::new(verb_span, &args, index::roles::Relation::Declares)
-        }
-        RelationModifier::HOLDS => {
-            RelationModifier::new(verb_span, &args, index::roles::Relation::Holds)
-        }
-        word if RoleModifier::role_of(word).is_some() => {
-            let (word, role) = RoleModifier::role_of(word).expect("checked by the guard");
-            RoleModifier::new(verb_span, &args, word, role)
+        word if Word::named(word).is_some() => {
+            let word = Word::named(word).expect("checked by the guard");
+            RelationshipVerb::word(verb_span, &args, word)
         }
         DeriveModifier::NAME => DeriveModifier::new(verb_span, &args),
         LimitsVerb::NAME => LimitsVerb::new(verb_span, &args),

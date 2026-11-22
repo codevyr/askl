@@ -5,9 +5,10 @@ use crate::execution_state::{
 use crate::hierarchy::Hierarchy;
 use crate::parser::Rule;
 use crate::parser_context::ParserContext;
+use crate::relationship::Relationship;
 use crate::scope::{build_scope, EmptyScope, Scope};
 use crate::span::Span;
-use crate::verb::{build_compound_filter, DefaultTypeFilter};
+use crate::verb::{build_compound_filter, DefaultTypeFilter, Term};
 use index::edge::Edge;
 use pest::error::Error;
 use std::collections::HashMap;
@@ -30,12 +31,38 @@ pub fn build_statement<'a>(
 
     let mut last_verb_end: Option<usize> = None;
     let mut scope_has_real_children = false;
+    // Where this statement wrote its relationship, if it has.
+    let mut relationship: Option<pest::Span> = None;
+    let text = |span: &pest::Span| span.as_str().trim().to_string();
 
     for pair in iter.by_ref() {
         match pair.as_rule() {
             Rule::compound_filter => {
                 last_verb_end = Some(pair.as_span().end());
-                build_compound_filter(sub_ctx.clone(), pair)?;
+                let term_span = pair.as_span();
+                let term = build_compound_filter(sub_ctx.clone(), pair)?;
+                // A STATEMENT SAYS ITS RELATIONSHIP ONCE, WHEREVER IT SAYS
+                // IT.  Like every other term, a relationship word acts on
+                // the statement it is written in, so its place among the
+                // terms means nothing: `calls func { … }` is `func calls
+                // { … }`.  Two of them used to run as the second alone;
+                // what the two mean together is either, and that is spelled
+                // `or` (as two type words are: `macro or func`).
+                if term == Term::Relationship {
+                    if let Some(first) = &relationship {
+                        return Err(Error::new_from_span(
+                            pest::error::ErrorVariant::CustomError {
+                                message: format!(
+                                    "join relationship words with `or`: `{} or {}`",
+                                    text(first),
+                                    text(&term_span)
+                                ),
+                            },
+                            term_span,
+                        ));
+                    }
+                    relationship = Some(term_span);
+                }
             }
             Rule::scope => {
                 scope_has_real_children = pair.clone().into_inner().next().is_some();
@@ -43,7 +70,7 @@ pub fn build_statement<'a>(
                 if !sub_ctx.has_relationship_modifier() {
                     // No explicit has/refs — default to both so parent-child
                     // works regardless of whether the edge is containment or reference.
-                    sub_ctx.set_relationship_type_default(Edge::ALL);
+                    sub_ctx.set_relationship_type_default(Relationship::unwritten(Edge::ALL));
                 }
 
                 // Allow all symbol types for children — empty vec means no type filtering.
