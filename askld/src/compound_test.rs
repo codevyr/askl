@@ -1,5 +1,6 @@
 //! Boolean filter expressions: parsing, admission errors, and execution.
 
+use crate::hierarchy::Hierarchy;
 use crate::parser::parse;
 use crate::test_util::{run_query, TEST_INPUT_A, VERB_TEST};
 use index::symbols::SymbolInstanceId;
@@ -46,7 +47,9 @@ fn keywords_do_not_split_identifiers() {
 
 #[test]
 fn non_predicate_verbs_are_rejected_in_expressions() {
-    let err = parse_err(r#"not has "a""#);
+    // (A relationship WORD is an atom of the other kind of expression: see
+    // "Relationship expressions" below.  `derive(...)` is not one.)
+    let err = parse_err(r#"not derive(type="has") "a""#);
     assert!(err.contains("relationship verb"), "{}", err);
 
     let err = parse_err(r#"@l or "a""#);
@@ -352,4 +355,269 @@ fn package_filter_parses_and_holds_its_slot() {
         .map(|f| format!("{}", f))
         .collect();
     assert_eq!(filters, vec!["PackageFilter(package=k8s.io/y)".to_string()]);
+}
+
+// ---------------------------------------------------------------------------
+// Relationship expressions
+// ---------------------------------------------------------------------------
+
+/// The relationship each top-level statement asks of the statements in its
+/// braces, as (edge, the words written).
+fn asked(query: &str) -> Vec<(index::edge::Edge, Option<String>)> {
+    let ast = parse(query).unwrap_or_else(|e| panic!("`{}` failed to parse: {}", query, e));
+    ast.scope()
+        .statements()
+        .map(|statement| {
+            let child = statement
+                .children()
+                .next()
+                .unwrap_or_else(|| panic!("`{}` has no scope", query));
+            (
+                child.get_relationship_type(),
+                child.relationship().written(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn relationship_words_join_with_or() {
+    use index::edge::{Edge, RefTest};
+    use index::roles::{Relation, Roles};
+
+    let calls = Edge::references(RefTest::stating(Roles::CALL).unwrap());
+    let writes = Edge::references(RefTest::stating(Roles::WRITE).unwrap());
+    let takes = Edge::references(RefTest::stating(Roles::TAKE).unwrap());
+    let holds = Edge::references(RefTest::relation(Relation::Holds));
+    let declares = Edge::references(RefTest::relation(Relation::Declares));
+    let refs = Edge::references(RefTest::ORDINARY);
+
+    for (q, edge, written) in [
+        // One word is the expression of one word.
+        (r#"calls { "x" }"#, calls, "calls"),
+        (r#"(calls) { "x" }"#, calls, "calls"),
+        // A PAIR MATCHES IF ANY OF ITS ROWS DOES: the union of the tests.
+        (r#"calls or has { "x" }"#, calls | Edge::HAS, "calls or has"),
+        (
+            r#""vfs_read" calls or holds { func }"#,
+            calls | holds,
+            "calls or holds",
+        ),
+        (
+            r#"calls or writes or takes { "x" }"#,
+            calls | writes | takes,
+            "calls or writes or takes",
+        ),
+        (
+            r#"refs or declares { "x" }"#,
+            refs | declares,
+            "refs or declares",
+        ),
+        // Parentheses group and change nothing: there is one operator.
+        (
+            r#"(calls or writes) or holds { "x" }"#,
+            calls | writes | holds,
+            "calls or writes or holds",
+        ),
+        (
+            r#"has or (refs or (declares)) { "x" }"#,
+            Edge::HAS | refs | declares,
+            "has or refs or declares",
+        ),
+        // A trailing operator continues the expression on the next line.
+        (
+            "\"a\" calls or\n  holds { \"x\" }",
+            calls | holds,
+            "calls or holds",
+        ),
+        // `reads` is `takes`; each is quoted as it was written, once.
+        (r#"reads { "x" }"#, takes, "reads"),
+        (r#"takes or reads { "x" }"#, takes, "takes or reads"),
+        (r#"calls or calls { "x" }"#, calls, "calls"),
+        // A role word narrows `refs`, so `refs` beside it admits them all.
+        (r#"calls or refs { "x" }"#, refs, "calls or refs"),
+    ] {
+        assert_eq!(asked(q), vec![(edge, Some(written.to_string()))], "{q}");
+    }
+
+    // The four relationships are everything: the bare scope's edge.
+    let all = asked(r#""a" has or refs or declares or holds { "x" }"#);
+    assert_eq!(all[0].0, Edge::ALL);
+    assert_eq!(asked(r#""a" { "x" }"#), vec![(Edge::ALL, None)]);
+
+    // LAW 3: `func or data calls or holds { "x" }` is two expressions, a type
+    // group for the statement and a relationship group for the edge.
+    let ast = parse(r#"func or data calls or holds { "x" }"#).unwrap();
+    let statement = ast.scope().statements().next().unwrap();
+    assert!(statement.command().has_suppress_default_type_filter());
+    let child = statement.children().next().unwrap();
+    assert_eq!(child.get_relationship_type(), calls | holds);
+    assert_eq!(
+        child.relationship().written().as_deref(),
+        Some("calls or holds")
+    );
+}
+
+#[test]
+fn and_between_relationships_is_not_supported_yet() {
+    for (q, quoted) in [
+        (r#"calls and writes { "n" }"#, "calls and writes"),
+        (r#""a" has and refs { func }"#, "has and refs"),
+        // `and` binds tighter than `or`: the conjunction is what is quoted.
+        (r#"has or calls and writes { "n" }"#, "calls and writes"),
+        (
+            r#"(calls or takes) and writes { "n" }"#,
+            "(calls or takes) and writes",
+        ),
+        // With a `not` inside, the `and` is met first.
+        (r#"refs and not calls { "x" }"#, "refs and not calls"),
+    ] {
+        let err = parse_err(q);
+        let expected = format!(
+            "`and` between relationships is not supported yet: `{quoted}` would have to be \
+             decided for the pair as a whole. Ask each in its own query."
+        );
+        assert!(err.contains(&expected), "{q}: {err}");
+    }
+}
+
+#[test]
+fn not_on_a_relationship_is_not_supported_yet() {
+    for (q, quoted, instead) in [
+        (
+            r#"not calls { "x" }"#,
+            "not calls",
+            "`writes or takes`, `refs`, `declares`",
+        ),
+        (
+            r#"not writes { "x" }"#,
+            "not writes",
+            "`calls or takes`, `refs`, `declares`",
+        ),
+        (
+            r#"not reads { "x" }"#,
+            "not reads",
+            "`calls or writes`, `refs`, `declares`",
+        ),
+        (
+            r#"not (calls or writes) { "x" }"#,
+            "not (calls or writes)",
+            "`takes`, `refs`, `declares`",
+        ),
+        (
+            r#"not has { "x" }"#,
+            "not has",
+            "`refs`, `declares`, `holds`",
+        ),
+        (
+            r#"not refs { "x" }"#,
+            "not refs",
+            "`has`, `declares`, `holds`",
+        ),
+        (
+            r#"has or not holds { "x" }"#,
+            "not holds",
+            "`has`, `refs`, `declares`",
+        ),
+        // Written before a selector, with no braces: still one expression.
+        (r#"not has "a""#, "not has", "`refs`, `declares`, `holds`"),
+    ] {
+        let err = parse_err(q);
+        let expected = format!("`{quoted}` is not supported yet: name what you want: {instead}.");
+        assert!(err.contains(&expected), "{q}: {err}");
+    }
+}
+
+#[test]
+fn a_relationship_and_a_predicate_are_written_side_by_side() {
+    // One expression is over predicates or over relationship words.
+    for (q, expected) in [
+        (
+            r#"func or calls { "x" }"#,
+            "`func` is a type, `calls` a relationship: write them side by side: \
+             `func calls { … }`",
+        ),
+        (
+            r#"calls or func { "x" }"#,
+            "`func` is a type, `calls` a relationship: write them side by side: \
+             `func calls { … }`",
+        ),
+        (
+            r#"func and has { "x" }"#,
+            "`func` is a type, `has` a relationship: write them side by side: \
+             `func has { … }`",
+        ),
+        (
+            r#"func or data or calls or holds { "x" }"#,
+            "`func` is a type, `calls` a relationship: write them side by side: \
+             `func or data calls or holds { … }`",
+        ),
+        (
+            r#""foo" or calls { "x" }"#,
+            "`\"foo\"` is a selector, `calls` a relationship: write them side by side: \
+             `\"foo\" calls { … }`",
+        ),
+        (
+            r#"project("p") or holds { "x" }"#,
+            "`project(\"p\")` is a filter, `holds` a relationship: write them side by side: \
+             `project(\"p\") holds { … }`",
+        ),
+    ] {
+        let err = parse_err(q);
+        assert!(err.contains(expected), "{q}: {err}");
+    }
+
+    // What is not a predicate either says so itself.
+    let err = parse_err(r#"derive(type="has") or calls { "x" }"#);
+    assert!(err.contains("`derive` is a relationship verb"), "{err}");
+    let err = parse_err(r#"@l or calls { "x" }"#);
+    assert!(err.contains("label verb"), "{err}");
+    // A relationship word takes no arguments, in an expression as outside.
+    let err = parse_err(r#"calls("x") or has { "x" }"#);
+    assert!(err.contains("takes no positional arguments"), "{err}");
+}
+
+#[test]
+fn a_relationship_word_stands_anywhere_in_its_statement() {
+    // A term acts on the statement it is written in; where it stands among
+    // the other terms means nothing.  (What each order ANSWERS is the same:
+    // `a_relationship_word_acts_on_its_statement_wherever_it_stands`.)
+    for q in [
+        r#"func calls { "x" }"#,
+        r#"calls func { "x" }"#,
+        r#""a" has "b" { "x" }"#,
+        r#"has "a" "b" { "x" }"#,
+        r#"calls or holds func or data { "x" }"#,
+        r#"project("p") calls or holds func or data { "x" }"#,
+        r#"has @l "a" { "x" }"#,
+        r#"@l "a" has { "x" }"#,
+    ] {
+        parse(q).unwrap_or_else(|e| panic!("`{}` failed to parse: {}", q, e));
+    }
+}
+
+#[test]
+fn two_relationship_words_are_joined_with_or() {
+    for (q, expected) in [
+        (
+            r#"field("slot") has holds { }"#,
+            "join relationship words with `or`: `has or holds`",
+        ),
+        (
+            r#""caller" calls writes { }"#,
+            "join relationship words with `or`: `calls or writes`",
+        ),
+        (
+            r#""caller" calls or has (holds) { }"#,
+            "join relationship words with `or`: `calls or has or (holds)`",
+        ),
+        // Apart, they are still two.
+        (
+            r#"has "a" refs { }"#,
+            "join relationship words with `or`: `has or refs`",
+        ),
+    ] {
+        let err = parse_err(q);
+        assert!(err.contains(expected), "{q}: {err}");
+    }
 }

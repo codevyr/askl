@@ -1,33 +1,55 @@
 use crate::parser_context::ParserContext;
+use crate::relationship::{Relationship, Word};
 use crate::span::Span;
 use crate::verb::Args;
 use anyhow::{anyhow, bail, Result};
 use index::db_diesel::TraversalMode;
-use index::edge::{Edge, RefTest};
-use index::roles::{Relation, Roles};
 use std::fmt::Display;
 use std::sync::Arc;
 
 use super::super::{DeriveMethod, Limits, Verb, VerbClass};
 
-/// HasModifier - sets the relationship type to Has (containment) for child scopes
+/// RelationshipVerb - what a scope asks of the edge to the statements in its
+/// braces: one relationship word, or several joined with `or`.
+///
+/// The words and what each selects are [`crate::relationship`]'s.  A word is
+/// written with no arguments, immediately before the `{` it governs, and is
+/// carried into nested scopes until one of them writes its own.
+///
+/// One word comes here from the verb table ([`RelationshipVerb::word`]); an
+/// expression of them comes from the expression builder, already joined
+/// ([`RelationshipVerb::joined`], see `verb/compound.rs`).  Either way the
+/// verb consumes itself into the parser context: it describes the scope, and
+/// is no part of the statement's command.
 #[derive(Debug)]
-pub(in crate::verb) struct HasModifier {
+pub(in crate::verb) struct RelationshipVerb {
     span: Span,
+    relationship: Relationship,
+    /// The expression as written (`calls or holds`): the verb's name.
+    written: String,
 }
 
-impl HasModifier {
-    pub(in crate::verb) const NAME: &'static str = "has";
-
-    pub fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
+impl RelationshipVerb {
+    pub fn word(span: Span, args: &Args, word: Word) -> Result<Arc<dyn Verb>> {
         args.accepts(0, &[])?;
-        Ok(Arc::new(Self { span }))
+        Ok(Self::joined(span, Relationship::of(word)))
+    }
+
+    /// A relationship that words were written for.  (One that no word asked
+    /// for is the bare scope, and no verb.)
+    pub fn joined(span: Span, relationship: Relationship) -> Arc<dyn Verb> {
+        let written = relationship.written().unwrap_or_default();
+        Arc::new(Self {
+            span,
+            relationship,
+            written,
+        })
     }
 }
 
-impl Verb for HasModifier {
+impl Verb for RelationshipVerb {
     fn name(&self) -> &str {
-        HasModifier::NAME
+        &self.written
     }
 
     fn span(&self) -> pest::Span<'_> {
@@ -42,204 +64,19 @@ impl Verb for HasModifier {
         DeriveMethod::Skip
     }
 
-    /// The has verb consumes itself by setting the relationship type in the parser context
+    fn relationship(&self) -> Option<&Relationship> {
+        Some(&self.relationship)
+    }
+
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.set_relationship_type_inherited(Edge::HAS);
+        ctx.set_relationship_type_inherited(self.relationship.clone());
         Ok(true) // consumed - don't add to command
     }
 }
 
-impl Display for HasModifier {
+impl Display for RelationshipVerb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "HasModifier")
-    }
-}
-
-/// RefsModifier - the scope relates by an ORDINARY reference: a token of the
-/// parent names the child (`→`).
-///
-/// A RELATIONSHIP WORD SELECTS THE EDGES DRAWN WITH ITS MARK.  There are four
-/// relationships and they are disjoint: `has` (`▸`), `refs` (`→`), `declares`
-/// (`↦`), `holds` (`⇢`).  A bare `{ }` asks for all four.  `refs` used to mean
-/// every row of the reference table, the two relations included, so
-/// `field refs { func }` listed what a slot holds under a word that says a
-/// token names it.
-#[derive(Debug)]
-pub(in crate::verb) struct RefsModifier {
-    span: Span,
-}
-
-impl RefsModifier {
-    pub(in crate::verb) const NAME: &'static str = "refs";
-
-    pub fn new(span: Span, args: &Args) -> Result<Arc<dyn Verb>> {
-        args.accepts(0, &[])?;
-        Ok(Arc::new(Self { span }))
-    }
-}
-
-impl Verb for RefsModifier {
-    fn name(&self) -> &str {
-        RefsModifier::NAME
-    }
-
-    fn span(&self) -> pest::Span<'_> {
-        self.span.as_pest_span()
-    }
-
-    fn class(&self) -> VerbClass {
-        VerbClass::Relationship
-    }
-
-    fn derive_method(&self) -> DeriveMethod {
-        DeriveMethod::Skip
-    }
-
-    /// The refs verb consumes itself by setting the relationship type in the parser context
-    fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.set_relationship_type_inherited(Edge::references(RefTest::ORDINARY));
-        Ok(true) // consumed - don't add to command
-    }
-}
-
-impl Display for RefsModifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RefsModifier")
-    }
-}
-
-/// RelationModifier - the scope relates by a relation, a fact no token of
-/// the parent spells: `declares` (the parent's invocation declared the child,
-/// `↦`) or `holds` (the parent is a slot and the child is stored in it, or an
-/// interface method and an implementer, `⇢`).
-///
-/// Written where `has` and `refs` are written, and carried into nested scopes
-/// exactly as they are.
-#[derive(Debug)]
-pub(in crate::verb) struct RelationModifier {
-    span: Span,
-    relation: Relation,
-}
-
-impl RelationModifier {
-    pub(in crate::verb) const DECLARES: &'static str = "declares";
-    pub(in crate::verb) const HOLDS: &'static str = "holds";
-
-    pub fn new(span: Span, args: &Args, relation: Relation) -> Result<Arc<dyn Verb>> {
-        args.accepts(0, &[])?;
-        Ok(Arc::new(Self { span, relation }))
-    }
-}
-
-impl Verb for RelationModifier {
-    fn name(&self) -> &str {
-        match self.relation {
-            Relation::Declares => RelationModifier::DECLARES,
-            Relation::Holds => RelationModifier::HOLDS,
-        }
-    }
-
-    fn span(&self) -> pest::Span<'_> {
-        self.span.as_pest_span()
-    }
-
-    fn class(&self) -> VerbClass {
-        VerbClass::Relationship
-    }
-
-    fn derive_method(&self) -> DeriveMethod {
-        DeriveMethod::Skip
-    }
-
-    fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.set_relationship_type_inherited(Edge::references(RefTest::relation(self.relation)));
-        Ok(true) // consumed - don't add to command
-    }
-}
-
-impl Display for RelationModifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RelationModifier({})", self.name())
-    }
-}
-
-/// RoleModifier - the scope relates by an ordinary reference that STATES what
-/// it does to the child: `calls` (the token is the callee of a call),
-/// `writes` (the child is assigned or initialised), `takes` (its value or
-/// address is taken, not called).  `reads` is `takes` under the name an
-/// answer prints for data and fields: one bit, either word, any target.
-///
-/// A ROLE WORD NARROWS `refs`.  It selects the references drawn `→` whose
-/// words say that role, and nothing else: not a relation row, which no token
-/// spells, and not a reference that states nothing.  AN UNSTATED ROLE IS
-/// UNKNOWN, NEVER "NO" -- and never "yes" either, so no role word matches it;
-/// what a word passed over for that reason, the answer says
-/// (`crate::statement::passed_over`).
-///
-/// `calls` is literal.  A call through a slot is a call of the slot; the
-/// functions stored in it are one more hop, written `calls { field holds
-/// { func } }`.
-///
-/// Written where `refs` is written, and carried into nested scopes exactly as
-/// it is.
-#[derive(Debug)]
-pub(in crate::verb) struct RoleModifier {
-    span: Span,
-    word: &'static str,
-    role: Roles,
-}
-
-impl RoleModifier {
-    pub(in crate::verb) const CALLS: &'static str = "calls";
-    pub(in crate::verb) const WRITES: &'static str = "writes";
-    pub(in crate::verb) const TAKES: &'static str = "takes";
-    pub(in crate::verb) const READS: &'static str = "reads";
-
-    /// The role a word asks for; `None` for a word that is not a role word.
-    pub(crate) fn role_of(word: &str) -> Option<(&'static str, Roles)> {
-        match word {
-            Self::CALLS => Some((Self::CALLS, Roles::CALL)),
-            Self::WRITES => Some((Self::WRITES, Roles::WRITE)),
-            Self::TAKES => Some((Self::TAKES, Roles::TAKE)),
-            Self::READS => Some((Self::READS, Roles::TAKE)),
-            _ => None,
-        }
-    }
-
-    pub fn new(span: Span, args: &Args, word: &'static str, role: Roles) -> Result<Arc<dyn Verb>> {
-        args.accepts(0, &[])?;
-        Ok(Arc::new(Self { span, word, role }))
-    }
-}
-
-impl Verb for RoleModifier {
-    fn name(&self) -> &str {
-        self.word
-    }
-
-    fn span(&self) -> pest::Span<'_> {
-        self.span.as_pest_span()
-    }
-
-    fn class(&self) -> VerbClass {
-        VerbClass::Relationship
-    }
-
-    fn derive_method(&self) -> DeriveMethod {
-        DeriveMethod::Skip
-    }
-
-    fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        let test = RefTest::stating(self.role)
-            .ok_or_else(|| anyhow!("`{}` asks for no role", self.word))?;
-        ctx.set_relationship_type_inherited(Edge::references(test));
-        Ok(true) // consumed - don't add to command
-    }
-}
-
-impl Display for RoleModifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RoleModifier({})", self.word)
+        write!(f, "RelationshipVerb({})", self.written)
     }
 }
 
@@ -251,7 +88,7 @@ impl Display for RoleModifier {
 #[derive(Debug)]
 pub(in crate::verb) struct DeriveModifier {
     span: Span,
-    relationship_type: Edge,
+    relationship: Relationship,
     inherit: bool,
 }
 
@@ -265,22 +102,26 @@ impl DeriveModifier {
             .named_str("type")?
             .ok_or_else(|| anyhow!("derive requires a 'type' parameter"))?;
 
-        let mut asked: Option<Edge> = None;
+        let mut asked: Option<Relationship> = None;
         for part in type_str.split(',') {
-            let edge = match part.trim() {
-                // What the word `refs` means (see `RefsModifier`).
-                "refs" => Edge::references(RefTest::ORDINARY),
-                "has" => Edge::HAS,
+            // The two words `derive` has always taken, meaning what they mean
+            // written as words.
+            let word = match part.trim() {
+                part @ ("refs" | "has") => Word::named(part).expect("a relationship word"),
                 other => bail!(
                     "unknown relationship type '{}' in derive (expected 'refs' or 'has')",
                     other
                 ),
             };
-            asked = Some(asked.map_or(edge, |so_far| so_far | edge));
+            let word = Relationship::of(word);
+            asked = Some(match asked {
+                Some(so_far) => so_far.or(word),
+                None => word,
+            });
         }
 
-        // `split` always yields a part, so an edge was asked or we bailed.
-        let Some(rel_type) = asked else {
+        // `split` always yields a part, so a word was asked or we bailed.
+        let Some(relationship) = asked else {
             bail!("derive type parameter must contain at least one of 'refs', 'has'");
         };
 
@@ -288,7 +129,7 @@ impl DeriveModifier {
 
         Ok(Arc::new(Self {
             span,
-            relationship_type: rel_type,
+            relationship,
             inherit,
         }))
     }
@@ -312,7 +153,7 @@ impl Verb for DeriveModifier {
     }
 
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.set_relationship_type_explicit(self.relationship_type);
+        ctx.set_relationship_type_explicit(self.relationship.clone());
         ctx.set_inherit_relationship_modifier(self.inherit);
         Ok(true) // consumed - don't add to command
     }
