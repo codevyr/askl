@@ -34,7 +34,7 @@ pub(super) use self::filters::{IgnoreVerb, PackageFilter, ProjectFilter};
 pub(super) use self::loc::LocSelector;
 pub(super) use self::modifiers::{
     DeriveModifier, HasModifier, LimitsVerb, NestedModifier, RefsModifier, RelationModifier,
-    UnnestModifier,
+    RoleModifier, UnnestModifier,
 };
 pub(super) use self::search::SearchSelector;
 pub(super) use self::selectors::{ForcedVerb, TypeSelector};
@@ -111,6 +111,10 @@ pub(crate) fn build_generic_verb(
         }
         RelationModifier::HOLDS => {
             RelationModifier::new(verb_span, &args, index::roles::Relation::Holds)
+        }
+        word if RoleModifier::role_of(word).is_some() => {
+            let (word, role) = RoleModifier::role_of(word).expect("checked by the guard");
+            RoleModifier::new(verb_span, &args, word, role)
         }
         DeriveModifier::NAME => DeriveModifier::new(verb_span, &args),
         LimitsVerb::NAME => LimitsVerb::new(verb_span, &args),
