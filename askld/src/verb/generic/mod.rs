@@ -34,7 +34,7 @@ pub(crate) use self::ephemeral::{EphemeralOps, LabelResolutions};
 pub(super) use self::filters::{IgnoreVerb, PackageFilter, ProjectFilter};
 pub(super) use self::loc::LocSelector;
 pub(super) use self::modifiers::{
-    DeriveModifier, LimitsVerb, NestedModifier, RelationshipVerb, UnnestModifier,
+    DeriveModifier, InheritVerb, LimitsVerb, NestedModifier, RelationshipVerb, UnnestModifier,
 };
 pub(super) use self::search::SearchSelector;
 pub(super) use self::selectors::{ForcedVerb, TypeSelector};

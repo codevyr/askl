@@ -126,6 +126,30 @@ impl PredicateExpr {
         }
     }
 
+    /// The expression with every positive atom that says a type carried
+    /// below ([`Verb::carried_below`]): `func or method inherit(type)` is
+    /// `func(inherit=true) or method(inherit=true)`.  A negated atom is an
+    /// exclusion, which is carried whatever it is.
+    fn carried_below(&self, positive: bool) -> PredicateExpr {
+        let each = |parts: &[PredicateExpr]| {
+            parts
+                .iter()
+                .map(|part| part.carried_below(positive))
+                .collect()
+        };
+        match self {
+            PredicateExpr::Atom(verb) => PredicateExpr::Atom(
+                Some(verb)
+                    .filter(|verb| positive && verb.writes().contains(&Dimension::Type))
+                    .and_then(|verb| verb.carried_below())
+                    .unwrap_or_else(|| verb.clone()),
+            ),
+            PredicateExpr::And(parts) => PredicateExpr::And(each(parts)),
+            PredicateExpr::Or(parts) => PredicateExpr::Or(each(parts)),
+            PredicateExpr::Not(inner) => PredicateExpr::Not(Box::new(inner.carried_below(false))),
+        }
+    }
+
     /// Visit every atom with its positivity (false once under any `not`).
     fn for_each_atom<'a>(&'a self, positive: bool, f: &mut impl FnMut(&'a Arc<dyn Verb>, bool)) {
         match self {
@@ -502,6 +526,13 @@ impl Verb for CompoundVerb {
         token
     }
 
+    fn carried_below(&self) -> Option<Arc<dyn Verb>> {
+        Some(Arc::new(CompoundVerb::new(
+            self.span.clone(),
+            self.expr.carried_below(true),
+        )))
+    }
+
     /// A branch never inherits; a filter compound follows
     /// [`PredicateExpr::inherits_as_filter`].
     fn derive_method(&self) -> DeriveMethod {
@@ -702,8 +733,8 @@ fn validate(expr: &PredicateExpr, span: pest::Span<'_>) -> Result<(), Error<Rule
 }
 
 /// What one term of a statement turned out to be.  A statement writes its
-/// relationship once and last (`statement/parse.rs`), so the statement
-/// builder needs to know which of its terms was one.
+/// relationship once (`statement/parse.rs`), so the statement builder needs
+/// to know which of its terms was one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Term {
     /// A relationship word, or several joined with `or`.

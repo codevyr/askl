@@ -596,6 +596,281 @@ fn a_relationship_word_stands_anywhere_in_its_statement() {
     }
 }
 
+/// What each statement of the first top-level tree says of the edge into
+/// its braces, outermost first: the words, or `-` for a bare scope.  A
+/// statement's braces are read off its first child.
+fn edges_down(q: &str) -> Vec<String> {
+    let ast = parse(q).unwrap_or_else(|e| panic!("`{}` failed to parse: {}", q, e));
+    let mut edges = Vec::new();
+    let mut statement = ast.scope().statements().next();
+    while let Some(s) = statement {
+        let child = s.scope().statements().next();
+        if let Some(child) = &child {
+            edges.push(
+                child
+                    .relationship()
+                    .written()
+                    .unwrap_or_else(|| "-".to_string()),
+            );
+        }
+        statement = child;
+    }
+    edges
+}
+
+/// The filters each statement of the first top-level tree runs under,
+/// outermost first.
+fn filters_down(q: &str) -> Vec<Vec<String>> {
+    let ast = parse(q).unwrap_or_else(|e| panic!("`{}` failed to parse: {}", q, e));
+    let mut all = Vec::new();
+    let mut statement = ast.scope().statements().next();
+    while let Some(s) = statement {
+        all.push(s.command().filters().map(|f| format!("{}", f)).collect());
+        statement = s.scope().statements().next();
+    }
+    all
+}
+
+#[test]
+fn a_relationship_word_governs_the_statement_it_is_written_in() {
+    // A WORD GOVERNS THE STATEMENT IT IS WRITTEN IN.  The scopes below wrote
+    // none, so each is the bare scope.
+    for word in [
+        "has", "refs", "declares", "holds", "calls", "writes", "takes", "reads",
+    ] {
+        assert_eq!(
+            edges_down(&format!(r#""a" {word} {{ "b" {{ "c" {{ "d" }} }} }}"#)),
+            vec![word, "-", "-"],
+            "{word}"
+        );
+    }
+    assert_eq!(
+        edges_down(r#""a" calls or holds { "b" { "c" } }"#),
+        vec!["calls or holds", "-"]
+    );
+}
+
+#[test]
+fn inherit_carries_what_its_statement_writes() {
+    // `inherit(relationship)` CARRIES THE STATEMENT'S RELATIONSHIP INTO
+    // EVERY SCOPE BELOW, wherever it stands among the terms...
+    for q in [
+        r#""a" calls inherit(relationship) { "b" { "c" { "d" } } }"#,
+        r#""a" inherit(relationship) calls { "b" { "c" { "d" } } }"#,
+        r#"inherit(relationship) "a" calls { "b" { "c" { "d" } } }"#,
+        r#"calls inherit( relationship ) "a" { "b" { "c" { "d" } } }"#,
+    ] {
+        assert_eq!(edges_down(q), vec!["calls", "calls", "calls"], "{q}");
+    }
+    assert_eq!(
+        edges_down(r#""a" inherit(relationship) calls or holds { "b" { "c" } }"#),
+        vec!["calls or holds", "calls or holds"]
+    );
+    // ...UNTIL A STATEMENT WRITES ITS OWN, which governs that statement
+    // alone unless it says `inherit` too.
+    assert_eq!(
+        edges_down(r#""a" calls inherit(relationship) { "b" { "c" holds { "d" { "e" } } } }"#),
+        vec!["calls", "calls", "holds", "-"]
+    );
+    assert_eq!(
+        edges_down(
+            r#""a" calls inherit(relationship) { "b" holds inherit(relationship) { "c" { "d" } } }"#
+        ),
+        vec!["calls", "holds", "holds"]
+    );
+    // Written again under a carried relationship, with no word of its own,
+    // it carries what was carried.
+    assert_eq!(
+        edges_down(
+            r#""a" has inherit(relationship) { "b" inherit(relationship) { "c" { "d" } } }"#
+        ),
+        vec!["has", "has", "has"]
+    );
+    // Nothing to carry is nothing carried, and no error: the scopes below
+    // are bare either way.
+    assert_eq!(
+        edges_down(r#""a" inherit(relationship) { "b" { "c" } }"#),
+        vec!["-", "-"]
+    );
+    assert_eq!(
+        edges_down(r#""a" has { "b" inherit(relationship) { "c" { "d" } } }"#),
+        vec!["has", "-", "-"]
+    );
+    // It copies words into the braces that exist; it adds none.
+    assert_eq!(
+        edges_down(r#""a" calls inherit(relationship)"#),
+        Vec::<String>::new()
+    );
+    // `derive` keeps its own argument until it is removed, and the verb
+    // carries what `derive` wrote as it carries a word.
+    assert_eq!(
+        edges_down(r#""a" derive(type="has", inherit=false) { "b" { "c" } }"#),
+        vec!["has", "-"]
+    );
+    for q in [
+        r#""a" derive(type="has", inherit=false) inherit(relationship) { "b" { "c" } }"#,
+        r#""a" inherit(relationship) derive(type="has", inherit=false) { "b" { "c" } }"#,
+        r#""a" derive(type="has") { "b" { "c" } }"#,
+    ] {
+        assert_eq!(edges_down(q), vec!["has", "has"], "{q}");
+    }
+}
+
+#[test]
+fn inherit_type_is_inherit_true_on_the_statements_type() {
+    // `inherit(type)` CARRIES THE STATEMENT'S TYPE FILTER: the statements
+    // below run under exactly the filters `T(inherit=true)` gives them,
+    // whichever side of the type word it is written on.
+    for (argument, verb, other_side) in [
+        (
+            r#"data(inherit=true) { { "x" } }"#,
+            r#"data inherit(type) { { "x" } }"#,
+            r#"inherit(type) data { { "x" } }"#,
+        ),
+        (
+            r#"func(inherit=true) "foo" { data { "x" } }"#,
+            r#"func inherit(type) "foo" { data { "x" } }"#,
+            r#"inherit(type) "foo" func { data { "x" } }"#,
+        ),
+        (
+            r#"func("a", inherit=true) { { "x" } }"#,
+            r#"func("a") inherit(type) { { "x" } }"#,
+            r#"inherit(type) func("a") { { "x" } }"#,
+        ),
+        (
+            r#"func(inherit=true) or method(inherit=true) { { "x" } }"#,
+            r#"func or method inherit(type) { { "x" } }"#,
+            r#"inherit(type) func or method { { "x" } }"#,
+        ),
+        (
+            r#"func(inherit=true) and not g"test_*" { { "x" } }"#,
+            r#"func and not g"test_*" inherit(type) { { "x" } }"#,
+            r#"inherit(type) func and not g"test_*" { { "x" } }"#,
+        ),
+        (
+            r#"filter("type", "func", inherit=true) { { "x" } }"#,
+            r#"filter("type", "func") inherit(type) { { "x" } }"#,
+            r#"inherit(type) filter("type", "func") { { "x" } }"#,
+        ),
+        // A statement under a carried type that writes its own replaces it,
+        // and its own stays in its statement.
+        (
+            r#"func(inherit=true) "foo" { data { { "x" } } }"#,
+            r#"func inherit(type) "foo" { data { { "x" } } }"#,
+            r#"inherit(type) func "foo" { data { { "x" } } }"#,
+        ),
+    ] {
+        let expected = filters_down(argument);
+        assert!(
+            expected[1..].iter().any(|filters| !filters.is_empty()),
+            "{argument}: nothing was carried, so this compares nothing"
+        );
+        assert_eq!(filters_down(verb), expected, "{verb}");
+        assert_eq!(filters_down(other_side), expected, "{other_side}");
+    }
+    // Without the verb a type word stays in its statement.
+    assert_eq!(
+        filters_down(r#"data { { "x" } }"#)[1..],
+        [Vec::<String>::new(), Vec::new()]
+    );
+    // It carries the type and nothing else the statement wrote...
+    assert_eq!(
+        filters_down(r#"data filter("compound_name", "a") inherit(type) { { "x" } }"#)[1..],
+        filters_down(r#"data(inherit=true) { { "x" } }"#)[1..]
+    );
+    // ...and a statement that wrote no type has none to carry.
+    assert_eq!(
+        filters_down(r#""foo" inherit(type) { { "x" } }"#),
+        filters_down(r#""foo" { { "x" } }"#)
+    );
+    // Each kind carries its own; both are two verbs.
+    let both = r#""a" has inherit(relationship) data inherit(type) { { "x" } }"#;
+    assert_eq!(edges_down(both), vec!["has", "has"]);
+    assert_eq!(
+        filters_down(both)[1..],
+        filters_down(r#"data(inherit=true) "a" { { "x" } }"#)[1..]
+    );
+    assert_eq!(
+        edges_down(r#""a" has data inherit(type) { { "x" } }"#),
+        vec!["has", "-"]
+    );
+    assert_eq!(
+        filters_down(r#""a" has inherit(relationship) data { { "x" } }"#)[1..],
+        [Vec::<String>::new(), Vec::new()]
+    );
+}
+
+#[test]
+fn inherit_says_what_it_takes() {
+    let kinds = "write `inherit(relationship)` or `inherit(type)`";
+    let not_a_kind = "`inherit` carries a statement's relationship or its type, not";
+    let no_part = "carries what its statement writes and is no part of an expression: \
+                   write it beside the expression";
+    for (q, expected) in [
+        (
+            r#""a" has inherit { "b" }"#,
+            format!("`inherit` needs what to carry: {kinds}"),
+        ),
+        (
+            r#""a" has inherit() { "b" }"#,
+            format!("`inherit` needs what to carry: {kinds}"),
+        ),
+        (
+            r#""a" has inherit(expression) { "b" }"#,
+            format!("{not_a_kind} `expression`: {kinds}"),
+        ),
+        (
+            r#""a" has inherit(true) { "b" }"#,
+            format!("{not_a_kind} `true`: {kinds}"),
+        ),
+        (
+            r#""a" has inherit("relationship") { "b" }"#,
+            "the kind is a word, not a string: write `inherit(relationship)`".to_string(),
+        ),
+        (
+            r#"data inherit("type") { "b" }"#,
+            "the kind is a word, not a string: write `inherit(type)`".to_string(),
+        ),
+        (
+            r#"data inherit("types") { "b" }"#,
+            format!("{not_a_kind} `\"types\"`: {kinds}"),
+        ),
+        (
+            r#""a" has data inherit(relationship, type) { "b" }"#,
+            "`inherit` carries one kind: write `inherit(relationship) inherit(type)` to \
+             carry both"
+                .to_string(),
+        ),
+        // It is no part of an expression of either kind.
+        (
+            r#"func or inherit(type) { "b" }"#,
+            format!("`inherit(type)` {no_part}"),
+        ),
+        (
+            r#""a" calls or inherit(relationship) { "b" }"#,
+            format!("`inherit(relationship)` {no_part}"),
+        ),
+        (
+            r#""a" not inherit(relationship) has { "b" }"#,
+            format!("`inherit(relationship)` {no_part}"),
+        ),
+    ] {
+        let err = parse_err(q);
+        assert!(err.contains(&expected), "{q}: {err}");
+    }
+    // The words it is spelled with stay what they were everywhere else.
+    for q in [
+        r#"func(inherit=true) { "x" }"#,
+        r#"type("relationship") { "x" }"#,
+        r#""inherit" { "x" }"#,
+        r#"@inherit "a"; #inherit { "x" }"#,
+    ] {
+        parse(q).unwrap_or_else(|e| panic!("`{}` failed to parse: {}", q, e));
+    }
+    let err = parse_err(r#"inherited(type) { "x" }"#);
+    assert!(!err.contains("needs what to carry"), "{err}");
+}
+
 #[test]
 fn two_relationship_words_are_joined_with_or() {
     for (q, expected) in [

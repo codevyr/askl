@@ -673,6 +673,18 @@ impl Verb for TypeSelector {
         }))
     }
 
+    /// `inherit(type)` is `inherit=true` written beside the word.
+    fn carried_below(&self) -> Option<Arc<dyn Verb>> {
+        Some(Arc::new(TypeSelector {
+            span: self.span.clone(),
+            symbol_type_id: self.symbol_type_id,
+            name_pattern: self.name_pattern.clone(),
+            inherit: true,
+            contains: self.contains,
+            derived: self.derived,
+        }))
+    }
+
     /// A type FILTER holds the type slot: a later write replaces it.  A
     /// branch holds nothing — it is not a constraint on the statement — so
     /// the selector written after it joins it instead of replacing it.

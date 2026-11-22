@@ -44,9 +44,20 @@ use_shortcut = ${ "#" ~ ident }
 plain_filter = { string_value }
 forced_verb = { "!" ~ string_value }
 special_verb = _{ plain_filter | forced_verb }
+// `inherit(relationship)` / `inherit(type)`: what a statement writes, carried
+// into the scopes below.  The kind is a WORD, which no other argument is
+// (a bare word in value position is a forgotten quote everywhere else), so
+// the verb has a rule of its own.  The rule is wider than the two sentences
+// it means -- no parentheses, none or several kinds, a quoted kind -- so that
+// each of those reaches the builder and is told what to write, instead of
+// "expected quoted_string".
+inherit_kw = @{ "inherit" ~ !XID_CONTINUE }
+inherit_kind = { ident | value }
+inherit_verb = { inherit_kw ~ ("(" ~ nl ~ (inherit_kind ~ (nl ~ "," ~ nl ~ inherit_kind)*)? ~ nl ~ ")")? }
 // special_verb must precede generic_verb so a prefixed string like g"foo"
 // parses as a filter rather than as verb ident `g` followed by a string.
-verb = { inherit_label_shortcut | label_shortcut | use_shortcut | special_verb | generic_verb }
+// inherit_verb must precede it too: `inherit(type)` is no argument list.
+verb = { inherit_label_shortcut | label_shortcut | use_shortcut | special_verb | inherit_verb | generic_verb }
 // Boolean operators over predicate verbs.  The keywords are guarded with
 // !XID_CONTINUE so idents like `order` don't split; verb names stay ordinary
 // idents classified in the builder.  Precedence (not > and > or) lives in

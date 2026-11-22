@@ -9,7 +9,7 @@ use crate::{
 use anyhow::Result;
 use index::edge::Edge;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::{Rc, Weak},
     sync::Arc,
 };
@@ -62,6 +62,13 @@ pub struct ParserContext {
     /// When true, derive() copies both has_relationship_modifier and inherit_relationship_modifier
     /// to child contexts, so the relationship type propagates to all descendants.
     inherit_relationship_modifier: RefCell<bool>,
+    /// `inherit(relationship)` was written on THIS statement.  Kept apart
+    /// from the flag above, which is also true where a relationship is only
+    /// passing through: a word written here must know whether its own
+    /// statement asked for it to be carried, whichever of the two came first.
+    carries_relationship: Cell<bool>,
+    /// `inherit(type)` was written on THIS statement.
+    carries_type: Cell<bool>,
     /// Shared ephemeral ops vec for the current layer block.
     /// Set by LayerVerb::update_context(), inherited by derive() so child
     /// contexts push ops to the same vec.
@@ -81,6 +88,8 @@ impl ParserContext {
             default_symbol_types: RefCell::new(None),
             has_relationship_modifier: RefCell::new(false),
             inherit_relationship_modifier: RefCell::new(false),
+            carries_relationship: Cell::new(false),
+            carries_type: Cell::new(false),
             eph_ops: RefCell::new(None),
         })
     }
@@ -102,6 +111,9 @@ impl ParserContext {
             inherit_relationship_modifier: RefCell::new(
                 *from.inherit_relationship_modifier.borrow(),
             ),
+            // What a statement says of itself is not said of the next one.
+            carries_relationship: Cell::new(false),
+            carries_type: Cell::new(false),
             eph_ops: RefCell::new(from.get_eph_ops()),
         })
     }
@@ -156,6 +168,18 @@ impl ParserContext {
         self.prev.clone()
     }
 
+    /// The global context, the only one with no predecessor.  Verbs reach it
+    /// through a `preamble` and nothing else.
+    ///
+    /// A PREAMBLE CARRIES WHAT IT WRITES.  A word governs the statement it
+    /// is written in, and `inherit(kind)` carries it into the scopes below;
+    /// a preamble is no statement and has no braces, so what it writes is
+    /// written for every statement after it, at every depth, until one
+    /// writes its own.  It needs no `inherit(...)` to say so.
+    fn is_global(&self) -> bool {
+        self.prev.is_none()
+    }
+
     /// Finalize this context into the command of the statement being built.
     ///
     /// A context that redirects to global belongs to a preamble directive
@@ -188,6 +212,13 @@ impl ParserContext {
         };
 
         ctx.command.borrow_mut().extend(verb);
+        if ctx.is_global() {
+            // A preamble carries what it writes.
+            ctx.command.borrow_mut().carry_everything();
+        } else if ctx.carries_type.get() {
+            // `inherit(type)` written before the type it carries.
+            ctx.command.borrow_mut().carry_type();
+        }
     }
 
     /// See [`Command::said_twice`].
@@ -222,17 +253,36 @@ impl ParserContext {
         *self.has_relationship_modifier.borrow()
     }
 
-    /// Set the relationship type and mark it for propagation to all descendants.
-    /// Combines set_relationship_type_explicit + set_inherit_relationship_modifier(true).
-    pub fn set_relationship_type_inherited(&self, rel_type: Relationship) {
+    /// A relationship written on this statement, by a word or an expression
+    /// of them.
+    ///
+    /// A WORD GOVERNS THE STATEMENT IT IS WRITTEN IN.  It describes the edge
+    /// into this statement's braces, and it ends whatever an enclosing
+    /// statement was carrying down here.  It reaches the scopes below only if
+    /// this statement also says `inherit(relationship)`, before the word or
+    /// after it -- or if it is written in a preamble ([`Self::is_global`]).
+    pub fn write_relationship(&self, rel_type: Relationship) {
         self.set_relationship_type_explicit(rel_type);
-        self.set_inherit_relationship_modifier(true);
+        *self.inherit_relationship_modifier.borrow_mut() =
+            self.carries_relationship.get() || self.is_global();
     }
 
-    /// Set the inherit_relationship_modifier flag.
-    /// When true, derive() will propagate the relationship modifier to all descendants.
-    pub fn set_inherit_relationship_modifier(&self, val: bool) {
-        *self.inherit_relationship_modifier.borrow_mut() = val;
+    /// `inherit(relationship)`: the relationship in force for this
+    /// statement's braces is carried into every scope below, until a
+    /// statement writes its own.  With no word in force that is the bare
+    /// scope, which the scopes below are anyway; and the word may be still
+    /// to come ([`Self::write_relationship`]).
+    pub fn carry_relationship(&self) {
+        self.carries_relationship.set(true);
+        *self.inherit_relationship_modifier.borrow_mut() = true;
+    }
+
+    /// `inherit(type)`: the type this statement writes is carried into every
+    /// scope below, until a statement writes its own.  The type may be
+    /// written already or still to come ([`Self::extend_verb`]).
+    pub fn carry_type(&self) {
+        self.carries_type.set(true);
+        self.command.borrow_mut().carry_type();
     }
 
     /// Set the default symbol types for child scopes.

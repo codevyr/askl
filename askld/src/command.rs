@@ -6,9 +6,9 @@ use crate::parser::Rule;
 use crate::span::Span;
 use crate::statement::Statement;
 use crate::verb::{
-    find_symbol_by_instance_id, weak_notifier_blocks, ConstraintAction, DeriveMethod, Filter,
-    LabelResolutions, Labeler, LayerShardPopulate, LayerSpec, NotificationContext, OwnPredicate,
-    RootShardPopulate, SelectionShardPopulate, Selector, SelectorId, Verb, VerbClass,
+    find_symbol_by_instance_id, weak_notifier_blocks, ConstraintAction, DeriveMethod, Dimension,
+    Filter, LabelResolutions, Labeler, LayerShardPopulate, LayerSpec, NotificationContext,
+    OwnPredicate, RootShardPopulate, SelectionShardPopulate, Selector, SelectorId, Verb, VerbClass,
 };
 use anyhow::Result;
 use core::fmt::Debug;
@@ -199,6 +199,33 @@ impl Command {
             span: Some(span),
             verb_span: None,
             said_twice: None,
+        }
+    }
+
+    /// `inherit(type)`: THE TYPE THIS STATEMENT WRITES IS CARRIED INTO THE
+    /// SCOPES BELOW.  Every verb of its own that says a type is replaced by
+    /// the same verb, derived into child scopes ([`Verb::carried_below`]).
+    /// What it inherited is carried already, and a statement that wrote no
+    /// type has none to carry.
+    pub fn carry_type(&mut self) {
+        self.carry(|verb| verb.writes().contains(&Dimension::Type));
+    }
+
+    /// A PREAMBLE CARRIES WHAT IT WRITES: every verb of its own, whatever it
+    /// says, is derived into the statements after it and the scopes below
+    /// them.
+    pub fn carry_everything(&mut self) {
+        self.carry(|_| true);
+    }
+
+    fn carry(&mut self, which: impl Fn(&Arc<dyn Verb>) -> bool) {
+        for verb in self.predicate[self.inherited..].iter_mut() {
+            if !which(verb) {
+                continue;
+            }
+            if let Some(carried) = verb.carried_below() {
+                *verb = carried;
+            }
         }
     }
 

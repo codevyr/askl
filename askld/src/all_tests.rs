@@ -2155,18 +2155,22 @@ fn type_selector_module_query() {
 }
 
 #[test]
-fn has_propagates_by_default() {
+fn has_reaches_nested_scopes_only_when_carried() {
     // file has { "foo" { "bar" } }
-    // has now inherits by default, so the inner {} also uses HAS.
-    // foo is in file (has), but foo does NOT contain bar (has) — functions don't contain functions.
-    // So bar is not found, constraining foo and file out.
-    const QUERY: &str = r#"file has { "foo" { "bar" } }"#;
-    let res = run_query(TEST_INPUT_CONTAINMENT, QUERY);
+    // `has` governs the statement it is written in: the file contains foo.
+    // The braces under foo wrote no word, so they are the bare scope, and
+    // foo calls bar.
+    let res = run_query(TEST_INPUT_CONTAINMENT, r#"file has { "foo" { "bar" } }"#);
+    assert_eq!(sorted_ids(&res), vec![20, 30, 510]);
 
-    println!("{:#?}", res.nodes);
-    println!("{:#?}", res.edges);
-
-    // With has inheriting: foo doesn't contain bar → empty result
+    // Carried, `has` is asked of foo and bar too.  foo does NOT contain bar
+    // (functions don't contain functions), so bar is not found, constraining
+    // foo and the file out.  This is what `has` did before it stopped
+    // carrying by default.
+    let res = run_query(
+        TEST_INPUT_CONTAINMENT,
+        r#"file has inherit(relationship) { "foo" { "bar" } }"#,
+    );
     assert_eq!(res.nodes.as_vec().len(), 0);
 }
 
@@ -6680,6 +6684,313 @@ fn role_said(q: &str) -> Vec<String> {
 }
 
 #[test]
+fn a_word_governs_its_statement_and_inherit_carries_it() {
+    // A WORD GOVERNS THE STATEMENT IT IS WRITTEN IN; `inherit(kind)` CARRIES
+    // IT.
+    //
+    // file ▸ foo → bar → baz: the file contains the three functions, and
+    // they call one another in a chain.  No function contains a function.
+    let ids = |q: &str| sorted_ids(&run_query(TEST_INPUT_CONTAINMENT, q));
+    let nothing = Vec::<i64>::new();
+
+    // `has` is about the file and `foo`.  The braces under `foo` wrote no
+    // word: they are the bare scope, and `foo` calls `bar`.
+    assert_eq!(ids(r#"file has { "foo" { "bar" } }"#), vec![20, 30, 510]);
+    assert_eq!(
+        ids(r#"file has { "foo" { "bar" } }"#),
+        ids(r#"file has { "foo" has or refs or declares or holds { "bar" } }"#)
+    );
+    // Carried, `has` is asked of `foo` and `bar` too, and `foo` contains
+    // nothing: the chain breaks and the answer is empty.
+    assert_eq!(
+        ids(r#"file has inherit(relationship) { "foo" { "bar" } }"#),
+        nothing
+    );
+    assert_eq!(
+        ids(r#"file has inherit(relationship) { "foo" { "bar" } }"#),
+        ids(r#"file has { "foo" has { "bar" } }"#)
+    );
+    // Wherever the verb stands.
+    for q in [
+        r#"inherit(relationship) file has { "foo" { "bar" } }"#,
+        r#"file inherit(relationship) has { "foo" { "bar" } }"#,
+        r#"has inherit(relationship) file { "foo" { "bar" } }"#,
+    ] {
+        assert_eq!(ids(q), nothing, "{q}");
+    }
+
+    // UNTIL A STATEMENT WRITES ITS OWN.  The module's `has` is carried into
+    // the file's braces, where it holds (the file contains `foo`)...
+    assert_eq!(
+        ids(r#"mod("testmodule") has inherit(relationship) { file { "foo" } }"#),
+        vec![10, 20, 510]
+    );
+    // ...and one level further it breaks the chain, as above...
+    assert_eq!(
+        ids(r#"mod("testmodule") has inherit(relationship) { file { "foo" { "bar" } } }"#),
+        nothing
+    );
+    // ...unless `foo` writes its own word, which ends it there.
+    assert_eq!(
+        ids(r#"mod("testmodule") has inherit(relationship) { file { "foo" refs { "bar" } } }"#),
+        vec![10, 20, 30, 510]
+    );
+    // With nothing carried, the module's `has` is the file's edge alone and
+    // the two scopes below are bare.
+    assert_eq!(
+        ids(r#"mod("testmodule") has { file { "foo" { "bar" } } }"#),
+        vec![10, 20, 30, 510]
+    );
+    // A statement's own word ends what was carried, and is not itself
+    // carried: under the file's own `has`, `foo { "bar" }` is bare.
+    assert_eq!(
+        ids(r#"mod("testmodule") has inherit(relationship) { file has { "foo" { "bar" } } }"#),
+        vec![10, 20, 30, 510]
+    );
+    assert_eq!(
+        ids(
+            r#"mod("testmodule") has inherit(relationship) { file has inherit(relationship) { "foo" { "bar" } } }"#
+        ),
+        nothing
+    );
+
+    // A role word is carried as `has` is.
+    let ids = role_ids;
+    // `via` calls the slot.  Below the slot the scope is bare: what the slot
+    // holds is there (60, 140, 150), and `plain` (90), which it names.
+    assert_eq!(
+        ids(r#""via" calls { field { func } }"#),
+        vec![30, 50, 60, 90, 140, 150]
+    );
+    assert_eq!(
+        ids(r#""via" calls { field { func } }"#),
+        ids(r#""via" calls { field has or refs or declares or holds { func } }"#)
+    );
+    // Carried, `calls` is asked of the slot, which calls nothing.
+    assert_eq!(
+        ids(r#""via" calls inherit(relationship) { field { func } }"#),
+        vec![30, 50]
+    );
+    assert_eq!(
+        ids(r#""via" calls inherit(relationship) { field { func } }"#),
+        ids(r#""via" calls { field calls { func } }"#)
+    );
+}
+
+#[test]
+fn inherit_type_carries_the_statements_type() {
+    // `inherit(type)` is what `T(inherit=true)` was: the type is asked of
+    // every statement below, until one writes its own.
+    let ids = |q: &str| sorted_ids(&run_query(TEST_INPUT_CONTAINMENT, q));
+    // A type word is about its own statement: the module and `baz`.
+    assert_eq!(ids(r#"mod {{ "baz" }}"#), ids(r#"mod { { "baz" } }"#));
+    assert!(ids(r#"mod {{ "baz" }}"#).contains(&40));
+    // Carried, it meets a function and finds nothing.
+    for q in [
+        r#"mod inherit(type) {{ "baz" }}"#,
+        r#"inherit(type) mod {{ "baz" }}"#,
+    ] {
+        assert_eq!(ids(q), Vec::<i64>::new(), "{q}");
+        assert_eq!(ids(q), ids(r#"mod(inherit=true) {{ "baz" }}"#), "{q}");
+    }
+
+    let ids = |q: &str| sorted_ids(&run_query(VERB_TEST, q));
+    // driver → id_table → info_a → config_a → channels_a, all data.
+    for q in [
+        r#"data inherit(type) "driver" {{{{"channels_a"}}}}"#,
+        r#"inherit(type) data "driver" {{{{"channels_a"}}}}"#,
+        r#""driver" data inherit(type) {{{{"channels_a"}}}}"#,
+    ] {
+        assert_eq!(ids(q), vec![200, 210, 220, 240, 260], "{q}");
+        assert_eq!(
+            ids(q),
+            ids(r#"data(inherit=true) "driver" {{{{"channels_a"}}}}"#),
+            "{q}"
+        );
+    }
+    // A statement below that writes its own type replaces the carried one.
+    assert_eq!(
+        ids(r#"func inherit(type) "foo" { data("config.Debug") }"#),
+        vec![91, 97]
+    );
+    // A carried `func` makes the child a function, and config.Debug is data.
+    assert!(!ids(r#"func inherit(type) { "config.Debug" }"#).contains(&97));
+    assert!(ids(r#"func { "config.Debug" }"#).contains(&97));
+    // Nothing to carry is no error and no change.
+    assert_eq!(
+        ids(r#""foo" inherit(type) { data("config.Debug") }"#),
+        ids(r#""foo" { data("config.Debug") }"#)
+    );
+}
+
+#[test]
+fn a_preamble_carries_what_it_writes() {
+    // A PREAMBLE'S WORDS REACH EVERY STATEMENT AFTER IT, AT EVERY DEPTH.  A
+    // preamble is not a statement with braces of its own: what it writes is
+    // written for the whole query, so it needs no `inherit(...)` to say so.
+
+    // Its relationship: asked of the slot too, which calls nothing.
+    let ids = role_ids;
+    assert_eq!(
+        ids(r#""via" { field { func } }"#),
+        ids(r#""via" has or refs or declares or holds { field { func } }"#)
+    );
+    assert_eq!(
+        ids(r#"preamble calls; "via" { field { func } }"#),
+        vec![30, 50]
+    );
+    assert_eq!(
+        ids(r#"preamble calls; "via" { field { func } }"#),
+        ids(r#""via" calls inherit(relationship) { field { func } }"#)
+    );
+    // Saying it changes nothing.
+    assert_eq!(
+        ids(r#"preamble calls inherit(relationship); "via" { field { func } }"#),
+        vec![30, 50]
+    );
+    // Until a statement writes its own.
+    assert_eq!(
+        ids(r#"preamble calls; "via" { field holds { func } }"#),
+        ids(r#""via" calls { field holds { func } }"#)
+    );
+    // `has`, the word that used to reach every scope from a preamble.
+    let ids = |q: &str| sorted_ids(&run_query(TEST_INPUT_CONTAINMENT, q));
+    assert_eq!(ids(r#"file { "foo" { "bar" } }"#), vec![20, 30, 510]);
+    assert_eq!(
+        ids(r#"preamble has; file { "foo" { "bar" } }"#),
+        Vec::<i64>::new()
+    );
+    assert_eq!(
+        ids(r#"preamble has; file { "foo" refs { "bar" } }"#),
+        vec![20, 30, 510]
+    );
+
+    // Its type.
+    let ids = |q: &str| sorted_ids(&run_query(VERB_TEST, q));
+    assert!(ids(r#""foo" { "config.Debug" }"#).contains(&97));
+    assert!(!ids(r#"preamble func; "foo" { "config.Debug" }"#).contains(&97));
+    assert_eq!(
+        ids(r#"preamble func; "foo" { "config.Debug" }"#),
+        ids(r#"func inherit(type) "foo" { "config.Debug" }"#)
+    );
+    assert_eq!(
+        ids(r#"preamble func; "foo" { data("config.Debug") }"#),
+        vec![91, 97]
+    );
+
+    // Its name filter, which has no `inherit(...)` kind and needed
+    // `inherit=true` to reach even the statement after it.
+    let ids = |q: &str| sorted_ids(&run_query(TEST_INPUT_MODULES, q));
+    assert_eq!(ids(r#""a""#), vec![91, 201, 301]);
+    assert_eq!(
+        ids(r#"preamble filter("compound_name", "test"); "a""#),
+        vec![91]
+    );
+    assert_eq!(
+        ids(r#"preamble filter("compound_name", "test"); { "a" }"#),
+        ids(r#"preamble filter("compound_name", "test", inherit=true); { "a" }"#)
+    );
+}
+
+/// What the transition notice says of a query on the containment fixture.
+fn no_longer_carried(q: &str) -> Vec<String> {
+    run_query(TEST_INPUT_CONTAINMENT, q)
+        .warnings
+        .iter()
+        .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::NoLongerCarried)
+        .map(|w| format!("{} @ `{}`", w.message, w.span.as_str()))
+        .collect()
+}
+
+#[test]
+fn has_and_refs_say_they_no_longer_reach_nested_scopes() {
+    // TRANSITIONAL, one release.  `has` and `refs` used to reach every scope
+    // below them.  Where a query is written as if they still did -- a
+    // nested statement with braces of its own and no word on them -- the
+    // answer says what changed, once per statement.
+    let said = |word: &str| {
+        vec![format!(
+            "`{word}` no longer reaches nested scopes; write `inherit(relationship)` to \
+             carry it @ `{word}`"
+        )]
+    };
+    assert_eq!(
+        no_longer_carried(r#"file has { "foo" { "bar" } }"#),
+        said("has")
+    );
+    assert_eq!(
+        no_longer_carried(r#""foo" refs { "bar" { "baz" } }"#),
+        said("refs")
+    );
+    // Braces count whatever is in them, and wherever the word stands.
+    assert_eq!(no_longer_carried(r#"has file { "foo" { } }"#), said("has"));
+    // Once per statement, however many scopes are nested in it...
+    assert_eq!(
+        no_longer_carried(r#"file has { "foo" { "bar" } "bar" { "baz" } }"#),
+        said("has")
+    );
+    // ...and of the statement whose word it is: here the file's.
+    assert_eq!(
+        no_longer_carried(r#"mod("testmodule") has { file has { "foo" { "bar" } } }"#),
+        said("has")
+    );
+    assert_eq!(
+        no_longer_carried(r#"mod("testmodule") has { file refs { "foo" { "bar" } } }"#),
+        said("refs")
+    );
+
+    // It is said beside whatever else the statement is told, never folded
+    // into the warning next to it.
+    let res = run_query(TEST_INPUT_CONTAINMENT, r#""nosuch"has { "foo" { "bar" } }"#);
+    let kinds: Vec<_> = res.warnings.iter().map(|w| w.kind.clone()).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            crate::diagnostic::DiagnosticKind::NoMatch,
+            crate::diagnostic::DiagnosticKind::NoLongerCarried
+        ],
+        "{:?}",
+        res.warnings
+    );
+
+    // Not said:
+    for q in [
+        // nothing nested has braces;
+        r#"file has { "foo" }"#,
+        r#"file has { "foo" "bar" }"#,
+        r#""foo" has"#,
+        // the query says it wants the word carried;
+        r#"file has inherit(relationship) { "foo" { "bar" } }"#,
+        r#"inherit(relationship) file has { "foo" { "bar" } }"#,
+        // every nested scope writes its own relationship;
+        r#"file has { "foo" refs { "bar" } }"#,
+        r#"file has { "foo" has { "bar" } }"#,
+        r#"file has { "foo" derive(type="refs") { "bar" } }"#,
+        // the word is carried there from above;
+        r#"mod("testmodule") has inherit(relationship) { file { "foo" { "bar" } } }"#,
+        // no word at all;
+        r#"file { "foo" { "bar" } }"#,
+        // `derive`, which says for itself whether it is carried;
+        r#"file derive(type="has", inherit=false) { "foo" { "bar" } }"#,
+        r#"file derive(type="has") { "foo" { "bar" } }"#,
+        // an expression, which never was carried.
+        r#"file has or refs { "foo" { "bar" } }"#,
+    ] {
+        assert_eq!(no_longer_carried(q), Vec::<String>::new(), "{q}");
+    }
+    // Nor of the six words that never reached further than their statement.
+    for word in ["declares", "holds", "calls", "writes", "takes", "reads"] {
+        let q = format!(r#""via" {word} {{ field {{ func }} }}"#);
+        let said = run_query(crate::test_util::TEST_INPUT_ROLE_WORDS, &q)
+            .warnings
+            .iter()
+            .filter(|w| w.kind == crate::diagnostic::DiagnosticKind::NoLongerCarried)
+            .count();
+        assert_eq!(said, 0, "{q}");
+    }
+}
+
+#[test]
 fn a_relationship_word_acts_on_its_statement_wherever_it_stands() {
     // A TERM ACTS ON THE STATEMENT IT IS WRITTEN IN.  A relationship word
     // describes the edge into that statement's braces whether it is written
@@ -6771,15 +7082,18 @@ fn a_role_word_narrows_refs_to_the_references_that_state_it() {
         ids(r#""via" calls { field holds { func } }"#),
         vec![30, 50, 60, 140, 150]
     );
-    // The word carries into nested scopes as `refs` does: the slot calls
-    // nothing, so the inner scope written without `holds` finds nothing.
-    assert_ne!(
-        ids(r#""via" calls { field { func } }"#),
-        ids(r#""via" calls { field holds { func } }"#)
-    );
+    // The word governs its own statement.  The scope under the slot wrote
+    // none, so it is bare: what the slot holds, and `plain`, which it names.
     assert_eq!(
         ids(r#""via" calls { field { func } }"#),
-        ids(r#""via" calls { field calls { func } }"#)
+        vec![30, 50, 60, 90, 140, 150]
+    );
+    // Carried on request, `calls` is asked of the slot too, and the slot
+    // calls nothing.
+    assert_eq!(ids(r#""via" calls { field calls { func } }"#), vec![30, 50]);
+    assert_eq!(
+        ids(r#""via" calls inherit(relationship) { field { func } }"#),
+        vec![30, 50]
     );
 
     // Two role words on one statement are joined with `or`
@@ -7391,15 +7705,22 @@ fn relationship_words_joined_with_or_match_a_pair_by_any_of_its_rows() {
         ids(r#""caller" takes { }"#)
     );
 
-    // The expression carries into nested scopes as one word does: `via`
-    // calls the slot, and the slot holds the three functions.
+    // The expression is carried into nested scopes as one word is, when the
+    // statement asks: `via` calls the slot, and the slot holds the three
+    // functions.
     assert_eq!(
-        ids(r#""via" calls or holds { field { func } }"#),
+        ids(r#""via" calls or holds inherit(relationship) { field { func } }"#),
         vec![30, 50, 60, 140, 150]
     );
     assert_eq!(
-        ids(r#""via" calls or holds { field { func } }"#),
+        ids(r#""via" calls or holds inherit(relationship) { field { func } }"#),
         ids(r#""via" calls { field holds { func } }"#)
+    );
+    // Not asked, it governs `via` alone, and the slot's scope is bare: it
+    // lists `plain` too, which the slot names.
+    assert_eq!(
+        ids(r#""via" calls or holds { field { func } }"#),
+        vec![30, 50, 60, 90, 140, 150]
     );
 
     // On the relation fixture: `slot` HOLDS `my_read` and names `plain`;

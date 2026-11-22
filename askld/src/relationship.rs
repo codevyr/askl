@@ -19,6 +19,12 @@
 //! reference that states nothing; what a word passed over for that reason
 //! the answer says (`crate::statement::passed_over`).
 //!
+//! A WORD GOVERNS THE STATEMENT IT IS WRITTEN IN: it describes the edge into
+//! that statement's braces, wherever it stands among the terms, and the
+//! scopes below are bare again.  `inherit(relationship)` on the same
+//! statement carries it into every scope below, until a statement writes its
+//! own (`crate::parser_context::ParserContext::write_relationship`).
+//!
 //! `calls` is literal.  A call through a slot is a call of the slot; the
 //! functions stored in it are one more hop, written
 //! `calls { field holds { func } }`.

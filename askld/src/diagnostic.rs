@@ -35,6 +35,12 @@ pub enum DiagnosticKind {
     /// for the reason `LeftOut` is not: it is the only thing saying that the
     /// empty answer is the word's doing.
     PassedOver,
+    /// TRANSITIONAL (one release; see `crate::statement::no_longer_carried`,
+    /// and delete this with it): `has` or `refs` stands above a nested scope
+    /// that writes no relationship, which it used to reach and no longer
+    /// does.  Never collapsed: it is the only thing saying why the answer
+    /// differs from the one the same query gave before.
+    NoLongerCarried,
 }
 
 impl DiagnosticKind {
@@ -44,7 +50,10 @@ impl DiagnosticKind {
     pub fn always_surfaces(&self) -> bool {
         matches!(
             self,
-            DiagnosticKind::Truncation | DiagnosticKind::LeftOut | DiagnosticKind::PassedOver
+            DiagnosticKind::Truncation
+                | DiagnosticKind::LeftOut
+                | DiagnosticKind::PassedOver
+                | DiagnosticKind::NoLongerCarried
         )
     }
 }

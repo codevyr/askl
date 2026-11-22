@@ -218,7 +218,7 @@ pub use self::generic::{
     DefaultTypeFilter, GenericFilter, GenericSelector, NameSelector, UnitVerb,
 };
 
-use self::generic::{build_generic_verb, ForcedVerb};
+use self::generic::{build_generic_verb, ForcedVerb, InheritVerb};
 use self::labels::{LabelVerb, UserVerb};
 
 /// Construct the verb a `Rule::verb` pair denotes, WITHOUT applying its
@@ -245,6 +245,18 @@ pub(super) fn construct_verb(
 
     let verb = if let Rule::generic_verb = verb.as_rule() {
         build_generic_verb(ctx.clone(), verb)?
+    } else if let Rule::inherit_verb = verb.as_rule() {
+        if ctx.get_eph_ops().is_some() {
+            return Err(Error::new_from_span(
+                CustomError {
+                    message: "Only ephemeral verbs are allowed inside layer blocks".into(),
+                },
+                verb_span.as_pest_span(),
+            ));
+        }
+        InheritVerb::build(verb_span.clone(), verb).map_err(|message| {
+            Error::new_from_span(CustomError { message }, verb_span.as_pest_span())
+        })?
     } else {
         if ctx.get_eph_ops().is_some() {
             return Err(Error::new_from_span(
@@ -530,6 +542,13 @@ pub trait Verb: std::fmt::Debug + Send + Sync {
 
     /// Create a new instance of this verb for derivation into child scopes.
     fn derive_new_instance(&self) -> Option<Arc<dyn Verb>> {
+        None
+    }
+
+    /// This verb, as `inherit(...)` on its statement makes it: the same
+    /// predicate, derived into the scopes below.  `None` for a verb that
+    /// cannot be carried, which then stays as it is.
+    fn carried_below(&self) -> Option<Arc<dyn Verb>> {
         None
     }
 

@@ -13,8 +13,9 @@ use super::super::{DeriveMethod, Limits, Verb, VerbClass};
 /// braces: one relationship word, or several joined with `or`.
 ///
 /// The words and what each selects are [`crate::relationship`]'s.  A word is
-/// written with no arguments, immediately before the `{` it governs, and is
-/// carried into nested scopes until one of them writes its own.
+/// written with no arguments and GOVERNS THE STATEMENT IT IS WRITTEN IN: it
+/// describes the edge into that statement's braces and no other.  What
+/// carries it into the scopes below is [`InheritVerb`].
 ///
 /// One word comes here from the verb table ([`RelationshipVerb::word`]); an
 /// expression of them comes from the expression builder, already joined
@@ -69,7 +70,7 @@ impl Verb for RelationshipVerb {
     }
 
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.set_relationship_type_inherited(self.relationship.clone());
+        ctx.write_relationship(self.relationship.clone());
         Ok(true) // consumed - don't add to command
     }
 }
@@ -80,11 +81,155 @@ impl Display for RelationshipVerb {
     }
 }
 
-/// DeriveModifier - generalized relationship modifier with combination support
-/// derive(type="refs")           — same as refs (inherits by default)
-/// derive(type="has")            — same as has (inherits by default)
-/// derive(type="refs,has")       — union: either relationship (inherits by default)
-/// derive(type="has", inherit=false) — has, NOT propagated to descendants
+/// What a statement writes that `inherit` can carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::verb) enum Carried {
+    /// The relationship: the edge into the statement's braces.
+    Relationship,
+    /// The type filter.
+    Type,
+}
+
+impl Carried {
+    const ALL: [Carried; 2] = [Carried::Relationship, Carried::Type];
+
+    /// The kind as it is written between the parentheses.
+    fn word(self) -> &'static str {
+        match self {
+            Carried::Relationship => "relationship",
+            Carried::Type => "type",
+        }
+    }
+
+    fn named(word: &str) -> Option<Carried> {
+        Carried::ALL.into_iter().find(|kind| kind.word() == word)
+    }
+}
+
+/// InheritVerb - `inherit(relationship)` / `inherit(type)`.
+///
+/// A WORD GOVERNS THE STATEMENT IT IS WRITTEN IN; `inherit(kind)` CARRIES IT.
+///
+/// `inherit(relationship)` carries the statement's relationship into every
+/// scope below it, and `inherit(type)` its type filter, until a statement
+/// writes its own.  It copies words into the braces that exist and adds no
+/// hop: `"a" calls inherit(relationship) { "b" { "c" } }` is
+/// `"a" calls { "b" calls { "c" } }`.  Carrying both is two verbs.
+///
+/// Like every term it acts on the statement it is written in, wherever it
+/// stands among the others: before the word it carries or after it.  A
+/// statement that wrote nothing of the kind has nothing to carry, and that
+/// is no error: the scopes below are what they would be anyway.
+#[derive(Debug)]
+pub(in crate::verb) struct InheritVerb {
+    span: Span,
+    carried: Carried,
+    /// `inherit(type)`: the verb as it is written, for messages.
+    written: String,
+}
+
+impl InheritVerb {
+    /// Build from the grammar's `inherit_verb`.  The rule admits more than
+    /// the two sentences that mean something, so that each mistake is told
+    /// here what to write.
+    pub fn build(
+        span: Span,
+        pair: pest::iterators::Pair<crate::parser::Rule>,
+    ) -> std::result::Result<Arc<dyn Verb>, String> {
+        use crate::parser::Rule;
+        let either = format!(
+            "write `inherit({})` or `inherit({})`",
+            Carried::Relationship.word(),
+            Carried::Type.word()
+        );
+        let kinds: Vec<_> = pair
+            .into_inner()
+            .filter(|inner| inner.as_rule() == Rule::inherit_kind)
+            .collect();
+        let kind = match kinds.as_slice() {
+            [] => return Err(format!("`inherit` needs what to carry: {either}")),
+            [kind] => kind,
+            _ => {
+                return Err(format!(
+                    "`inherit` carries one kind: write `inherit({}) inherit({})` to carry both",
+                    Carried::Relationship.word(),
+                    Carried::Type.word()
+                ))
+            }
+        };
+        let written = kind.as_str().trim();
+        let word = kind.clone().into_inner().next();
+        let is_word = word.as_ref().map(|w| w.as_rule()) == Some(Rule::ident);
+        let Some(carried) = Carried::named(written).filter(|_| is_word) else {
+            // The kind in quotes is the one mistake with one right answer.
+            if let Some(meant) = Carried::named(written.trim_matches('"')) {
+                return Err(format!(
+                    "the kind is a word, not a string: write `inherit({})`",
+                    meant.word()
+                ));
+            }
+            return Err(format!(
+                "`inherit` carries a statement's relationship or its type, not `{written}`: \
+                 {either}"
+            ));
+        };
+        Ok(Arc::new(Self {
+            span,
+            carried,
+            written: format!("inherit({})", carried.word()),
+        }))
+    }
+}
+
+impl Verb for InheritVerb {
+    fn name(&self) -> &str {
+        &self.written
+    }
+
+    fn span(&self) -> pest::Span<'_> {
+        self.span.as_pest_span()
+    }
+
+    fn class(&self) -> VerbClass {
+        VerbClass::Relationship
+    }
+
+    fn derive_method(&self) -> DeriveMethod {
+        DeriveMethod::Skip
+    }
+
+    /// It says nothing true or false of a symbol, so it joins no expression:
+    /// `func or inherit(type)` has no reading.
+    fn compound_admission(&self) -> std::result::Result<(), String> {
+        Err(format!(
+            "`{}` carries what its statement writes and is no part of an expression: \
+             write it beside the expression",
+            self.written
+        ))
+    }
+
+    fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
+        match self.carried {
+            Carried::Relationship => ctx.carry_relationship(),
+            Carried::Type => ctx.carry_type(),
+        }
+        Ok(true) // consumed - don't add to command
+    }
+}
+
+impl Display for InheritVerb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "InheritVerb({})", self.carried.word())
+    }
+}
+
+/// DeriveModifier - the parameterised spelling of `has` / `refs`, which says
+/// for itself whether it is carried into the scopes below (it is, unless
+/// `inherit=false`).  The words are carried by [`InheritVerb`] instead.
+/// derive(type="refs")           — `refs inherit(relationship)`
+/// derive(type="has")            — `has inherit(relationship)`
+/// derive(type="refs,has")       — `refs or has inherit(relationship)`
+/// derive(type="has", inherit=false) — `has`
 #[derive(Debug)]
 pub(in crate::verb) struct DeriveModifier {
     span: Span,
@@ -153,8 +298,10 @@ impl Verb for DeriveModifier {
     }
 
     fn update_context(&self, ctx: &ParserContext) -> Result<bool> {
-        ctx.set_relationship_type_explicit(self.relationship.clone());
-        ctx.set_inherit_relationship_modifier(self.inherit);
+        ctx.write_relationship(self.relationship.clone());
+        if self.inherit {
+            ctx.carry_relationship();
+        }
         Ok(true) // consumed - don't add to command
     }
 }
