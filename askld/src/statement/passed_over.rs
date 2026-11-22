@@ -43,6 +43,14 @@
 //!     that has no rows of that relation -- "the `linux` index has no
 //!     `declares` rows".
 //!
+//! A LISTING passes over one thing that is said whatever the word on its
+//! edge, a bare scope included:
+//!
+//!  6. A slot its parent calls through, when what the slot holds is what the
+//!     listing asked for: "`func` passed over 3 slots that `"vfs_read"`
+//!     calls through …" ([`slots_passed_over`]).  Read only where the index
+//!     states roles and has `holds` rows.
+//!
 //! UNDER AN EXPRESSION (`calls or holds`) each of these is said of the words
 //! it is true of, and the expression is quoted as the query wrote it
 //! ([`crate::relationship::Relationship`] keeps the words beside the edge):
@@ -80,6 +88,8 @@
 //! first found something to count.
 
 use std::collections::{BTreeMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 
 use index::db_diesel::{
@@ -89,7 +99,7 @@ use index::db_diesel::{
     SYMBOL_TYPE_MACRO,
 };
 use index::edge::{Edge, RefTest, Relations};
-use index::roles::Relation;
+use index::roles::{Relation, Roles};
 use index::symbols::SymbolInstanceId;
 
 use super::Statement;
@@ -196,6 +206,9 @@ pub(super) async fn notices(
     // Once: an index that states no roles is one fact, however many scopes
     // carry the word that ran into it.
     let mut messages: HashSet<String> = HashSet::new();
+    // What the projects state, once it has been asked for (notice 6 asks at
+    // every listing under an edge that admits a call).
+    let mut states: Option<Vec<ProjectStates>> = None;
     for child in statements {
         let Some(parent) = child.parent().and_then(|p| p.upgrade()) else {
             continue;
@@ -207,6 +220,23 @@ pub(super) async fn notices(
         let Some(test) = asked.edge().refs() else {
             continue;
         };
+        // A call through a slot is an ordinary reference that states a call:
+        // every edge that admits one may have had a slot at its end.  This
+        // one is about the listing, and is said at it.
+        if test.admits(Roles::CALL.bits(), 0) {
+            match slots_passed_over(child, &parent, &mut states, ctx, cfg).await {
+                Ok(Some(message)) => {
+                    if messages.insert(message.clone()) {
+                        said.push(Diagnostic::passed_over(
+                            child.command().query_statement_span().clone(),
+                            message,
+                        ));
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::debug!("the slots a listing passed over: {}", e),
+            }
+        }
         let empty = answered_nothing(child, ctx) || answered_nothing(&parent, ctx);
         // A role word, and no `refs` beside it to admit what states nothing.
         let narrowed_to_roles = !test.any_ordinary() && test.roles().bits() != 0;
@@ -1154,4 +1184,367 @@ async fn no_such_rows(
         })
         .collect();
     Ok(Some(sentences.join("; ")))
+}
+
+/// Notice 6: a listing left out a slot its parent calls through, and what the
+/// slot holds is what the listing asked for.
+///
+/// `calls` IS LITERAL: `ops->read(...)` is a call of the slot, a field.  So
+/// `"vfs_read" { func { func } }` loses the hop without a word: the field is
+/// not a function, and the functions it dispatches to are one relationship
+/// further, behind `holds`.  Any filter leaves things out and that is its
+/// job; this is said because what stands behind the slot is what the filter
+/// ASKED for.
+///
+/// It is said of a statement, once, when all of these hold:
+///
+///  - it is a LISTING (it names nothing itself) with a filter, and its
+///    answer is not cut (a cut answer is already said to be incomplete);
+///  - the edge from its parent admits a call (the caller checks: a bare
+///    scope, `refs`, `calls`, an expression with one of them);
+///  - the parent's rows are in a project whose index states roles and has
+///    `holds` rows.  Elsewhere no reference is a known call or nothing is
+///    recorded behind a slot, and NOTHING IS READ: on such an index the
+///    notice costs one look at what the projects state, once per query (and
+///    that one is answered from the SQL cache where there is one);
+///  - the parent refers, STATING A CALL, to fields the listing's own
+///    predicate does not match (a slot it lists was not passed over);
+///  - those fields hold rows the predicate does match, which the edge does
+///    not find by itself (a function called by name as well is listed
+///    already) and which the statements in the listing's braces would keep
+///    ([`kept_below`]).
+///
+/// So it is said exactly when the query it offers, with the hop written
+/// (`"vfs_read" calls { field holds { func } }`), lists something this
+/// answer lacks.  A called field that holds nothing is not counted: there is
+/// nothing to follow.  Neither is a field the parent only names: a
+/// reference that states no role is not a known call.
+///
+/// Counted and named are the slots (distinct names, as the other notices
+/// name symbols: three, then "and N more"); "at least" where a read was cut.
+async fn slots_passed_over(
+    child: &Rc<Statement>,
+    parent: &Rc<Statement>,
+    states: &mut Option<Vec<ProjectStates>>,
+    ctx: &ExecutionContext,
+    cfg: &ControlFlowGraph,
+) -> anyhow::Result<Option<String>> {
+    if !is_listing(child) {
+        return Ok(None);
+    }
+    // No filter, nothing left out.
+    let Some(own) = child.command().constraint_predicate(&ctx.eph) else {
+        return Ok(None);
+    };
+    if child
+        .get_selection(ctx)
+        .is_some_and(|selection| selection.cut())
+    {
+        return Ok(None);
+    }
+    // AN INDEX THAT STATES NO ROLES HAS NO KNOWN CALL, and one without
+    // `holds` rows has nothing behind a slot.  Decided before any row is
+    // read.
+    let follows = |state: &ProjectStates| state.states_roles && state.has_holds;
+    let states: &[ProjectStates] = match states {
+        Some(states) => states,
+        None => states.insert(cfg.index.what_projects_state().await?),
+    };
+    if !states.iter().any(follows) {
+        return Ok(None);
+    }
+    let Some(parent_rows) = rows(parent, ctx) else {
+        return Ok(None);
+    };
+    let callers: Vec<i64> = cfg
+        .index
+        .instances_matching(&ids_leaf(&parent_rows), &ctx.eph)
+        .await?
+        .into_iter()
+        .filter(|row| {
+            states
+                .iter()
+                .any(|state| state.project == row.project && follows(state))
+        })
+        .map(|row| row.instance)
+        .collect();
+    if callers.is_empty() {
+        return Ok(None);
+    }
+    let as_ids = |instances: &[SymbolInstanceId]| -> Vec<i64> {
+        instances.iter().map(|id| Into::<i64>::into(*id)).collect()
+    };
+
+    // The fields the parent calls through ...
+    let call = RefTest::stating(Roles::CALL).expect("a role is asked for");
+    let (called, called_cut) = cfg
+        .index
+        .find_child_instance_ids(
+            &callers,
+            Edge::references(call),
+            &CompositeFilter::leaf(DefaultSymbolTypeMixin::new(vec![SYMBOL_TYPE_FIELD])),
+            None,
+            &ctx.eph,
+        )
+        .await?;
+    if called.is_empty() {
+        return Ok(None);
+    }
+    // ... that the listing left out.
+    let slots = cfg
+        .index
+        .instances_matching(
+            &CompositeFilter::and(vec![
+                ids_leaf(&as_ids(&called)),
+                CompositeFilter::leaf(SymbolTypeMixin::new(SYMBOL_TYPE_FIELD)),
+                CompositeFilter::not(own.clone()),
+            ]),
+            &ctx.eph,
+        )
+        .await?;
+    if slots.is_empty() {
+        return Ok(None);
+    }
+    let slot_rows: Vec<i64> = slots.iter().map(|row| row.instance).collect();
+
+    // What they hold that the listing asked for: the derive's own read, as
+    // `field holds { … }` would make it.
+    let holds = Edge::references(RefTest::relation(Relation::Holds));
+    let (held, held_cut) = related(
+        Asked::Child,
+        child,
+        &slot_rows,
+        holds,
+        vec![own.clone()],
+        &ctx.eph,
+        cfg,
+    )
+    .await?;
+    if held.is_empty() {
+        return Ok(None);
+    }
+    // Less what the edge finds from the parent itself.
+    let (found, found_cut) = related(
+        Asked::Child,
+        child,
+        &callers,
+        child.get_relationship_type(),
+        vec![own.clone()],
+        &ctx.eph,
+        cfg,
+    )
+    .await?;
+    if found_cut {
+        return Ok(None);
+    }
+    let found: HashSet<i64> = cfg
+        .index
+        .instances_matching(&ids_leaf(&as_ids(&found)), &ctx.eph)
+        .await?
+        .into_iter()
+        .map(|row| row.symbol)
+        .collect();
+    // The read applies what of the predicate its channel carries; the rows
+    // are those the whole predicate matches.
+    let behind: Vec<i64> = cfg
+        .index
+        .instances_matching(
+            &CompositeFilter::and(vec![own.clone(), ids_leaf(&as_ids(&held))]),
+            &ctx.eph,
+        )
+        .await?
+        .into_iter()
+        .filter(|row| !found.contains(&row.symbol))
+        .map(|row| row.instance)
+        .collect();
+    let Some((behind, subset)) = kept_below(child, behind, ctx, cfg).await? else {
+        return Ok(None);
+    };
+    if behind.is_empty() {
+        return Ok(None);
+    }
+    // The slots that hold one of them.
+    let holding = cfg
+        .index
+        .which_relate(&slot_rows, &behind, AskSide::Parents, holds, &ctx.eph)
+        .await?;
+    let names: std::collections::BTreeSet<String> = slots
+        .into_iter()
+        .filter(|row| holding.ids.contains(&row.instance))
+        .map(|row| row.name)
+        .collect();
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let parent_cut = parent
+        .get_selection(ctx)
+        .is_some_and(|selection| selection.cut());
+    let at_least = called_cut || held_cut || subset || !holding.whole || parent_cut;
+    // The listing as the query wrote it.  (One that wrote nothing at all, a
+    // bare `{ }` under a carried filter, has the braces it stands in for a
+    // span, and is quoted as the nothing it wrote.)
+    let wrote_nothing = child.command().own_words().is_none() && child.children().next().is_none();
+    let listing = if wrote_nothing {
+        String::new()
+    } else {
+        child.command().span().as_str().to_string()
+    };
+    Ok(Some(slots_message(
+        &names.into_iter().collect::<Vec<_>>(),
+        at_least,
+        parent.command().own_words().as_deref(),
+        child.command().own_words().as_deref(),
+        &listing,
+    )))
+}
+
+/// Which of `rows` -- rows `statement` would have -- the statements in its
+/// braces would keep, and whether that is only some of them (a read was cut;
+/// every row returned is true).  `None` when it cannot be decided.
+///
+/// Only a strong statement narrows.  One that resolved on its own (its probe was not bound by
+/// `statement`) is asked as it stands.  One that takes its rows from
+/// `statement` has, in what it ended as, only what `statement`'s rows led
+/// to, and `rows` are not among those: it is derived from `rows` here, by
+/// the derive's own read, and asked about its own braces in turn.
+fn kept_below<'a>(
+    statement: &'a Rc<Statement>,
+    mut rows: Vec<i64>,
+    ctx: &'a ExecutionContext,
+    cfg: &'a ControlFlowGraph,
+) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<(Vec<i64>, bool)>>> + 'a>> {
+    Box::pin(async move {
+        let mut subset = false;
+        for below in statement.children() {
+            if rows.is_empty() {
+                break;
+            }
+            // A weak statement narrows nobody (`weakness`): it only lists
+            // what its neighbour leads to, and so does everything past it.
+            if below.get_state().weak {
+                continue;
+            }
+            let edge = below.get_relationship_type();
+            let theirs = match rows_not_read_through(&below, statement, ctx) {
+                Some(theirs) => theirs,
+                None => {
+                    let Some(own) = predicate(&below, ctx) else {
+                        return Ok(None);
+                    };
+                    let (instances, cut) = related(
+                        Asked::Child,
+                        &below,
+                        &rows,
+                        edge,
+                        vec![own.clone()],
+                        &ctx.eph,
+                        cfg,
+                    )
+                    .await?;
+                    subset |= cut;
+                    let instances: Vec<i64> =
+                        instances.iter().map(|id| Into::<i64>::into(*id)).collect();
+                    let matching: Vec<i64> = if instances.is_empty() {
+                        vec![]
+                    } else {
+                        cfg.index
+                            .instances_matching(
+                                &CompositeFilter::and(vec![own, ids_leaf(&instances)]),
+                                &ctx.eph,
+                            )
+                            .await?
+                            .into_iter()
+                            .map(|row| row.instance)
+                            .collect()
+                    };
+                    let Some((kept, some)) = kept_below(&below, matching, ctx, cfg).await? else {
+                        return Ok(None);
+                    };
+                    subset |= some;
+                    kept
+                }
+            };
+            let related = cfg
+                .index
+                .which_relate(&rows, &theirs, AskSide::Parents, edge, &ctx.eph)
+                .await?;
+            subset |= !related.whole;
+            rows = related.ids;
+        }
+        Ok(Some((rows, subset)))
+    })
+}
+
+/// "`func` passed over 3 slots that `"vfs_read"` calls through: `a`, `b`,
+/// `c`; follow them: `"vfs_read" calls { field holds { func } }`".
+///
+/// What it offers is the parent's own words, the hop, and the listing as the
+/// query wrote it, braces and all: a query that runs.  Two things it cannot
+/// spell that way are left as the shape to fill in: a parent that wrote no
+/// words of its own, or whose words stand around a relationship word (the
+/// statement would then say its relationship twice), and a listing too long
+/// to quote.
+fn slots_message(
+    names: &[String],
+    at_least: bool,
+    parent: Option<&str>,
+    child: Option<&str>,
+    listing: &str,
+) -> String {
+    const SHOWN: usize = 3;
+    // A listing is quoted whole up to this many characters.
+    const WHOLE: usize = 60;
+    let count = names.len();
+    let one = count == 1 && !at_least;
+    let mut listed = names
+        .iter()
+        .take(SHOWN)
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if count > SHOWN {
+        if at_least {
+            listed.push_str(" and more");
+        } else {
+            listed.push_str(&format!(" and {} more", count - SHOWN));
+        }
+    }
+    let how_many = format!(
+        "{}{} slot{}",
+        if at_least { "at least " } else { "" },
+        count,
+        if one { "" } else { "s" },
+    );
+    let quoted = |text: &str| format!("`{}`", Diagnostic::quote(text));
+    let filter = child
+        .map(quoted)
+        .unwrap_or_else(|| "the filter carried into this scope".to_string());
+    let caller = parent
+        .map(quoted)
+        .unwrap_or_else(|| "the statement above".to_string());
+    let one_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let listing = one_line(listing);
+    let inner = if listing.chars().count() <= WHOLE {
+        listing
+    } else {
+        format!("{} {{ … }}", child.map(one_line).unwrap_or_default())
+    };
+    let says_a_relationship = |words: &str| {
+        words
+            .split_whitespace()
+            .any(|token| Word::named(token.trim_matches(|c| c == '(' || c == ')')).is_some())
+    };
+    let source = match parent {
+        Some(words) if !says_a_relationship(words) => format!("{} ", one_line(words)),
+        _ => String::new(),
+    };
+    let held = match inner.trim() {
+        "" => "{ }".to_string(),
+        inner => format!("{{ {inner} }}"),
+    };
+    format!(
+        "{filter} passed over {how_many} that {caller} calls through: {listed}; follow {}: \
+         `{source}calls {{ field holds {held} }}`",
+        if one { "it" } else { "them" },
+    )
 }
