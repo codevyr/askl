@@ -417,6 +417,24 @@ pub struct EdgeOccurrenceRowJson {
     /// the union over the pair's occurrences); absent when nothing is stated.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub kinds: Vec<RefKind>,
+    /// Where a relation happened.  A `declares` or `holds` occurrence sits on
+    /// the declaration of its source (`path` and the offsets above say WHO is
+    /// related); this is one place in the code that made it so.  Absent on a
+    /// reference, whose own place is where it happened, and on a relation the
+    /// index names no place for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub witness: Option<WitnessJson>,
+}
+
+/// One place in the code that made a relation, and how many there are.
+#[derive(Debug, Serialize)]
+pub struct WitnessJson {
+    pub object_id: String,
+    pub path: String,
+    pub start_offset: i32,
+    pub end_offset: i32,
+    /// How many places made the relation; this is the first in file order.
+    pub sites: i32,
 }
 
 /// One call site as the endpoint returns it; `None` for a row whose range
@@ -424,6 +442,13 @@ pub struct EdgeOccurrenceRowJson {
 fn edge_occurrence_json(row: EdgeOccurrenceRow) -> Option<EdgeOccurrenceRowJson> {
     let (start_offset, end_offset) = range_bounds_to_offsets(&row.from_offset_range)?;
     let kinds = Stated::of(row.roles, row.relation).kinds(SymbolType::from(row.to_symbol_type));
+    let witness = row.witness().map(|witness| WitnessJson {
+        object_id: witness.object.to_string(),
+        path: witness.path,
+        start_offset: witness.start_offset,
+        end_offset: witness.end_offset,
+        sites: witness.sites,
+    });
     Some(EdgeOccurrenceRowJson {
         ref_id: row.ref_id.to_string(),
         from_instance_id: row.from_instance_id.to_string(),
@@ -433,6 +458,7 @@ fn edge_occurrence_json(row: EdgeOccurrenceRow) -> Option<EdgeOccurrenceRowJson>
         start_offset,
         end_offset,
         kinds,
+        witness,
     })
 }
 
@@ -515,7 +541,53 @@ mod tests {
             roles,
             relation,
             to_symbol_type,
+            witness_object: None,
+            witness_path: None,
+            witness_range: None,
+            witness_sites: None,
         }
+    }
+
+    /// The slot's `holds` row, with the place that made it so.
+    fn witnessed(sites: i32) -> EdgeOccurrenceRow {
+        EdgeOccurrenceRow {
+            witness_object: Some(2),
+            witness_path: Some("/drv.c".to_string()),
+            witness_range: Some((
+                std::ops::Bound::Included(1000),
+                std::ops::Bound::Excluded(1015),
+            )),
+            witness_sites: Some(sites),
+            ..occurrence(0, 2, 1)
+        }
+    }
+
+    #[test]
+    fn a_relation_says_where_it_happened() {
+        // The row's own place stays: it says who is related.  The witness is
+        // beside it, with how many places made the relation.
+        let row = edge_occurrence_json(witnessed(3)).unwrap();
+        assert_eq!(
+            serde_json::to_string(&row).unwrap(),
+            concat!(
+                r#"{"ref_id":"7","from_instance_id":"10","object_id":"1","path":"/a.c","#,
+                r#""project_id":"1","start_offset":130,"end_offset":134,"kinds":["holds"],"#,
+                r#""witness":{"object_id":"2","path":"/drv.c","start_offset":1000,"#,
+                r#""end_offset":1015,"sites":3}}"#
+            )
+        );
+        // A relation with no place to name, and one whose witness names an
+        // object that is not there yet, are the row they were.
+        let bare = r#"{"ref_id":"7","from_instance_id":"10","object_id":"1","path":"/a.c","project_id":"1","start_offset":130,"end_offset":134,"kinds":["holds"]}"#;
+        let row = edge_occurrence_json(occurrence(0, 2, 1)).unwrap();
+        assert_eq!(serde_json::to_string(&row).unwrap(), bare);
+        let unresolved = EdgeOccurrenceRow {
+            witness_object: None,
+            witness_path: None,
+            ..witnessed(1)
+        };
+        let row = edge_occurrence_json(unresolved).unwrap();
+        assert_eq!(serde_json::to_string(&row).unwrap(), bare);
     }
 
     #[test]

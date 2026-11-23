@@ -38,7 +38,7 @@ pub use mixins::{
 };
 pub use references::{
     ContainedInstanceRow, DisplayCursor, EdgeOccurrenceRow, ReferenceCursor, SymbolInstancePageRow,
-    SymbolReferenceRow,
+    SymbolReferenceRow, Witness,
 };
 pub use selection::{
     Checked, ChildReference, EphContext, FamilyRead, FamilyReads, HasChildReference, HasEphLeak,

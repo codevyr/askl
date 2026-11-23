@@ -2709,6 +2709,7 @@ impl Index {
     pub const TEST_INPUT_TYPE_FILTER: &'static str = "test_input_type_filter.sql";
     pub const TEST_INPUT_REFERENCE_ROLES: &'static str = "test_input_reference_roles.sql";
     pub const TEST_INPUT_RELATION_ROWS: &'static str = "test_input_relation_rows.sql";
+    pub const TEST_INPUT_WITNESS: &'static str = "test_input_witness.sql";
     pub const TEST_INPUT_ROLE_WORDS: &'static str = "test_input_role_words.sql";
     pub const TEST_INPUT_STRUCT_FIELDS: &'static str = "test_input_struct_fields.sql";
     pub const TEST_INPUT_NAME_IN_MANY_STRUCTS: &'static str = "test_input_name_in_many_structs.sql";
@@ -2802,6 +2803,10 @@ impl Index {
         (
             "test_input_reference_roles.sql",
             include_str!("../../../sql/test_input_reference_roles.sql"),
+        ),
+        (
+            "test_input_witness.sql",
+            include_str!("../../../sql/test_input_witness.sql"),
         ),
         (
             "test_input_relation_rows.sql",

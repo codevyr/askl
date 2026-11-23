@@ -64,6 +64,9 @@ diesel::table! {
         // - filetype = "directory"
         // - content_hash = "" (empty)
         layer -> BigInt,
+        // The id the upload gave this object; lets a witness in another
+        // chunk of the upload name it.  NULL for an object no upload made.
+        local_id -> Nullable<BigInt>,
     }
 }
 
@@ -101,6 +104,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    // Objects that the witnesses of an upload in progress name from another
+    // chunk; checked and emptied at finalize.  It has no key of its own: a
+    // chunk adds the objects it could not see, and two chunks may add the
+    // same one.
+    index.project_witness_objects (project_id, object_local_id) {
+        project_id -> Integer,
+        object_local_id -> BigInt,
+    }
+}
+
+diesel::table! {
     use diesel::sql_types::*;
 
     index.symbol_refs (id) {
@@ -114,6 +128,12 @@ diesel::table! {
         from_full_range -> Nullable<Int4range>,
         roles -> SmallInt,
         relation -> SmallInt,
+        // Where a relation happened: one place in the code that made it,
+        // its object named by `objects.local_id`, and how many there are.
+        // All three NULL on a reference.
+        witness_object_local_id -> Nullable<BigInt>,
+        witness_range -> Nullable<Int4range>,
+        witness_sites -> Nullable<Integer>,
     }
 }
 
@@ -169,6 +189,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     projects,
     project_symbol_chunks,
     project_object_chunks,
+    project_witness_objects,
     symbol_refs,
     symbols,
 );

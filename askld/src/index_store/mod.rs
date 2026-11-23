@@ -179,6 +179,9 @@ struct NewObject {
     filetype: String,        // 4
     content_hash: String,    // 5
     layer: i64,              // 6
+    /// The id the upload gave the object.  Kept so that a witness in another
+    /// chunk can name it (see `upload::Witnessed`).
+    local_id: Option<i64>, // 7
 }
 
 #[derive(Insertable, Clone)]
@@ -234,6 +237,17 @@ struct NewSymbolRef {
     from_full_range: Option<std::ops::Range<i32>>,
     roles: i16,
     relation: i16,
+    /// Where a relation happened; all three `None` on a reference.
+    witness_object_local_id: Option<i64>,
+    witness_range: Option<std::ops::Range<i32>>,
+    witness_sites: Option<i32>,
+}
+
+#[derive(Insertable, Clone)]
+#[diesel(table_name = index_schema::project_witness_objects)]
+pub(super) struct NewProjectWitnessObject {
+    pub project_id: i32,
+    pub object_local_id: i64,
 }
 
 #[derive(Debug, QueryableByName)]
