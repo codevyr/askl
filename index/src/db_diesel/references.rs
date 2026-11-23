@@ -144,9 +144,63 @@ pub struct EdgeOccurrenceRow {
     pub relation: i16,
     #[diesel(sql_type = Integer)]
     pub to_symbol_type: i32,
+    /// Where a relation happened ([`Witness`]), as stored and as resolved:
+    /// the object the witness names, found through `objects.local_id`, its
+    /// path, the place in it, and how many places there are.  All `None` on
+    /// a reference; read through [`Self::witness`].
+    #[diesel(sql_type = Nullable<Integer>)]
+    pub witness_object: Option<i32>,
+    #[diesel(sql_type = Nullable<Text>)]
+    pub witness_path: Option<String>,
+    #[diesel(sql_type = Nullable<Int4range>)]
+    pub witness_range: Option<(std::ops::Bound<i32>, std::ops::Bound<i32>)>,
+    #[diesel(sql_type = Nullable<Integer>)]
+    pub witness_sites: Option<i32>,
+}
+
+/// WHERE A RELATION HAPPENED.  A relation row (`declares`, `holds`) sits on
+/// the declaration of its source, so its own place says who is related: the
+/// same header line for everything a slot holds.  The witness is one place in
+/// the code that made the relation (`.read = bt_bmc_read`), the first in file
+/// order, and how many such places there are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Witness {
+    pub object: i32,
+    pub path: String,
+    pub start_offset: i32,
+    pub end_offset: i32,
+    /// How many places made the relation; this one is the first.
+    pub sites: i32,
 }
 
 impl EdgeOccurrenceRow {
+    /// The occurrence's witness, when it has one that can be shown.
+    ///
+    /// `None` for a reference, for a relation with no place to name, and for
+    /// a witness whose object is not in the project: its chunk has not
+    /// arrived yet (an upload names every such object before it is finalized,
+    /// see `askld`'s `index_store::upload`).
+    pub fn witness(&self) -> Option<Witness> {
+        let (start, end) = self.witness_range.as_ref()?;
+        let start_offset = match start {
+            std::ops::Bound::Included(v) => *v,
+            std::ops::Bound::Excluded(v) => v + 1,
+            std::ops::Bound::Unbounded => return None,
+        };
+        let end_offset = match end {
+            std::ops::Bound::Included(v) => v + 1,
+            std::ops::Bound::Excluded(v) => *v,
+            std::ops::Bound::Unbounded => return None,
+        };
+        Some(Witness {
+            object: self.witness_object?,
+            path: self.witness_path.clone()?,
+            start_offset,
+            end_offset,
+            sites: self.witness_sites?,
+        })
+    }
+
     /// Start offset of the call site — middle component of the display cursor.
     pub fn start_offset(&self) -> i32 {
         match self.from_offset_range.0 {
@@ -509,6 +563,13 @@ impl Index {
     /// One row per place in the text, as in [`Self::find_symbol_references`]:
     /// several references on one token are one call site, represented by the
     /// earliest, and the cursor is compared after they are collapsed.
+    ///
+    /// A RELATION SAYS WHERE IT HAPPENED.  The occurrence of a relation row
+    /// carries its [`Witness`] beside its own place.  The witness names its
+    /// object by the id the upload gave it, and it is resolved here, for the
+    /// rows of this page, through the object's project and
+    /// `objects.local_id` (`objects_project_local_id_idx`): a reference has
+    /// no witness and looks nothing up.
     pub async fn find_edge_occurrences(
         &self,
         from_symbol: i64,
@@ -530,11 +591,14 @@ impl Index {
             "SELECT occ.ref_id, occ.from_instance_id, \
                     occ.from_object, o.filesystem_path AS path, \
                     o.project_id::text AS project_id, occ.from_offset_range, \
-                    occ.roles, occ.relation, target.symbol_type AS to_symbol_type \
+                    occ.roles, occ.relation, target.symbol_type AS to_symbol_type, \
+                    witness.object AS witness_object, witness.path AS witness_path, \
+                    occ.witness_range, occ.witness_sites \
              FROM ( \
                SELECT DISTINCT ON (sr.from_object, sr.from_offset_range) \
                       sr.id AS ref_id, from_inst.id AS from_instance_id, \
-                      sr.from_object, sr.from_offset_range, sr.roles, sr.relation \
+                      sr.from_object, sr.from_offset_range, sr.roles, sr.relation, \
+                      sr.witness_object_local_id, sr.witness_range, sr.witness_sites \
                FROM ( \
                  SELECT si.id, si.object_id, si.offset_range, si.dfs_enter, si.dfs_exit, \
                         si.nesting_level \
@@ -542,7 +606,8 @@ impl Index {
                  WHERE si.symbol = $1 AND si.layer = ANY($2) \
                ) from_inst \
                CROSS JOIN LATERAL ( \
-                 SELECT sr.id, sr.from_object, sr.from_offset_range, sr.roles, sr.relation \
+                 SELECT sr.id, sr.from_object, sr.from_offset_range, sr.roles, sr.relation, \
+                        sr.witness_object_local_id, sr.witness_range, sr.witness_sites \
                  FROM index.symbol_refs sr \
                  WHERE sr.from_object = from_inst.object_id \
                    AND {inside} \
@@ -553,6 +618,14 @@ impl Index {
              ) occ \
              JOIN index.objects o ON o.id = occ.from_object \
              JOIN index.symbols target ON target.id = $3 \
+             LEFT JOIN LATERAL ( \
+               SELECT wo.id AS object, wo.filesystem_path AS path \
+               FROM index.objects wo \
+               WHERE wo.project_id = o.project_id \
+                 AND wo.local_id = occ.witness_object_local_id \
+               ORDER BY wo.id \
+               LIMIT 1 \
+             ) witness ON TRUE \
              WHERE (occ.from_object, lower(occ.from_offset_range), occ.ref_id) > ($4, $5, $6) \
              ORDER BY occ.from_object, lower(occ.from_offset_range), occ.ref_id \
              LIMIT $7",

@@ -2238,6 +2238,109 @@ async fn a_relation_row_is_attributed_to_the_declaration_it_sits_in() -> anyhow:
     Ok(())
 }
 
+/// A RELATION SAYS WHERE IT HAPPENED.  The occurrence of a relation row keeps
+/// its own place, the declaration of its source, which says who is related;
+/// and carries the witness, one place in the code that made it so, resolved
+/// through the id the upload gave the witness's object.
+#[tokio::test(flavor = "current_thread")]
+async fn a_relation_says_where_it_happened() -> anyhow::Result<()> {
+    use crate::db_diesel::{EphContext, Index, Witness};
+
+    let docker = clients::Cli::default();
+    let (_node, url) = start_postgres(&docker);
+    wait_for_postgres(&url).await?;
+    let mut index = Index::connect(&url).await?;
+    index.load_test_input(Index::TEST_INPUT_WITNESS).await?;
+    let eph = EphContext::rooted(index.load_root_layers().await?);
+    const CALLER: i64 = 1;
+    const SLOT: i64 = 3;
+    const MY_READ: i64 = 4;
+    const SHARED_READ: i64 = 5;
+    const BARE: i64 = 6;
+    const LATE: i64 = 7;
+    const GHOST: i64 = 8;
+    const DEFINE_X: i64 = 9;
+    const LOCK: i64 = 10;
+    const OPS_H: i32 = 1;
+    const DRV_C: i32 = 2;
+    const OTHER_C: i32 = 3;
+
+    // The one occurrence of a pair, with where the row itself sits.
+    let one = |from: i64, to: i64| {
+        let index = &index;
+        let eph = &eph;
+        async move {
+            let (rows, more) = index
+                .find_edge_occurrences(from, to, None, 10, eph)
+                .await
+                .unwrap();
+            assert!(!more);
+            assert_eq!(rows.len(), 1, "{from} -> {to}");
+            rows.into_iter().next().unwrap()
+        }
+    };
+    let at = |object: i32, path: &str, start_offset: i32, end_offset: i32, sites: i32| Witness {
+        object,
+        path: path.to_string(),
+        start_offset,
+        end_offset,
+        sites,
+    };
+
+    // The slot holds my_read.  The row is on the field's declaration in the
+    // header, as before; the witness is the assignment in /drv.c.
+    let held = one(SLOT, MY_READ).await;
+    assert_eq!((held.from_object, held.path.as_str()), (OPS_H, "/ops.h"));
+    assert_eq!(held.start_offset(), 712);
+    assert_eq!(held.relation, 2);
+    assert_eq!(held.witness(), Some(at(DRV_C, "/drv.c", 1000, 1015, 1)));
+
+    // The first of three places says so.
+    assert_eq!(
+        one(SLOT, SHARED_READ).await.witness(),
+        Some(at(DRV_C, "/drv.c", 1020, 1039, 3))
+    );
+    // Each pair has its own witness, in its own object, though every row of
+    // the slot sits on the same line of the header.
+    assert_eq!(
+        one(SLOT, LATE).await.witness(),
+        Some(at(OTHER_C, "/other.c", 300, 312, 1))
+    );
+    // What a macro declared, the same.
+    let declared = one(DEFINE_X, LOCK).await;
+    assert_eq!((declared.from_object, declared.relation), (OPS_H, 1));
+    assert_eq!(declared.witness(), Some(at(DRV_C, "/drv.c", 890, 904, 1)));
+
+    // A relation with no place to name has none, and is listed as before.
+    let bare = one(SLOT, BARE).await;
+    assert_eq!((bare.relation, bare.witness()), (2, None));
+    // A reference's own span is where it happened.
+    let called = one(CALLER, MY_READ).await;
+    assert_eq!((called.from_object, called.roles), (DRV_C, 1));
+    assert_eq!(called.witness(), None);
+    assert_eq!(
+        (
+            called.witness_object,
+            called.witness_range,
+            called.witness_sites
+        ),
+        (None, None, None)
+    );
+
+    // A witness whose object the project does not have (its chunk has not
+    // arrived) is not shown, and the occurrence is: nothing is lost with it.
+    let ghost = one(SLOT, GHOST).await;
+    assert_eq!(ghost.relation, 2);
+    assert_eq!(ghost.witness(), None);
+    assert_eq!(ghost.witness_sites, Some(1), "it is stored");
+
+    // The witness's object is found by the id the UPLOAD gave it (11, 12,
+    // 13), never by `objects.id` (1, 2, 3): no witness names 1, 2 or 3, and
+    // every one above resolved.
+
+    Ok(())
+}
+
 /// A reference keeps what it says about its target through every read that
 /// carries it to an answer: the edges among a set of instances, the family of
 /// a statement, and the occurrences of one edge.

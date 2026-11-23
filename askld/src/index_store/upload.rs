@@ -15,8 +15,9 @@ use index::symbols::symbol_path_and_leaf;
 
 use super::{
     hash_bytes, normalize_full_path, IndexStore, NewContentStoreRow, NewObject, NewProject,
-    NewProjectObjectChunk, NewProjectSymbolChunk, NewSymbol, NewSymbolInstance, NewSymbolRef,
-    UploadError, UploadStatus, MAX_INSERT_ROWS, MAX_SYMBOL_INSERT_ROWS,
+    NewProjectObjectChunk, NewProjectSymbolChunk, NewProjectWitnessObject, NewSymbol,
+    NewSymbolInstance, NewSymbolRef, UploadError, UploadStatus, MAX_INSERT_ROWS,
+    MAX_SYMBOL_INSERT_ROWS,
 };
 
 struct ObjectInsert {
@@ -224,6 +225,7 @@ impl IndexStore {
                                 )));
                             }
                         }
+                        check_witness_objects(conn, project_id).await?;
                         diesel::update(
                             index_schema::projects::table
                                 .filter(index_schema::projects::id.eq(project_id)),
@@ -526,6 +528,11 @@ async fn do_upload_objects(
     insert_symbol_refs(conn, &ref_rows).await?;
     tracing::info!("upload_objects: refs done");
 
+    let elsewhere = witness_objects_elsewhere(&ref_rows, &object_map);
+    if !elsewhere.is_empty() {
+        record_witness_objects_elsewhere(conn, project_id, &elsewhere).await?;
+    }
+
     record_what_the_upload_states(conn, project_id, Observed::of(&ref_rows)).await?;
 
     Ok(())
@@ -737,6 +744,7 @@ fn build_objects(
                 filetype: object.filetype.clone(),
                 content_hash,
                 layer: root_layer_id,
+                local_id: Some(object.local_id),
             },
         });
     }
@@ -771,6 +779,8 @@ async fn insert_objects(
                     .eq(diesel::upsert::excluded(index_schema::objects::module_path)),
                 index_schema::objects::layer
                     .eq(diesel::upsert::excluded(index_schema::objects::layer)),
+                index_schema::objects::local_id
+                    .eq(diesel::upsert::excluded(index_schema::objects::local_id)),
             ))
             .returning(index_schema::objects::id)
             .get_results(conn)
@@ -1068,6 +1078,7 @@ fn build_symbol_refs(
                     reference.relation
                 ))
             })?;
+            let witnessed = Witnessed::of(reference)?;
             rows.push(NewSymbolRef {
                 to_symbol: symbol_id,
                 from_object: object_id,
@@ -1078,10 +1089,190 @@ fn build_symbol_refs(
                 from_full_range: span_to_range(reference.full.as_ref(), "ref full")?,
                 roles,
                 relation,
+                witness_object_local_id: witnessed.as_ref().map(|w| w.object_local_id),
+                witness_range: witnessed.as_ref().map(|w| w.range.clone()),
+                witness_sites: witnessed.as_ref().map(|w| w.sites),
             });
         }
     }
     Ok(rows)
+}
+
+/// WHERE A RELATION HAPPENED, as it is stored.
+///
+/// A relation row sits on the declaration of its source and says who is
+/// related; its witness is one place in the code that made it so, and how
+/// many there are (the proto's `Witness`).
+///
+/// THE WITNESS KEEPS THE ID THE UPLOAD GAVE ITS OBJECT.  A reference's own
+/// object is always in the chunk that carries the reference, so it is stored
+/// by `objects.id` through this chunk's map.  A witness's object is not: the
+/// field's header and the file that assigns it are in different chunks more
+/// often than not, chunks are sent concurrently and commit in any order, and
+/// a chunk knows the stored id of its own objects only.  So the upload's id
+/// is what is stored, every object keeps its own (`objects.local_id`), and
+/// the two meet where the witness is read
+/// (`index::db_diesel::Index::find_edge_occurrences`).
+struct Witnessed {
+    object_local_id: i64,
+    range: std::ops::Range<i32>,
+    sites: i32,
+}
+
+impl Witnessed {
+    /// What `reference` says of where it happened; `None` when it says
+    /// nothing, which is every reference and any relation with no place to
+    /// name.
+    ///
+    /// Refused, not dropped: a witness on a row that is no relation (a
+    /// reference's own span is where it happened, and nobody would read the
+    /// witness), and a witness that names no place.  A producer that writes
+    /// either has a mistake a silent NULL would hide.
+    fn of(reference: &crate::proto::askl::index::SymbolRef) -> Result<Option<Self>, UploadError> {
+        let Some(witness) = reference.witness.as_ref() else {
+            return Ok(None);
+        };
+        let whose = || {
+            format!(
+                "the row to symbol {} at {}..{}",
+                reference.to_symbol_local_id,
+                reference.from_offset_start,
+                reference.from_offset_end
+            )
+        };
+        if reference.relation == 0 {
+            return Err(UploadError::Invalid(format!(
+                "{} is a reference and carries a witness: a witness says where a RELATION \
+                 happened, and a reference's own span is where it happened",
+                whose()
+            )));
+        }
+        if witness.offset_start < 0 || witness.offset_end <= witness.offset_start {
+            return Err(UploadError::Invalid(format!(
+                "the witness of {} spans {}..{}, which is not a place in an object",
+                whose(),
+                witness.offset_start,
+                witness.offset_end
+            )));
+        }
+        if witness.sites == 0 {
+            return Err(UploadError::Invalid(format!(
+                "the witness of {} is the first of 0 sites: it is one of them, so at least 1",
+                whose()
+            )));
+        }
+        let sites = i32::try_from(witness.sites).map_err(|_| {
+            UploadError::Invalid(format!(
+                "the witness of {} is the first of {} sites, which does not fit the column",
+                whose(),
+                witness.sites
+            ))
+        })?;
+        Ok(Some(Witnessed {
+            object_local_id: witness.object_local_id,
+            range: witness.offset_start..witness.offset_end,
+            sites,
+        }))
+    }
+}
+
+/// The objects that the witnesses of these rows name and this chunk does not
+/// itself carry, each once, in order.
+///
+/// Whether such an object exists is not known until every chunk is in; they
+/// are put down to be checked at finalize
+/// ([`record_witness_objects_elsewhere`]).  An object of this chunk needs no
+/// check, and an upload without witnesses names nothing.
+fn witness_objects_elsewhere(rows: &[NewSymbolRef], object_map: &HashMap<i64, i32>) -> Vec<i64> {
+    let named: std::collections::BTreeSet<i64> = rows
+        .iter()
+        .filter_map(|row| row.witness_object_local_id)
+        .filter(|local_id| !object_map.contains_key(local_id))
+        .collect();
+    named.into_iter().collect()
+}
+
+/// Put down the objects this chunk's witnesses name from another chunk, in
+/// the chunk's own transaction.
+///
+/// The list has no key: two chunks sent at once may name the same object,
+/// and a unique index would make each wait on the other's rows (and, naming
+/// two objects in opposite order, deadlock).  A repeated object costs one
+/// row until finalize.
+async fn record_witness_objects_elsewhere(
+    conn: &mut AsyncPgConnection,
+    project_id: i32,
+    object_local_ids: &[i64],
+) -> Result<(), UploadError> {
+    let rows: Vec<NewProjectWitnessObject> = object_local_ids
+        .iter()
+        .map(|&object_local_id| NewProjectWitnessObject {
+            project_id,
+            object_local_id,
+        })
+        .collect();
+    for chunk in rows.chunks(MAX_INSERT_ROWS) {
+        diesel::insert_into(index_schema::project_witness_objects::table)
+            .values(chunk)
+            .execute(conn)
+            .await
+            .map_err(|e| UploadError::Storage(e.to_string()))?;
+    }
+    Ok(())
+}
+
+#[derive(diesel::QueryableByName)]
+struct NeverUploaded {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    objects: i64,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
+    first: Option<i64>,
+}
+
+/// EVERY WITNESS NAMES AN OBJECT OF ITS UPLOAD.  With the last chunk in, the
+/// objects that witnesses named from other chunks are looked up; one that
+/// never arrived refuses the upload, because its witness would read as "no
+/// witness" for ever and nothing would say why.  The list is emptied either
+/// way it ends: no row outlives its upload (a refused one keeps its rows
+/// until the project is deleted or re-sent, which cascades).
+async fn check_witness_objects(
+    conn: &mut AsyncPgConnection,
+    project_id: i32,
+) -> Result<(), UploadError> {
+    let never: NeverUploaded = diesel::sql_query(
+        "SELECT count(DISTINCT w.object_local_id) AS objects, \
+                min(w.object_local_id) AS first \
+         FROM index.project_witness_objects w \
+         WHERE w.project_id = $1 \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM index.objects o \
+             WHERE o.project_id = $1 AND o.local_id = w.object_local_id \
+           )",
+    )
+    .bind::<diesel::sql_types::Integer, _>(project_id)
+    .get_result(conn)
+    .await
+    .map_err(|e| UploadError::Storage(e.to_string()))?;
+    if let (objects @ 1.., Some(first)) = (never.objects, never.first) {
+        let (what, was) = if objects == 1 {
+            ("object", "was")
+        } else {
+            ("objects", "were")
+        };
+        return Err(UploadError::Invalid(format!(
+            "{objects} {what} that a witness names {was} never uploaded (local_id {first}{}): \
+             a witness is a place in an object of the same upload",
+            if objects == 1 { "" } else { " is the first" }
+        )));
+    }
+    diesel::delete(
+        index_schema::project_witness_objects::table
+            .filter(index_schema::project_witness_objects::project_id.eq(project_id)),
+    )
+    .execute(conn)
+    .await
+    .map_err(|e| UploadError::Storage(e.to_string()))?;
+    Ok(())
 }
 
 async fn insert_symbol_instances(
@@ -1164,8 +1355,9 @@ mod tests {
     use super::{
         build_objects, build_symbol_instances, build_symbol_refs, build_symbols, compute_symbol_id,
         resolve_object_id, validate_instance_type, validate_object_tree, validate_symbol_type,
-        validate_type,
+        validate_type, witness_objects_elsewhere,
     };
+    use crate::proto::askl::index::Witness;
 
     // --- validate_type ---
 
@@ -1589,6 +1781,159 @@ mod tests {
         };
         let obj_map = HashMap::from([(1i64, 1i32)]);
         assert!(build_symbol_refs(1, 1000001, &[object], &obj_map).is_err());
+    }
+
+    // --- witnesses ---
+
+    fn witness(object_local_id: i64, start: i32, end: i32, sites: u32) -> Option<Witness> {
+        Some(Witness {
+            object_local_id,
+            offset_start: start,
+            offset_end: end,
+            sites,
+        })
+    }
+
+    /// A `holds` row on a field's declaration, with a witness.
+    fn held(to: i64, witness: Option<Witness>) -> SymbolRef {
+        SymbolRef {
+            relation: 2,
+            witness,
+            ..sref(to, 20, 30)
+        }
+    }
+
+    fn refs_of(refs: Vec<SymbolRef>) -> Result<Vec<super::NewSymbolRef>, super::UploadError> {
+        let object = UploadObject {
+            local_id: 1,
+            refs,
+            ..Default::default()
+        };
+        build_symbol_refs(1, 1000001, &[object], &HashMap::from([(1i64, 50i32)]))
+    }
+
+    #[test]
+    fn a_relation_row_is_stored_with_where_it_happened() {
+        // The witness's object is kept as the id the UPLOAD gave it: it is in
+        // another chunk more often than not, and this chunk knows the stored
+        // id of its own objects only (here local 1 is stored as 50).
+        let rows = refs_of(vec![
+            held(10, witness(7, 100, 118, 3)),
+            SymbolRef {
+                relation: 1,
+                ..held(11, witness(1, 40, 52, 1))
+            },
+            held(12, None),
+            sref(13, 60, 70),
+        ])
+        .unwrap();
+        let stored: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.witness_object_local_id,
+                    r.witness_range.clone(),
+                    r.witness_sites,
+                )
+            })
+            .collect();
+        assert_eq!(
+            stored,
+            vec![
+                (Some(7), Some(100..118), Some(3)),
+                (Some(1), Some(40..52), Some(1)),
+                (None, None, None),
+                (None, None, None),
+            ]
+        );
+        // The row's own place is untouched: it says who is related.
+        assert_eq!(rows[0].from_object, 50);
+        assert_eq!(rows[0].from_offset_range, 20..30);
+    }
+
+    #[test]
+    fn a_witness_on_a_reference_is_refused() {
+        // A reference's own span is where it happened.  A witness there is a
+        // producer's mistake, and stored it would be read by nobody.
+        let err = refs_of(vec![SymbolRef {
+            roles: 1,
+            witness: witness(1, 40, 52, 1),
+            ..sref(13, 60, 70)
+        }])
+        .err()
+        .expect("refused");
+        let message = format!("{err:?}");
+        assert!(
+            message.contains("a witness says where a RELATION happened"),
+            "{message}"
+        );
+        // The same row without it is a reference like any other.
+        assert!(refs_of(vec![SymbolRef {
+            roles: 1,
+            ..sref(13, 60, 70)
+        }])
+        .is_ok());
+    }
+
+    #[test]
+    fn a_witness_that_names_no_place_is_refused() {
+        for (bad, why) in [
+            (witness(7, 100, 118, 0), "at least 1"),
+            (witness(7, 118, 100, 1), "is not a place"),
+            (witness(7, 100, 100, 1), "is not a place"),
+            (witness(7, -4, 10, 1), "is not a place"),
+            (witness(7, 100, 118, u32::MAX), "does not fit"),
+        ] {
+            let err = refs_of(vec![held(10, bad.clone())]).err().expect("refused");
+            let message = format!("{err:?}");
+            assert!(message.contains(why), "{bad:?}: {message}");
+        }
+        assert!(refs_of(vec![held(10, witness(7, 100, 118, 1))]).is_ok());
+    }
+
+    #[test]
+    fn a_chunk_names_the_witness_objects_it_does_not_carry() {
+        // This chunk carries objects 1 and 2.  Its witnesses name 1 (here),
+        // 7 twice and 9 (elsewhere).
+        let chunk = [
+            UploadObject {
+                local_id: 1,
+                refs: vec![
+                    held(10, witness(1, 40, 52, 1)),
+                    held(11, witness(7, 100, 118, 1)),
+                    held(12, witness(9, 5, 9, 2)),
+                    held(13, None),
+                ],
+                ..Default::default()
+            },
+            UploadObject {
+                local_id: 2,
+                refs: vec![held(14, witness(7, 200, 218, 1)), sref(15, 60, 70)],
+                ..Default::default()
+            },
+        ];
+        let map = HashMap::from([(1i64, 50i32), (2i64, 51i32)]);
+        let rows = build_symbol_refs(1, 1000001, &chunk, &map).unwrap();
+        assert_eq!(witness_objects_elsewhere(&rows, &map), vec![7, 9]);
+        // A chunk whose witnesses are all its own, or that has none, names
+        // nothing: an upload without witnesses writes nothing more than before.
+        let own = build_symbol_refs(
+            1,
+            1000001,
+            &chunk[1..],
+            &HashMap::from([(2i64, 51i32), (7, 52)]),
+        )
+        .unwrap();
+        assert_eq!(
+            witness_objects_elsewhere(&own, &HashMap::from([(2i64, 51i32), (7, 52)])),
+            Vec::<i64>::new()
+        );
+    }
+
+    #[test]
+    fn an_object_keeps_the_id_the_upload_gave_it() {
+        let inserts = build_objects(1, 1000001, &[obj(42, "/src/a.c", b"x", "")]).unwrap();
+        assert_eq!(inserts[0].row.local_id, Some(42));
     }
 
     #[test]

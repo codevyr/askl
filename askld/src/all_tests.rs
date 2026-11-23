@@ -11895,6 +11895,329 @@ fn uploading_references_records_what_the_index_states() {
     });
 }
 
+/// A RELATION SAYS WHERE IT HAPPENED, across the chunks of an upload.  The
+/// field's header and the file that assigns it are in different chunks, sent
+/// in any order; a chunk knows the stored id of its own objects only.  So a
+/// witness keeps the id the upload gave its object, is resolved where it is
+/// read, and an upload whose witness names an object that never arrived is
+/// refused when it is finalized.
+#[test]
+fn a_witness_is_resolved_across_the_chunks_of_an_upload() {
+    use crate::proto::askl::index::{
+        Object as UploadObject, Project as UploadProject, Symbol as UploadSymbol,
+        SymbolInstance as UploadInstance, SymbolRef as UploadRef, Witness as UploadWitness,
+    };
+    use crate::test_util::{create_isolated_fixture, store_and_index_with_shared_cache};
+    use diesel_async::AsyncConnection;
+    use index::db_diesel::{EphContext, Witness};
+    let fx = create_isolated_fixture(VERB_TEST);
+
+    #[derive(diesel::QueryableByName, Debug)]
+    struct Count {
+        #[diesel(sql_type = diesel::sql_types::BigInt)]
+        n: i64,
+    }
+    async fn count(conn: &mut diesel_async::AsyncPgConnection, sql: &str) -> i64 {
+        use diesel_async::RunQueryDsl;
+        diesel::sql_query(sql)
+            .get_result::<Count>(conn)
+            .await
+            .unwrap()
+            .n
+    }
+
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&mut rt, async {
+        let (store, index) = store_and_index_with_shared_cache(fx.url()).await;
+        let mut conn = diesel_async::AsyncPgConnection::establish(fx.url())
+            .await
+            .unwrap();
+        // The fixture wrote its project and its objects with explicit ids
+        // and left the sequences behind them; this test uploads two more
+        // projects and several files.
+        for table in ["objects", "projects"] {
+            diesel_async::RunQueryDsl::execute(
+                diesel::sql_query(format!(
+                    "SELECT setval(pg_get_serial_sequence('index.{table}', 'id'), \
+                     (SELECT max(id) FROM index.{table}))"
+                )),
+                &mut conn,
+            )
+            .await
+            .unwrap();
+        }
+
+        // In each project: slot (field, 1) in a header; target (func, 2) and
+        // its assignment in a driver; `own` (func, 3), held with a witness in
+        // the header's own chunk.
+        let sym = |local_id: i64, name: &str, r#type: i32| UploadSymbol {
+            local_id,
+            name: name.to_string(),
+            r#type,
+            ..Default::default()
+        };
+        let file = |root: &str, local_id: i64, symbol: i64, rows: Vec<UploadRef>| UploadObject {
+            local_id,
+            module_path: "mod".to_string(),
+            filesystem_path: format!("/{root}/f{local_id}.c"),
+            filetype: "c".to_string(),
+            content: format!("{root} file {local_id}").into_bytes(),
+            symbol_instances: vec![UploadInstance {
+                symbol_local_id: symbol,
+                instance_type: 1,
+                start_offset: 0,
+                end_offset: 100,
+                dfs_enter: 0,
+                dfs_exit: 8192,
+                nesting_level: 0,
+                ..Default::default()
+            }],
+            refs: rows
+                .into_iter()
+                .enumerate()
+                .map(|(at, row)| UploadRef {
+                    from_offset_start: 10,
+                    from_offset_end: 16,
+                    nesting_level: 1,
+                    dfs_enter: 1 + at as i64,
+                    ..row
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let holds = |to: i64, object_local_id: i64, start: i32, sites: u32| UploadRef {
+            to_symbol_local_id: to,
+            relation: 2,
+            witness: Some(UploadWitness {
+                object_local_id,
+                offset_start: start,
+                offset_end: start + 12,
+                sites,
+            }),
+            ..Default::default()
+        };
+        let chunk = |objects: Vec<UploadObject>| UploadProject {
+            objects,
+            ..Default::default()
+        };
+        let begin = |name: &'static str, chunks: i32| {
+            let store = &store;
+            async move {
+                let (pid, _) = store
+                    .upload_index(
+                        UploadProject {
+                            project_name: name.to_string(),
+                            root_path: format!("/{name}"),
+                            ..Default::default()
+                        },
+                        Some(1),
+                        Some(chunks),
+                    )
+                    .await
+                    .unwrap();
+                store
+                    .upload_symbol_chunk(
+                        pid,
+                        0,
+                        vec![sym(1, "slot", 8), sym(2, "target", 1), sym(3, "own", 1)],
+                    )
+                    .await
+                    .unwrap();
+                pid
+            }
+        };
+        let pending = |project: i32| {
+            format!("SELECT count(*) AS n FROM index.project_witness_objects WHERE project_id = {project}")
+        };
+
+        // ANOTHER upload is under way beside ours, and uses the same ids for
+        // its own objects, as every upload does: its file 20 is stored
+        // before ours.  Its slot's witnesses name objects 30 and 40, which
+        // it never sends (ours will have a 30, and nobody a 40).
+        let other = begin("unwitnessed", 1).await;
+        store
+            .upload_object_chunk(
+                other,
+                0,
+                chunk(vec![
+                    file(
+                        "unwitnessed",
+                        10,
+                        1,
+                        vec![holds(2, 30, 40, 1), holds(3, 40, 60, 1)],
+                    ),
+                    file("unwitnessed", 20, 2, vec![]),
+                ]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count(&mut conn, &pending(other)).await, 2);
+
+        let pid = begin("witnessed", 3).await;
+        let symbol = |local: i64| ((pid as i64) << 32) | local;
+        let witness_of = |to: i64| {
+            let index = index.clone();
+            async move {
+                let eph = EphContext::rooted(index.load_root_layers().await.unwrap());
+                let (rows, _) = index
+                    .find_edge_occurrences(symbol(1), symbol(to), None, 10, &eph)
+                    .await
+                    .unwrap();
+                assert_eq!(rows.len(), 1, "slot -> {to}");
+                (rows[0].path.clone(), rows[0].witness())
+            }
+        };
+
+        // The header's chunk arrives FIRST.  Its slot holds `target`, made so
+        // in file 20, which no chunk of this upload has delivered yet; and
+        // `own`, made so in file 11, which is in this chunk beside the
+        // header (file 10).
+        store
+            .upload_object_chunk(
+                pid,
+                0,
+                chunk(vec![
+                    file(
+                        "witnessed",
+                        10,
+                        1,
+                        vec![holds(2, 20, 40, 2), holds(3, 11, 60, 1)],
+                    ),
+                    file("witnessed", 11, 3, vec![]),
+                ]),
+            )
+            .await
+            .unwrap();
+        // Only the object it could not see is put down to be checked.
+        assert_eq!(count(&mut conn, &pending(pid)).await, 1);
+        // The row is there, on the header; its witness is not shown until
+        // the object it names is -- and the other upload's file 20 is not
+        // it.  The witness in this chunk is shown at once.
+        let (path, witness) = witness_of(2).await;
+        assert_eq!(path, "/witnessed/f10.c");
+        assert_eq!(witness, None);
+        let (_, own) = witness_of(3).await;
+        let own = own.expect("a witness in the row's own chunk");
+        assert_eq!(
+            (
+                own.path.as_str(),
+                own.start_offset,
+                own.end_offset,
+                own.sites
+            ),
+            ("/witnessed/f11.c", 60, 72, 1)
+        );
+
+        // The driver's chunk arrives, numbered HIGHER than one that is still
+        // missing: any order.
+        store
+            .upload_object_chunk(pid, 2, chunk(vec![file("witnessed", 20, 2, vec![])]))
+            .await
+            .unwrap();
+        let (path, witness) = witness_of(2).await;
+        assert_eq!(path, "/witnessed/f10.c", "the row stays where it was");
+        let f20 = count(
+            &mut conn,
+            "SELECT id::bigint AS n FROM index.objects \
+             WHERE filesystem_path = '/witnessed/f20.c'",
+        )
+        .await as i32;
+        assert_eq!(
+            witness,
+            Some(Witness {
+                object: f20,
+                path: "/witnessed/f20.c".to_string(),
+                start_offset: 40,
+                end_offset: 52,
+                sites: 2,
+            })
+        );
+        // The stored id is not the upload's: the witness was found by
+        // `local_id`, not by taking 20 for an `objects.id`.
+        assert_ne!(f20, 20);
+
+        store
+            .upload_object_chunk(pid, 1, chunk(vec![file("witnessed", 30, 3, vec![])]))
+            .await
+            .unwrap();
+        store.finalize_project(pid).await.unwrap();
+        // No row outlives its upload, and the other upload's are its own.
+        assert_eq!(count(&mut conn, &pending(pid)).await, 0);
+        assert_eq!(count(&mut conn, &pending(other)).await, 2);
+        assert!(
+            witness_of(2).await.1.is_some(),
+            "and the witness is still read"
+        );
+
+        // AN UPLOAD WHOSE WITNESS NAMES AN OBJECT THAT NEVER ARRIVED IS
+        // REFUSED, not finalized with a witness that reads as none for ever.
+        // That our project has an object 30 does not make it the other's.
+        let refused = match store.finalize_project(other).await {
+            Ok(outcome) => panic!("finalized: {outcome:?}"),
+            Err(err) => format!("{err:?}"),
+        };
+        assert!(
+            refused.contains(
+                "2 objects that a witness names were never uploaded (local_id 30 is the first)"
+            ),
+            "{refused}"
+        );
+        assert_eq!(
+            count(
+                &mut conn,
+                &format!(
+                    "SELECT count(*) AS n FROM index.projects \
+                     WHERE id = {other} AND upload_status = 'complete'"
+                )
+            )
+            .await,
+            0,
+            "the upload is not complete"
+        );
+        // Our project was not touched by the refusal.
+        assert!(witness_of(2).await.1.is_some());
+
+        // A path sent twice in one upload is one object, and it answers to
+        // the id it was last sent under, as it takes the content it was last
+        // sent with.  (And one missing object is said in the singular.)
+        let resent = begin("resent", 2).await;
+        store
+            .upload_object_chunk(
+                resent,
+                0,
+                chunk(vec![file("resent", 5, 1, vec![holds(2, 77, 40, 1)])]),
+            )
+            .await
+            .unwrap();
+        let again = UploadObject {
+            local_id: 6,
+            ..file("resent", 5, 1, vec![])
+        };
+        store
+            .upload_object_chunk(resent, 1, chunk(vec![again]))
+            .await
+            .unwrap();
+        assert_eq!(
+            count(
+                &mut conn,
+                "SELECT local_id AS n FROM index.objects \
+                 WHERE filesystem_path = '/resent/f5.c'"
+            )
+            .await,
+            6
+        );
+        let refused = match store.finalize_project(resent).await {
+            Ok(outcome) => panic!("finalized: {outcome:?}"),
+            Err(err) => format!("{err:?}"),
+        };
+        assert!(
+            refused.contains("1 object that a witness names was never uploaded (local_id 77)"),
+            "{refused}"
+        );
+    });
+}
+
 #[test]
 fn zombie_project_reupload_purges_caches() {
     // upload_index deleting a Failed/Deleting zombie project cascades its
